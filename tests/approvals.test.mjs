@@ -2,14 +2,15 @@
 // requests, and Claude Code's PermissionRequest hook (scripts/claude-approval.mjs) run as the host
 // would run it, with a synthetic request on its input. No model, no browser.
 import childProcess, { execFileSync, spawn } from 'node:child_process'
-import { createServer } from 'node:http'
-import fs, { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createServer, request as httpRequest } from 'node:http'
+import fs, { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { EventEmitter } from 'node:events'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { after, test } from 'node:test'
+import { runInNewContext } from 'node:vm'
 import assert from 'node:assert/strict'
 
 // The server and page modules use the host's extensionless imports; resolve only those local
@@ -28,6 +29,7 @@ const { APPROVAL_DRAW_MS, APPROVAL_GRACE_MS, APPROVAL_PRESS_MS, APPROVAL_SECRET_
 const { addressFileName: receiverFileName, addressKey: receiverKey, parseAddress: receiverParse } = await import('../hooks/receiver.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
+const { serveModel, servePage } = await import('../hooks/serve.ts')
 const { EN } = await import('../hooks/strings-en.ts')
 const { ZH_TW } = await import('../hooks/i18n.ts')
 const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
@@ -62,10 +64,9 @@ const homeFor = (url, pid = process.pid) => {
 
 // A board started from source, with the tests' shorter waits. No grace window unless a test asks.
 // `open` stands in for the browser opener; the default opens the page and says so.
-const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, pageMs, open, holdMs, isWatched = false } = {}) => {
+const startBoard = async ({ port = 0, drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, graceMs = 0, pageMs, open, holdMs, isWatched = false, watchFs, place = homeFor(), addressFile = place.file, now } = {}) => {
   let self
-  const place = homeFor()
-  const messages = join(place.root, 'messages')
+  const messages = join(place.root, `messages-${Date.now()}-${Math.random().toString(16).slice(2)}`)
   mkdirSync(messages)
   const opened = []
   const journal = []
@@ -73,19 +74,21 @@ const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, 
   const isStopped = new Promise(done => { stopped = done })
   const address = await new Promise((resolve, reject) => {
     startServer({
-      port: 0, messagesDirectory: messages, routes: [], s: EN, ping: {},
+      port, messagesDirectory: messages, routes: [], s: EN, ping: {}, addressFile,
       view: () => buildView(parseProgress(readFileSync(place.progress, 'utf8')), [], null, Date.now(), 0, {}, EN),
       pending: () => [], act: () => '', tidy: () => '', clean: () => '', sweep: () => {}, sweepMs: 60_000,
       paste: () => ({ isAdded: false, note: '' }), failure: () => null, idleMs: 0,
+      ...(now === undefined ? {} : { now }),
       approvalTimes: { drawMs, pressMs, secretMs, graceMs, ...(pageMs === undefined ? {} : { pageMs }) },
       ...(holdMs === undefined ? {} : { boardTimes: { holdMs } }),
       // A file watch as the shipped board has (#359), so no timer looks at the board while a request waits; its stand-in
       // never reports, and nothing in these tests writes the files, so only the board's own changes answer a request.
-      ...(isWatched ? { watch: { progress: place.progress, inbox: join(dirname(place.progress), 'progress-inbox'), fs: () => Object.assign(new EventEmitter(), { close: () => {} }) } } : {}),
+      ...(isWatched ? { watch: { progress: place.progress, inbox: join(dirname(place.progress), 'progress-inbox'), fs: watchFs ?? (() => Object.assign(new EventEmitter(), { close: () => {} })) } } : {}),
       // The browser stand-in: the address the board would open, with its one-time key.
       open: async url => { opened.push(url); return open === undefined ? true : open(url, self) },
       journal: entry => { journal.push(entry) },
       onReady: url => { resolve(url); return true },
+      onListenError: reject,
       onStop: () => { stopped(); reject(new Error('stopped before ready')) },
     })
   })
@@ -99,7 +102,7 @@ const startBoard = async ({ drawMs = 3_000, pressMs = 8_000, secretMs = 60_000, 
     return { status: response.status, text, body: text === '' ? {} : JSON.parse(text) }
   }
   const board = {
-    ...place, address, origin, token, opened, journal, call,
+    ...place, place, address, origin, token, opened, journal, call,
     // The key the board last opened its page with.
     lastKey: () => /#k=([\w-]+)$/.exec(opened.at(-1) ?? '')?.[1],
     close: async () => {
@@ -2402,4 +2405,955 @@ test('a script replaced between its two reads falls back once and the next reque
   const numbers = ['7:1', '7:2']
   assert.equal(hook.processRefusal(found, [expected], 'win32', () => numbers.shift()), 'not-board-script')
   assert.equal(hook.processRefusal(found, [expected], 'win32', () => '7:2'), null)
+})
+
+const switchApprovals = (board, page, enabled) =>
+  board.call('/api/approvals/switch', { enabled }, page.headers)
+
+// The board as the page asks for it: the status is the page's too, and the approvals part of the answer comes back.
+const boardAs = async (board, page) => {
+  const res = await board.call('/api/board', undefined, page.headers)
+  assert.equal(res.status, 200)
+  return res.body.approvals
+}
+
+// Counts the asks that reach the board: the hook's address file points at this forwarder until it is closed.
+const askCounter = async board => {
+  const target = new URL(board.origin)
+  const asks = []
+  const forwarder = createServer((req, res) => {
+    if (req.method === 'POST' && req.url.startsWith('/api/approvals/ask')) asks.push(req.url)
+    const up = httpRequest({ host: target.hostname, port: target.port, path: req.url, method: req.method, headers: { ...req.headers, host: target.host } }, answer => {
+      res.writeHead(answer.statusCode, answer.headers)
+      answer.pipe(res)
+    })
+    up.on('error', () => res.destroy())
+    req.pipe(up)
+  })
+  await new Promise(done => forwarder.listen(0, '127.0.0.1', done))
+  board.place.writeAddress(`http://127.0.0.1:${forwarder.address().port}/?t=${board.token}`)
+  return {
+    asks,
+    close: () => new Promise(done => { forwarder.close(done); forwarder.closeAllConnections() }),
+  }
+}
+
+// Makes one fs call fail for as long as `body` runs, as a full disk or a locked file would.
+const withFsFault = async (name, isTarget, body) => {
+  const real = fs[name]
+  fs[name] = function (...args) {
+    if (isTarget(args)) throw Object.assign(new Error(`synthetic ${name} fault`), { code: 'EIO' })
+    return Reflect.apply(real, this, args)
+  }
+  syncBuiltinESMExports()
+  try { return await body() } finally {
+    fs[name] = real
+    syncBuiltinESMExports()
+  }
+}
+
+const writeRefusalRecord = (board, reason, at = new Date().toISOString()) =>
+  writeFileSync(hook.approvalsRefusedFile(board.file), `${JSON.stringify({ at, reason })}\n`, { mode: 0o600 })
+
+const placeLink = (targetDir, targetFile, linkPath) => {
+  try {
+    symlinkSync(targetFile, linkPath)
+  } catch {
+    symlinkSync(targetDir, linkPath, 'junction')
+  }
+}
+
+const denyRead = file => {
+  if (process.platform !== 'win32') {
+    chmodSync(file, 0)
+    return () => { chmodSync(file, 0o600) }
+  }
+  const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+  const options = { windowsHide: true, encoding: 'utf8', timeout: 10_000, stdio: 'pipe' }
+  const sid = /,"(S-\d+(?:-\d+)+)"\s*$/.exec(execFileSync(join(system, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], options))[1]
+  execFileSync(join(system, 'icacls.exe'), [file, '/deny', `*${sid}:(RD)`], options)
+  return () => { execFileSync(join(system, 'icacls.exe'), [file, '/remove:d', `*${sid}`], options) }
+}
+
+const approvalPageDom = async ({ html, approvals, post }) => {
+  const nodes = new Map()
+  const matches = (node, selector) => {
+    if (selector.includes(',')) return selector.split(',').some(part => matches(node, part.trim()))
+    const id = /^#([\w-]+)$/.exec(selector)
+    if (id) return node.id === id[1]
+    const cls = /^\.([\w-]+)$/.exec(selector)
+    if (cls) return String(node.className ?? '').split(/\s+/).includes(cls[1])
+    const tag = /^[a-z]+/.exec(selector)?.[0]
+    const attrs = [...selector.matchAll(/\[([^=\]]+)(?:=["']?([^\]"']+)["']?)?\]/g)]
+    if (tag && node.tag !== tag) return false
+    return attrs.length > 0 && attrs.every(([, name, value]) => node.getAttribute(name) !== null && (value === undefined || node.getAttribute(name) === value))
+  }
+  class Element {
+    constructor(tag) {
+      this.tag = tag
+      this.childNodes = []
+      this.attributes = {}
+      this.events = {}
+      this.value = ''
+      this.text = ''
+      this.style = {}
+      this.className = ''
+      this.disabled = false
+    }
+    set id(value) { this.attributes.id = value; nodes.set(value, this) }
+    get id() { return this.attributes.id ?? '' }
+    get hidden() { return 'hidden' in this.attributes }
+    set hidden(value) { if (value) this.attributes.hidden = ''; else delete this.attributes.hidden }
+    get tagName() { return this.tag.toUpperCase() }
+    set textContent(value) { this.text = String(value); this.childNodes = [] }
+    get textContent() { return this.text + this.childNodes.map(child => child.textContent).join('') }
+    appendChild(child) { child.parentNode = this; this.childNodes.push(child); return child }
+    removeChild(child) { this.childNodes = this.childNodes.filter(one => one !== child) }
+    insertAdjacentElement(_pos, child) { get('main').appendChild(child) }
+    insertBefore(child, before) { child.parentNode = this; const idx = this.childNodes.indexOf(before); this.childNodes.splice(idx < 0 ? this.childNodes.length : idx, 0, child); return child }
+    get firstChild() { return this.childNodes[0] ?? null }
+    remove() { this.parentNode?.removeChild(this) }
+    setAttribute(name, value) { this.attributes[name] = String(value); if (name === 'id') nodes.set(String(value), this) }
+    getAttribute(name) { return this.attributes[name] ?? null }
+    addEventListener(name, run) { this.events[name] = run }
+    querySelectorAll(selector) {
+      return this.childNodes.flatMap(child => [...(matches(child, selector) ? [child] : []), ...child.querySelectorAll(selector)])
+    }
+    querySelector(selector) { return this.querySelectorAll(selector)[0] ?? null }
+    click() { if (!this.disabled) this.events.click?.({ target: this }) }
+    focus() { document.activeElement = this }
+    closest(selector) { for (let node = this; node; node = node.parentNode) if (matches(node, selector)) return node; return null }
+  }
+  const get = id => {
+    if (!nodes.has(id)) nodes.set(id, new Element(id))
+    return nodes.get(id)
+  }
+  get('words').textContent = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1]
+  get('.pfoot').className = 'pfoot'
+  get('.pfoot').appendChild(get('close'))
+  get('close').tag = 'button'
+  const document = {
+    documentElement: new Element('html'),
+    body: new Element('body'),
+    getElementById: get,
+    createElement: tag => new Element(tag),
+    createTextNode: text => { const node = new Element('text'); node.textContent = text; return node },
+    querySelector: selector => selector.startsWith('#') ? get(selector.slice(1)) : [...nodes.values()].flatMap(node => [...(matches(node, selector) ? [node] : []), ...node.querySelectorAll(selector)])[0] ?? get(selector),
+    querySelectorAll: selector => {
+      const seen = new Set()
+      return [...nodes.values(), document.body].flatMap(node => [...(matches(node, selector) ? [node] : []), ...node.querySelectorAll(selector)]).filter(one => (seen.has(one) ? false : (seen.add(one), true)))
+    },
+    addEventListener() {},
+    hidden: false,
+    title: '',
+    activeElement: null,
+  }
+  const settingsMarkup = html.match(/<div id="settings"[\s\S]*?<p id="settings-result"[^>]*><\/p><\/div><\/div>/)?.[0] ?? ''
+  const parents = [document.body]
+  for (const token of settingsMarkup.matchAll(/<\/?([a-z][\w-]*)\b([^>]*)>|([^<]+)/g)) {
+    if (token[3]) { parents.at(-1).text += token[3]; continue }
+    if (token[0].startsWith('</')) { parents.pop(); continue }
+    const attrs = Object.fromEntries([...token[2].matchAll(/([\w-]+)(?:="([^"]*)")?/g)].map(one => [one[1], one[2] ?? '']))
+    const node = attrs.id ? get(attrs.id) : new Element(token[1])
+    node.tag = token[1]
+    for (const [name, value] of Object.entries(attrs)) node.setAttribute(name, value)
+    if ('hidden' in attrs) node.hidden = true
+    parents.at(-1).appendChild(node)
+    if (!token[0].endsWith('/>')) parents.push(node)
+  }
+  let currentApprovals = approvals
+  let scheduled = null
+  const pending = new Set()
+  const requests = []
+  const model = serveModel(buildView(parseProgress('# Progress\n'), [], null, 0, 0, {}, EN), [], EN, new Set(), false, undefined, false, { now: 1, repoOf: () => '', versions: { board: '0.0.0', package: null }, unreadable: [] })
+  const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(found => found[1]).find(code => code.includes('(function ()'))
+  runInNewContext(script, {
+    document,
+    location: { search: '?t=synthetic', pathname: '/', hash: '' },
+    URLSearchParams,
+    navigator: {},
+    crypto: { randomUUID: () => 'synthetic-page-id' },
+    window: { confirm: () => true, isSecureContext: true, location: { reload: () => {} } },
+    Date: { now: () => 1 },
+    setTimeout: (run, ms) => { if (run.name === 'refresh') scheduled = run; return 1 },
+    clearTimeout: () => {},
+    fetch: (target, options = {}) => {
+      const task = (async () => {
+        if (target.startsWith('/api/board')) return { ok: true, status: 200, headers: { get: () => 'W/"s"' }, json: async () => ({ model, approvals: currentApprovals, now: 1 }) }
+        if (target === '/api/agents') return { ok: true, status: 200, json: async () => ({ rows: [] }) }
+        const req = { path: target, method: options.method, body: options.body ? JSON.parse(options.body) : {} }
+        requests.push(req)
+        return post ? post(req) : { ok: true, status: 200, json: async () => ({}) }
+      })()
+      pending.add(task)
+      task.then(() => pending.delete(task), () => pending.delete(task))
+      return task
+    },
+  }, { timeout: 1000 })
+  const settle = async () => {
+    do {
+      await Promise.allSettled([...pending])
+      await new Promise(done => setImmediate(done))
+    } while (pending.size > 0)
+  }
+  await settle()
+  return {
+    node: get,
+    requests,
+    board: () => get('board'),
+    redraw: async nextApprovals => { currentApprovals = nextApprovals; scheduled?.(); await settle() },
+  }
+}
+
+test('switching approvals off writes the off marker, sets isOff and stops the hook', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const off = await switchApprovals(board, page, false)
+  assert.equal(off.status, 200)
+  assert.equal(off.body.isOff, true)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), true)
+  const shown = await boardAs(board, page)
+  assert.equal(shown?.isOff, true)
+  const counter = await askCounter(board)
+  try {
+    let checkedListener = 0
+    const decision = await hook.run(board.env, process.platform, {
+      input: request('echo synthetic-off'),
+      now: () => 0,
+      discoveryMs: 1_000,
+      checkListener: () => { checkedListener += 1; return null },
+    })
+    assert.equal(decision, null)
+    assert.equal(checkedListener, 0)
+    assert.equal(counter.asks.length, 0)
+  } finally { await counter.close() }
+})
+
+test('switching approvals off again when already off succeeds idempotently', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  const again = await switchApprovals(board, page, false)
+  assert.equal(again.status, 200)
+  assert.equal(again.body.isOff, true)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), true)
+  assert.equal((await page.look())?.isOff, true)
+})
+
+test('approvals switched off persists across a board restart', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  await board.close()
+  const restarted = await startBoard({ place: board.place })
+  const reopened = await openPage(restarted)
+  assert.equal((await boardAs(restarted, reopened))?.isOff, true)
+  assert.equal(existsSync(hook.approvalsOffFile(restarted.file)), true)
+  const counter = await askCounter(restarted)
+  try {
+    const decision = await hook.run(restarted.env, process.platform, {
+      input: request('echo synthetic-restart'),
+      now: () => 0,
+      discoveryMs: 1_000,
+      checkListener: () => null,
+    })
+    assert.equal(decision, null)
+    assert.equal(counter.asks.length, 0)
+  } finally { await counter.close() }
+})
+
+test('switching approvals on removes the off marker, clears isOff and lets hook asks reach the page', { timeout: 60_000 }, async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  const on = await switchApprovals(board, page, true)
+  assert.equal(on.status, 200)
+  assert.equal(on.body.isOff, false)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
+  assert.equal((await page.look())?.isOff, undefined)
+  const counter = await askCounter(board)
+  try {
+    const waiting = runHook(board, request('npm run synthetic-back-on'))
+    const card = await page.show('npm run synthetic-back-on')
+    assert.equal((await page.press(card, 'allow', { confirmed: true })).status, 200)
+    assert.equal((await waiting.done).decision?.hookSpecificOutput?.decision?.behavior, 'allow')
+    assert.equal(counter.asks.length, 1)
+  } finally { await counter.close() }
+})
+
+test('switching approvals on again when already on succeeds idempotently', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const on = await switchApprovals(board, page, true)
+  assert.equal(on.status, 200)
+  assert.equal(on.body.isOff, false)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
+  assert.equal(await page.look(), undefined)
+})
+
+test('a page on the network cannot switch approvals', async t => {
+  const board = await startBoard()
+  const lan = await board.call('/api/lan', { address: '' })
+  if (typeof lan.body.url !== 'string') {
+    t.skip('this computer has no private network address for the page on the network')
+    return
+  }
+  const page = await openPage(board)
+  const lanUrl = new URL(lan.body.url)
+  const res = await fetch(new URL('/api/approvals/switch', lanUrl.origin), {
+    method: 'POST',
+    headers: { 'x-board-token': lanUrl.searchParams.get('t'), origin: lanUrl.origin, 'x-board-approve': page.secret, 'content-type': 'application/json' },
+    body: JSON.stringify({ enabled: false }),
+  })
+  assert.equal(res.status, 403)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+})
+
+test('a switch request without an Origin header is refused', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const res = await board.call('/api/approvals/switch', { enabled: false }, { 'x-board-page': 'p-synthetic', 'x-board-approve': page.secret })
+  assert.equal(res.status, 403)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
+})
+
+test('a switch request without a valid page secret is refused with approvalSwitchNoSecret', async () => {
+  const board = await startBoard()
+  await openPage(board)
+  const missing = await board.call('/api/approvals/switch', { enabled: false }, { origin: board.origin, 'x-board-page': 'p-synthetic' })
+  assert.equal(missing.status, 403)
+  assert.equal(missing.body.note, EN.approvalSwitchNoSecret)
+  const forged = await board.call('/api/approvals/switch', { enabled: false }, { origin: board.origin, 'x-board-page': 'p-synthetic', 'x-board-approve': board.token })
+  assert.equal(forged.status, 403)
+  assert.equal(forged.body.note, EN.approvalSwitchNoSecret)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
+})
+
+test('a switch request with a non-boolean enabled body is refused with 400', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  for (const body of [{}, { enabled: 'false' }, { enabled: 0 }, { enabled: null }]) {
+    const res = await board.call('/api/approvals/switch', body, page.headers)
+    assert.equal(res.status, 400)
+  }
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
+})
+
+test('key-replay lockdown rejects switch requests with approvalOff until restart', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const thief = await board.call('/api/approvals/pair', { key: page.key }, { origin: board.origin, 'x-board-page': 'p-thief' })
+  assert.equal(thief.status, 403)
+  assert.equal(thief.body.note, EN.approvalOff)
+  for (const enabled of [true, false]) {
+    const res = await switchApprovals(board, page, enabled)
+    assert.equal(res.status, 403)
+    assert.equal(res.body.note, EN.approvalOff)
+  }
+  const ask = await board.call('/api/approvals/ask', hook.askBody(request('echo synthetic-lockdown')))
+  assert.equal(ask.status, 200)
+  assert.deepEqual(ask.body, {})
+  await board.close()
+  const restarted = await startBoard({ place: board.place })
+  const reopened = await openPage(restarted)
+  assert.notEqual((await boardAs(restarted, reopened))?.isLockdown, true)
+  const off = await switchApprovals(restarted, reopened, false)
+  assert.equal(off.status, 200)
+  assert.equal(off.body.isOff, true)
+  assert.equal((await switchApprovals(restarted, reopened, true)).status, 200)
+})
+
+test('a symlink at the off-marker path fails switch with 409 approvalSwitchFailed and stays untouched', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const victimDir = join(board.root, 'victim-dir')
+  mkdirSync(victimDir)
+  const victimFile = join(victimDir, 'victim.txt')
+  writeFileSync(victimFile, 'untouched')
+  const offFile = hook.approvalsOffFile(board.file)
+  placeLink(victimDir, victimFile, offFile)
+  for (const enabled of [false, true]) {
+    const res = await switchApprovals(board, page, enabled)
+    assert.equal(res.status, 409)
+    assert.equal(res.body.note, EN.approvalSwitchFailed)
+    assert.equal(lstatSync(offFile).isSymbolicLink(), true)
+    assert.equal(readFileSync(victimFile, 'utf8'), 'untouched')
+  }
+})
+
+test('a directory at the off-marker path fails switch with 409 approvalSwitchFailed and stays untouched', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const offFile = hook.approvalsOffFile(board.file)
+  mkdirSync(offFile)
+  for (const enabled of [false, true]) {
+    const res = await switchApprovals(board, page, enabled)
+    assert.equal(res.status, 409)
+    assert.equal(res.body.note, EN.approvalSwitchFailed)
+    assert.equal(lstatSync(offFile).isDirectory(), true)
+  }
+})
+
+test('switching approvals off immediately settles a waiting asking request as window', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-asking-switch')))
+  const card = await page.card('npm run synthetic-asking-switch', 'asking')
+  assert.equal(card.state, 'asking')
+  const started = Date.now()
+  const off = await switchApprovals(board, page, false)
+  assert.equal(off.status, 200)
+  const result = await waiting
+  // The long approval timers stay: only the switch can have answered this soon.
+  assert.ok(Date.now() - started < 3_000, `answered after ${Date.now() - started} ms`)
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.body, {})
+  const settled = await page.card('npm run synthetic-asking-switch', 'window')
+  assert.equal(settled.state, 'window')
+  assert.equal((await page.look())?.isOff, true)
+})
+
+test('switching approvals off immediately settles a drawn shown request as window', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-shown-switch')))
+  await page.show('npm run synthetic-shown-switch')
+  const started = Date.now()
+  const off = await switchApprovals(board, page, false)
+  assert.equal(off.status, 200)
+  const result = await waiting
+  assert.ok(Date.now() - started < 3_000, `answered after ${Date.now() - started} ms`)
+  assert.equal(result.status, 200)
+  assert.deepEqual(result.body, {})
+  const settled = await page.card('npm run synthetic-shown-switch', 'window')
+  assert.equal(settled.state, 'window')
+})
+
+test('an ask that passed isSwitchedOff before switch off receives 200 empty at once', async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  assert.equal(hook.isSwitchedOff(board.file), false)
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  const started = Date.now()
+  const res = await board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-crossing-switch')))
+  assert.ok(Date.now() - started < 3_000, `answered after ${Date.now() - started} ms`)
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.body, {})
+  assert.deepEqual((await boardAs(board, page))?.cards, [])
+})
+
+for (const [reason, key] of [
+  ['no-lookup', 'approvalRefusedNoLookup'],
+  ['lookup-timeout', 'approvalRefusedLookupTimeout'],
+  ['lookup-failed', 'approvalRefusedLookupFailed'],
+  ['not-listening', 'approvalRefusedNotListening'],
+  ['empty-command-line', 'approvalRefusedEmptyCommandLine'],
+  ['not-node', 'approvalRefusedNotNode'],
+]) {
+  test(`refusal record with reason ${reason} is reported on the local board`, async () => {
+    const board = await startBoard()
+    const page = await openPage(board)
+    const at = '2026-11-20T00:00:00.000Z'
+    writeRefusalRecord(board, reason, at)
+    const shown = await boardAs(board, page)
+    assert.deepEqual(shown?.refusal, { reason, at, note: EN[key] })
+  })
+}
+
+test('refusal record with reason not-board-script instructs updating the Claude Code plugin', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const at = '2026-11-20T00:00:00.000Z'
+  writeRefusalRecord(board, 'not-board-script', at)
+  const shown = await boardAs(board, page)
+  assert.equal(shown?.refusal?.reason, 'not-board-script')
+  assert.equal(shown?.refusal?.at, at)
+  assert.match(shown?.refusal?.note ?? '', /claude plugin marketplace update agent-board/)
+  assert.match(shown?.refusal?.note ?? '', /claude plugin update agent-board@agent-board/)
+})
+
+test('all refusal reasons, unreadable note and switch strings appear in EN, ZH_TW and ZH_CN', () => {
+  const keys = [
+    'settingsApprovals', 'approvalSwitchedOff', 'approvalSwitchFailed',
+    'approvalRefusedNoLookup', 'approvalRefusedLookupTimeout', 'approvalRefusedLookupFailed',
+    'approvalRefusedNotListening', 'approvalRefusedEmptyCommandLine', 'approvalRefusedNotNode',
+    'approvalRefusedNotBoardScript', 'approvalRefusedUnreadable',
+  ]
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    for (const key of [...keys, 'approvalSwitchNoSecret']) {
+      assert.equal(typeof s[key], 'string', key)
+      assert.notEqual(s[key].trim(), '', key)
+    }
+    assert.match(s.approvalRefusedNotBoardScript, /claude plugin marketplace update agent-board/)
+    assert.match(s.approvalRefusedNotBoardScript, /claude plugin update agent-board@agent-board/)
+  }
+})
+
+test('the page on the network never sees refusal or isOff on the board payload', async t => {
+  const board = await startBoard()
+  const lan = await board.call('/api/lan', { address: '' })
+  if (typeof lan.body.url !== 'string') {
+    t.skip('this computer has no private network address for the page on the network')
+    return
+  }
+  const page = await openPage(board)
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  writeRefusalRecord(board, 'not-listening')
+  const local = await page.look()
+  assert.equal(local?.isOff, true)
+  assert.equal(local?.refusal?.reason, 'not-listening')
+  const lanUrl = new URL(lan.body.url)
+  const lanBoard = await fetch(new URL('/api/board', lanUrl.origin), {
+    headers: { 'x-board-token': lanUrl.searchParams.get('t'), 'x-board-page': 'p-lan' },
+  })
+  assert.equal(lanBoard.status, 200)
+  const lanBody = await lanBoard.json()
+  assert.equal(lanBody.approvals, undefined)
+})
+
+test('removing the refusal record clears refusal from the board payload', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  writeRefusalRecord(board, 'not-node')
+  assert.equal((await boardAs(board, page))?.refusal?.reason, 'not-node')
+  rmSync(hook.approvalsRefusedFile(board.file))
+  assert.equal(await boardAs(board, page), undefined)
+})
+
+test('a malformed JSON refusal record returns 200 with reason unreadable and clears when removed', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const record = hook.approvalsRefusedFile(board.file)
+  writeFileSync(record, '{not-json')
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  rmSync(record)
+  assert.equal(await boardAs(board, page), undefined)
+})
+
+test('a refusal record with an unknown reason returns 200 with reason unreadable and clears when removed', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const record = hook.approvalsRefusedFile(board.file)
+  writeRefusalRecord(board, 'synthetic-unknown-reason')
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  rmSync(record)
+  assert.equal(await boardAs(board, page), undefined)
+})
+
+test('a refusal record with a bad timestamp returns 200 with reason unreadable and clears when removed', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const record = hook.approvalsRefusedFile(board.file)
+  for (const content of [{ at: 'not-a-timestamp', reason: 'not-node' }, { reason: 'not-node' }]) {
+    writeFileSync(record, JSON.stringify(content))
+    assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+    rmSync(record)
+    assert.equal(await boardAs(board, page), undefined)
+  }
+})
+
+test('an oversized refusal record over 4 KiB returns 200 with reason unreadable and clears when removed', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const record = hook.approvalsRefusedFile(board.file)
+  writeFileSync(record, JSON.stringify({ at: new Date().toISOString(), reason: 'not-node', extra: 'x'.repeat(5_000) }))
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  rmSync(record)
+  assert.equal(await boardAs(board, page), undefined)
+})
+
+test('a symlink at the refusal record path returns 200 with reason unreadable and clears when removed', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const targetDir = join(board.root, 'refused-link-dir')
+  mkdirSync(targetDir)
+  const targetFile = join(targetDir, 'refused.json')
+  writeFileSync(targetFile, JSON.stringify({ at: new Date().toISOString(), reason: 'not-node' }))
+  const record = hook.approvalsRefusedFile(board.file)
+  placeLink(targetDir, targetFile, record)
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  rmSync(record, { recursive: true, force: true })
+  assert.equal(await boardAs(board, page), undefined)
+})
+
+test('a directory at the refusal record path returns 200 with reason unreadable and clears when removed', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const record = hook.approvalsRefusedFile(board.file)
+  mkdirSync(record)
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  rmSync(record, { recursive: true, force: true })
+  assert.equal(await boardAs(board, page), undefined)
+})
+
+test('a refusal record with unreadable permissions returns 200 with reason unreadable and clears when removed', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  const record = hook.approvalsRefusedFile(board.file)
+  writeRefusalRecord(board, 'not-node')
+  const restore = denyRead(record)
+  try {
+    assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'unreadable', at: null, note: EN.approvalRefusedUnreadable })
+  } finally {
+    restore()
+  }
+  rmSync(record)
+  assert.equal(await boardAs(board, page), undefined)
+})
+
+test('a stale refusal older than the latest passing ask is not reported while a newer refusal is', async () => {
+  let fakeNow = 1_700_000_010_000
+  const board = await startBoard({ now: () => fakeNow })
+  const page = await openPage(board)
+  const t1 = new Date(fakeNow - 5_000).toISOString()
+  assert.equal((await board.call('/api/approvals/ask', hook.askBody(request('echo synthetic-pass')))).status, 200)
+  writeRefusalRecord(board, 'not-listening', t1)
+  assert.equal((await page.look())?.refusal, undefined)
+  fakeNow += 5_000
+  const t3 = new Date(fakeNow).toISOString()
+  writeRefusalRecord(board, 'lookup-failed', t3)
+  assert.equal((await page.look())?.refusal?.reason, 'lookup-failed')
+})
+
+test('a refusal timestamped equal to the latest passing ask is not reported', async () => {
+  let fakeNow = 1_700_000_020_000
+  const board = await startBoard({ now: () => fakeNow })
+  const page = await openPage(board)
+  assert.equal((await board.call('/api/approvals/ask', hook.askBody(request('echo synthetic-tie')))).status, 200)
+  const t2 = new Date(fakeNow).toISOString()
+  writeRefusalRecord(board, 'not-node', t2)
+  assert.equal((await page.look())?.refusal, undefined)
+  fakeNow += 1_000
+  const t3 = new Date(fakeNow).toISOString()
+  writeRefusalRecord(board, 'not-node', t3)
+  assert.equal((await page.look())?.refusal?.reason, 'not-node')
+})
+
+test('a genuine refusal newer than the latest passing ask is reported on the board', async () => {
+  let fakeNow = 1_700_000_030_000
+  const board = await startBoard({ now: () => fakeNow })
+  const page = await openPage(board)
+  assert.equal((await board.call('/api/approvals/ask', hook.askBody(request('echo synthetic-first-pass')))).status, 200)
+  fakeNow += 2_000
+  const t3 = new Date(fakeNow).toISOString()
+  writeRefusalRecord(board, 'lookup-timeout', t3)
+  assert.deepEqual((await boardAs(board, page))?.refusal, { reason: 'lookup-timeout', at: t3, note: EN.approvalRefusedLookupTimeout })
+})
+
+test('the local page renders the approvals switch toggle with role switch and wires it to the switch route', async () => {
+  const html = servePage(EN, 'synthetic', false)
+  let switchedTo = null
+  let switchMethod = null
+  const dom = await approvalPageDom({
+    html,
+    approvals: undefined,
+    post: req => {
+      if (req.path === '/api/approvals/switch') {
+        switchedTo = req.body.enabled
+        switchMethod = req.method
+        return { ok: true, status: 200, json: async () => ({ isOff: !req.body.enabled, note: EN.settingsChanged(EN.settingsApprovals, req.body.enabled ? EN.settingsOn : EN.settingsOff) }) }
+      }
+      return { ok: true, status: 200, json: async () => ({}) }
+    },
+  })
+  const toggle = dom.node('settings-approvals-toggle')
+  assert.equal(toggle.getAttribute('role'), 'switch')
+  assert.equal(toggle.getAttribute('aria-checked'), 'true')
+  toggle.click()
+  await dom.redraw({ cards: [], isOff: true, note: EN.approvalSwitchedOff })
+  assert.equal(switchedTo, false)
+  assert.equal(switchMethod, 'POST')
+  assert.equal(toggle.getAttribute('aria-checked'), 'false')
+})
+
+test('the network page omits the approvals switch setting while the local page renders it', () => {
+  const localHtml = servePage(EN, 'synthetic', false)
+  const lanHtml = servePage(EN, 'synthetic', true)
+  assert.match(localHtml, /id="settings-approvals"/)
+  assert.match(localHtml, /id="settings-approvals-toggle"/)
+  assert.doesNotMatch(lanHtml, /id="settings-approvals"/)
+  assert.doesNotMatch(lanHtml, /id="settings-approvals-toggle"/)
+})
+
+test('approvalSection renders the refusal element without an empty card list when cards is empty', async () => {
+  const html = servePage(EN, 'synthetic', false)
+  const dom = await approvalPageDom({
+    html,
+    approvals: { cards: [], refusal: { reason: 'not-node', at: '2026-11-20T00:00:00.000Z', note: 'Synthetic refusal note' } },
+  })
+  const notices = dom.board().querySelectorAll('[data-approval-refusal]')
+  assert.equal(notices.length, 1)
+  assert.equal(notices[0].textContent, 'Synthetic refusal note')
+  assert.equal(dom.board().querySelectorAll('.cards').length, 0)
+})
+
+test('approvalSection shows the refusal element for a refusal and hides it when absent', async () => {
+  const html = servePage(EN, 'synthetic', false)
+  const dom = await approvalPageDom({
+    html,
+    approvals: { cards: [], refusal: { reason: 'not-listening', at: '2026-11-20T00:00:00.000Z', note: 'Synthetic listener refusal' } },
+  })
+  assert.equal(dom.board().querySelectorAll('[data-approval-refusal]').length, 1)
+  await dom.redraw(undefined)
+  assert.equal(dom.board().querySelectorAll('[data-approval-refusal]').length, 0)
+})
+
+test('approvalSection stays quiet when switched off with zero cards and no refusal', async () => {
+  const html = servePage(EN, 'synthetic', false)
+  const dom = await approvalPageDom({
+    html,
+    approvals: { cards: [], isOff: true, note: 'Synthetic switched off note' },
+  })
+  assert.equal(dom.board().querySelectorAll('.approvals').length, 0)
+  assert.equal(dom.board().querySelectorAll('[data-approval-refusal]').length, 0)
+  assert.equal(dom.board().querySelectorAll('.cards').length, 0)
+  assert.equal(dom.board().textContent.includes('Synthetic switched off note'), false)
+  assert.equal(dom.board().textContent.includes(EN.approvalHead), false)
+})
+
+test('switching approvals off on a fresh board followed by reload requests a keyed page so reopening can switch back on', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  await board.call('/api/board', undefined, { 'x-board-page': 'p-reloaded' })
+  const reloadedTry = await board.call('/api/approvals/switch', { enabled: true }, { origin: board.origin, 'x-board-page': 'p-reloaded' })
+  assert.equal(reloadedTry.status, 403)
+  assert.equal(reloadedTry.body.note, EN.approvalSwitchNoSecret)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
+  const reopened = await openPage(board, { pageId: 'p-reopened' })
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  const backOn = await switchApprovals(board, reopened, true)
+  assert.equal(backOn.status, 200)
+  assert.equal(backOn.body.isOff, false)
+  assert.equal(await reopened.look(), undefined)
+})
+
+test('a page that holds no secret and presses the switch makes the next board command open a keyed page', async () => {
+  const board = await startBoard()
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  const bare = { origin: board.origin, 'x-board-page': 'p-bare' }
+  // Another refusal for a missing secret keeps its own words and asks for nothing.
+  const drawn = await board.call('/api/approvals/drawn', { items: [] }, bare)
+  assert.equal(drawn.status, 403)
+  assert.equal(drawn.body.note, EN.approvalNoSecret)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  const refused = await board.call('/api/approvals/switch', { enabled: false }, bare)
+  assert.equal(refused.status, 403)
+  assert.equal(refused.body.note, EN.approvalSwitchNoSecret)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, true)
+  const keyed = await openPage(board, { pageId: 'p-keyed' })
+  assert.equal((await board.call('/api/ping')).body.wantsKeyedPage, false)
+  const off = await switchApprovals(board, keyed, false)
+  assert.equal(off.status, 200)
+  assert.equal(off.body.isOff, true)
+})
+
+test('a marker write that fails after the file was created removes the file, answers 409 and leaves waiting asks alone', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-failed-write')))
+  await page.card('npm run synthetic-failed-write', 'asking')
+  const refused = await withFsFault('writeSync', args => typeof args[1] === 'string' && args[1].startsWith('{"at"'), () => switchApprovals(board, page, false))
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.note, EN.approvalSwitchFailed)
+  assert.equal(existsSync(hook.approvalsOffFile(board.file)), false)
+  assert.equal(hook.isSwitchedOff(board.file), false)
+  assert.equal((await boardAs(board, page))?.isOff, undefined)
+  // Still waiting for the page: a failed switch changed nothing.
+  assert.equal(await Promise.race([waiting, pause(500).then(() => 'waiting')]), 'waiting')
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  assert.equal((await waiting).status, 200)
+})
+
+test('a marker close that fails after the write closes once, removes the file, answers 409 and leaves waiting asks alone', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-failed-close')))
+  await page.card('npm run synthetic-failed-close', 'asking')
+  const offFile = hook.approvalsOffFile(board.file)
+  // The marker's descriptor is the one its JSON is written to. Its close releases it, as a close that reports an error
+  // still does, and then fails. Every close of it in the same synchronous write is counted; after that the number may
+  // be given to another file, so later closes are left alone.
+  let markerFd
+  let isMarkerReleased = false
+  const markerCloses = []
+  const realWrite = fs.writeSync
+  const realClose = fs.closeSync
+  fs.writeSync = function (...args) {
+    if (typeof args[1] === 'string' && args[1].startsWith('{"at"')) markerFd = args[0]
+    return Reflect.apply(realWrite, this, args)
+  }
+  fs.closeSync = function (...args) {
+    if (markerFd === undefined || args[0] !== markerFd || isMarkerReleased) return Reflect.apply(realClose, this, args)
+    markerCloses.push(args[0])
+    if (markerCloses.length === 1) {
+      Reflect.apply(realClose, this, args)
+      queueMicrotask(() => { isMarkerReleased = true })
+    }
+    throw Object.assign(new Error('synthetic closeSync fault'), { code: 'EIO' })
+  }
+  syncBuiltinESMExports()
+  let refused
+  try { refused = await switchApprovals(board, page, false) } finally {
+    fs.writeSync = realWrite
+    fs.closeSync = realClose
+    syncBuiltinESMExports()
+  }
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.note, EN.approvalSwitchFailed)
+  assert.equal(markerCloses.length, 1)
+  assert.equal(existsSync(offFile), false)
+  assert.equal(hook.isSwitchedOff(board.file), false)
+  assert.equal((await boardAs(board, page))?.isOff, undefined)
+  // Still waiting for the page: a failed switch changed nothing.
+  assert.equal(await Promise.race([waiting, pause(500).then(() => 'waiting')]), 'waiting')
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  assert.equal((await waiting).status, 200)
+})
+
+test('a switch on that fails because a directory sits at the marker path reads Off and settles waiting asks', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-marker-directory')))
+  await page.card('npm run synthetic-marker-directory', 'asking')
+  const offFile = hook.approvalsOffFile(board.file)
+  mkdirSync(offFile)
+  const started = Date.now()
+  const refused = await switchApprovals(board, page, true)
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.note, EN.approvalSwitchFailed)
+  const answered = await waiting
+  // The long approval timers stay: only the failed switch can have answered this soon.
+  assert.ok(Date.now() - started < 3_000, `answered after ${Date.now() - started} ms`)
+  assert.equal(answered.status, 200)
+  assert.deepEqual(answered.body, {})
+  assert.equal(hook.isSwitchedOff(board.file), true)
+  assert.equal((await boardAs(board, page))?.isOff, true)
+  assert.equal(lstatSync(offFile).isDirectory(), true)
+})
+
+test('a marker write that fails and leaves the file behind settles waiting asks as the hook already is off', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-stuck-marker')))
+  await page.card('npm run synthetic-stuck-marker', 'asking')
+  const offFile = hook.approvalsOffFile(board.file)
+  const fails = args => typeof args[1] === 'string' && args[1].startsWith('{"at"')
+  const refused = await withFsFault('writeSync', fails, () => withFsFault('unlinkSync', args => args[0] === offFile, async () => {
+    const started = Date.now()
+    const res = await switchApprovals(board, page, false)
+    const answered = await waiting
+    assert.ok(Date.now() - started < 3_000, `answered after ${Date.now() - started} ms`)
+    assert.equal(answered.status, 200)
+    assert.deepEqual(answered.body, {})
+    return res
+  }))
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.note, EN.approvalSwitchFailed)
+  assert.equal(existsSync(offFile), true)
+  assert.equal((await boardAs(board, page))?.isOff, true)
+})
+
+test('during key-replay lockdown the approvals switch shows off and disabled while keeping the lockdown banner and user off state', async () => {
+  const board = await startBoard()
+  const page = await openPage(board)
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  const thief = await board.call('/api/approvals/pair', { key: page.key }, { origin: board.origin, 'x-board-page': 'p-thief' })
+  assert.equal(thief.status, 403)
+  assert.equal(thief.body.note, EN.approvalOff)
+  const looked = await page.look()
+  assert.equal(looked?.isLockdown, true)
+  assert.equal(looked?.isOff, true)
+  assert.equal(looked?.note, EN.approvalOff)
+  const dom = await approvalPageDom({
+    html: servePage(EN, 'synthetic', false),
+    approvals: { cards: [], isLockdown: true, isOff: true, note: EN.approvalOff },
+  })
+  const toggle = dom.node('settings-approvals-toggle')
+  assert.equal(toggle.getAttribute('aria-checked'), 'false')
+  assert.equal(toggle.disabled, true)
+  assert.equal(toggle.textContent, EN.settingsOff)
+  toggle.click()
+  assert.equal(dom.requests.length, 0)
+  assert.equal(dom.board().textContent.includes(EN.approvalOff), true)
+})
+
+test('a watched board caches idle refusal and off-switch checks until the folder watcher signals a change', async () => {
+  const watchers = []
+  const watchFs = (path, listener) => {
+    const entry = Object.assign(new EventEmitter(), {
+      path,
+      listener,
+      closed: false,
+      close() { this.closed = true },
+    })
+    watchers.push(entry)
+    return entry
+  }
+  const board = await startBoard({ isWatched: true, watchFs })
+  const page = await openPage(board)
+  assert.equal(await boardAs(board, page), undefined)
+  const runtimeWatcher = watchers.find(one => one.path === dirname(board.file))
+  assert.ok(runtimeWatcher)
+  writeRefusalRecord(board, 'not-listening')
+  // An idle poll before the folder watcher signals reads the cached state without touching disk.
+  assert.equal(await boardAs(board, page), undefined)
+  runtimeWatcher.listener('change', basename(hook.approvalsRefusedFile(board.file)))
+  assert.equal((await boardAs(board, page))?.refusal?.reason, 'not-listening')
+  rmSync(hook.approvalsRefusedFile(board.file))
+  runtimeWatcher.listener('rename', basename(hook.approvalsRefusedFile(board.file)))
+  assert.equal(await boardAs(board, page), undefined)
+  const offFile = hook.approvalsOffFile(board.file)
+  writeFileSync(offFile, `${JSON.stringify({ at: new Date().toISOString() })}\n`, { mode: 0o600 })
+  assert.equal((await boardAs(board, page))?.isOff, undefined)
+  runtimeWatcher.listener('rename', basename(offFile))
+  assert.equal((await boardAs(board, page))?.isOff, true)
+  rmSync(offFile)
+  assert.equal((await boardAs(board, page))?.isOff, true)
+  runtimeWatcher.listener('rename', basename(offFile))
+  assert.equal(await boardAs(board, page), undefined)
+  const busyPort = Number(new URL(board.origin).port)
+  const busyWatchers = []
+  await assert.rejects(
+    startBoard({ port: busyPort, isWatched: true, watchFs: (path, listener) => { busyWatchers.push(path); return watchFs(path, listener) } }),
+    error => error?.code === 'EADDRINUSE',
+  )
+  assert.equal(busyWatchers.length, 0)
+  await board.close()
+  assert.equal(runtimeWatcher.closed, true)
+})
+
+test('an ask sent after the off marker is removed, before the folder watcher signals, is admitted and waits for the page', { timeout: 60_000 }, async t => {
+  // The board reads its Off files again once 5 s have passed since the switch, by the clock (`Date.now()`) of its page poll,
+  // which the board's `now` option does not set. The clock stands still for this test, so that read never comes due however
+  // slowly the machine runs: the cached Off this test needs cannot clear before the ask, and the test cannot fail on correct code.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.now() })
+  const watchFs = (path, listener) => Object.assign(new EventEmitter(), { path, listener, close() {} })
+  const board = await startBoard({ isWatched: true, watchFs, drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  rmSync(hook.approvalsOffFile(board.file))
+  // The board still shows its own Off until the watcher signals, but the hook already reads On: the ask is the page's.
+  assert.equal((await boardAs(board, page))?.isOff, true)
+  assert.equal(hook.isSwitchedOff(board.file), false)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-marker-removed')))
+  // The board admitted the ask: its card is there, asking, before Off is switched on again, and the same read still shows
+  // the board's own cached Off. That cache only clears (the marker is gone), so the ask was admitted while the board read
+  // Off: with the cached Off in the ask admission it is refused and no card is made. Should the board's 5 s probe read
+  // the disk first, the read shows On and the test fails; it cannot pass that way.
+  let seen
+  for (let tries = 0; tries < 100 && seen === undefined; tries++) {
+    const approvals = await boardAs(board, page)
+    if (approvals?.cards?.some(one => one.command === 'npm run synthetic-marker-removed' && one.state === 'asking')) seen = approvals
+    else await pause(50)
+  }
+  assert.ok(seen, 'the ask was admitted and its card is asking')
+  assert.equal(seen.isOff, true, 'the board still read its cached Off when the ask was admitted')
+  assert.equal(await Promise.race([waiting, pause(500).then(() => 'waiting')]), 'waiting')
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  const answered = await waiting
+  assert.equal(answered.status, 200)
+  assert.deepEqual(answered.body, {})
 })

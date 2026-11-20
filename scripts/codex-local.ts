@@ -156,9 +156,11 @@ const readLocal = (file: string): string | null => readBytes(file)?.toString('ut
 // What setup saw at a path when it planned (#1488): the kind of the path itself (lstat follows no link), a link's
 // target, and the bytes read through it. Decoded text is not enough to compare later: bytes that decode alike
 // (EF BF BD and FF) would pass, and a dangling link would read as a missing file. lstat sees the last part of the
-// path only: a folder above it swapped for a link is not caught.
-type Snap = { kind: 'none' | 'file' | 'link' | 'other'; link: string | null; bytes: Buffer | null }
-const NO_PATH: Snap = { kind: 'none', link: null, bytes: null }
+// path only: a folder above it swapped for a link is not caught. `real` is the path's real path while it resolves (the OS
+// settles letter case, relative link targets and link chains), so a removal can tell a file this batch removed from one
+// another program removed; it is not compared.
+type Snap = { kind: 'none' | 'file' | 'link' | 'other'; link: string | null; bytes: Buffer | null; real: string | null }
+const NO_PATH: Snap = { kind: 'none', link: null, bytes: null, real: null }
 const take = (file: string): Snap => {
   let kind: Snap['kind']
   try {
@@ -168,7 +170,9 @@ const take = (file: string): Snap => {
     if ((error as { code?: string }).code === 'ENOENT') return NO_PATH
     throw error
   }
-  return { kind, link: kind === 'link' ? readlinkSync(file) : null, bytes: readBytes(file) }
+  let real: string | null = null
+  try { real = realpathSync.native(file) } catch {}
+  return { kind, link: kind === 'link' ? readlinkSync(file) : null, bytes: readBytes(file), real }
 }
 const sameBytes = (a: Buffer | null, b: Buffer | null): boolean => a === null || b === null ? a === b : a.equals(b)
 const same = (a: Snap, b: Snap): boolean => a.kind === b.kind && a.link === b.link && sameBytes(a.bytes, b.bytes)
@@ -547,35 +551,59 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // The hash of the bytes setup saw. For valid UTF-8 it is the hash of the text, so a record written earlier still
   // matches; FF and the EF BF BD it would decode to differ, so one is never taken for the other.
   const ownHash = (file: string, text: string): string => hash(before.get(file)?.bytes ?? text)
-  // The batch check and the re-read just before each write compare a path with what setup saw there (#1488), in both
-  // writers. Before a write the path must be as planned, or already hold exactly the new bytes as the same kind of
-  // path, or as a new regular file where there was none: one file reached by a second name earlier in this batch (a
-  // skills folder linked to the shared one, or another letter case on Windows), so writing the same bytes over it loses
-  // nothing. A second name may also find a regular file where it planned a file link, when this batch's own write
-  // replaced that link (a skills folder linked to the shared one whose SKILL.md is a file link): only when the path's
-  // real path is one this batch wrote and it holds exactly the new bytes (Greptile on #1594). Anything else stops the
-  // batch, a link or other bytes put where the file was included. After a write the rename target must be a regular
-  // file holding exactly the bytes. A plain rename cannot close the instant between the last re-read and the write.
-  // Removals: the main writer reads a stale .new copy and this agent's pending list again just before the unlink, and
-  // unlinks every other path with no re-read, as on main. The sidecar-only writer compares the path's kind, link and
-  // bytes just before (main compared decoded text) and checks after that the path reads as gone. Not covered here, and
-  // left as on main: a re-read before the main writer's other removals, a file another program removes just before
-  // setup's unlink (#1611), and a remove through a skills folder linked to the shared one whose SKILL.md is a file link
-  // (#1610).
+  // Every re-read after planning compares a path with what setup saw there (#1488): the batch check, the re-read just
+  // before each change and the read-back after it, in both writers. Before a write the path must be as planned, or
+  // already hold exactly the new bytes as the same kind of path, or as a new regular file where there was none: one
+  // file reached by a second name earlier in this batch (a skills folder linked to the shared one, or another letter
+  // case on Windows), so writing the same bytes over it loses nothing. Before a removal it must be as planned, or, only
+  // when its planned real path is a file this batch itself removed, already gone (a second name of that file) or the
+  // same link it was with its target gone (a file link to that file). A file or target another program removed or moved
+  // stops the batch. Anything else stops the batch, a link or other bytes put where the file was included.
+  // A second name may also find a regular file where it planned a file link, when this batch's own write replaced that
+  // link (a skills folder linked to the shared one whose SKILL.md is a file link): only when the path's real path is
+  // one this batch wrote and it holds exactly the new bytes (Greptile on #1594).
+  // After a write the rename target must be a regular file holding exactly the bytes; after a removal the path is gone.
+  // A plain rename or unlink cannot close the instant between the last re-read and the change: a file another program
+  // deletes in that instant stops the removal instead of counting as removed by setup (#1611).
+  // A stale .new copy and the pending list are read again just before the unlink, as planned, not through the re-read removal.
   const isHolding = (now: Snap, text: string): boolean => sameBytes(now.bytes, Buffer.from(text, 'utf8'))
   const ours = new Set<string>()
+  // The real paths of the entries this batch removed, each recorded once its removal was checked: a regular file by
+  // its own real path, a file link by the link entry's real path (its parent's real path plus its name), so a second
+  // name of either finds its own removal and the batch finishes (#1610). A link's target is never recorded here: the
+  // target still exists, and another link to it must not read as removed (F2).
+  const gone = new Set<string>()
   const realOf = (file: string): string | null => { try { return realpathSync.native(file) } catch { return null } }
+  // The real path of a link entry itself: resolve the parent, keep the name. Two names of one link (a skills folder
+  // linked to the shared one) share it; two separate links to one target do not.
+  const entryReal = (file: string): string | null => { try { return join(realpathSync.native(dirname(file)), basename(file)) } catch { return null } }
   const isOurs = (file: string, now: Snap, next: string): boolean => now.kind === 'file' && isHolding(now, next) && ours.has(realOf(file) ?? '')
   // A .new path is the exception: a file that appeared there is a second name only when this batch wrote it, since bytes
   // alone would also match a file another program put there (#1693).
-  const unchanged = (file: string, next: string): void => {
+  const unchanged = (file: string, next: string | null): Snap => {
     const was = before.get(file) ?? NO_PATH, now = take(file)
-    const isSecondName = isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' && !file.endsWith('.new') || isOurs(file, now, next))
-    if (!same(was, now) && !isSecondName) throw new Error('INSTALL_CHANGED')
+    const isSecondName = next !== null && isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' && !file.endsWith('.new') || isOurs(file, now, next))
+    // A path already gone, or the same link with its target gone, only where this batch itself removed the entry or
+    // the target: a second name of a file this batch removed (its own real path), a second name of a link this batch
+    // removed (the link entry's real path, not its target), a link whose target this batch removed, or a dangling
+    // link whose link text names an entry this batch removed (a chain H -> S -> C where S went first: H's final
+    // target C is not in `gone`, but the break is explained by setup's own verified removal of S).
+    const entry = was.kind === 'link' ? entryReal(file) : was.real
+    // The entry the link text names: resolve it against the link's folder, then take that entry's real path. The
+    // first removed entry in a chain explains the break; a target another program deleted is not named by the link
+    // text, so it still stops the batch (F2). `resolve` must not be used here: it collapses `hop/..` lexically
+    // before the OS follows `hop`, so the entry named is a file the link never read (Greptile 4627685622). Join
+    // the raw text instead, and let `entryReal` resolve the parent with realpath, so `..` goes up from the
+    // directory the OS reached through the link, not the lexical one.
+    const target = was.link !== null && isAbsolute(was.link) ? was.link : dirname(file) + sep + was.link
+    const linkEntry = was.kind === 'link' && was.link !== null ? entryReal(target) : null
+    const isGone = next === null && ((now.kind === 'none' && entry !== null && gone.has(entry)) || (was.kind === 'link' && now.kind === 'link' && now.link === was.link && now.bytes === null && was.real !== null && (gone.has(was.real) || (linkEntry !== null && gone.has(linkEntry)))))
+    if (!same(was, now) && !isSecondName && !isGone) throw new Error('INSTALL_CHANGED')
+    return now
   }
-  const written = (file: string, text: string): void => {
+  const written = (file: string, text: string | null): void => {
     const now = take(file)
-    if (now.kind !== 'file' || !isHolding(now, text)) throw new Error('INSTALL_CHANGED')
+    if (text === null ? now.kind !== 'none' : now.kind !== 'file' || !isHolding(now, text)) throw new Error('INSTALL_CHANGED')
   }
   // A .new copy where the plan found nothing is created, never written over (#1693). A name this batch already wrote as
   // the same file through another name (a skills folder linked to the shared one) is not written again: it holds the
@@ -589,6 +617,28 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     written(target, text)
     const real = realOf(target)
     if (real !== null) ours.add(real)
+  }
+  // unlinkSync, not an existsSync check first: a file link whose target this batch already removed reads as gone but
+  // is still there, and must go too. A path already gone by this batch's own earlier removal needs no unlink; a path
+  // that read as present when re-read, gone by the unlink, was taken by another program in that instant (#1611).
+  // Reuse the snapshot `unchanged` validated: a second read could see a deletion by another program and skip the
+  // unlink that would have caught it, crediting the outside deletion to setup (F1).
+  const drop = (file: string): void => {
+    const now = unchanged(file, null)
+    if (now.kind !== 'none') {
+      try { unlinkSync(file) } catch (error) {
+        if ((error as { code?: string }).code === 'ENOENT') throw new Error('INSTALL_CHANGED')
+        throw error
+      }
+    }
+    written(file, null)
+    const was = before.get(file)
+    // Record the entry this batch removed: for a link, the link entry itself (its parent's real path plus its name),
+    // not its target — the target still exists, and another link to it must not read as removed (F2).
+    if (was !== undefined && was.real !== null) {
+      const entry = was.kind === 'link' ? entryReal(file) : was.real
+      if (entry !== null) gone.add(entry)
+    }
   }
   const isAsPlanned = (file: string): boolean => same(take(file), before.get(file) ?? NO_PATH)
   // A board run (a report, a hook event, a status, a hook recovery, the mailbox) only reads where the board is from the
@@ -841,16 +891,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (args.includes('--apply') && !sidecarConflicts.length) {
       withInstallLock(home, () => {
         for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED')
-        // Each file is read again just before its change and checked after it, so an edit made before that last re-read
-        // is never overwritten or removed, and a change that did not land is not reported as applied. A write goes
-        // through put; a removal compares the path's kind, link and bytes and checks that the path reads as gone after.
+        // Each file is read again just before its change and checked after it (put and drop), so an edit made before
+        // that last re-read is never overwritten or removed, and a change that did not land is not reported as applied.
         for (const change of sidecarChanges) {
-          if (change.action !== 'remove') put(change.file, change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!)
-          else {
-            if (!isAsPlanned(change.file)) throw new Error('INSTALL_CHANGED')
-            unlinkSync(change.file)
-            if (readLocal(change.file) !== null) throw new Error('INSTALL_CHANGED')
-          }
+          if (change.action === 'remove') drop(change.file)
+          else put(change.file, change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!)
         }
       })
       if (isRemoving) try { rmdirSync(sidecarDirectory) } catch {}
@@ -1969,7 +2014,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       withInstallLock(home, () => {
         if (!isAsPlanned(allowlistFile)) throw new Error('INSTALL_CHANGED')
         const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-        atomic(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
+        // The allowlist is read again just before the rename and checked after it (put, as every other write in the
+        // batch does), so an edit made before that last re-read is kept; an edit saved after the re-read and before
+        // the rename is still written over (#1606).
+        put(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
       })
     }
     output({ mode: 'trust', agent, file: allowlistFile, entries: wanted.map(([event, command]) => ({ event, command, trusted: isApplied || !missing.some(one => one[0] === event) })), changes: missing.length, ...(isApplied ? { applied: true } : {}) })
@@ -2064,14 +2112,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // snapshot taken after planning: another installer or host may have changed them in that interval.
     for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED')
     local?.beforeApply?.(plan)
-    // Each file setup writes is read again just before the write and checked after it (#1488, put, as runSidecarOnly
-    // does), so an edit made before that last re-read is never overwritten, and a write that did not land is not reported
-    // as applied. A removal unlinks as on main, with no re-read, but a stale copy and the pending list go only as planned.
+    // Each file is read again just before its change and checked after it (#1488, put and drop, as runSidecarOnly does),
+    // so an edit made before that last re-read is never overwritten or removed, and a change that did not land is not
+    // reported as applied. A stale copy and the pending list go only as planned, not through the re-read removal.
     // A mismatch stops the batch at once: files written or removed before it stay (no rollback, as in the connect
-    // transaction). This agent's install record changes after every
-    // planned file (on install, other agents' records are updated after it; on remove, the handover to another agent's
-    // record comes first), so a mismatch among the planned files leaves the record as it was. The next setup plans again
-    // from the files as they are. A .new copy is named in the pending list before any of them, and an older entry stays
+    // transaction). This agent's install record changes after every planned file (on install, other agents'
+    // records are updated after it; on remove, the handover to another agent's record comes first), so a mismatch among
+    // the planned files leaves the record as it was. The next setup plans again from the files as they are. A .new copy is named in the pending list before any of them, and an older entry stays
     // beside the new one, since a stop right here leaves the older copy on disk.
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
     const copies = keptText.filter(one => changes.some(change => change.file === one.beside))
@@ -2097,11 +2144,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         const target = realpathSync(trustConfig)
         const mode = statSync(target).mode & 0o777
         put(trustConfig, nextTrust, target)
+        // A link further along config.toml's chain repointed after `target` was found leaves the write on a file
+        // config.toml no longer reaches (#1606): the write counts only where config.toml still points.
+        let resolved: string | null = null
+        try { resolved = realpathSync(trustConfig) } catch {}
+        // `put` already replaced the target (its temp file is 0600), so restore the person's
+        // permissions before the resolution check can report a failure (#1606).
         if (process.platform !== 'win32') chmodSync(target, mode)
+        if (resolved !== target) throw new Error('INSTALL_CHANGED')
       }
       else if (change.file === allowlistFile && nextAllowlist !== undefined) put(allowlistFile, nextAllowlist)
       else if (change.file === nativeConfig) {
-        if (change.action === 'remove') unlinkSync(nativeConfig)
+        if (change.action === 'remove') drop(nativeConfig)
         else put(nativeConfig, nextConfigText!)
       }
       else if (change.file === progress) {
@@ -2112,7 +2166,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         // unlink is a gap no check closes, the same for every file a removal deletes.
         if (!isAsPlanned(change.file)) throw new Error('INSTALL_CHANGED')
         unlinkSync(change.file)
-      } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
+      } else if (remove || retired.includes(change.file)) drop(change.file)
       else {
         try { put(change.file, files[change.file] ?? '') }
         catch (error) {
@@ -2123,8 +2177,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     if (remove) {
       if (handover) put(handover.file, handover.text)
+      unchanged(manifestFile, null)
       // Only a record that read as one when setup planned, as the plan lists it: a dangling link there stays, as on main.
-      if (initial(manifestFile) !== null) unlinkSync(manifestFile)
+      if (initial(manifestFile) !== null) drop(manifestFile)
     } else {
       put(manifestFile, nextManifest)
       for (const other of localAgents.filter(one => one !== agent)) {

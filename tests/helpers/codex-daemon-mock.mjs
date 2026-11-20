@@ -33,6 +33,9 @@
 //   endStatus  the status the delivery turn ends with: 'completed' (default), 'failed', 'interrupted', 'none' (no status field) or any other word
 //   approval   when true, the daemon asks its client for an approval during the turn
 //   beginFlag  a file whose appearance starts the person's own turn ('turn-person') on an idle thread
+//   beginLate  a file whose appearance sends the notices of the person's own turn, held until then once that turn has begun
+//              (thread/read shows it at once), as when they arrive behind the receiver's other answers; none are sent if the turn
+//              has ended by then
 //   endFlag    a file whose appearance ends the running turn
 //   userAgent  what initialize says the daemon is (default: a version that unloads a thread 60 s after its last subscriber left)
 //   person     file whose presence stands for a person's own client being open on the thread: without it, the thread is listed only
@@ -89,6 +92,8 @@ let stamp = carried?.stamp ?? 1
 let first = carried?.first ?? null
 // The thread/read answers held back while readHold is there.
 const reads = []
+// The person's turn notices that beginLate holds until its file appears.
+let lateTell = null
 // Written whole and then renamed into place: a proxy killed in the middle of a write leaves the file before it.
 const save = () => {
   try {
@@ -143,9 +148,14 @@ const begin = threadId => {
   stamp += 1
   const typed = typedBy(threadId)
   first = typed.params.item
-  notice({ method: 'turn/started', params: { threadId, turn: { id: running } } })
-  notice({ method: 'thread/status/changed', params: { threadId, status: { type: 'active' } } })
-  notice(typed)
+  const tell = () => {
+    if (running !== 'turn-person') return
+    notice({ method: 'turn/started', params: { threadId, turn: { id: running } } })
+    notice({ method: 'thread/status/changed', params: { threadId, status: { type: 'active' } } })
+    notice(typed)
+  }
+  if (config.beginLate) lateTell = tell
+  else tell()
 }
 const finish = (id, threadId, text) => {
   if (config.approval) notice({ id: 999, method: 'item/commandExecution/requestApproval', params: { threadId, turnId: id } })
@@ -326,6 +336,7 @@ const watcher = setInterval(() => {
   if (config.closeFlag && existsSync(config.closeFlag)) { unlinkSync(config.closeFlag); emitNow({ method: 'thread/closed', params: { threadId: config.loaded[0] } }) }
   if (config.interruptFlag && existsSync(config.interruptFlag)) for (const stop of interrupts.splice(0)) stop()
   if (reads.length > 0 && !existsSync(config.readHold)) for (const answer of reads.splice(0)) answer()
+  if (lateTell && existsSync(config.beginLate)) { unlinkSync(config.beginLate); const tell = lateTell; lateTell = null; tell() }
   if (!running && config.beginFlag && existsSync(config.beginFlag)) { unlinkSync(config.beginFlag); begin(config.loaded[0]) }
   if (!running || !config.endFlag || !existsSync(config.endFlag)) return
   unlinkSync(config.endFlag)

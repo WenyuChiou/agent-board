@@ -64,9 +64,11 @@ export const boardClient = address => {
     // replaces: the { connection, secret } of this receiver's own earlier connection, from
     // credentials() before a restart, so the board ends it instead of marking both contested.
     // pollMs: how often the board is asked for messages.
-    attach: async ({ agent, session, surface, turn, scope = 'turn', replaces, unclaimed = false, reclaim = false, pollMs = 2000, verify, canReceive, deliver, onError = () => undefined }) => {
+    // marksStart: this receiver calls deliver's fifth argument, `starting`, right before it asks its host for anything, so the
+    // board knows a claim it never said that for was never started (#1507).
+    attach: async ({ agent, session, surface, turn, scope = 'turn', replaces, unclaimed = false, marksStart = false, reclaim = false, pollMs = 2000, verify, canReceive, deliver, onError = () => undefined }) => {
       if (typeof verify !== 'function' || typeof deliver !== 'function' || canReceive !== undefined && typeof canReceive !== 'function' || !await verify()) throw new Error('HOST_NOT_CONNECTED')
-      const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }), ...(unclaimed ? { unclaimed: true } : {}) })
+      const registered = await call('register', { agent, session, surface, turn, scope, ...(replaces === undefined ? {} : { connection: replaces.connection, secret: replaces.secret }), ...(unclaimed ? { unclaimed: true } : {}), ...(marksStart ? { marksStart: true } : {}) })
       let credentials = { connection: registered.id, secret: registered.secret }, contestAfter = 0
       let isContested = false, isClosed = false, isPolling = false, isPollDue = false, isRetried = false, inFlight = 0, leaseUntil = registered.expires
       // ended: the caller read its session as ended. Only then does an automatic receiver's queued message go back refused.
@@ -86,9 +88,11 @@ export const boardClient = address => {
           const accept = () => { begin(); return receipt(message, 'accepted') }
           // For a delivery that never asked for any of the message to be sent: the board puts it back in the queue (#1578).
           const unsent = () => hasStarted ? Promise.reject(new Error('DELIVERY_STARTED')) : receipt(message, 'unsent')
+          // Right before the host is asked for anything: from then on a connection that ends leaves the claim in doubt (#1507).
+          const starting = () => hasStarted ? Promise.reject(new Error('DELIVERY_STARTED')) : receipt(message, 'starting')
           // Older adapters have no explicit boundary, so entering them remains uncertain.
           if (deliver.length < 3) begin()
-          const reply = await (deliver.length >= 3 ? deliver(message, accept, begin, unsent) : deliver(message, accept))
+          const reply = await (deliver.length >= 3 ? deliver(message, accept, begin, unsent, starting) : deliver(message, accept))
           if (typeof reply === 'string' && reply.trim()) await receipt(message, 'acknowledged', reply)
         } catch (error) {
           if (!hasStarted) await receipt(message, 'rejected', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : undefined).catch(() => undefined)

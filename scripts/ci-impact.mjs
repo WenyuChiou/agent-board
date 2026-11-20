@@ -176,6 +176,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/opencode-receiver.test.mjs': 85_000, // one part's share, about 44 s
   // New with #1438 (merge-check runs git in temporary repositories): 46.1 and 46.4 s on Windows Node 24 (#1464).
   'tests/merge-check.test.mjs': 90_000, // slowest 46.4 s
+  // Grew with #1680's eleven removal re-read tests: up to 49.0 s on Windows Node 24 (run 44650276536), over the 42 s
+  // line of the 60 s default. By the rule of #1715: 49 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/setup-sidecar.test.mjs': 95_000, // slowest 49.0 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
@@ -423,7 +426,12 @@ export const testArgs = (files, { isSerial = false, isWindows = false } = {}) =>
 // their budget, each to the part with the least so far; a file with no budget counts as 15 s (the slowest of
 // them, mcp-tools, took 12.6 s on Linux). When every file weighs the same, this is the old every-nth split. Every job works out
 // the same split, so the parts together still run each file once.
-const partWeight = path => BOARD_FILE_BUDGETS_MS[path] ?? 15_000
+// A file with no budget that runs far longer than 15 s weighs its slowest Windows time instead, rounded up to five
+// seconds. l3c took 294.4 s in the Node 22 journeys part 2/2 that main's run 44601640119 cancelled at ten minutes
+// (#1722), and 289.1 s of a 529 s part 2/2 on main 7685f8ed (run 44615703631), where no other journey in that part
+// took more than 61.3 s. At this weight it gets a part to itself.
+const PART_WEIGHTS_MS = Object.freeze({ 'tests/e2e/l3c-message-store-ownership.test.mjs': 295_000 })
+const partWeight = path => BOARD_FILE_BUDGETS_MS[path] ?? PART_WEIGHTS_MS[path] ?? 15_000
 
 // The Node run of one part: its share of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
