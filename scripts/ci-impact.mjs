@@ -162,7 +162,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // Grew with #1302's two upgrade tests: 57.6 s on Windows Node 24 with the same two journeys on #1328 (run 43181075103).
   // Re-derived by the same rule (#1715): up to 80.6 s on Windows Node 24 on #1709, which changes these tests; 65.9 s on
   // Node 24 and 83.8 s on Node 22 on main after #1686 (run 44523734737).
-  'tests/host-upgrade.test.mjs': 150_000, // slowest 80.6 s
+  // Grew with #1730's three Windows tests that start setup from a copied Node: 109.1 s on Windows Node 24 (run
+  // 44681768984), over the 105 s line of 150 s. By the rule of #1715: 109.1 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/host-upgrade.test.mjs': 205_000, // slowest 109.1 s
   // Re-derived by the same rule (#1715): 60.6-73.4 s on Windows Node 24 on #1709, which adds terminal setup tests here.
   'tests/setup-terminal.test.mjs': 140_000, // slowest 73.4 s
   // Over the 42 s line (70%) of the 60 s default: up to 47.1 s on Windows Node 24 on #1709, which does not touch it, and
