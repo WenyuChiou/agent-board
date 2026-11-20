@@ -178,7 +178,7 @@ The step ledger and J11 in `docs/validation/USER-SIM.md`; one real reply per rec
 
 **What the script verifies before it sends anything:**
 1. The address file's process id is the process listening on `127.0.0.1:<port>`, by the system's own table.
-2. That process is Node running the board script at an expected path: beside the progress file, `~/.agent-board/agent-board.mjs`, or the plugin's own copy.
+2. That process is Node, and its command line names the board script at an expected path directly before `--serve-child`: beside the progress file, `~/.agent-board/agent-board.mjs`, or the plugin's own copy.
 3. The off switch is not set. The page switch writes a local marker, and the hook reads it before it contacts the listener.
 4. Any failure, timeout or system with no lookup prints nothing, so Claude Code shows its own prompt.
 

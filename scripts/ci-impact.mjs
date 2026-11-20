@@ -148,7 +148,9 @@ export const checkResults = (plan, results) => {
 // rounded up to five seconds (board and codex-local: one part's share): it fails a pull request only when it
 // runs 30% slower than its slowest recent run. page-regressions (6.5 s at most) keeps its old budget.
 export const BOARD_FILE_BUDGETS_MS = Object.freeze({
-  'tests/codex-local.test.mjs': 225_000, // slowest 120.4 s
+  // Re-derived by the same rule (#1715): one part's share took up to 167.4 s on Windows Node 24 on #1709, which changes
+  // these tests, and 86.9-147.0 s on main's last three pushes (Node 22 up to 174.7 s, run 44523734737).
+  'tests/codex-local.test.mjs': 315_000, // slowest 167.4 s
   'tests/board.test.mjs': 200_000, // slowest 105.5 s
   'tests/legacy-connect.test.mjs': 275_000, // slowest 148.0 s
   'tests/page-regressions.test.mjs': 90_000,
@@ -157,8 +159,15 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/prompt-hooks.test.mjs': 130_000, // slowest 67.9 s
   // Grew past the floor with #1162's terminal setup tests (#1159); slowest 52.6 s after #1361.
   'tests/setup-guidance.test.mjs': 100_000,
-  'tests/host-upgrade.test.mjs': 80_000, // slowest 42.6 s
-  'tests/setup-terminal.test.mjs': 70_000, // slowest 36.0 s
+  // Grew with #1302's two upgrade tests: 57.6 s on Windows Node 24 with the same two journeys on #1328 (run 43181075103).
+  // Re-derived by the same rule (#1715): up to 80.6 s on Windows Node 24 on #1709, which changes these tests; 65.9 s on
+  // Node 24 and 83.8 s on Node 22 on main after #1686 (run 44523734737).
+  'tests/host-upgrade.test.mjs': 150_000, // slowest 80.6 s
+  // Re-derived by the same rule (#1715): 60.6-73.4 s on Windows Node 24 on #1709, which adds terminal setup tests here.
+  'tests/setup-terminal.test.mjs': 140_000, // slowest 73.4 s
+  // Over the 42 s line (70%) of the 60 s default: up to 47.1 s on Windows Node 24 on #1709, which does not touch it, and
+  // 42.5 s on main (run 44464805292); main's Node 22 runs report up to 46.0 s (#1715).
+  'tests/approvals.test.mjs': 90_000, // slowest 47.1 s
   // Grew with #1339's lock tests (several wait out the 2 s bounded lock wait): 43.4 s on Windows Node 24 (run 43190652904).
   'tests/settings-symlink.test.mjs': 85_000, // slowest 43.4 s
   // New with #1366 and self-parted since its round 18, so this is one part's share. The whole file took 164.0 s on
@@ -414,7 +423,12 @@ export const testArgs = (files, { isSerial = false, isWindows = false } = {}) =>
 // their budget, each to the part with the least so far; a file with no budget counts as 15 s (the slowest of
 // them, mcp-tools, took 12.6 s on Linux). When every file weighs the same, this is the old every-nth split. Every job works out
 // the same split, so the parts together still run each file once.
-const partWeight = path => BOARD_FILE_BUDGETS_MS[path] ?? 15_000
+// A file with no budget that runs far longer than 15 s weighs its slowest Windows time instead, rounded up to five
+// seconds. l3c took 294.4 s in the Node 22 journeys part 2/2 that main's run 44601640119 cancelled at ten minutes
+// (#1722), and 289.1 s of a 529 s part 2/2 on main 7685f8ed (run 44615703631), where no other journey in that part
+// took more than 61.3 s. At this weight it gets a part to itself.
+const PART_WEIGHTS_MS = Object.freeze({ 'tests/e2e/l3c-message-store-ownership.test.mjs': 295_000 })
+const partWeight = path => BOARD_FILE_BUDGETS_MS[path] ?? PART_WEIGHTS_MS[path] ?? 15_000
 
 // The Node run of one part: its share of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.

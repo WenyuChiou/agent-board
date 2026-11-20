@@ -246,7 +246,9 @@ export type RowGroup = { project: string; isHere: boolean; rows: TaskRow[]; summ
 
 // The line of counts at the top: what waits on you (here and elsewhere), what is open,
 // what is due within two weeks (the 快到期 list), and the steps finished today.
-export type Overview = { waiting: number; active: number; due: number; today: number; idle: number; stopped: number }
+// `queued`: questions whose answer is queued for the session's next turn (#1296). The Claude Code pane sets it from
+// the page's message store and leaves them out of `waiting`, as the page, --status and --json do.
+export type Overview = { waiting: number; active: number; due: number; today: number; idle: number; stopped: number; queued?: number }
 
 export type View = {
   now: number
@@ -1635,6 +1637,7 @@ export const statusLine = (view: View, s: Strings = ZH_TW): string | undefined =
   const parts = [
     current === null || current.state === 'done' ? '' : currentPart(current),
     view.overview.waiting > 0 ? s.statusWaiting(view.overview.waiting) : '',
+    (view.overview.queued ?? 0) > 0 ? s.boardQueuedCount(view.overview.queued ?? 0) : '',
     urgent > 0 ? s.statusDue(urgent) : '',
     view.pr === null ? '' : view.pr.text,
   ].filter(part => part !== '')
