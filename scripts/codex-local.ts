@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -27,7 +28,7 @@ import { installControlRoot, withInstallLock } from './install-control'
 import { ConnectTransaction } from './connect-transaction'
 import { boardPromptHelper, boardRequestWords, boardRun, deliveryRequestWords, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
-import { windowsHookNode } from './windows-hook-node'
+import { hookProgram, windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
@@ -1505,7 +1506,49 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const isReadable = parsedConfig !== null
   const hooks = object(hookConfig.hooks ?? {})
   const worker = join(root, 'agent-board-hook.mjs')
-  const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(process.execPath, home, agent, worker, progress, event, state)
+  // Only the program is kept from the last install; every other word is written from this run.
+  const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
+  // Hermes records each event's command by name, not in groups.
+  const hermesRecord = agent === 'hermes' ? Object.values(object(manifest.groups.hooks ?? {})) : []
+  const earlier = [...commandsOf(Object.values(manifest.groups)), ...hermesRecord].filter((command): command is string => typeof command === 'string')
+  // The Node setup wrote last time, spelled as setup wrote it, still runs the same hooks. So it is
+  // kept even when this run's Node is a copy in another folder or another name for the same file:
+  // rewriting a command would drop the approval its host bound to it (#1662). Every path asked
+  // about here comes from setup's own records, so it was a working Node by any name when written.
+  const keptNodes = new Map<string, boolean>()
+  const isKeptNode = (path: string): boolean => {
+    if (!isAbsolute(path)) return false
+    const known = keptNodes.get(path)
+    if (known !== undefined) return known
+    const decide = (): boolean => {
+      try {
+        const kept = statSync(path, { bigint: true }), running = statSync(process.execPath, { bigint: true })
+        if (!kept.isFile()) return false
+        if (kept.ino > 0n && kept.dev === running.dev && kept.ino === running.ino) return true
+      } catch { return false }
+      // Another program in that place is not kept. A probe that runs out of time keeps it, so a
+      // slow computer does not change the command (#625). SIGKILL, since a program may ignore SIGTERM.
+      const probe = spawnSync(path, ['-p', 'process.release.name'], { encoding: 'utf8', windowsHide: true, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 4096 })
+      if ((probe.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') return true
+      return probe.error === undefined && probe.status === 0 && probe.stdout.trim() === 'node'
+    }
+    const isKept = decide()
+    keptNodes.set(path, isKept)
+    return isKept
+  }
+  // Every host reads the Node of the files beside its hooks from the skill they all share: a host's
+  // own hook commands would let two hosts write that skill with different Nodes in turn. Only a skill
+  // setup wrote and still owns is read: one the person edited may name any program.
+  const scriptWord = quote(script).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const skillNow = initial(skill)
+  const isSetupSkill = skillNow !== null && !isUnreadable(skill) && [manifest.files, ...otherManifests.map(one => object(one.files ?? {}))].some(files => files[skill] === ownHash(skill, skillNow))
+  const skillNode = isSetupSkill ? new RegExp('"([^"\\r\\n]+)" ' + scriptWord).exec(skillNow)?.[1] : undefined
+  const commandNode = skillNode !== undefined && isKeptNode(skillNode) ? skillNode : process.execPath
+  // A host's hooks keep the program they start, which on Windows may be an 8.3 name or sit inside an encoded launch.
+  // Antigravity's hooks carry no approval, and its PowerShell launch moves to a direct command once this run's Node
+  // can be verified, so they follow this run's Node as before.
+  const hookNode = agent === 'antigravity' ? process.execPath : earlier.map(hookProgram).find(isKeptNode) ?? commandNode
+  const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(hookNode, home, agent, worker, progress, event, state)
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
@@ -1540,10 +1583,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // Muse Code 1.4.14 on Windows hands the line to cmd as one argument with each quote escaped as \",
   // which cmd does not read, so every quoted hook failed live. It gets Antigravity's quote-free line.
   const isQuoteFreeHost = agent === 'muse' && process.platform === 'win32'
-  // Only the program is kept from the last install; every other word is written from this run.
-  const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
-  const earlier = commandsOf(Object.values(manifest.groups)).filter((command): command is string => typeof command === 'string')
-  const hostNode = isPowerShellHost || isQuoteFreeHost ? windowsHookNode(process.execPath, earlier) : undefined
+  const hostNode = isPowerShellHost || isQuoteFreeHost ? windowsHookNode(hookNode, earlier) : undefined
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
     const argv = hookArgs(event, state)
@@ -1675,7 +1715,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
   }
-  const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(fileWords.localAgentSkillDescription)}\n---\n\n${fileWords.localAgentSkill(`${quote(process.execPath)} ${quote(script)}`)}\n\n${fileWords.localAgentHandoff}\n\n${fileWords.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
+  const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(fileWords.localAgentSkillDescription)}\n---\n\n${fileWords.localAgentSkill(`${quote(commandNode)} ${quote(script)}`)}\n\n${fileWords.localAgentHandoff}\n\n${fileWords.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
   // The connect writes its board beside the progress file it connected: the default one, one a
   // CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names, or the one its own record keeps (#285).
   // Releases before de40dde wrote the command as node "<path>" for any path; later ones use boardRun.
@@ -1693,15 +1733,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)), deliveryRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script, fileWords)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(commandNode, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script, fileWords)
   if (agent === 'openclaw') {
-    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
+    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(commandNode, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
     // activation.onStartup: OpenClaw 2026.6.35 loads a plugin when its gateway starts only when the manifest asks for it (#1489).
     files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', activation: { onStartup: true }, contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {
-    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(process.execPath, worker, progress, home, script, fileWords.deepseekBoardTool, fileWords.localAgentStepFormat)
+    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(commandNode, worker, progress, home, script, fileWords.deepseekBoardTool, fileWords.localAgentStepFormat)
     files[join(deepseekDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'hermes') files[join(hermesDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
@@ -1715,8 +1755,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       files[sidecarFiles[1]!] = antigravitySidecarSource(fileWords.antigravityWakeLine)
     }
   }
-  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)}}\n'''\n`
-  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'agent-board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)}\`\n`
+  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(commandNode)} ${quote(script)}}\n'''\n`
+  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'agent-board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(commandNode)} ${quote(script)}\`\n`
   // 0.24.2 and earlier wrote /board here. The command is now /agent-board, so setup takes the old file
   // away when it is still the bytes setup or a release wrote, and leaves one the person edited (#868).
   const retired = agent === 'gemini' ? [join(home, '.gemini', 'commands', 'board.toml')] : agent === 'opencode' ? [join(opencodeDir, 'commands', 'board.md')] : []
