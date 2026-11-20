@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
@@ -27,7 +28,7 @@ import { installControlRoot, withInstallLock } from './install-control'
 import { ConnectTransaction } from './connect-transaction'
 import { boardPromptHelper, boardRequestWords, boardRun, deliveryRequestWords, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
-import { windowsHookNode } from './windows-hook-node'
+import { hookProgram, windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
@@ -1463,31 +1464,38 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // Only the program is kept from the last install; every other word is written from this run.
   const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
   const earlier = commandsOf(Object.values(manifest.groups)).filter((command): command is string => typeof command === 'string')
-  // A Node setup wrote last time that is still there runs the same command, so it is kept even
-  // when this run's Node is a copy in another folder: rewriting the command would drop the
-  // approval its host bound to it (#1662). Another program in that place is not kept.
-  const keptProgram = (commands: string[]): string | undefined => {
-    for (const command of commands) {
-      // quote() always double-quotes a word, so a quoted program runs to its closing quote;
-      // an unquoted one ends at the first space. A path with a space still reads as one program.
-      const kept = /^"([^"]+)"/.exec(command)?.[1] ?? command.split(' ')[0] ?? ''
-      if (!isAbsolute(kept) || !/^node(js)?(\.exe)?$/i.test(basename(kept))) continue
-      try { if (statSync(kept).isFile()) return kept } catch {}
+  // The Node setup wrote last time, spelled as setup wrote it, still runs the same hooks. So it is
+  // kept even when this run's Node is a copy in another folder or another name for the same file:
+  // rewriting a command would drop the approval its host bound to it (#1662).
+  const keptNodes = new Map<string, boolean>()
+  const isKeptNode = (path: string): boolean => {
+    if (!isAbsolute(path) || !/^node(js)?(\.exe)?$/i.test(basename(path))) return false
+    const known = keptNodes.get(path)
+    if (known !== undefined) return known
+    const decide = (): boolean => {
+      try {
+        const kept = statSync(path, { bigint: true }), running = statSync(process.execPath, { bigint: true })
+        if (!kept.isFile()) return false
+        if (kept.ino > 0n && kept.dev === running.dev && kept.ino === running.ino) return true
+      } catch { return false }
+      // Another program in that place is not kept. A probe that runs out of time keeps it, so a
+      // slow computer does not change the command (#625).
+      const probe = spawnSync(path, ['-p', 'process.release.name'], { encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096 })
+      if ((probe.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') return true
+      return probe.error === undefined && probe.status === 0 && probe.stdout.trim() === 'node'
     }
-    return undefined
+    const isKept = decide()
+    keptNodes.set(path, isKept)
+    return isKept
   }
-  // On Windows the hooks start Node by its short 8.3 name. The same Node keeps the path this run
-  // has, and another Node's short name reads back as its long path, as the files beside the hooks name it.
-  const isSameNode = (a: string, b: string): boolean => {
-    try {
-      const x = statSync(a, { bigint: true }), y = statSync(b, { bigint: true })
-      return x.ino > 0n && x.dev === y.dev && x.ino === y.ino
-    } catch { return false }
-  }
-  const longPath = (path: string): string => { try { return realpathSync.native(path) } catch { return path } }
-  const earlierNode = keptProgram(earlier)
-  const commandNode = earlierNode === undefined || isSameNode(earlierNode, process.execPath) ? process.execPath : process.platform === 'win32' ? longPath(earlierNode) : earlierNode
-  const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(commandNode, home, agent, worker, progress, event, state)
+  // Every host reads the Node of the files beside its hooks from the skill they all share: a host's
+  // own hook commands would let two hosts write that skill with different Nodes in turn.
+  const scriptWord = quote(script).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const skillNode = new RegExp('"([^"\\r\\n]+)" ' + scriptWord).exec(readLocal(skill) ?? '')?.[1]
+  const commandNode = skillNode !== undefined && isKeptNode(skillNode) ? skillNode : process.execPath
+  // A host's hooks keep the program they start, which on Windows may be an 8.3 name or sit inside an encoded launch.
+  const hookNode = earlier.map(hookProgram).find(isKeptNode) ?? commandNode
+  const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(hookNode, home, agent, worker, progress, event, state)
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
@@ -1522,7 +1530,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // Muse Code 1.4.14 on Windows hands the line to cmd as one argument with each quote escaped as \",
   // which cmd does not read, so every quoted hook failed live. It gets Antigravity's quote-free line.
   const isQuoteFreeHost = agent === 'muse' && process.platform === 'win32'
-  const hostNode = isPowerShellHost || isQuoteFreeHost ? windowsHookNode(process.execPath, earlier) : undefined
+  const hostNode = isPowerShellHost || isQuoteFreeHost ? windowsHookNode(hookNode, earlier) : undefined
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
     const argv = hookArgs(event, state)

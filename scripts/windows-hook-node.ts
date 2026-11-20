@@ -5,14 +5,13 @@ import { statSync } from 'node:fs'
 // from a setup probe. An existing Windows short path may avoid executable quotes.
 // `earlier` holds the commands setup wrote last time: a program among them that is still this
 // file is kept without a probe, so a slow probe cannot change the command and its hook hash (#625).
+// An encoded launch of this same Node stays encoded (undefined), so its bytes do not change either (#1662).
 export const windowsHookNode = (executable: string, earlier: string[] = []): string | undefined => {
   if (process.platform !== 'win32') return undefined
-  // A Node setup wrote last time that is still there runs the same hook, so it is kept even when
-  // this run's Node is a copy in another folder, whatever its path: rewriting the command would
-  // drop the approval the host bound to it (#1662).
   for (const command of earlier) {
+    if (encodedProgram(command) === executable) return undefined
     const kept = command.split(' ')[0] ?? ''
-    if (isSameFile(executable, kept) || isNodeFile(kept)) return kept
+    if (isSameFile(executable, kept)) return kept
   }
   if (/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i.test(executable)) return executable
   if (!/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/ -]+\.exe$/i.test(executable)) return undefined
@@ -28,11 +27,25 @@ export const windowsHookNode = (executable: string, earlier: string[] = []): str
   return undefined
 }
 
-// A path setup wrote that still names a node.exe, whatever Node this run started from.
-// Another program in that place is not kept.
-const isNodeFile = (candidate: string): boolean => {
-  if (!/^[A-Za-z]:[\\/](?:[A-Za-z0-9_.~\\/-]*[\\/])?node\.exe$/i.test(candidate)) return false
-  try { return statSync(candidate).isFile() } catch { return false }
+// The program a hook command setup wrote starts, as setup spelled it: a quoted first word, an
+// unquoted one, or the first word inside an encoded PowerShell launch (`encodedLaunch` in hooks/local-agents.ts).
+export const hookProgram = (command: string): string => encodedProgram(command) ?? /^"([^"]+)"/.exec(command)?.[1] ?? command.split(' ')[0] ?? ''
+
+// encodedLaunch writes `& 'program' ...` in UTF-16LE base64, doubling each single quote it holds.
+const encodedProgram = (command: string): string | undefined => {
+  const encoded = /^powershell\.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(command)?.[1]
+  if (encoded === undefined) return undefined
+  const source = Buffer.from(encoded, 'base64').toString('utf16le')
+  if (!source.startsWith("& '")) return undefined
+  let program = ''
+  for (let at = 3; at < source.length; at++) {
+    const char = source[at] ?? ''
+    if (!/['‘’‚‛]/.test(char)) { program += char; continue }
+    if (source[at + 1] !== char) return program
+    program += char
+    at++
+  }
+  return undefined
 }
 
 // realpath on Windows can preserve an 8.3 alias. Nonzero file identities
