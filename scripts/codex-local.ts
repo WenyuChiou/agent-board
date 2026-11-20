@@ -1701,7 +1701,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (!isAsPlanned(allowlistFile)) throw new Error('INSTALL_CHANGED')
         const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
         // The allowlist is read again just before the rename and checked after it (put, as every other write in the
-        // batch does), so an edit made between the check above and the rename is never written over (#1606).
+        // batch does), so an edit made before that last re-read is kept; an edit saved after the re-read and before
+        // the rename is still written over (#1606).
         put(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
       })
     }
