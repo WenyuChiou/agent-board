@@ -1,7 +1,6 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
 import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -10,6 +9,7 @@ import { EN } from '../../hooks/strings-en.ts'
 import { hookTimeout } from '../../hooks/hook-safety.ts'
 import { hostHashOf } from '../../hooks/session-liveness.ts'
 import { makeWorld } from './lib/world.mjs'
+import { spawnIsolated } from './lib/spawn.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { json, print, run, serve, terminal } from './lib/surfaces.mjs'
 import { keptHookEvents } from './lib/faults.mjs'
@@ -207,7 +207,9 @@ describe('L4 time and scale', () => {
     try {
       const title = 'Closed Codex window, with record'
       const ask = 'Continue the synthetic plan, OK?'
-      const child = spawnSync(process.execPath, ['-e', ''])
+      // A process that has exited, started through the world's own spawn helper.
+      const child = spawnIsolated(process.execPath, ['-e', ''], { cwd: world.root, env: world.env, stdio: 'ignore' })
+      await new Promise(done => child.once('close', done))
       assert.throws(() => process.kill(child.pid, 0), error => error.code === 'ESRCH', 'the test pid is gone')
       const host = hostHashOf(process.platform, hostname())
       codexAsk(world, { title, ask, claim: ` agentpid=${child.pid} agentstarted=${Date.now() - 60_000} host=${host}` })

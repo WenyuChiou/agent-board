@@ -18,6 +18,7 @@ const { buildView } = await import('../hooks/view.ts')
 const { takeTask } = await import('../hooks/blocks.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
 const { boardDocument } = await import('../hooks/board-json.ts')
+const { boardItems, boardKey, emptyBoardState, pinned } = await import('../hooks/board.ts')
 
 const NOW = Date.parse('2026-11-19T12:00:00Z')
 const SECOND = 1000
@@ -99,4 +100,18 @@ test('every string table says the window may be closed, and none says it closed'
   assert.equal(STRINGS.en.windowMayBeClosed, 'The window may be closed.')
   assert.match(STRINGS['zh-CN'].windowMayBeClosed, /可能/)
   assert.match(STRINGS['zh-TW'].windowMayBeClosed, /可能/)
+})
+
+test('on the terminal board, a archives a may-be-closed card and says the live answer otherwise', () => {
+  const ref = { project: 'demo', title: 'Ship it', line: 2, session: 'c0d1e2f3' }
+  const pressA = ago => {
+    const view = viewOf(block({ ago }))
+    const items = boardItems(view, [])
+    const at = items.findIndex(item => item.type === 'ask')
+    return boardKey(pinned({ ...emptyBoardState, selected: at }, items), 'a', items, STRINGS.en)
+  }
+  assert.deepEqual(pressA(121 * SECOND).action, { type: 'archive', ref, title: 'Ship it' })
+  const early = pressA(60 * SECOND)
+  assert.equal(early.action, null)
+  assert.equal(early.state.note, STRINGS.en.archiveLive)
 })
