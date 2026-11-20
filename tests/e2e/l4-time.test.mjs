@@ -1,11 +1,14 @@
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { EN } from '../../hooks/strings-en.ts'
 import { hookTimeout } from '../../hooks/hook-safety.ts'
+import { hostHashOf } from '../../hooks/session-liveness.ts'
 import { makeWorld } from './lib/world.mjs'
 import { block, hook } from './lib/writers.mjs'
 import { json, print, run, serve, terminal } from './lib/surfaces.mjs'
@@ -145,6 +148,82 @@ describe('L4 time and scale', () => {
       const clearedJson = [...clearedDoc.working, ...clearedDoc.waiting].find(one => one.title === title)
       assert.equal(clearedJson.state, 'working')
       assert.equal(clearedJson.isUnsure, false)
+    } finally { await world.close() }
+  })
+
+  // A closed Codex window (#1092, M7), run with and without a Codex process record. The board a world starts
+  // has no COMPUTERNAME or HOSTNAME, so it names this machine by os.hostname(), as this test does.
+  const codexAsk = (world, { title, ask, claim = '' }) => world.write('progress.md', [
+    '## api-gateway',
+    `<!-- auto session=c0d1e2f3 agent=codex state=waiting updated=${new Date(world.now).toISOString()}${claim} -->`,
+    `### ${title}`,
+    '> Context: Synthetic closed-window scenario',
+    '- [x] Build the release',
+    `- [?] ${ask}`,
+    '<!-- /auto session=c0d1e2f3 -->',
+    '',
+  ].join('\n'))
+  const takeJump = async (world, server) => {
+    for (let attempt = 0; ; attempt++) {
+      const report = (await server.get('/api/board')).json()
+      if (Math.abs(report.now - world.now) <= 2000) return report
+      assert.ok(attempt < 50, 'The page server never took the clock jump')
+      await new Promise(done => setTimeout(done, 100))
+    }
+  }
+
+  test('L4 a stale Codex card with no process record says the window may be closed past 2 min, still counts, and Archive keeps its question (#1092)', async () => {
+    const world = makeWorld()
+    try {
+      const title = 'Closed Codex window, no record'
+      const ask = 'Deploy the synthetic build, OK?'
+      codexAsk(world, { title, ask })
+      const server = await serve.start(world)
+      // Under two minutes the card says nothing about the window.
+      assert.ok(!squash(await server.page()).includes(EN.windowMayBeClosed), 'no line before two minutes')
+      world.jump('3m')
+      const report = await takeJump(world, server)
+      assert.equal(report.model.counts.waiting, 1, 'the card still counts in Needs you')
+      const screens = { terminal: await terminal.screen(world, ['--all']), print: await print(world), page: await server.page() }
+      for (const [surface, text] of Object.entries(screens)) {
+        assert.ok(text.includes(ask) && squash(text).includes(EN.windowMayBeClosed), `${surface} must keep the card and say the window may be closed:\n${text}`)
+        assert.ok(!/window (?:is |was )?closed\b/i.test(text.replace(EN.windowMayBeClosed, '')), `${surface} must never say the window closed:\n${text}`)
+      }
+      const document = await json(world)
+      const need = document.needs.find(one => one.kind === 'question')
+      assert.equal(need?.mayBeClosed, true)
+      assert.ok(!JSON.stringify(document).includes('agentpid'), '--json carries no process identity')
+      const pressed = await server.press(ask, EN.archiveThis)
+      assert.ok(pressed.requests.some(request => request.path === '/api/act' && request.body.type === 'archive'))
+      assert.ok(!world.read('progress.md').includes(title), 'Archive took the block out of progress.md')
+      const after = (await server.get('/api/board')).json().model
+      assert.equal(after.counts.waiting, 0, 'the archived card leaves the count')
+      assert.ok(squash(await server.page()).includes(ask), 'its question stays unanswered under Older')
+    } finally { await world.close() }
+  })
+
+  test('L4 a Codex card whose process record names a gone process leaves Needs you at once, and never says "may be closed" (#1092)', async () => {
+    const world = makeWorld()
+    try {
+      const title = 'Closed Codex window, with record'
+      const ask = 'Continue the synthetic plan, OK?'
+      const child = spawnSync(process.execPath, ['-e', ''])
+      assert.throws(() => process.kill(child.pid, 0), error => error.code === 'ESRCH', 'the test pid is gone')
+      const host = hostHashOf(process.platform, hostname())
+      codexAsk(world, { title, ask, claim: ` agentpid=${child.pid} agentstarted=${Date.now() - 60_000} host=${host}` })
+      const server = await serve.start(world)
+      const model = (await server.get('/api/board')).json().model
+      assert.equal(model.counts.waiting, 0, 'a gone Codex card leaves the waiting count')
+      const page = squash(await server.page())
+      assert.ok(page.includes(ask), 'its question stays unanswered under Older')
+      assert.ok(!page.includes(EN.windowMayBeClosed), 'a proven close never shows the may-be-closed line')
+      const document = await json(world)
+      assert.equal(document.needs.filter(one => one.kind === 'question').length, 0, '--json lists no need for a gone card')
+      assert.ok(!JSON.stringify(document).includes(String(child.pid)), '--json carries no process identity')
+      // Archive goes through at once.
+      const pressed = await server.press(title, EN.archiveThis)
+      assert.ok(pressed.requests.some(request => request.path === '/api/act' && request.body.type === 'archive'))
+      assert.ok(!world.read('progress.md').includes(title))
     } finally { await world.close() }
   })
 
