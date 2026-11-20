@@ -1494,7 +1494,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const skillNode = new RegExp('"([^"\\r\\n]+)" ' + scriptWord).exec(readLocal(skill) ?? '')?.[1]
   const commandNode = skillNode !== undefined && isKeptNode(skillNode) ? skillNode : process.execPath
   // A host's hooks keep the program they start, which on Windows may be an 8.3 name or sit inside an encoded launch.
-  const hookNode = earlier.map(hookProgram).find(isKeptNode) ?? commandNode
+  // Antigravity's hooks carry no approval, and its PowerShell launch moves to a direct command once this run's Node
+  // can be verified, so they follow this run's Node as before.
+  const hookNode = agent === 'antigravity' ? process.execPath : earlier.map(hookProgram).find(isKeptNode) ?? commandNode
   const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(hookNode, home, agent, worker, progress, event, state)
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'

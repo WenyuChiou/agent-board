@@ -27,9 +27,21 @@ export const windowsHookNode = (executable: string, earlier: string[] = []): str
   return undefined
 }
 
-// The program a hook command setup wrote starts, as setup spelled it: a quoted first word, an
-// unquoted one, or the first word inside an encoded PowerShell launch (`encodedLaunch` in hooks/local-agents.ts).
-export const hookProgram = (command: string): string => encodedProgram(command) ?? /^"([^"]+)"/.exec(command)?.[1] ?? command.split(' ')[0] ?? ''
+// The Node a hook command setup wrote runs, as setup spelled it: the first word inside an encoded
+// PowerShell launch, the Node a quote-free command passes on as its first argument (its program
+// word may be the 8.3 name), a quoted first word, or an unquoted one (hooks/local-agents.ts).
+export const hookProgram = (command: string): string => encodedProgram(command) ?? quoteFreeProgram(command) ?? /^"([^"]+)"/.exec(command)?.[1] ?? command.split(' ')[0] ?? ''
+
+// antigravityCommand writes `process.argv=JSON.parse("[...]")` first inside its base64 source.
+const quoteFreeProgram = (command: string): string | undefined => {
+  const encoded = /^\S+ --input-type=commonjs -e eval\(Buffer\.from\('([A-Za-z0-9+/=]+)','base64'\)\.toString\('utf8'\)\)$/.exec(command)?.[1]
+  if (encoded === undefined) return undefined
+  const literal = /^process\.argv=JSON\.parse\(("(?:[^"\\]|\\.)*")\);/.exec(Buffer.from(encoded, 'base64').toString('utf8'))?.[1]
+  try {
+    const args: unknown = JSON.parse(JSON.parse(literal ?? ''))
+    return Array.isArray(args) && typeof args[0] === 'string' ? args[0] : undefined
+  } catch { return undefined }
+}
 
 // encodedLaunch writes `& 'program' ...` in UTF-16LE base64, doubling each single quote it holds.
 const encodedProgram = (command: string): string | undefined => {

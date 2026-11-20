@@ -1596,7 +1596,7 @@ export const LINES = [
 "  const scriptWord = quote(script).replace(/[.*+?^${}()|[\\]\\\\]/g, \"\\\\$&\");",
 "  const skillNode = new RegExp('\"([^\"\\\\r\\\\n]+)\" ' + scriptWord).exec(readLocal2(skill) ?? \"\")?.[1];",
 "  const commandNode = skillNode !== undefined && isKeptNode(skillNode) ? skillNode : process.execPath;",
-"  const hookNode = earlier.map(hookProgram).find(isKeptNode) ?? commandNode;",
+"  const hookNode = agent === \"antigravity\" ? process.execPath : earlier.map(hookProgram).find(isKeptNode) ?? commandNode;",
 "  const hookArgs = (event, state) => hookCommandArgs(hookNode, home, agent, worker, progress, event, state);",
 "  const isSame = (a, b) => JSON.stringify(a) === JSON.stringify(b);",
 "  const remove = mode === \"--codex-remove\";",
