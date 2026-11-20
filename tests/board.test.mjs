@@ -11915,6 +11915,59 @@ test('a reply button on an unconnected question says it copies and the card then
   } finally { await board.close() }
 })
 
+test('the page says the installed script is older and how to update it (#1304)', async () => {
+  const runtime = await sourceBoard()
+  const view = (words) => runtime.buildView([], [], null, groupedNow, 0, {}, words)
+  const model = (words, versions, olderScript) => runtime.serveModel(view(words), [], words, new Set(), false, undefined, false, { now: groupedNow, repoOf: () => null, versions, unreadable: [], ...(olderScript === undefined ? {} : { olderScript }) })
+  const command = 'npx @wenyuchiou/agent-board@9.9.9 setup'
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const setup = model(words, { board: '1.2.3', package: '9.9.9' }, { update: 'setup', command })
+    assert.equal(setup.health?.length, 1, JSON.stringify(setup.health))
+    assert.equal(setup.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', command))
+    const plugin = model(words, { board: '1.2.3', package: '9.9.9' }, { update: 'plugin' })
+    assert.equal(plugin.health?.length, 1, JSON.stringify(plugin.health))
+    assert.equal(plugin.health[0], words.serveOlderScriptPlugin('1.2.3', '9.9.9'))
+    // No package, the same version, or a newer script: the page shows nothing.
+    for (const versions of [{ board: '1.2.3', package: null }, { board: '1.2.3', package: '1.2.3' }, { board: '9.9.9', package: '1.2.3' }]) {
+      assert.equal(model(words, versions, { update: 'setup', command }).health, undefined)
+    }
+    // A newer package with no update instruction: nothing to say.
+    assert.equal(model(words, { board: '1.2.3', package: '9.9.9' }).health, undefined)
+  }
+})
+
+test('the page on the local network gets update advice without the data folder (#1304)', async () => {
+  const runtime = await sourceBoard()
+  const view = (words) => runtime.buildView([], [], null, groupedNow, 0, {}, words)
+  const model = (words, isLan, olderScript) => runtime.serveModel(view(words), [], words, new Set(), isLan, undefined, false, { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: '9.9.9' }, unreadable: [], olderScript })
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    // A custom data folder, bare, quoted, or holding a `$`, a backtick or a double quote: the
+    // phone's page keeps the advice the board script built without the folder, and no path
+    // survives in it, whatever the folder holds.
+    for (const [command, lanCommand] of [
+      ['npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir /home/person/custom-data', 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ['npx @wenyuchiou/agent-board@9.9.9 setup --data-dir "/home/person/my data"', 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir '/home/person/data$cache'", 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir '/home/person/data`x`'", 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '/home/person/board\"private\"/sensitive-project'", 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '/home/person/data$cache more'", 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+    ]) {
+      const lan = model(words, true, { update: 'setup', command, lanCommand })
+      assert.equal(lan.health?.length, 1, JSON.stringify(lan.health))
+      assert.equal(lan.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', lanCommand))
+      assert.equal(lan.health[0].includes('/home/person'), false, lan.health[0])
+      // The computer's own page keeps the full command, so the person can run it as written.
+      const local = model(words, false, { update: 'setup', command, lanCommand })
+      assert.equal(local.health?.length, 1, JSON.stringify(local.health))
+      assert.equal(local.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', command))
+    }
+    // A plugin copy has no folder in its advice, so the phone's page is unchanged.
+    const plugin = model(words, true, { update: 'plugin' })
+    assert.equal(plugin.health?.length, 1, JSON.stringify(plugin.health))
+    assert.equal(plugin.health[0], words.serveOlderScriptPlugin('1.2.3', '9.9.9'))
+  }
+})
+
 test('the empty page lists the connected agents and how their work appears', async () => {
   const runtime = await sourceBoard()
   const options = { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null } }

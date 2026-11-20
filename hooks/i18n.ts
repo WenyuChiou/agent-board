@@ -1066,6 +1066,8 @@ export const ZH_TW = {
   pgMoreStepsOne: (n: number): string => `還有 ${n} 個步驟`,
   pgVersion: (board: string): string => `v${board}`,
   pgVersions: (board: string, pkg: string): string => `看板程式 ${board}，套件 ${pkg}`,
+  serveOlderScriptSetup: (board: string, pkg: string, command: string): string => `看板程式是 ${board} 版，套件是 ${pkg}。更新前先預覽：${command}，再加上 --apply。`,
+  serveOlderScriptPlugin: (board: string, pkg: string): string => `看板程式是 ${board} 版，套件是 ${pkg}，由 Claude Code 外掛寫入。更新：先在 Claude Code 更新 agent-board 外掛，再執行 /progress connect。`,
   pgUnreadable: (agent: string): string => `無法讀取 ${agent} 的進度檔，部分任務可能未顯示。`,
   pgHowFix: '如何修復',
   pgFixAdvice: '請確認進度檔可讀取，並讓代理程式重新回報進度。',

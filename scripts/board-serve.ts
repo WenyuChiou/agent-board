@@ -4,13 +4,13 @@
 // what a press does are worked out in hooks/serve.ts; the writes are the terminal board's own
 // (board-cli.ts passes them in), so the page changes progress.md the way the pane does.
 import { createHash, randomBytes } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync, watch as fsWatch, writeSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readdirSync, unlinkSync, watch as fsWatch, writeSync } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { homedir, networkInterfaces } from 'node:os'
-import { basename, dirname } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { deliveryTargets } from '../hooks/hook-messages'
 import { placeOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
@@ -30,6 +30,7 @@ import { createMessaging } from './board-messaging'
 import { watchBoard } from './board-watch'
 import type { BoardWatch, WatchFn } from './board-watch'
 import { startCodexReceiver } from './codex-receiver.mjs'
+import { setupAgents } from './setup-discovery.mjs'
 import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
 import { isBarStyle } from '../hooks/progress-bar'
@@ -261,7 +262,54 @@ export const boardVersion = RELEASED.reduce((highest, release) => {
   return isNewerVersion(release.version, highest) ? release.version : highest
 }, '0.0.0')
 const packageVersionValue = process.env.AGENT_BOARD_PACKAGE_VERSION ?? ''
-const packageVersion = /^\d+\.\d+\.\d+$/.test(packageVersionValue) ? packageVersionValue : null
+// A later launcher that reuses this server reports the package it runs from, so the page
+// notice follows the newest package (#1304). These change on that refresh, never on a request.
+let packageVersion: string | null = /^\d+\.\d+\.\d+$/.test(packageVersionValue) ? packageVersionValue : null
+
+// How to update this install, for the page notice when the package is newer than the board
+// script (#1304). An independent install names the setup preview, with the same agents and
+// data folder the launcher names; a plugin-written copy names the plugin update. The package
+// name is the published one: this bundle ships only in @wenyuchiou/agent-board.
+// The folder as a literal shell argument, quoted the way setup quotes its own commands
+// (scripts/setup-agent.mjs `quote`): bare when it holds only word, dot, slash, colon, at,
+// equals, comma or dash characters, else single-quoted, so `$`, backticks and double quotes in
+// a custom folder reach the shell unchanged. A double-quoted folder would let the shell expand
+// `$` and backticks. That helper lives in the setup script, which runs on import, so this is
+// the same rule written here, not an import.
+export const quoteArg = (value: string): string => /^[\w./:@=,-]+$/.test(value) ? value : process.platform === 'win32'
+  ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
+const olderScriptUpdate = (): { update: 'setup' | 'plugin'; command?: string; lanCommand?: string } | undefined => {
+  if (packageVersion === null) return undefined
+  const prelude = (globalThis as { AGENT_BOARD?: { codexRoot?: unknown } }).AGENT_BOARD ?? {}
+  if (typeof prelude.codexRoot !== 'string') return { update: 'plugin' }
+  let root = resolve(prelude.codexRoot)
+  // Only what setup sets up: setup refuses a retired agent in any selection that is
+  // not a removal (#1327), so a retained install-gemini.json from an earlier Gemini
+  // CLI setup must not put gemini back into the update command.
+  const targets = setupAgents
+  const listed = (folder: string): string[] | undefined => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
+  let agents = listed(root)
+  // A moved data folder: the board script's own folder is where the board is now.
+  if (!agents) { root = dirname(process.argv[1] ?? ''); agents = listed(root) ?? [] }
+  const agentOpts = agents.length ? ` --agent ${agents.join(',')}` : ''
+  const dataOpts = root !== join(homedir(), '.agent-board') ? ` --data-dir ${quoteArg(root)}` : ''
+  const base = `npx @wenyuchiou/agent-board@${packageVersion} setup`
+  // The page on the local network is plain HTTP: its advice is the same command without the
+  // data folder, built here beside the full one, so no path can survive redaction (#1304).
+  return { update: 'setup', command: `${base}${agentOpts}${dataOpts}`, lanCommand: `${base}${agentOpts}` }
+}
+let olderScript = olderScriptUpdate()
+
+// The package a later launcher reports, when it is newer than the one this server started
+// with: an older launcher reusing the server must not take the notice away, and a version
+// that is not three numbers is not a package at all. Pending messages are untouched: only
+// the two values the next /api/board answer reads change.
+const refreshPackageVersion = (version: string): boolean => {
+  if (!/^\d+\.\d+\.\d+$/.test(version) || (packageVersion !== null && !isNewerVersion(version, packageVersion))) return false
+  packageVersion = version
+  olderScript = olderScriptUpdate()
+  return true
+}
 
 const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { ...HEADERS, 'content-type': 'application/json; charset=utf-8' })
@@ -854,7 +902,7 @@ export const startServer = (o: ServeOptions): void => {
             const now = Date.now()
             const view = o.view()
             const state = messaging.snapshot(now, o.reports?.(false))
-            const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [] }
+            const group = { now, repoOf, versions: { board: boardVersion, package: packageVersion }, unreadable: view.unreadable ?? [], ...(olderScript === undefined ? {} : { olderScript }) }
             // The page on the network learns only that an approval waits: no command, no button, no off-switch or refusal.
             if (!isLan) refreshApprovalFiles(now)
             const refusal = !isLan ? formatRefusal(rawRefusal, lastPassedAskAt, o.s) : undefined
@@ -1222,6 +1270,16 @@ export const startServer = (o: ServeOptions): void => {
       const wanted = text(body.address)
       const opened = await openLan(wanted === '' ? null : wanted)
       return json(res, 'url' in opened ? 200 : 409, opened)
+    }
+    // Only the board script on the computer tells the server the package a later launcher runs
+    // from: a reused server learns the newer package, and its page shows the notice (#1304).
+    // A web page always sends an Origin, and the phone's page never sends this.
+    if (url.pathname === '/api/package') {
+      if (isLan || req.headers.origin !== undefined) return json(res, 403, {})
+      const version = text(body.version)
+      if (!/^\d+\.\d+\.\d+$/.test(version)) return json(res, 400, {})
+      refreshPackageVersion(version)
+      return json(res, 200, { package: packageVersion })
     }
     if (url.pathname === '/api/close') {
       // Closing would cut a reply off halfway: on Windows the agent goes with the server.
