@@ -27,7 +27,13 @@ const splitPaths = text => text.split('\0').filter(Boolean)
 // would load hooks/messaging.ts), and messaging. A file joins the list only in a reviewed change, so preflight does
 // not guess which files are too long or which tests a change reaches (#1392 review): it says the file was not run,
 // and the author runs the tests they changed by name.
-export const leftToCi = new Set(['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs'])
+export const leftToCi = new Set(['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs'])
+// Where Playwright keeps the account's browsers on Windows: under LOCALAPPDATA, which the nested run's temp home replaces.
+// A value the account already set wins; the other platforms are left as they are (#1471).
+export const pinnedBrowsersPath = (env, platform = process.platform) => {
+  if (env.PLAYWRIGHT_BROWSERS_PATH) return env.PLAYWRIGHT_BROWSERS_PATH
+  return platform === 'win32' && env.LOCALAPPDATA ? win32.join(env.LOCALAPPDATA, 'ms-playwright') : undefined
+}
 
 // Without a recorded or readable identity, a live PID cannot safely be identified as a replacement.
 export const isLiveMarker = ({ isAlive, recordedIdentity, identity = null }) =>
@@ -703,6 +709,9 @@ export const runPreflight = async ({ cwd = process.cwd(), base = 'origin/main', 
     // A nested test runner must emit its own TAP, not the parent's IPC protocol.
     delete env.NODE_TEST_CONTEXT
     for (const name of Object.keys(env)) if (/^(GITHUB_TOKEN|GH_TOKEN|NPM_TOKEN|ANTHROPIC_API_KEY)$/i.test(name)) delete env[name]
+    // Before the homes are replaced, so the nested run still finds the browsers installed for the account.
+    const browsers = pinnedBrowsersPath(process.env)
+    if (browsers) env.PLAYWRIGHT_BROWSERS_PATH = browsers
     for (const name of homeNames) env[name] = name === 'CLAUDE_PROGRESS_FILE' ? join(temp, 'progress.md') : temp
     return env
   }

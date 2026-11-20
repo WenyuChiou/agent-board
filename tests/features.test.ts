@@ -1,4 +1,4 @@
-import { emptyQuestions, observeQuestions, resolveQuestion, withCaptures } from '../hooks/questions'
+import { emptyQuestions, observeQuestions, parseQuestions, questionsJson, resolveQuestion, withCaptures } from '../hooks/questions'
 import { expect, test } from 'claude-code/testing'
 import { countedText } from './fixtures/counted-work'
 
@@ -1314,8 +1314,8 @@ test('the board page shows the whole file: counts, questions, folded work, steps
   // The shipped DOM's title safety is checked in page-titles.test.mjs, outside the SDK sandbox.
   expect(html).toContain('textContent')
   expect(html).not.toContain('<script>alert(1)')
-  expect(html).toContain("call('/api/board')")
-  expect(html).toContain('timer = setTimeout(refresh, 2000)')
+  expect(html).toContain("call('/api/board', undefined, boardAbort ? boardAbort.signal : undefined, isNow === true)")
+  expect(html).toContain('timer = setTimeout(refresh, boardEtag ? 0 : 2000)')
   expect(servePage(STRINGS.en, 'synthetic')).toContain('<html lang="en">')
 })
 
@@ -3698,7 +3698,7 @@ test('with explicit legacy opt-in the page offers a send only into a Grok or Cod
   const row = (title: string) => [...model.groups.flatMap(group => group.rows), ...model.stopped].find(one => one.title === title)
   expect(row('Pick the cache')).toMatchObject({ send: 'send', where: '/w/api-gateway', info: '', isSending: false })
   const codex = model.asks.find(ask => ask.agent === 'codex')
-  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveSendOpen('Codex'), where: '' })
+  expect(codex).toMatchObject({ send: 'open', info: STRINGS.en.serveCodexCopyHint, where: '' })
   expect(codex?.answers.length).toBeGreaterThan(0)
   // A hand-kept question is the person's own: ticking it is the answer, with nothing to copy.
   expect(model.asks.find(ask => ask.project === 'docs-site')).toMatchObject({ send: 'none', answers: [], canTick: true, info: '' })
@@ -4317,7 +4317,10 @@ test('the board you work in marks the chosen line and lists only the keys that d
   const onAsk = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
   expect(onAsk).toContain('› [Choose] Per-key limit')
   expect(onAsk).toContain('    2 300 a minute')
-  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · ↑↓/jk select')
+  // The Codex question has been quiet past two minutes with no process record: the window may be closed, so a archives it (#1092).
+  // At 100 columns the footer clips that last key's word ("a…").
+  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · a')
+  expect(onAsk).toContain('↑↓/jk select')
   const onJob = boardScreen(view, [], { selected: job, key: null, open: items[job]?.key ?? null, note: 'Copied: 300' }, STRINGS.en, { width: 100, isColor: false })
   expect(onJob).toContain('› Fabrikam fellowship')
   expect(onJob).toContain('    ✓ 1 Draft the statement')
@@ -5413,6 +5416,104 @@ test('a refused list leaves only the reply box on the page, the own pane, the te
   const { card } = codexStop({ question: EITHER_1277, options: TEN_1277 })
   expect(card).toContain('<!-- options=[] -->')
   expect(offeredAs(fileView(card)), 'Codex card').toEqual(REPLY_ONLY)
+})
+
+test('a Task list with an empty or non-text entry is refused whole on every surface, never offered without that entry (#1628)', () => {
+  const base = emptyMirror('a1b2c3d4', 'demo', AT_1277, '/work/demo', 'claude')
+  const lists: unknown[][] = [['Alpha', '', 'Beta'], [...TEN_1277.slice(0, 9), ''], ['Alpha', 7, 'Beta'], ['', ' ']]
+  for (const options of lists) {
+    const label = JSON.stringify(options).slice(0, 40)
+    const mine = applyTaskCreate(base, { subject: EITHER_1277, metadata: { waiting: 'you', options } }, '1', AT_1277)
+    // The mirror keeps the list whole, so every reader sees what the agent gave.
+    expect(mine.tasks[0]?.options, label).toHaveLength(options.length)
+    expect(offeredAs(buildView([], [], mine, AT_1277, 0, {}, STRINGS.en)), `own pane ${label}`).toEqual(REPLY_ONLY)
+    const file = upsertAutoBlock('', mine, STRINGS.en)
+    expect(file, label).toContain('<!-- options=[] -->')
+    expect(offeredAs(fileView(file)), `another board ${label}`).toEqual(REPLY_ONLY)
+    const kept = observeQuestions(emptyQuestions(), parseProgress(file), null, [], AT_1277, true).ledger
+    expect(offeredAs(fileView('## demo\n', kept)), `kept block ${label}`).toEqual(REPLY_ONLY)
+    const keptOwn = observeQuestions(emptyQuestions(), [], mine, [], AT_1277, true).ledger
+    expect(offeredAs(buildView([], [], null, AT_1277, 0, {}, STRINGS.en, [], {}, keptOwn)), `kept own ${label}`).toEqual(REPLY_ONLY)
+  }
+})
+
+test("a refused list stays refused on the inbox card after the question's block is gone and its inbox turn stays (#1630)", () => {
+  const updated = new Date(AT_1277).toISOString()
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'codex-session-1630', cwd: '/work/demo', last_assistant_message: EITHER_1277 }), at: AT_1277 }], undefined, undefined, STRINGS.en)
+  expect(inbox[0]).toMatchObject({ isQuestion: true, text: EITHER_1277 })
+  // The block goes by the id the inbox turn gives the same Codex session, so both are one question.
+  const id = inbox[0]!.id!
+  const block = `## demo\n<!-- auto session=${id} agent=codex state=waiting updated=${updated} -->\n### Storage\n- [?] ${EITHER_1277}\n<!-- options=[] -->\n<!-- /auto session=${id} -->\n`
+  const first = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true, 'fixture:1630', undefined, inbox)
+  expect(first.ledger.records.map(record => record.source?.kind)).toEqual(['block'])
+  expect(offeredAs(buildView(parseProgress(block), [], null, AT_1277, 0, {}, STRINGS.en, [], {}, first.ledger, undefined, inbox)), 'with its block').toEqual(REPLY_ONLY)
+  // The block is gone and the inbox turn stays: the same record now has the inbox turn as its source.
+  const after = observeQuestions(first.ledger, parseProgress('## demo\n'), null, [], AT_1277 + 1000, true, 'fixture:1630', undefined, inbox)
+  expect(after.ledger.records.map(record => [record.id, record.source?.kind])).toEqual([[first.ledger.records[0]!.id, 'inbox']])
+  expect(offeredAs(buildView(parseProgress('## demo\n'), [], null, AT_1277 + 1000, 0, {}, STRINGS.en, [], {}, after.ledger, undefined, inbox)), 'inbox card').toEqual(REPLY_ONLY)
+  // Read back from disk, the kept refusal is still there.
+  const reread = parseQuestions(questionsJson(after.ledger))
+  expect(reread?.records[0]?.options).toEqual([])
+  expect(offeredAs(buildView(parseProgress('## demo\n'), [], null, AT_1277 + 1000, 0, {}, STRINGS.en, [], {}, reread!, undefined, inbox)), 'read back').toEqual(REPLY_ONLY)
+  // A ledger whose kept list is not a list of text is refused like any other bad field.
+  expect(parseQuestions(JSON.stringify({ ...after.ledger, records: after.ledger.records.map(record => ({ ...record, options: ['Postgres', 7] })) }))).toBe(null)
+})
+
+test('a refused list kept only in the saved source of a ledger written before #1630 stays refused when its record moves to the inbox turn (#1630)', () => {
+  const updated = new Date(AT_1277).toISOString()
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'codex-session-1630-moved', cwd: '/work/demo', last_assistant_message: EITHER_1277 }), at: AT_1277 }], undefined, undefined, STRINGS.en)
+  const id = inbox[0]!.id!
+  const block = `## demo\n<!-- auto session=${id} agent=codex state=waiting updated=${updated} -->\n### Storage\n- [?] ${EITHER_1277}\n<!-- options=[] -->\n<!-- /auto session=${id} -->\n`
+  const first = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true, 'fixture:1630', undefined, inbox)
+  // A ledger written before this change has the block's source (with its refused list) but no options field.
+  const older = { ...first.ledger, records: first.ledger.records.map(({ options: _options, ...record }) => record) }
+  const after = observeQuestions(older, parseProgress('## demo\n'), null, [], AT_1277 + 1000, true, 'fixture:1630', undefined, inbox)
+  expect(after.ledger.records.map(record => [record.id, record.source?.kind]), 'the same record').toEqual([[first.ledger.records[0]!.id, 'inbox']])
+  expect(offeredAs(buildView(parseProgress('## demo\n'), [], null, AT_1277 + 1000, 0, {}, STRINGS.en, [], {}, after.ledger, undefined, inbox)), 'inbox card').toEqual(REPLY_ONLY)
+})
+
+test('a refused list on a token-marked block stays refused on the inbox card after the block is gone (#1630)', () => {
+  const updated = new Date(AT_1277).toISOString()
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'codex-session-1630-token', cwd: '/work/demo', last_assistant_message: EITHER_1277 }), at: AT_1277 }], undefined, undefined, STRINGS.en)
+  const id = inbox[0]!.id!
+  // The question token gives the block's question its own record, which the inbox turn (with no token) cannot reuse.
+  const block = `## demo\n<!-- auto session=${id} agent=codex state=waiting updated=${updated} -->\n### Storage\n- [?] ${EITHER_1277}\n<!-- options=[] -->\n<!-- question=${'c'.repeat(64)}:1 -->\n<!-- /auto session=${id} -->\n`
+  const first = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true, 'fixture:1630', undefined, inbox)
+  expect(first.ledger.records.find(record => record.source?.kind === 'block')?.producer).toBe(`${'c'.repeat(64)}:1`)
+  const after = observeQuestions(first.ledger, parseProgress('## demo\n'), null, [], AT_1277 + 1000, true, 'fixture:1630', undefined, inbox)
+  const view = buildView(parseProgress('## demo\n'), [], null, AT_1277 + 1000, 0, {}, STRINGS.en, [], {}, after.ledger, undefined, inbox)
+  expect(view.waiting.length > 0, 'still waiting').toBe(true)
+  expect(view.waiting.map(item => [item.kind, item.options]), 'inbox card').toEqual(view.waiting.map(() => ['reply', []]))
+  expect(serveModel(view, [], STRINGS.en).asks.map(ask => ask.answers), 'page').toEqual(view.waiting.map(() => []))
+})
+
+test('a refused list kept only in the saved source of a ledger written before #1630 stays refused on the inbox card after the block is gone (#1630)', () => {
+  const updated = new Date(AT_1277).toISOString()
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'codex-session-1630-older', cwd: '/work/demo', last_assistant_message: EITHER_1277 }), at: AT_1277 }], undefined, undefined, STRINGS.en)
+  const id = inbox[0]!.id!
+  const block = `## demo\n<!-- auto session=${id} agent=codex state=waiting updated=${updated} -->\n### Storage\n- [?] ${EITHER_1277}\n<!-- options=[] -->\n<!-- question=${'c'.repeat(64)}:1 -->\n<!-- /auto session=${id} -->\n`
+  const first = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true, 'fixture:1630', undefined, inbox)
+  // A ledger written before this change has the block's source (with its refused list) but no options field.
+  const older = { ...first.ledger, records: first.ledger.records.map(({ options: _options, ...record }) => record) }
+  expect(older.records.find(record => record.source?.kind === 'block')?.source?.data).toContain('stepOptions')
+  const after = observeQuestions(older, parseProgress('## demo\n'), null, [], AT_1277 + 1000, true, 'fixture:1630', undefined, inbox)
+  const view = buildView(parseProgress('## demo\n'), [], null, AT_1277 + 1000, 0, {}, STRINGS.en, [], {}, after.ledger, undefined, inbox)
+  expect(view.waiting.length > 0, 'still waiting').toBe(true)
+  expect(view.waiting.map(item => [item.kind, item.options]), 'inbox card').toEqual(view.waiting.map(() => ['reply', []]))
+})
+
+test('an inbox turn that matches two token-marked steps of the same words with different lists takes neither list (#1630)', () => {
+  const updated = new Date(AT_1277).toISOString()
+  const inbox = peekInbox([{ name: `codex-turn-${AT_1277}-1.json`, body: JSON.stringify({ session_id: 'codex-session-1630-twice', cwd: '/work/demo', last_assistant_message: EITHER_1277 }), at: AT_1277 }], undefined, undefined, STRINGS.en)
+  const id = inbox[0]!.id!
+  const block = `## demo\n<!-- auto session=${id} agent=codex state=waiting updated=${updated} -->\n### Storage\n- [?] ${EITHER_1277}\n<!-- options=[] -->\n<!-- question=${'c'.repeat(64)}:1 -->\n- [?] ${EITHER_1277}\n<!-- options=["MySQL","Redis"] -->\n<!-- question=${'d'.repeat(64)}:1 -->\n<!-- /auto session=${id} -->\n`
+  const first = observeQuestions(emptyQuestions(), parseProgress(block), null, [], AT_1277, true, 'fixture:1630', undefined, inbox)
+  expect(first.ledger.records.filter(record => record.source?.kind === 'block').map(record => record.options), 'both steps keep their own').toEqual([[], ['MySQL', 'Redis']])
+  const after = observeQuestions(first.ledger, parseProgress('## demo\n'), null, [], AT_1277 + 1000, true, 'fixture:1630', undefined, inbox)
+  const view = buildView(parseProgress('## demo\n'), [], null, AT_1277 + 1000, 0, {}, STRINGS.en, [], {}, after.ledger, undefined, inbox)
+  expect(view.waiting.length > 0, 'still waiting').toBe(true)
+  // The turn could be either step's, so it offers no list: neither the other step's choices nor ones made from its words.
+  expect(view.waiting.map(item => [item.kind, item.options]), 'inbox card').toEqual(view.waiting.map(() => ['reply', []]))
 })
 
 test('a task that asks for a yes or no and also lists options is a confirm on its own pane and on the other board (#1277)', () => {

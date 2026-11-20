@@ -47,14 +47,21 @@ test('a sent question keeps its documented hide control visible on a phone', { c
     // Only the send result is synthetic: this tests the page's post-Send controls,
     // not a provider or native receiver. Hide and restore still use the real service.
     await page.route('**/api/board', async route => {
-      const response = await route.fetch({ maxRetries: 0 })
-      if (response.status() === 304) { await route.fulfill({ response }); return }
+      // The page keeps a board request open (#359): one still waiting when the page replaces it or the test
+      // closes the page has nobody left to answer, so its forward ending that way is not a failure.
+      let response
+      try { response = await route.fetch({ maxRetries: 0 }) } catch (error) {
+        if (/disposed|closed|aborted/i.test(String(error?.message ?? error))) return
+        throw error
+      }
+      if (response.status() === 304) { await route.fulfill({ response }).catch(() => undefined); return }
       const body = await response.json()
       for (const ask of body.model?.asks ?? []) {
         ask.send = 'send'
         if (ask.text === 'Blue or green?') ask.answers = ['Blue', 'Green', 'Red', 'Gold']
       }
-      await route.fulfill({ response, json: body })
+      // A request the page aborted meanwhile cannot be answered any more.
+      await route.fulfill({ response, json: body }).catch(() => undefined)
     })
     const sends = []
     await page.route('**/api/act', async route => {

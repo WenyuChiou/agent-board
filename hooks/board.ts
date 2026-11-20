@@ -307,11 +307,12 @@ const blockedRows = (view: View): TaskRow[] => liveRows(view).filter(row => rowN
 // What waits on the person: the questions of the work on the board, then those in turns no
 // session has taken in yet. Questions marked answered are not in `view.waiting`. `named` says
 // how a project is told (the chat shows the home folder's name as `~`).
-const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: (project: string) => string = project => project, label: (agent: string) => string = agent => agent): Array<{ where: string; text: string; task: string }> => [
+const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: (project: string) => string = project => project, label: (agent: string) => string = agent => agent): Array<{ where: string; text: string; task: string; mayBeClosed?: true }> => [
   ...view.waiting.map(item => ({
     where: [named(item.project), label(item.agent)].filter(part => part !== '').join(' · '),
     text: `${s.chip(s.ask[item.kind])}${item.text}${item.note ? ` — ${item.note}` : ''}`,
     task: item.task,
+    ...(item.mayBeClosed === true ? { mayBeClosed: true as const } : {}),
   })),
   ...remainingInbox(view, pending).filter(turn => turn.isQuestion).map(turn => ({ where: [named(turn.project), label(turn.agent)].filter(part => part !== '').join(' · '), text: turn.text, task: '' })),
   ...blockedRows(view).map(row => ({
@@ -345,6 +346,8 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push(c('waiting', `● ${s.sectionWaiting}`, true))
     for (const ask of asks) {
       lines.push(`  ${c('project', cut(ask.where + (ask.task ? ` › ${ask.task}` : ''), o.width - 4))}`, `    ${cut(ask.text, o.width - 6)}`)
+      // A Codex card with no process to check, quiet past two minutes (#1092): it may be closed, never closed.
+      if (ask.mayBeClosed === true) lines.push(`    ${c('quiet', cut(s.windowMayBeClosed, o.width - 6))}`)
     }
     lines.push(...hidden.map(line => `  ${line}`), '')
   }
@@ -551,7 +554,7 @@ export const chatText = (
   const hidden = view.hidden.length === 0 ? null : s.hiddenCount(view.hidden.length)
   if (asks.length === 0) items.push(`\n${s.nothingForYou}${hidden === null ? '' : `\n${hidden}`}`)
   asks.forEach((ask, index) => {
-    items.push([...(index === 0 ? ['', `● ${s.sectionWaiting}`] : []), line(ask.where + (ask.task ? ` › ${ask.task}` : ''), 2), line(ask.text, 4)].join('\n'))
+    items.push([...(index === 0 ? ['', `● ${s.sectionWaiting}`] : []), line(ask.where + (ask.task ? ` › ${ask.task}` : ''), 2), line(ask.text, 4), ...(ask.mayBeClosed === true ? [line(s.windowMayBeClosed, 4)] : [])].join('\n'))
   })
   if (asks.length > 0 && hidden !== null) items.push(`  ${hidden}`)
   if ((view.stoppedAsking ?? 0) > 0) items.push(line(s.stoppedAsking(view.stoppedAsking!)))
@@ -824,6 +827,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
       return route !== undefined ? { state, action: { type: 'send', key: item.key, text: plain(answer), route } } : { state, action: { type: 'copy', text: plain(answer) } }
     }
     // Said only when asked: a live session's question is that session's to take off the board.
+    if (key === 'a' && ask.archive !== undefined) return { state, action: { type: 'archive', ref: ask.archive, title: ask.task } }
     if (key === 'a' && ask.where !== 'manual' && ask.isKept !== true && ask.canHide !== false) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
   }
   if (item.type === 'row') {
@@ -856,6 +860,8 @@ const keysFor = (item: BoardItem | undefined, s: Strings, routes: Readonly<Recor
           ? [s.boardKeyCopyResume]
           : []),
       ...(ask.hideKey !== '' && ask.canHide !== false ? [s.boardKeyHide] : []),
+      // A card that says the window may be closed archives with a (#1092), so its footer says so.
+      ...(ask.archive !== undefined ? [s.boardKeyArchive] : []),
     ]
   }
   if (item.type === 'row') {
@@ -1031,6 +1037,8 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       if (result?.key === item.key) resultLines('    ')
       lines.push(`    ${c('project', cut(ask.project + (ask.task ? ` › ${ask.task}` : ''), o.width - 6))}`)
       if (ask.task && ask.context && (titleCounts.get(ask.task) ?? 0) > 1) lines.push(`    ${c('quiet', cut(ask.context, o.width - 6))}`)
+      // A Codex card with no process to check, quiet past two minutes (#1092): `a` archives it.
+      if (ask.mayBeClosed === true) lines.push(`    ${c('quiet', cut(s.windowMayBeClosed, o.width - 6))}`)
       if (isOpen || isHere) {
         if (ask.canHide === false) lines.push(`    ${c('quiet', cut(s.questionReviewOnly, o.width - 6))}`)
         if (ask.note) lines.push(`    ${cut(ask.note, o.width - 6)}`)

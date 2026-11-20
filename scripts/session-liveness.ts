@@ -1,7 +1,13 @@
-import { hostname } from 'node:os'
-import { processStartedMany } from './local-lock'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readFileSync } from 'node:fs'
+import { homedir, hostname } from 'node:os'
+import { join } from 'node:path'
+import { RESUME } from '../hooks/parse'
+import { processStarted, processStartedMany } from './local-lock'
+import { codexTerminalPid, procEntryOf } from '../hooks/codex-process'
+import type { ProcEntry } from '../hooks/codex-process'
 import type { ProcessStart } from './local-lock'
-import { claimedBlocksOf, goneBlocks, hostHashOf } from '../hooks/session-liveness'
+import { agentClaimOf, claimedBlocksOf, goneBlocks, hostHashOf, isAntigravityQuestionWaiting, newestAntigravityBlocks } from '../hooks/session-liveness'
+import type { AgentClaim } from '../hooks/session-liveness'
 import type { ProgressProject } from '../types'
 
 // The liveness of agent sessions, as the shell sees it (#1092): whether the agent
@@ -50,16 +56,39 @@ const isAlivePid = (pid: number): boolean => {
   }
 }
 
-// Keys (`blockKey(auto)`) of working/waiting Claude session blocks whose claimed
-// agent process is gone on this machine (#1092). The kill runs first for every
-// claimed pid; dead pids evict the cache without spawning a start lookup, and
-// live pids with an uncached `(pid, started)` share ONE `lookupStart` call.
+export type AntigravityPresence = 'locked' | 'unlocked' | 'missing'
+
+export type GoneBlocksOptions = {
+  home?: string
+  platform?: NodeJS.Platform
+  presenceProbe?: (lockFile: string) => AntigravityPresence
+}
+
+// Windows `agy` CLI holds a mandatory OS lock on `<home>/.gemini/antigravity-cli/presence/<id>.lock`
+// for its full lifetime and releases it immediately on exit (#1589).
+export const probeAntigravityPresenceLock = (lockFile: string): AntigravityPresence => {
+  try {
+    if (!lstatSync(lockFile).isFile()) return 'missing'
+    const fd = openSync(lockFile, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+    try {
+      if (!fstatSync(fd).isFile()) return 'missing'
+      readSync(fd, Buffer.alloc(1), 0, 1, 0)
+      return 'unlocked'
+    } finally { closeSync(fd) }
+  } catch (error) {
+    const code = (error as { code?: string }).code
+    return code === 'EBUSY' || code === 'EACCES' || code === 'EPERM' ? 'locked' : 'missing'
+  }
+}
+
+// Keys (`blockKey(auto)`) of working/waiting session blocks whose agent process is gone on this machine (#1092, #1589).
 export const goneBlocksOf = (
   projects: readonly ProgressProject[],
   hostHash: string | null = readingHostHash(),
   cache: Map<string, ClaimStart> = startedCache,
   timeoutMs: number = START_LOOKUP_TIMEOUT_MS,
   lookupStart: (pids: readonly number[], timeoutMs: number) => Map<number, ProcessStart> = processStartedMany,
+  options?: GoneBlocksOptions,
 ): ReadonlySet<string> => {
   if (hostHash === null) return new Set()
   const claims = claimedBlocksOf(projects, hostHash)
@@ -81,11 +110,52 @@ export const goneBlocksOf = (
     if (!toLookup.has(claim.pid) || claim.started === undefined) continue
     cache.set(cacheKey(claim.pid, claim.started), { claimed: claim.started, actual: freshStarts.get(claim.pid) ?? null })
   }
-  return goneBlocks(projects, claim => {
+  const gone = new Set(goneBlocks(projects, claim => {
     const alive = alivePids.get(claim.pid) ?? true
     if (!alive || claim.started === undefined) return { alive, actual: null }
     if (toLookup.has(claim.pid)) return { alive: true, actual: freshStarts.get(claim.pid) ?? null }
     const held = cache.get(cacheKey(claim.pid, claim.started))
     return { alive: true, actual: held !== undefined && held.claimed === claim.started ? held.actual : null }
-  }, hostHash)
+  }, hostHash))
+  if ((options?.platform ?? process.platform) === 'win32') {
+    const home = options?.home ?? homedir()
+    const probe = options?.presenceProbe ?? probeAntigravityPresenceLock
+    if (home !== '') {
+      for (const [key, { auto, steps }] of newestAntigravityBlocks(projects)) {
+        if (gone.has(key)) continue
+        if (auto.state !== 'working' && auto.state !== 'waiting') continue
+        if (isAntigravityQuestionWaiting(auto, steps)) continue
+        if (auto.agentPid !== undefined || auto.host !== hostHash) continue
+        if (auto.resume === null || !RESUME.test(auto.resume)) continue
+        if (probe(join(home, '.gemini', 'antigravity-cli', 'presence', `${auto.resume}.lock`)) === 'unlocked') gone.add(key)
+      }
+    }
+  }
+  return gone
+}
+
+// One process as Linux's /proc says, or null when either file cannot be read.
+const procEntry = (pid: number): ProcEntry | null => {
+  try {
+    return procEntryOf(readFileSync(`/proc/${pid}/stat`, 'utf8'), readFileSync(`/proc/${pid}/cmdline`, 'utf8'))
+  } catch { return null }
+}
+
+// The Codex terminal this event ran under, with its start time and this machine's
+// host hash (#1092, M7). Linux only: the walk reads /proc and starts no process.
+// Elsewhere naming the terminal would need a spawn in the hook, which the board
+// never does (#1092, PM Q5), so Windows and macOS name no process and keep
+// SessionEnd and the may-be-closed line. `start` is the hook worker that started
+// this board script.
+export const codexProcessClaim = (
+  platform: string = process.platform,
+  start: number = process.ppid,
+  read: (pid: number) => ProcEntry | null = procEntry,
+  host: string | null = readingHostHash(),
+): AgentClaim | null => {
+  if (platform !== 'linux' || host === null) return null
+  const pid = codexTerminalPid(start, read)
+  if (pid === null) return null
+  const started = processStarted(pid, 0)
+  return agentClaimOf({ agentPid: pid, ...(typeof started === 'number' ? { agentStarted: started } : {}), host })
 }

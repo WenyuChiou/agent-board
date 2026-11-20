@@ -129,6 +129,8 @@ type World = {
   isRemoveRefused?: (path: string) => boolean
   // Paths that are a link or a folder, as the settings scripts see them (#1276).
   unsafeFiles?: Set<string>
+  // Files whose guarded read fails (exit 1), as a killed or failed read script would (#1296).
+  failedReads?: Set<string>
   // Settings files whose lock another save holds: the write script exits SETTINGS_LOCKED with the lock path on
   // stdout, or with that output cut short (#1339, codex_166 finding 5).
   lockedFiles?: Map<string, { stdout: string; isTruncated?: boolean }>
@@ -327,6 +329,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
       const file = posix(e.argv[4] ?? '')
       world.ran?.push([...e.argv])
       const text = world.files.get(file)
+      if (world.failedReads?.has(file) === true) return { value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
       const body = world.unsafeFiles?.has(file) === true ? { kind: 'unsafe' } : text === undefined ? { kind: 'missing' } : { kind: 'ok', text }
       return { value: { exitCode: 0, stdout: JSON.stringify(body), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
     }

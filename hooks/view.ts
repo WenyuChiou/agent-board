@@ -11,7 +11,7 @@ import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, validOptions } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isMaybeClosed, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, validOptions } from './parse'
 import { cellsOf, plainBar } from './progress-bar'
 import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
@@ -141,6 +141,10 @@ export type WaitingItem = {
   // The state of that session's block as the row shows it (a stopped or silent one is ended), so the
   // receiver's route is read for the state the session is in, not always for idle (#1351).
   auto?: 'working' | 'waiting' | 'ended'
+  // A Codex card with no process record, quiet past two minutes (#1092): it says the window may be
+  // closed and offers Archive of its task, the only way the person can see to clear it. It still counts.
+  mayBeClosed?: true
+  archive?: TaskRef
 }
 
 // The one thing the top of the pane puts in front of the person: the most pressing thing
@@ -176,6 +180,8 @@ export type TaskRow = {
   // The block itself says state=ended (its session closed). `auto` also reads 'ended' for a finished,
   // stale or silent block, which does not mean the session is closed.
   isRecordedEnded?: true
+  // The process check found the session's process gone on this machine (#1595): a close signal, unlike staleness.
+  isProcessGone?: true
   steps: ViewStep[]
   // Source positions before display folding, including a next step outside the shown list.
   stepLines?: readonly number[]
@@ -244,7 +250,9 @@ export type RowGroup = { project: string; isHere: boolean; rows: TaskRow[]; summ
 
 // The line of counts at the top: what waits on you (here and elsewhere), what is open,
 // what is due within two weeks (the 快到期 list), and the steps finished today.
-export type Overview = { waiting: number; active: number; due: number; today: number; idle: number; stopped: number }
+// `queued`: questions whose answer is queued for the session's next turn (#1296). The Claude Code pane sets it from
+// the page's message store and leaves them out of `waiting`, as the page, --status and --json do.
+export type Overview = { waiting: number; active: number; due: number; today: number; idle: number; stopped: number; queued?: number }
 
 export type View = {
   now: number
@@ -1025,6 +1033,7 @@ export const buildView = (
       const isGone = isStopped(task.auto, now, updated, staleMs, gone)
       const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || isGone || isSilence || task.auto?.state === 'ended')
+      const mayBeClosed = !isInactive && task.auto !== null && isMaybeClosed(task.auto, task.steps, now, updated, clock.isFuture)
       const repliedAt = task.auto?.replied
       const isRepliedTask = repliedAt !== undefined && Number.isFinite(repliedAt) && repliedAt >= (task.auto?.updated ?? 0)
       if (isRepliedTask && !isInactive && !isFrozen && task.auto !== null && task.auto.resume !== null && repliedAt <= now) {
@@ -1164,6 +1173,7 @@ export const buildView = (
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
           ...(task.auto === null ? {} : { auto: task.auto.state === 'done' || isComplete || isGone || isSilence ? 'ended' as const : task.auto.state, nativeSession: task.auto.resume ?? task.auto.session }),
+          ...(mayBeClosed && task.auto !== null ? { mayBeClosed: true as const, archive: { project: name, title: task.title, line: task.line, session: task.auto.session } } : {}),
         })
       })
       const unresolved = taskQuestions.filter(item => {
@@ -1287,6 +1297,8 @@ export const buildView = (
         pr: autoPr(task.auto, s),
         agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
         ...(task.auto?.state === 'ended' ? { isRecordedEnded: true as const } : {}),
+        // The process check proved the session's process gone (#1092, #1595): it is closed, as one whose block says ended.
+        ...(livenessOf(task.auto, gone) === 'dead' ? { isProcessGone: true as const } : {}),
         // Only an agent whose resume by id is known gets a command.
         resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
         handoff: handoffOf(task),
@@ -1403,7 +1415,9 @@ export const buildView = (
     const id = observed?.keys[pendingQuestionSlot(scope, turn.text)] ?? observed?.ledger.records.find(record => record.scope === scope && record.isUnresolved && record.producerSources?.includes(JSON.stringify(turn)))?.id
     if (id === undefined || waiting.some(item => item.questionId === id)) return []
     const parts = splitNote(turn.text)
-    return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
+    // The list or refusal its block gave stays with the question after the block is gone (#1630).
+    const kept = observed?.ledger.records.find(record => record.id === id)?.options
+    return [{ key: `inbox::${id}`, questionId: id, dir: turn.dir ?? null, project: turn.project, task: '', context: '', ...parts, when: '', at: turn.at, ...askOf(parts.text, parts.note, kept === undefined ? undefined : { options: optionsGiven(validOptions(kept)) }), where: 'other' as const, agent: turn.agent, session: turn.id ?? '', sessionId: null, resumeVia: null, reopen: null, hideKey: id, step: null, target: null }]
   })
   const isRepliedMine = mine !== null && mine.replied !== undefined && Number.isFinite(mine.replied) && (mine.updated === null || mine.replied >= (mine.updated ?? 0))
   const own = mine === null || mine.isRun === true ? [] : ownWaiting(mine, observed?.keys, scopeOf(mine.project, mine.agent || 'claude', shortId(mine.sessionId), mine.resume ?? (mine.sessionId.length > 8 ? mine.sessionId : null))).flatMap(item => {
@@ -1481,7 +1495,8 @@ export const buildView = (
     }
     const rowStopped = record.isArchived || isInactiveSource || inactiveScopes.has(record.scope)
     const stage = rowStopped ? 'older' : age.stage
-    const retainedOptions = sourceOptions(source, record.occurrence)
+    // An inbox turn carries no list, so its card reads the one its block gave (#1630); any other source reads its own.
+    const retainedOptions = sourceOptions(source, record.occurrence) ?? (source.kind !== 'inbox' || record.options === undefined ? undefined : validOptions(record.options) ?? [])
     const item: WaitingItem = { key: `retained::${record.id}`, questionId: record.id, dir: recordFolder(record) ?? saved?.auto?.dir ?? null, ageStage: stage, project: source.project, task: source.task, context: source.context, ...parts, when: age.age === null ? s.questionAgeUnknown : relativeTime(record.firstObserved, now, s), at: record.firstObserved, ...askOf(parts.text, parts.note, retainedOptions === undefined ? undefined : { options: optionsGiven(retainedOptions) }), where: 'other', agent: agent === 'claude' ? '' : agent, session: source.session, sessionId: null, resumeVia: null, reopen: null, hideKey: record.id, canHide: record.isArchived === true, ...(record.isArchived === true ? { isKept: true as const } : {}), step: null, target: null }
     // The inbox file can be gone while its ledger copy still waits for the report.
     // Require the full binding and a newer source clock before moving its Resolve action.
@@ -1628,6 +1643,7 @@ export const statusLine = (view: View, s: Strings = ZH_TW): string | undefined =
   const parts = [
     current === null || current.state === 'done' ? '' : currentPart(current),
     view.overview.waiting > 0 ? s.statusWaiting(view.overview.waiting) : '',
+    (view.overview.queued ?? 0) > 0 ? s.boardQueuedCount(view.overview.queued ?? 0) : '',
     urgent > 0 ? s.statusDue(urgent) : '',
     view.pr === null ? '' : view.pr.text,
   ].filter(part => part !== '')

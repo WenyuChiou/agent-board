@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFile
 import { dirname, join } from 'node:path'
 import { describe, test } from 'node:test'
 import { BoardPage } from './board-page.mjs'
-import { browserFixture, hiddenQuestion, installAntigravity, monthlyArchive, writeProgress } from './fixture.mjs'
+import { browserFixture, hiddenQuestion, installAntigravity, monthlyArchive, replaceProgress, writeProgress } from './fixture.mjs'
 
 // One second in the past: the board refuses a pasted source time ahead of its own clock (#954).
 const block = (session, agent, state, project, title, steps, context = 'Synthetic browser fixture only.', updated = new Date(Date.now() - 1000).toISOString()) => `## ${project}
@@ -131,16 +131,46 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
       await board.openTask('Stopped phone task')
       const stepClips = page.locator('.steps .clip')
       assert.equal(await stepClips.count(), 5)
-      const all = [...await stepClips.all(), noted.locator('.clip.context')]
-      for (const clip of all) {
+      const targets = [
+        ...[0, 1, 2, 3, 4].map(stepIndex => ({ stepIndex, clip: stepClips.nth(stepIndex) })),
+        { contextTask: 'Read card notes', clip: noted.locator('.clip.context') },
+      ]
+      // Query the live connected DOM synchronously inside page.evaluate so a background poll redraw
+      // (#1565: minute-tick draw() rebuilding #board) cannot detach an ElementHandle mid-measurement.
+      const readLiveClip = ({ stepIndex, contextTask, check }) => {
+        const root = document.querySelector('main')
+        const node = stepIndex !== undefined
+          ? root?.querySelectorAll('.steps .clip')[stepIndex]
+          : [...(root?.querySelectorAll('li.row') ?? [])].find(one => one.textContent?.includes(contextTask))?.querySelector('.clip.context')
+        if (!node || !node.isConnected) return null
+        if (check === 'ready') return (node.querySelector('.short')?.clientWidth ?? 0) > 0
+        if (check === 'metrics') {
+          const shortNode = node.querySelector('.short')
+          if (!shortNode) return null
+          const style = getComputedStyle(shortNode)
+          return {
+            height: shortNode.parentElement.getBoundingClientRect().height,
+            font: parseFloat(style.fontSize),
+            width: shortNode.clientWidth,
+            scroll: shortNode.scrollWidth,
+            whiteSpace: style.whiteSpace,
+            overflow: style.overflow,
+            ellipsis: style.textOverflow,
+          }
+        }
+        return {
+          open: node.getAttribute('open'),
+          whole: node.querySelector('.whole')?.innerText ?? '',
+          height: node.querySelector(':scope > summary')?.getBoundingClientRect().height ?? 0,
+        }
+      }
+      for (const target of targets) {
+        const { clip, ...spec } = target
         const summary = clip.locator(':scope > summary')
-        const short = clip.locator('.short')
         // A fold that was just opened may still be growing; measure once the line has its width.
-        await short.evaluate(node => new Promise(done => { const at = Date.now(); const check = () => (node.clientWidth > 0 || Date.now() - at > 3000 ? done() : requestAnimationFrame(check)); check() }))
-        const metrics = await short.evaluate(node => {
-          const style = getComputedStyle(node)
-          return { height: node.parentElement.getBoundingClientRect().height, font: parseFloat(style.fontSize), width: node.clientWidth, scroll: node.scrollWidth, whiteSpace: style.whiteSpace, overflow: style.overflow, ellipsis: style.textOverflow }
-        })
+        await page.waitForFunction(readLiveClip, { ...spec, check: 'ready' }, { timeout: 3000 })
+        const metrics = await page.evaluate(readLiveClip, { ...spec, check: 'metrics' })
+        assert.ok(metrics)
         assert.ok(metrics.width > 0 && metrics.scroll > metrics.width)
         assert.ok(metrics.height <= metrics.font * 1.8, JSON.stringify(metrics))
         assert.deepEqual([metrics.whiteSpace, metrics.overflow, metrics.ellipsis], ['nowrap', 'hidden', 'ellipsis'])
@@ -148,10 +178,10 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
         assert.ok(whole.length > 60 || whole === chinese)
         await summary.focus()
         await summary.press('Enter')
-        assert.equal(await clip.getAttribute('open'), '')
-        assert.equal(await clip.locator('.whole').innerText(), whole)
-        const height = await summary.evaluate(node => node.getBoundingClientRect().height)
-        assert.ok(height > metrics.font * 1.8)
+        const opened = await page.evaluate(readLiveClip, { ...spec, check: 'opened' })
+        assert.equal(opened?.open, '')
+        assert.equal(opened?.whole, whole)
+        assert.ok(opened.height > metrics.font * 1.8, JSON.stringify(opened))
         assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth))
         await summary.press('Space')
       }
@@ -161,13 +191,18 @@ describe('confirmed browser journeys', { concurrency: 1 }, () => {
       // Each step has one Done button (#942): the next step's is the primary button in the actions row, and the
       // list ticks only the others, each under its text, as wide as its one-line label allows (not squeezed into the mark's column).
       const ticks = task.locator('.steps li > button')
-      assert.equal(await ticks.count(), 2)
-      for (const tick of await ticks.all()) {
-        const place = await tick.evaluate(node => {
+      const tickCount = await ticks.count()
+      assert.equal(tickCount, 2)
+      for (let index = 0; index < tickCount; index += 1) {
+        const place = await page.evaluate(idx => {
+          const row = [...document.querySelectorAll('main li.row')].find(one => one.textContent?.includes('Read every step'))
+          const node = row?.querySelectorAll('.steps li > button')[idx]
+          if (!node || !node.isConnected) return null
           const box = node.getBoundingClientRect(), text = node.parentElement.querySelector('.clip').getBoundingClientRect()
           return { left: box.left, right: box.right, width: box.width, height: box.height, textLeft: text.left, textRight: text.right, title: node.title, cls: node.className }
-        })
+        }, index)
         // The page's button, as Confirm done and Copy are.
+        assert.ok(place)
         assert.equal(place.cls, 'btn', JSON.stringify(place))
         assert.ok(place.width >= 44 && place.left >= place.textLeft - 1 && place.right <= place.textRight + 1, JSON.stringify(place))
         assert.ok(place.height <= 56, JSON.stringify(place))
@@ -429,6 +464,8 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       }))
       assert.equal(await fold.evaluate(node => node.open), true)
       assert.equal(await clip.evaluate(node => node.open), true)
+      // The race below reads both folds from #board when the next board answer arrives: they are there before it is armed.
+      assert.deepEqual(await Promise.all([fold, clip].map(one => one.evaluate(node => document.getElementById('board').contains(node)))), [true, true])
 
       await page.evaluate(() => {
         const origFetch = window.fetch
@@ -445,6 +482,12 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
               const root = document.getElementById('board')
               const liveFold = [...root.querySelectorAll('details:not(.clip)')].find(node => node.querySelector('summary')?.textContent === '2 more steps')
               const liveClip = [...root.querySelectorAll('.steps details.clip')].find(node => node.textContent.includes('Review the complete synthetic rollout plan'))
+              // A throw here would make the page drop this answer and draw the task from its next poll, 2 s later,
+              // with the race never run (#1728): say what the page held instead, so the failure names its cause.
+              if (liveFold === undefined || liveClip === undefined) {
+                window.__race = { ...window.__race, error: 'race found no ' + (liveFold === undefined ? 'fold' : 'clip'), summaries: [...root.querySelectorAll('summary')].map(node => node.textContent.slice(0, 40)) }
+                return data
+              }
               let toggled = false
               const mark = () => { toggled = true }
               liveFold.addEventListener('toggle', mark, { once: true })
@@ -471,12 +514,20 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
           }
           return res
         }
+        // The page keeps one board request open (#359), sent with the fetch it had before this patch. A refresh
+        // replaces it with one sent through the patch, so the next board change reaches the race above.
+        document.dispatchEvent(new Event('visibilitychange'))
       })
 
-      writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger redraw\n`)
+      // Replaced, not rewritten in place: a read between truncate and write would draw a board without the open task's
+      // folds, and the race would find none (#1728).
+      replaceProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger redraw\n`)
       await board.task('Synthetic redraw race task').waitFor()
+      // Wait for the race's own end, not a moment after the task shows: the observer records it on the redraw that
+      // draws the task, and an error says why it did not run (#1728).
+      await page.waitForFunction(() => window.__race.done === true || window.__race.error !== undefined).catch(() => {})
       const race = await page.evaluate(() => window.__race)
-      assert.equal(race.done, true)
+      assert.equal(race.done, true, JSON.stringify(race))
       assert.equal(race.toggledBeforeDraw, false)
       assert.deepEqual(race.closedSync, [false, false])
       assert.deepEqual(race.afterDraw, [false, false])
@@ -485,7 +536,7 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       // Re-opening after the race still sticks across a subsequent redraw.
       await fold.locator('summary', { hasText: '2 more steps' }).click()
       await clip.locator('summary').click()
-      writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger second redraw\n`)
+      replaceProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger second redraw\n`)
       await page.locator('.short', { hasText: 'Trigger second redraw' }).waitFor()
       assert.deepEqual(await Promise.all([fold.evaluate(node => node.open), clip.evaluate(node => node.open)]), [true, true])
     })

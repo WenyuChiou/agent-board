@@ -8,58 +8,13 @@ import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
 import { withLocalLock } from './local-lock'
+import { isClaimRef, isTurnNumber, parseMessageStore, queuedMessagingOf, shownMessages } from '../hooks/queued-store'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
 import { claimMessageStore } from './message-store-claim'
 import { readSettings } from './settings-file'
 import type { MessageStoreClaim } from './message-store-claim'
 
-// The name a hook gives its mailbox claim, so it can hand back a claim it stopped waiting for (#990).
-const isClaimRef = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{12}$/.test(value)
-// A turn number an Antigravity hook counted for its conversation (#1396).
-const isTurnNumber = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0
-export const parseMessageStore = (text: string, now: number): MessageState => {
-  let saved: MessageState & { version: unknown }
-  try { saved = JSON.parse(text) as MessageState & { version: unknown } } catch { throw new Error('INVALID_MESSAGE_STORE') }
-  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error('INVALID_MESSAGE_STORE')
-  if (saved.pausePeerMessages !== undefined && typeof saved.pausePeerMessages !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
-  if (saved.version !== 1 && saved.version !== 2 || !Array.isArray(saved.messages) || saved.messages.length > OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('INVALID_MESSAGE_STORE')
-  // A store written before origins and hashes reads as local, with the hash of the text it kept.
-  const messages = saved.messages.map(one => saved.version === 1 ? { ...one, hops: 1, claimed: 0, nonce: '' } : { ...one })
-    .map(one => ({ ...one, origin: one.origin ?? 'local', hash: one.hash ?? (typeof one.text === 'string' && one.text !== '' ? textHash(one.text) : '') }))
-  for (const one of messages) {
-    messageId(one.id)
-    if (one.framingNonce !== undefined && (typeof one.framingNonce !== 'string' || !/^[0-9a-f]{32}$/.test(one.framingNonce)) || one.awaitsAck !== undefined && typeof one.awaitsAck !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
-    if (one.attempted !== undefined && !(Number.isFinite(one.attempted) && one.attempted > 0) || one.woke !== undefined && !(Number.isFinite(one.woke) && one.woke > 0) || one.wakeAfter !== undefined && !isTurnNumber(one.wakeAfter)) throw new Error('INVALID_MESSAGE_STORE')
-    if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
-    if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
-    if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
-    if (one.leftAt !== undefined && !Number.isFinite(one.leftAt)) throw new Error('INVALID_MESSAGE_STORE')
-    if (one.line !== undefined && !ROUTE_LINES.includes(one.line) || one.wake !== undefined && one.wake !== 'sent' && one.wake !== 'failed') throw new Error('INVALID_MESSAGE_STORE')
-    if (one.surface !== undefined && (typeof one.surface !== 'string' || one.surface === '' || /[\r\n]/.test(one.surface))) throw new Error('INVALID_MESSAGE_STORE')
-    messageId(one.target)
-    messageId(one.turn)
-    messageText(one.from, 300)
-    if (/[\r\n]/.test(one.from)) throw new Error('INVALID_MESSAGE_STORE')
-    messageText(one.to, 300)
-    if (!['queued', 'uncertain', 'accepted', 'acknowledged', 'rejected'].includes(one.status) || typeof one.reply !== 'string' || typeof one.error !== 'string' || !Number.isFinite(one.updated)) throw new Error('INVALID_MESSAGE_STORE')
-    // Only a finished message may have lost its text.
-    if (!isFinished(one) || one.text !== '') messageText(one.text)
-    if (one.origin !== 'local' || typeof one.hash !== 'string' || !/^[0-9a-f]{64}$/.test(one.hash) || one.text !== '' && one.hash !== textHash(one.text)) throw new Error('INVALID_MESSAGE_STORE')
-    if (!Number.isSafeInteger(one.hops) || one.hops < 1 || one.hops > HOP_LIMIT || !Number.isSafeInteger(one.claimed) || one.claimed < 0 || typeof one.nonce !== 'string' || !/^(?:[0-9a-f]{6})?$/.test(one.nonce)) throw new Error('INVALID_MESSAGE_STORE')
-  }
-  if (new Set(messages.map(one => one.id)).size !== messages.length) throw new Error('INVALID_MESSAGE_STORE')
-  if (saved.mailboxes !== undefined) {
-    if (!Array.isArray(saved.mailboxes) || saved.mailboxes.length > MAILBOX_CAP) throw new Error('INVALID_MESSAGE_STORE')
-    for (const one of saved.mailboxes) {
-      if (!one || !isMailboxTarget(one.id) || one.id !== mailboxId(messageId(one.agent), messageId(one.session)) || one.scope !== 'mailbox' || one.turn !== 'session' || !Number.isFinite(one.expires)) throw new Error('INVALID_MESSAGE_STORE')
-      messageText(one.surface, 100)
-      if (one.folderDigest !== undefined && (typeof one.folderDigest !== 'string' || !/^[0-9a-f]{64}$/.test(one.folderDigest)) || one.mcpOwner !== undefined && (typeof one.mcpOwner !== 'string' || !/^[1-9][0-9]*:[^\r\n\0]{1,100}$/.test(one.mcpOwner)) || one.mcpLeaseUntil !== undefined && !Number.isFinite(one.mcpLeaseUntil) || one.contested !== undefined && typeof one.contested !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
-      if (one.busySeq !== undefined && !isTurnNumber(one.busySeq)) throw new Error('INVALID_MESSAGE_STORE')
-    }
-    if (new Set(saved.mailboxes.map(one => one.id)).size !== saved.mailboxes.length) throw new Error('INVALID_MESSAGE_STORE')
-  }
-  return pruneMessages({ messages, ...(saved.mailboxes === undefined ? {} : { mailboxes: saved.mailboxes }), ...(saved.pausePeerMessages === undefined ? {} : { pausePeerMessages: saved.pausePeerMessages }) }, now)
-}
+export { isClaimRef, parseMessageStore }
 
 // A peer sender is 'unverified' or one session's address. Anything else is refused before it is saved,
 // because the store's own reader would refuse it on the next start.
@@ -134,7 +89,9 @@ const same = (a: string, b: string): boolean => {
   return left.length === right.length && timingSafeEqual(left, right)
 }
 // keepsQueued: an automatic receiver (registered `unclaimed`); its leaving leaves its queued messages queued (#318).
-type Live = Connection & { secret: string; keepsQueued?: boolean }
+// marksStart: a receiver that says `starting` right before it asks its host for anything, so a claim it never said that
+// for was never started (#1507).
+type Live = Connection & { secret: string; keepsQueued?: boolean; marksStart?: boolean }
 // On Windows a virus scanner or indexer can hold a file just written, and a rename onto it then
 // fails for a moment. A short wait clears it, so the store is called busy only if it stays busy.
 const RENAME_WAITS_MS = [10, 25, 50, 100]
@@ -209,22 +166,13 @@ const openMessaging = (directory: string, isDefault = false, gate?: MessageGate)
 // for the terminal board, --status and --json to count what the page counts (#1296). The file is replaced whole,
 // never edited in place, so a read sees one complete save. Nothing (undefined) when the folder holds no store or
 // the file cannot be read as one: those surfaces then count every question as waiting, as they did before.
-// isSidecarOn: whether the Antigravity sidecar polls now, which only the server knows.
-const shownMessages = (state: Pick<MessageState, 'messages' | 'mailboxes'>, isSidecarOn?: boolean) =>
-  state.messages.map(one => {
-    const { wake: _wake, ...shown } = shownMessage(one)
-    const wake = shownWake(one, isSidecarOn)
-    return { ...shown, ...(wake === undefined ? {} : { wake }), ...(isMailboxSurfaceLost(one, state.mailboxes) ? { isSurfaceLost: true as const } : {}) }
-  })
-
 export const readQueuedMessaging = (directory: string, now: number) => {
   try {
     // The server refuses a store folder that is a link; so does this read, and every question then waits (#1276 review).
     if (lstatSync(resolve(directory)).isSymbolicLink()) return undefined
     const found = readSettings(join(resolve(directory), 'messages.json'))
     if (found.kind !== 'ok') return undefined
-    const state = expireMailboxes(parseMessageStore(found.text, now), now)
-    return { connections: [] as Connection[], mailboxes: state.mailboxes ?? [], messages: shownMessages(state) }
+    return queuedMessagingOf(found.text, now)
   } catch { return undefined }
 }
 
@@ -307,6 +255,8 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
     requireOpen()
     const next = pruneMessages(changed, now)
     if (next === state) return
+    // An owner whose claim another board retired (after proving it ended, M6) writes nothing.
+    claim.check(root)
     const temp = `${file}.${process.pid}.tmp`
     try {
       // A temp file an earlier save could not remove would block every save after it.
@@ -391,7 +341,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       expire(now)
       for (const [id, one] of expectations) expectations.set(id, observeSession(one, reports, now))
       return {
-        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, keepsQueued: _keepsQueued, ...one }) => one), messages: shownMessages(state, isSidecarOn(now)), sidecar: isSidecarOn(now),
+        enabled: true, mailboxes: state.mailboxes ?? [], connections: [...connections.values()].map(({ secret: _secret, keepsQueued: _keepsQueued, marksStart: _marksStart, ...one }) => one), messages: shownMessages(state, isSidecarOn(now)), sidecar: isSidecarOn(now),
         sessions: [
           ...[...expectations.values()].map(one => ({
             id: one.id, agent: one.agent, session: one.session, surface: one.surface,
@@ -445,7 +395,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         return { id, deadline: now + timeoutMs }
       }
       if (action === 'register') {
-        messageFields(body, ['agent', 'session', 'surface', 'turn', 'scope', 'origin', 'connection', 'secret', 'unclaimed'])
+        messageFields(body, ['agent', 'session', 'surface', 'turn', 'scope', 'origin', 'connection', 'secret', 'unclaimed', 'marksStart'])
         const agent = messageId(body.agent), session = messageId(body.session), turn = messageId(body.turn), surface = messageText(body.surface, 100)
         const scope = body.scope ?? 'turn'
         if (scope !== 'turn' && scope !== 'session' || scope === 'session' && turn !== 'session') throw new Error('INVALID_CONNECTION_SCOPE')
@@ -464,10 +414,10 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         if (connections.size >= 100) throw new Error('CONNECTION_LIMIT')
         const matches = [...connections.values()].filter(one => address(one.agent, one.session) === address(agent, session))
         // An automatic receiver asks to join only a session nobody holds, so it never marks a person's own connection contested.
-        if (body.unclaimed !== undefined && typeof body.unclaimed !== 'boolean') throw new Error('INVALID_CONNECTION_REQUEST')
+        if (body.unclaimed !== undefined && typeof body.unclaimed !== 'boolean' || body.marksStart !== undefined && typeof body.marksStart !== 'boolean') throw new Error('INVALID_CONNECTION_REQUEST')
         if (body.unclaimed === true && matches.length > 0) throw new Error('TARGET_CLAIMED')
         for (const live of matches) connections.set(live.id, { ...live, contested: true })
-        const one: Live = { id: randomBytes(16).toString('hex'), secret: randomBytes(24).toString('base64url'), agent, session, surface, turn, scope, origin, expires: now + LEASE_MS, contested: matches.length > 0, ...(body.unclaimed === true ? { keepsQueued: true } : {}) }
+        const one: Live = { id: randomBytes(16).toString('hex'), secret: randomBytes(24).toString('base64url'), agent, session, surface, turn, scope, origin, expires: now + LEASE_MS, contested: matches.length > 0, ...(body.unclaimed === true ? { keepsQueued: true } : {}), ...(body.marksStart === true ? { marksStart: true } : {}) }
         // It takes over what an earlier automatic receiver of this session left queued, before it can be polled.
         if (one.keepsQueued === true) save(rebindMessages(state, one, id => connections.has(id)), now)
         connections.set(one.id, one)
@@ -530,7 +480,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       if (action !== 'poll') throw new Error('UNKNOWN_ACTION')
       if (body.receive !== undefined && typeof body.receive !== 'boolean') throw new Error('INVALID_RECEIVE')
       connections.set(one.id, { ...one, expires: now + LEASE_MS })
-      const claimed = one.contested || body.receive === false ? { state, messages: [] } : claimMessages(state, one, now, randomBytes(3).toString('hex'))
+      const claimed = one.contested || body.receive === false ? { state, messages: [] } : claimMessages(state, one, now, randomBytes(3).toString('hex'), undefined, one.marksStart === true)
       // Claim reaches disk before a connector can perform any external delivery.
       save(claimed.state, now)
       return { messages: claimed.messages.map(message => ({ ...message, prompt: deliveryText(message) })), leaseMs: LEASE_MS, contested: one.contested === true }
@@ -573,6 +523,11 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
   const root = resolve(directory)
   let hasDeferred = false
   let lastError: string | null = null
+  // The connection to the board failed after the request may have reached it: a failed take then hands back what the
+  // board may have claimed, as after a timeout (#990), while the error itself is reported, not read as busy (#1631).
+  let isCutOff = false
+  // The last call failed on the connection to the board (refused, reset or cut), not on a timeout or the board's answer.
+  let hasTransportError = false
   // The one place that decides "no folder": the first look at the root said ENOENT. Nothing at that path, so no board has run here;
   // a link (even a dead one), a file in its place or any other failure is not that, and no caller looks at the disk again.
   let isAbsent = false
@@ -598,6 +553,8 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
     hasDeferred = false
     lastError = null
     isAbsent = false
+    isCutOff = false
+    hasTransportError = false
     const wait = budget
     try {
       const started = Date.now()
@@ -633,10 +590,20 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
         if (!owner || typeof owner !== 'object' || owner.pid !== pid || typeof owner.url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url)) throw new Error('INVALID_SERVER_OWNER')
         return await new Promise<Record<string, unknown>>((done, fail) => {
           const url = new URL(owner.url as string)
+          // This call ends the request itself when its time is up or the answer is too long to read. The error that ending
+          // raises is no transport failure: the call stays deferred, as before #1631, and is not asked again.
+          let isEndedHere = false
+          const endHere = (): void => {
+            isEndedHere = true
+            clearTimeout(timer)
+            req.destroy()
+            hasDeferred = true
+            fail(new Error('BOARD_NOT_RUNNING'))
+          }
           const req = request(new URL(`/api/messages/${action}`, url), { method: 'POST', headers: { 'x-board-token': url.searchParams.get('t')!, 'content-type': 'application/json' } }, res => {
             let text = ''
             res.setEncoding('utf8')
-            res.on('data', chunk => { text += chunk; if (text.length > 65_536) req.destroy() })
+            res.on('data', chunk => { text += chunk; if (text.length > 65_536 && !isEndedHere) endHere() })
             res.on('end', () => {
               clearTimeout(timer)
               try {
@@ -650,10 +617,12 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
                 done(result)
               } catch (error) { fail(error) }
             })
-            res.on('error', () => { clearTimeout(timer); hasDeferred = true; fail(new Error('BOARD_NOT_RUNNING')) })
+            res.on('error', error => { if (isEndedHere) return; clearTimeout(timer); isCutOff = true; hasTransportError = true; fail(error) })
           })
-          const timer = setTimeout(() => { req.destroy(); hasDeferred = true; fail(new Error('BOARD_NOT_RUNNING')) }, wait)
-          req.on('error', () => { clearTimeout(timer); hasDeferred = true; fail(new Error('BOARD_NOT_RUNNING')) })
+          const timer = setTimeout(endHere, wait)
+          // Only the timer above is a timeout; any other transport failure keeps its own code (ECONNREFUSED, ECONNRESET).
+          // A refused connection never reached the board, so it claimed nothing to hand back.
+          req.on('error', error => { if (isEndedHere) return; clearTimeout(timer); isCutOff = (error as NodeJS.ErrnoException).code !== 'ECONNREFUSED'; hasTransportError = true; fail(error) })
           req.end(JSON.stringify(action === 'mailbox-turn' ? { ...body, before: started + wait } : body))
         })
       }
@@ -721,7 +690,7 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
       throw error
     }
   }
-  return { call, isDeferred: () => hasDeferred, isAbsent: () => isAbsent, error: () => lastError }
+  return { call, isDeferred: () => hasDeferred, isCutOff: () => isCutOff, hasTransportError: () => hasTransportError, isAbsent: () => isAbsent, error: () => lastError }
 }
 export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(directory, budget).call
 // Antigravity's turn order file (#1396; TurnOrder in hooks/hook-messages.ts): one per conversation in the messages folder,
@@ -763,11 +732,14 @@ export const markTurnOrder = (directory: string, agent: string, session: string,
 export const hookMailbox = (directory: string, budget: number, boardWait = 150, storeWait = 120) => {
   const deadline = Date.now() + budget
   const access = mailboxAccess(directory, Math.min(boardWait, budget), Math.min(storeWait, budget))
+  // The last take failed after the board may have claimed a message, and handing it back did not go through.
+  let isHeld = false
   const call = async (action: string, body: Record<string, unknown>, now: number): Promise<Message | null> => {
     try { return (await access.call(action, body, now)).message as Message ?? null } catch { return null }
   }
   // The take itself; a failure is thrown, so a caller that must tell it from an empty mailbox can.
   const takeTurn = async (agent: string, session: string, surface: string, now: number, named?: string, seq?: number): Promise<Message | null> => {
+    isHeld = false
     const ref = named ?? randomBytes(6).toString('hex')
     // A plugin that names its claim also marks its wake (attempt) and gives it back as unsent, which a board started before
     // the plugin existed refuses with UNKNOWN_FIELD, so a claim it took could never go back: it waits out 30 minutes and its text
@@ -791,10 +763,18 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
           if (index + 1 < bodies.length && deadline - Date.now() >= boardWait) continue
           throw error
         }
+        // A claim with no name cannot be handed back, so one this take may have made stays held (#1631).
+        if (body.ref === undefined) {
+          if (access.isDeferred() || access.isCutOff()) isHeld = true
+          throw error
+        }
         // The board may have claimed a message after this hook stopped waiting: hand it back (#990).
         // Its own budget is what the hook has left; a claim not handed back waits out the lease.
         const left = deadline - Date.now()
-        if (body.ref !== undefined && access.isDeferred() && left > 0) try { await mailboxAccess(directory, Math.min(boardWait, left)).call('mailbox-release', { agent, session, ref }, Date.now()) } catch {}
+        if (access.isDeferred() || access.isCutOff()) {
+          isHeld = true
+          if (left > 0) try { await mailboxAccess(directory, Math.min(boardWait, left)).call('mailbox-release', { agent, session, ref }, Date.now()); isHeld = false } catch {}
+        }
         throw error
       }
     }
@@ -803,6 +783,12 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
   return {
     get hasDeferred() { return access.isDeferred() },
     get error() { return access.error() },
+    // True when the last call failed on the connection to the board itself (refused, reset or cut): its error is reported,
+    // and a caller with time to spare may ask again, as after a deferred take (#1631).
+    get hasTransportError() { return access.hasTransportError() },
+    // True when the board may still hold a claim from the last take (handing it back failed): asking again would find
+    // nothing while that message waits, so the caller reports the error instead (#1631).
+    get hasHeldClaim() { return isHeld },
     // True only when the last call found nothing at the messages folder's path.
     get hasNoFolder() { return access.isAbsent() },
     // An in-process plugin may name the claim (a 12-hex ref), so it can hand the claim back with release.

@@ -2,6 +2,180 @@
 
 What changed for the person using Agent Board, one line per change, newest version first. How a change was built and tested is in its pull request. Entries up to 0.24.0 were shortened to this form on 2026-11-02; their full text is in `git show ddbef2a:CHANGELOG.md`.
 
+## 0.25.0 — 2026-11-18
+
+- A board message delivered through a generated hook keeps its question open, and the PowerShell hook no longer searches the module folders on every run (#1334, #836, #1573).
+
+- A forgotten retired page no longer displaces a keyed page, and a stale page poll failure is ignored (#1569).
+
+- For contributors: fail-first reads test titles as pr-check does and runs titles with fixed parts (#1568).
+
+- Refuse a press on a choice drawn from options that have since changed (#1521).
+
+- For contributors: every pull request check reads only the body lines a reader sees (#1567).
+
+- Send to Codex is on by default, and --no-codex-send turns it off (#1517).
+
+- For contributors: the Codex test stand-in skips an unfinished last log line and accepts a list poll before a turn starts (#1566).
+
+- Confirm an approval is still waiting before interrupting outside a thread (#1562).
+
+- For contributors: preflight and the pull request check test added lines against the code rules (#1551).
+
+- Explain how to reconnect a resumed conversation (#1510).
+
+- For contributors: a risk-tier pull request on a case surface starts with a tests-only commit, preflight maps touched paths to journeys, and a later review round resumes its reviewer (#1549).
+
+- For contributors: a pull request over its tier's size limit fails unless the body says why it cannot be split (#1548).
+
+- For contributors: a case table's tests must exist and fail without the change (#1522).
+
+- For contributors: a pull request names its tier, and a change to a listed risk path is risk tier (#1533).
+
+- Wait for active delivery or interrupt approval wait on page close (#1534).
+
+- Clear Codex sending state when delivery turn ends uncertain (#1493).
+
+- An idle Codex card says its message starts within about a minute, not right away (#1509).
+
+- The board reads a replaced inbox or question folder again instead of showing the old message (#1508).
+
+- Send to Codex starts a turn only while a person's Codex has the thread open (#1496).
+
+- A damaged or unreadable mailbox claim is a store error, not deferred (#1499).
+
+- An agent's own list of choices shows as buttons on every surface, and a list the board refuses shows none (#1462).
+
+- Avoid archive capture drain timeout on busy Windows runs (#1497).
+
+- An idle OpenCode session wakes on a board message and takes it at session.idle when busy (#1366).
+
+- Surface unreadable message store errors instead of reporting deferred (#1472).
+
+- OpenClaw's gateway loads the board's plugin at start: its manifest asks for it (#1494).
+
+- Notify open tabs on server replacement and avoid claim uncertain flicker (#1485).
+
+- Setup can write a sidecar, on the person's yes, that lets the board wake an idle Antigravity conversation (#1481).
+
+- Held press on a lost-result button survives a lost-results rebuild (#1482).
+
+- Verify Windows XDG_RUNTIME_DIR ACLs and retire replaced page secrets (#1436).
+
+- Keep closed clips and step folds closed across redraws (#1466).
+
+- Shared row-state derivation and unsure-with-age row (#1406).
+
+- Send to Codex starts an idle Codex CLI session's turn from the page, behind --codex-send (#1306).
+
+- Name Antigravity rows by conversation title with start-time disambiguation (#1446).
+
+- A press held while the board redraws is no longer lost (#1470).
+
+- For contributors: the merge check's tests get their own Windows time budget, 90 s (#1465).
+
+- A late take changes nothing, a reopened session gets its message, and a plain answer stops the retry timer (#1455).
+
+- An open step fold stays open when the board redraws (#1412).
+
+- Start the prompt classifier before the PowerShell reporter's first cmdlet (#1441).
+
+- A take the board defers is asked again, and a failed accept says so (#1442).
+
+- A board message reaches an idle Antigravity CLI (agy TUI) session or a desktop app conversation at its next turn, and the page offers Queue for them (#1386).
+
+- On Windows the board opens docked on the right quarter of the screen and comes back where you last put it (#1299).
+
+- Offer Copy and stop waiting when a mailbox surface changes (#1423).
+
+- Add shared background-resume helper within owner limits (#1417).
+
+- Give queued, handed-over and failed receipts distinct colours and plain next-turn wording (#1414).
+
+- A Codex hook mailbox is the CLI only when its session file says so (#1383).
+
+- For contributors: preflight leaves a test file too large to run whole to CI and says it was not run (#1392).
+
+- Open --serve in the app window like the plain command (#1398).
+
+- Show one honest message line after Send on a card (#1397).
+
+- Setup no longer offers Gemini CLI; Antigravity CLI is Google's CLI (#1382).
+
+- Quote a file name in every language, and say a failed read cannot be read (#1389).
+
+- Explain invalid and busy --port values (#1393).
+
+- Keep a single hide control and a single Show again button (#1391).
+
+- For contributors: a bot's approval does not count as a review (#1395).
+
+- Show Copy instead of send arrow on choice button when agent cannot receive (#1388).
+
+- Answer --version and reject unknown flags on the board script (#1387).
+
+- Open the sidebar as a drawer below 560 px (#1385).
+
+- An idle Codex CLI session's card offers Queue for its next turn, recorded live (#1381).
+
+- A queued answer counts as handled on the page and the CLI, and a settings file that is a link or not a plain file is never written through (#1339).
+
+- Allow once, Deny and Deny and say why on the board for Claude Code's permission prompts (#1368).
+
+- One honest send line per card; Send only on recorded routes (#1354).
+
+- A watcher whose folder is removed stops, so the DeepSeek host and the board are not kept busy (#1369).
+
+- Remove no longer says the direct command stops working when a skipped agent keeps the board script (#1350).
+
+- The README commands use the npx launcher and say the direct command stops working after remove (#1291).
+
+- A pasted Claude report names the reserved agent in its refusal (#1083).
+
+- Rebuild the board bundle on main after #1229, so the 0.24.3 fingerprints are recognized again (#1329).
+
+- Show new questions within the three-second update budget (#1229).
+
+- For contributors: the README may show one real screenshot of the board's page per language (#1307).
+
+- A board message to Antigravity reads Replied: the turn-end hook reads the model's ACK in its answer (#1416, #1601).
+
+- For contributors: the delivery state table covers combined flag shapes and their cells (#1623).
+
+- For contributors: pr-check decodes safe HTML entities in split reasons without letting hidden text through (#1617).
+
+- For contributors: the pr-check rerun reports early failures and checks timed-out reruns again (#1616).
+
+- For contributors: pr-check ignores Review: approvals from outside the team (#1615).
+
+- On Windows the docked open reads the screens without compiling C#, so it no longer waits for csc.exe (#1614).
+
+- On a big board the pane uses less processor time while idle: its 2-second check no longer lists the whole board folder (#422, #1619).
+
+- Setup stops instead of writing over a file someone edits while it runs, on a standalone install too (#1488, #1594).
+
+- For contributors: the code rules are read in file context and catch other test extensions, .only aliases and fake board-script files (#1605).
+
+- On Windows the sh reporter runs its PowerShell copy from a file, so a longer reporter still writes its prompt receipt (#1592).
+
+- For contributors: the nested test run on Windows keeps the account's Playwright browsers (#1471, #1590).
+
+- The away line counts the time until you came back, not until the next refresh (#1576).
+
+- For contributors: an outside small docs fix needs a Tier line like any other pull request (#1585).
+
+- For contributors: prompt-hooks.test.mjs gets a 130 s time budget on Windows, so a slow runner alone no longer fails a pull request (#1603, #1604).
+
+- For contributors: stand-in pages use a pid no process can have (#1571).
+
+- OpenCode's card sends a board message instead of offering Copy: at once when OpenCode is idle, and when its step ends when it is busy (#1591, #1599).
+
+- When an agent cannot reach the board because the connection was refused or cut, it reports that error instead of "mailbox deferred", and a DeepSeek turn asks the board again within five seconds (#1631, #1633).
+
+- A choice list with an empty entry offers nothing, a refused list stays refused on the inbox card, and each choice shows as sent (#1634).
+
+- Send to Codex waits about 10 minutes, not 1, before it starts a message on an idle thread, so a thread nobody has open gets nothing (#1608).
+
 ## 0.24.3 — 2026-11-10
 
 - **Tests / native hooks** · Failed Antigravity native-context checks name fixed hook-error codes and their exit status, while reading hook logs only on failure and keeping commands and log text private. Failed setup checks now also distinguish launch errors, deadlines and signals with bounded status, code and timing fields. The missing-context flake remains under investigation (#683).

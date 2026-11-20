@@ -5,11 +5,11 @@ import { localDay } from '../hooks/journal'
 import { isInboxFile } from '../hooks/inbox'
 import { paletteFor } from '../hooks/palette'
 import { parseProgress } from '../hooks/parse'
-import { captureJson, capturePath, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionFilesKey, questionProofJson, questionProofPath, questionsJson, questionsPath, resolveQuestion } from '../hooks/questions'
+import { captureJson, capturePath, emptyQuestions, observeQuestions, parseCapture, parseQuestions, questionFilesKey, questionProofJson, questionProofPath, questionStatsKey, questionsJson, questionsPath, resolveQuestion } from '../hooks/questions'
 import type { QuestionCapture } from '../hooks/questions'
 import { sha256 } from '../hooks/sha256'
 import { STRINGS } from '../hooks/strings'
-import { answeredPath } from '../hooks/view'
+import { answeredJson, answeredPath } from '../hooks/view'
 import { EN } from '../hooks/strings-en'
 import { finished, ledgerOf, reopened } from './fixtures/question-files'
 import { engineBeneath, FILE, INBOX, makeWorld, PANE, PROPS, visiblePaneText } from './fixtures/pane-world'
@@ -522,12 +522,100 @@ test('L4 D24 scale: the pane does at most 6 file operations per idle poll', { ti
   world.ran = []
   // From the 12th second to the 14th only the 2 s poll runs: the inbox look comes every 5 s.
   await clock.advance(2000)
-  // The poll ran: it looked at progress.md and listed the folder beside it.
+  // The poll ran: it looked at progress.md, and the question files by their stats and the
+  // folder's time, without listing the folder beside it (#422).
   expect(world.fileOps).toContain(`stat ${FILE}`)
-  expect(world.fileOps).toContain(`list ${FILE.replace(/\/[^/]*$/, '')}`)
+  expect(world.fileOps).not.toContain(`list ${FILE.replace(/\/[^/]*$/, '')}`)
   expect(world.fileOps.length).toBeLessThanOrEqual(IDLE_POLL_FILE_OPS)
   expect(world.fileOps.filter(op => op.startsWith('read ') || op.startsWith('write '))).toEqual([])
   expect(world.ran).toEqual([])
+})
+
+// After a settled pass, five idle polls on a folder of 6,000 entries list no folder, and a
+// capture added, removed or renamed still runs a pass at the next poll (#422). The 6,000 entries
+// are 600 valid captures and 5,400 notes the pass ignores by name: the listing's cost is the
+// entry count, and 6,000 captures would make the settling pass itself trip the clock's budget.
+test('five idle polls on a folder of 6,000 entries list no folder, and a capture added, removed or renamed still runs a pass', { timeoutMs: 60_000 }, async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  const records = Array.from({ length: 600 }, (_, n) => finished(n + 1))
+  records.forEach((record, n) => putCapture(world, record, 'resolved', 10 + n))
+  for (let n = 0; n < 5400; n++) world.files.set(`${FILE.replace(/\/[^/]*$/, '')}/note-${n}.txt`, 'a note\n')
+  seedAsked(world, board)
+  // A completed pass publishes the ledger cache once, even when no file changes.
+  let passes = 0
+  on('state.set', { plugin: 'agent-board', key: 'questionLedger' }, ($, event, next) => {
+    passes += 1
+    return next(event)
+  })
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  // The first polls read everything once; the pass after that finds nothing changed.
+  for (let n = 0; n < 8; n++) await clock.advance(2000)
+  expect(passes).toBeGreaterThan(0)
+  world.fileOps = []
+  world.reads = []
+  passes = 0
+  for (let n = 0; n < 5; n++) await clock.advance(2000)
+  // Five idle polls, and none of them listed the folder beside progress.md: only stats, and
+  // the inbox listing the pending turns already need. The progress.md stat shows the polls ran.
+  expect(passes).toBe(0)
+  expect(world.fileOps).toContain(`stat ${FILE}`)
+  expect(world.fileOps).not.toContain(`list ${FILE.replace(/\/[^/]*$/, '')}`)
+  expect(world.fileOps.every(op => op.startsWith('stat ') || op === `list ${INBOX}`)).toBe(true)
+  expect(world.reads).toEqual([])
+  // A capture added: the folder's time moves, so the next poll passes again and reads it.
+  const added = finished(6001)
+  putCapture(world, added, 'unresolved', 100_000)
+  await clock.advance(2000)
+  expect(passes).toBe(1)
+  expect(world.reads).toContain(captureFile(added, 'unresolved'))
+  // A capture removed: the next poll passes again.
+  passes = 0
+  world.files.delete(captureFile(records[0]!, 'resolved'))
+  await clock.advance(2000)
+  expect(passes).toBe(1)
+  // A capture renamed: the same question's copy under a new name, the old one gone.
+  passes = 0
+  const moved = records[1]!
+  world.files.delete(captureFile(moved, 'resolved'))
+  putCapture(world, reopened(moved), 'unresolved', 100_001)
+  await clock.advance(2000)
+  expect(passes).toBe(1)
+  expect(world.reads).toContain(captureFile(reopened(moved), 'unresolved'))
+})
+
+test('a ledger or answered change after a settled pass runs a pass at the next poll', async ($, on) => {
+  const board = `## demo\n${block('a1b2c301', 'waiting', 1, '- [?] Publish the first plan, OK?')}`
+  const world = makeWorld([[FILE, board]])
+  world.env = english
+  seedAsked(world, board)
+  // The answered file is there from the start, so changing it is a rewrite, not an add.
+  put(world, ANSWERED, answeredJson([]), 1)
+  let passes = 0
+  on('state.set', { plugin: 'agent-board', key: 'questionLedger' }, ($, event, next) => {
+    passes += 1
+    return next(event)
+  })
+  const clock = engineBeneath(on, world)
+  await $.session.start(START)
+  for (let n = 0; n < 3; n++) await clock.advance(2000)
+  passes = 0
+  world.reads = []
+  await clock.advance(2000)
+  expect(passes).toBe(0)
+  // Another session writes the same ledger again: its time moves, so the next poll passes.
+  put(world, LEDGER, world.files.get(LEDGER)!, 5)
+  await clock.advance(2000)
+  expect(passes).toBe(1)
+  expect(world.reads).toContain(LEDGER)
+  // The answered file changes: the next poll passes again.
+  passes = 0
+  world.reads = []
+  put(world, ANSWERED, answeredJson([]), 6)
+  await clock.advance(2000)
+  expect(passes).toBe(1)
 })
 
 test('an idle poll reads the questions again once another session changes the ledger, and not before', async ($, on) => {
@@ -571,7 +659,7 @@ test('idle polls run no question pass while only this session\'s background jobs
   expect(passed).toEqual([false, false, false, false, false])
 })
 
-test('adding one remembered answer alone runs exactly one question pass and later idle polls stay quiet', async ($, on) => {
+test('adding one remembered answer alone runs a question pass to carry it and one more to settle, and later idle polls stay quiet', async ($, on) => {
   const world = makeWorld([[FILE, '## demo\n']])
   world.env = english
   world.reply = () => 'TITLE: Synthetic work\nCONTEXT: Synthetic data\nDONE: -\nNEXT: -\nASK: -'
@@ -579,12 +667,24 @@ test('adding one remembered answer alone runs exactly one question pass and late
   let hidden: unknown = []
   let arriving: (() => void) | undefined
   const directory = FILE.slice(0, FILE.lastIndexOf('/') + 1)
+  // What the pane's idle key is made from (#422): the stats of progress.md, the ledger and the
+  // answered file, and the folder's own time. The mock's stat of progress.md reads the file
+  // clock, of any other file its own time or the file clock, and of a folder its time or the
+  // file clock, with size 0.
+  const statOf = (path: string): { size: number; mtimeMs: number } | null => {
+    const text = world.files.get(path)
+    if (text !== undefined) return { size: text.length, mtimeMs: path === FILE ? world.mtime : world.mtimes?.[path] ?? world.mtime }
+    const isDir = [...world.files.keys()].some(file => file.startsWith(`${path}/`))
+    return isDir ? { size: 0, mtimeMs: world.mtimes?.[path] ?? world.mtime } : null
+  }
   const inputs = () => ({
     path: FILE,
-    files: questionFilesKey(FILE, ANSWERED, [...world.files].flatMap(([path, text]) =>
-      path.startsWith(directory) && !path.slice(directory.length).includes('/')
-        ? [{ name: path.slice(directory.length), size: text.length, mtimeMs: world.mtimes?.[path] ?? world.mtime }]
-        : []), NOW, 2000),
+    files: questionStatsKey(FILE, ANSWERED, {
+      progress: statOf(FILE),
+      ledger: statOf(LEDGER),
+      answered: statOf(ANSWERED),
+      dirMtimeMs: statOf(directory.replace(/\/$/, ''))?.mtimeMs ?? null,
+    }, NOW, 2000),
     pending: [...world.files.keys()].filter(path => path.startsWith(`${INBOX}/`) && isInboxFile(path.slice(INBOX.length + 1))),
     own: structuredClone(own),
     hidden: structuredClone(hidden),
@@ -634,12 +734,18 @@ test('adding one remembered answer alone runs exactly one question pass and late
   for (let n = 0; n < 5; n++) await clock.advance(2000)
   expect(arriving).toBeUndefined()
   expect((world.store?.inboxDone as Record<string, string>)[name]).toBeDefined()
-  expect(inputs()).toEqual(fixed)
-  expect(passes).toEqual([fixed])
+  // One arrival is carried by one pass and settled by one more, not by one pass alone.
+  // Taking the turn writes its done record beside progress.md, which moves the folder's own
+  // time, and the key is taken before the pass on purpose (register.tsx: a write that lands
+  // while a pass runs makes the next poll pass again, so a concurrent write is never
+  // swallowed). The pass's own take is such a write, so the next poll sees the changed key
+  // and passes once more; after that the key is still and the polls stay quiet.
+  const settled = inputs()
+  expect(passes).toEqual([fixed, settled])
   for (let n = 0; n < 5; n++) {
     await clock.advance(2000)
-    expect(inputs()).toEqual(fixed)
-    expect(passes).toEqual([fixed])
+    expect(inputs()).toEqual(settled)
+    expect(passes).toEqual([fixed, settled])
   }
 })
 
@@ -1661,15 +1767,23 @@ test('fourteen question races over ten minutes show no error and the fifteenth s
   for (let pass = 0; pass < 3; pass += 1) await clock.advance(2000)
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
   try {
-    // An unreadable proof listing takes the race path before any ledger write.
+    // An unreadable proof listing takes the race path before any ledger write. The idle key
+    // does not list the folder (#422), so a pass only runs when something else changes: each
+    // race here is forced by rewriting the ledger, which moves its time.
     world.unlistable = new Set([FILE.replace(/\/[^/]*$/, '')])
-    await clock.advance(2000)
+    let rewritten = 0
+    const forceRace = async (): Promise<void> => {
+      rewritten += 1
+      put(world, LEDGER, world.files.get(LEDGER) ?? questionsJson(emptyQuestions()), 100 + rewritten)
+      await clock.advance(2000)
+    }
+    await forceRace()
     offset = 10 * 60_000 + 1
     for (let race = 2; race <= 14; race += 1) {
-      await clock.advance(2000)
+      await forceRace()
       expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeUndefined()
     }
-    await clock.advance(2000)
+    await forceRace()
     expect(await ui.find({ type: 'Text', text: EN.questionsUnreadable() })).toBeDefined()
   } finally {
     await ui.unmount()
@@ -1878,28 +1992,40 @@ test('a remembered question copy or proof is read again when its time moves or i
   const timesRead = (path: string): number => (world.reads ?? []).filter(one => one === path).length
   await $.session.start(START)
   await clock.advance(2000)
+  // A capture added forces the next pass; the pass reads the files whose time moved.
+  let forced = 0
+  const forcePass = async (): Promise<void> => {
+    forced += 1
+    putCapture(world, finished(900 + forced), 'unresolved', 100 + forced)
+    await clock.advance(2000)
+  }
   for (const [path, text] of whole) {
     const first = timesRead(path)
     expect(first).toBeGreaterThan(0)
     // Nothing moved: not read again.
     await clock.advance(2000)
     expect(timesRead(path)).toBe(first)
-    // The same bytes under a new time: read once more, and then remembered.
+    // The same bytes under a new time: the idle key does not see a file rewritten in place
+    // (#422), so no pass runs for the rewrite alone and it is not read again yet.
     put(world, path, text, 50)
     await clock.advance(2000)
+    expect(timesRead(path)).toBe(first)
+    // A pass forced by another change reads it once more, and then remembers it.
+    await forcePass()
     expect(timesRead(path)).toBe(first + 1)
     await clock.advance(2000)
     expect(timesRead(path)).toBe(first + 1)
-    // Another size under the same time: read again, and a damaged one at every look after.
+    // Another size under the same time: read again once a pass runs, and a damaged one at
+    // every pass after.
     put(world, path, text.slice(0, 40), 50)
-    await clock.advance(2000)
+    await forcePass()
     const damaged = timesRead(path)
     expect(damaged).toBeGreaterThan(first + 1)
-    await clock.advance(2000)
+    await forcePass()
     expect(timesRead(path)).toBeGreaterThan(damaged)
     // Whole again for the next file.
     put(world, path, text, 60)
-    await clock.advance(2000)
+    await forcePass()
   }
 })
 

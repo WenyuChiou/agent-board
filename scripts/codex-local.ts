@@ -1,16 +1,18 @@
+import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { boardConfirmedReport, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
-import type { CodexReport } from '../hooks/codex'
+import { blockClaimOf, blockHostOf, boardConfirmedReport, claimText, cleanAntigravityIdentity, codexClaimOf, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, resolveAntigravityIdentity, seenClaimOf, sessionTitle, validateCodexReport } from '../hooks/codex'
+import type { AntigravityIdentity, CodexReport } from '../hooks/codex'
 import { hermesHome } from '../hooks/hermes-home'
 import { agentHooks, BOARD_FOR, editHermesSetup, isReleased, readConfig } from '../hooks/connect-pure'
 import type { Strings } from '../hooks/i18n'
 import { STRINGS } from '../hooks/strings'
 import { parseProgress, STALE_MS } from '../hooks/parse'
+import { codexProcessClaim, readingHostHash } from './session-liveness'
 import { reporterTail } from './reporter-tail'
 import { othersNote } from '../hooks/others'
 import { cleanSignal, codexSignal, isStrongRun, pickParent, withSignal } from '../hooks/runs'
@@ -18,6 +20,7 @@ import type { RunSignal } from '../hooks/runs'
 import { antigravitySidecarConfig, antigravitySidecarSource, ANTIGRAVITY_SIDECAR_ID } from '../hooks/antigravity-sidecar'
 import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCommandArgs, lifecycleCapability, localAgents, opencodePlugin, planEvents, planPlugins, statusEvents, windowsHookCommand } from '../hooks/local-agents'
 import type { LocalAgent } from '../hooks/local-agents'
+import type { AgentClaim } from '../hooks/session-liveness'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
 import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
 import { discoverCodexBinary, inspectCodexConfigToml, trustCodex } from './codex-host'
@@ -26,12 +29,12 @@ import { installControlRoot, withInstallLock } from './install-control'
 import { ConnectTransaction } from './connect-transaction'
 import { boardPromptHelper, boardRequestWords, boardRun, deliveryRequestWords, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
-import { windowsHookNode } from './windows-hook-node'
+import { hookProgram, windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
-import { deliverTurnEvent } from './hook-delivery'
+import { antigravitySurface, deliverTurnEvent } from './hook-delivery'
 import { checkStoreFile, hookMailbox, markTurnOrder, readTurnOrder } from './board-messaging'
 import { isTurnStart } from '../hooks/hook-messages'
 import { defaultMessagesDirectory } from './runtime-folder'
@@ -39,7 +42,7 @@ import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
 import { currentPart } from '../hooks/retention'
 import { lastQuestion } from '../hooks/digest'
-import { ANTIGRAVITY_TRANSCRIPTS, resolveAntigravityTitle } from './antigravity-meta'
+import { antigravityProcessClaim, ANTIGRAVITY_TRANSCRIPTS, resolveAntigravityTitle } from './antigravity-meta'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -80,7 +83,10 @@ export const removeCodexTrustEntries = (text: string, keys: string[]): { text: s
   return { text: lines.filter((_, index) => !deleted.has(index)).join(''), removed }
 }
 
-const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
+const hash = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex')
+// A file is plain when its bytes survive a read as UTF-8 and a write back. One that does not (a lone FF, Big5) would
+// come back as EF BF BD, so setup refuses it instead of rewriting it (#1607).
+export const isPlain = (bytes: Buffer): boolean => Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes)
 
 // Antigravity hooks name their own transcript but do not carry the reply text.
 // agy 1.5.2 names transcript_full.jsonl, which has the same line shape as transcript.jsonl.
@@ -88,7 +94,7 @@ const antigravityQuestion = (path: unknown): string | null => {
   if (typeof path !== 'string' || !isAbsolute(path) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(path))) return null
   try {
     if (!lstatSync(path).isFile()) return null
-    const fd = openSync(path, 'r')
+    const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
     try {
       const stat = fstatSync(fd)
       if (!stat.isFile()) return null
@@ -110,8 +116,9 @@ const antigravityQuestion = (path: unknown): string | null => {
         if (typeof entry.source !== 'string' || typeof entry.type !== 'string') return null
         if (entry.type === 'USER_INPUT') reply = null
         else if (entry.source === 'MODEL' && entry.type === 'PLANNER_RESPONSE') {
-          if (typeof entry.content !== 'string') return null
-          if (entry.content.trim() !== '') reply = entry.content
+          if (entry.content !== undefined && typeof entry.content !== 'string') return null
+          if (typeof entry.content === 'string' && entry.content.trim() !== '') reply = entry.content
+          else if (entry.content === undefined) reply = null
         }
       }
       return reply === null ? null : lastQuestion(reply)
@@ -149,6 +156,29 @@ const readBytes = (file: string): Buffer | null => {
   }
 }
 const readLocal = (file: string): string | null => readBytes(file)?.toString('utf8') ?? null
+// What setup saw at a path when it planned (#1488): the kind of the path itself (lstat follows no link), a link's
+// target, and the bytes read through it. Decoded text is not enough to compare later: bytes that decode alike
+// (EF BF BD and FF) would pass, and a dangling link would read as a missing file. lstat sees the last part of the
+// path only: a folder above it swapped for a link is not caught. `real` is the path's real path while it resolves (the OS
+// settles letter case, relative link targets and link chains), so a removal can tell a file this batch removed from one
+// another program removed; it is not compared.
+type Snap = { kind: 'none' | 'file' | 'link' | 'other'; link: string | null; bytes: Buffer | null; real: string | null }
+const NO_PATH: Snap = { kind: 'none', link: null, bytes: null, real: null }
+const take = (file: string): Snap => {
+  let kind: Snap['kind']
+  try {
+    const stat = lstatSync(file)
+    kind = stat.isSymbolicLink() ? 'link' : stat.isFile() ? 'file' : 'other'
+  } catch (error) {
+    if ((error as { code?: string }).code === 'ENOENT') return NO_PATH
+    throw error
+  }
+  let real: string | null = null
+  try { real = realpathSync.native(file) } catch {}
+  return { kind, link: kind === 'link' ? readlinkSync(file) : null, bytes: readBytes(file), real }
+}
+const sameBytes = (a: Buffer | null, b: Buffer | null): boolean => a === null || b === null ? a === b : a.equals(b)
+const same = (a: Snap, b: Snap): boolean => a.kind === b.kind && a.link === b.link && sameBytes(a.bytes, b.bytes)
 
 // The repository name in a remote's address: `demo` from `https://host/x/demo.git` or `git@host:x/demo.git`.
 // `origin` when there is one, else the first remote; only that section's own `url` counts.
@@ -208,8 +238,9 @@ const object = (value: unknown): Json => {
 // Hermes Agent's trust file: {"approvals": [{event, command, approved_at, script_mtime_at_approval}]}, written with sorted keys.
 // An absent file is an empty list; one this cannot read as that shape is left alone (null).
 type Approval = Json & { event?: unknown; command?: unknown }
-const readAllowlist = (text: string | null): { data: Json; list: Approval[] } | null => {
+const readAllowlist = (text: string | null, isUnreadable = false): { data: Json; list: Approval[] } | null => {
   if (text === null) return { data: {}, list: [] }
+  if (isUnreadable) return null
   try {
     const data = object(JSON.parse(text))
     const list = data.approvals ?? []
@@ -223,7 +254,12 @@ const sortedKeys = (value: unknown): unknown => Array.isArray(value) ? value.map
 const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), null, 2).replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
 // A root that is not a mapping (a list, a flow document) is not something to add a key to.
 const isYamlMapping = (text: string): boolean => text.split(/\r?\n/).every(line => !/^\S/.test(line) || /^(?:#|---|\.\.\.)/.test(line) || /^(?:"[^"\n]*"|'[^'\n]*'|[^\s#{[!&*|>%@`"'-][^\n]*?)\s*:(?:\s|$)/.test(line))
-const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false): void => {
+// A name that was free when setup planned (`isFresh`) is created, never written over (#1693): a rename would replace a
+// file that landed there after the last check. A hard link of the finished temporary file places it whole in one step
+// and fails when the name is taken, and setup then stops as busy. Where a link is refused for any other reason, as on a
+// disk with no hard links, setup checks once more and renames, as for any other file: a file that lands between that
+// check and the rename is written over there, a stated limit.
+const atomic = (file: string, text: string | Buffer, current: () => void = () => {}, retryRecord = false, isFresh = false): void => {
   mkdirSync(dirname(file), { recursive: true })
   const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`
   const fd = openSync(temporary, 'wx', 0o600)
@@ -232,13 +268,19 @@ const atomic = (file: string, text: string | Buffer, current: () => void = () =>
     writeFileSync(fd, text)
     closeSync(fd)
     isOpen = false
-    let delay = 10, waited = 0
+    let delay = 10, waited = 0, isFree = isFresh
     for (;;) {
       current()
       try {
-        renameSync(temporary, file)
+        if (isFree) linkSync(temporary, file)
+        else renameSync(temporary, file)
         break
       } catch (error) {
+        if (isFree) {
+          if ((error as { code?: string }).code === 'EEXIST') throw new Error('INSTALL_CHANGED')
+          isFree = false
+          continue
+        }
         if (!retryRecord || process.platform !== 'win32' || !['EPERM', 'EACCES', 'EBUSY'].includes(String((error as { code?: string }).code)) || waited >= 250) throw error
         const wait = Math.min(delay, 250 - waited)
         Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait)
@@ -344,8 +386,23 @@ export type LocalPlan = {
   keptShared?: { file: string; usedBy: string[] }[]
   // An old /board command file the person edited: setup leaves it and names it here (#868).
   keptEdited?: string[]
+  // Generated files the person edited, which setup never overwrites (#1302). Text a host only reads gets the new
+  // version beside it. Code a host loads stays as it is, and the code and hooks that work with it stay with it.
+  keptText?: { file: string; beside: string }[]
+  keptCode?: string[]
+  keptHeld?: { file: string; by: string }[]
+  missingHeld?: { file: string; by: string }[]
+  // How the person opens the board in this agent, and the file that way rests on (#1698).
+  opens?: { way: string; file: string }
   applied?: boolean
 }
+
+const keptLines = (result: LocalPlan, words: Strings['localSummary']): string[] => [
+  ...(result.keptText ?? []).map(one => words.keptText(one.file, one.beside)),
+  ...(result.keptCode ?? []).map(file => words.keptCode(file)),
+  ...(result.keptHeld ?? []).map(one => words.keptHeld(one.file, one.by)),
+  ...(result.missingHeld ?? []).map(one => words.heldMissing(one.file, one.by)),
+]
 
 export const codexDoctorOutput = (result: LocalPlan & {
   installed: boolean
@@ -357,8 +414,10 @@ export const codexDoctorOutput = (result: LocalPlan & {
   const words = s.localSummary
   const host = s.agentNames[result.agent] ?? result.agent
   const hasHook = result.installed || result.reportHook === 'connect'
-  const lines = [words.doctor(host, result.installed ? words.installed : hasHook ? words.connector : words.missing)]
+  const isOutdated = result.installed && Boolean(result.keptCode?.length || result.keptHeld?.length)
+  const lines = [words.doctor(host, isOutdated ? words.outdated : result.installed ? words.installed : hasHook ? words.connector : words.missing)]
   if (result.problem) lines.push(result.problem)
+  lines.push(...keptLines(result, words))
   for (const file of result.conflicts) lines.push(words.conflict(file))
   if (!hasHook) for (const change of result.changes) lines.push(words.needsUpdate(change.file))
   const isPending = result.capabilities.lifecycle === 'adapter-pending'
@@ -367,6 +426,7 @@ export const codexDoctorOutput = (result: LocalPlan & {
   lines.push(s.codexDoctor)
   lines.push(result.conflicts.length ? words.review(command)
     : !hasHook ? words.setup(command)
+    : isOutdated ? words.outdatedNext
     : isPending ? words.skill(host)
     // --codex-trust works only on an installed Codex, not on one the connector hooked.
     : result.agent === 'codex' && result.installed && result.hooksTrusted !== true ? trustCommand ? words.trustRun(trustCommand) : words.trust
@@ -398,6 +458,7 @@ export const codexSetupOutput = (result: LocalPlan, s: Strings, command: string,
   const isApplied = result.applied === true && result.changes.length > 0
   const lines = [words.removal(host, isApplied ? words.setupApplied : result.conflicts.length ? words.setupBlocked : result.changes.length ? words.setupPreview : words.setupCurrent)]
   for (const change of result.changes) lines.push(isApplied ? words.setupWritten(change.file) : words.setupFile(change.file))
+  lines.push(...keptLines(result, words))
   for (const file of result.conflicts) lines.push(words.conflict(file))
   lines.push(result.conflicts.length ? words.review(command)
     : isApplied || !result.changes.length ? words.setupCheck(check)
@@ -412,7 +473,7 @@ export const setupFailure = (error: unknown, agent: string, s: Strings): { code:
   const code = isCode(detail?.code) ? detail.code : isCode(detail?.message) ? detail.message : 'UNKNOWN'
   const unknown = s.setupAgentUnknown.toLowerCase()
   const host = localAgents.includes(agent as LocalAgent) ? s.agentNames[agent] ?? unknown : unknown
-  const record = typeof detail?.record === 'string' && /^install-[a-z]+\.json$/.test(detail.record) ? detail.record : 'install-*.json'
+  const record = typeof detail?.record === 'string' && /^install-[a-z]+(?:-sidecar)?\.json$/.test(detail.record) ? detail.record : 'install-*.json'
   const message = code === 'MISSING_ARGUMENT' ? s.setupErrorMissingValue
     : code === 'INVALID_INSTALL_RECORD' ? s.setupErrorRecord(record)
     : code === 'INVALID_CONNECT_RECORD' ? s.setupErrorConnectRecord
@@ -478,13 +539,119 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const home = resolve(flag('--home') ?? homedir())
   const root = resolve(flag('--data-dir') ?? baked?.codexRoot ?? join(home, '.agent-board'))
-  const before = new Map<string, string | null>()
+  const before = new Map<string, Snap>()
   const initial = (file: string): string | null => {
-    if (!before.has(file)) before.set(file, readLocal(file))
-    return before.get(file)!
+    if (!before.has(file)) before.set(file, take(file))
+    return before.get(file)!.bytes?.toString('utf8') ?? null
   }
+  // A file whose bytes are not valid UTF-8 is never written over or taken as setup's (#1607). The plan still compares its
+  // decoded text with what setup would write; ownership asks isUnreadable, and put refuses such bytes before a write.
+  const isUnreadable = (file: string): boolean => {
+    initial(file)
+    const bytes = before.get(file)!.bytes
+    return bytes !== null && !isPlain(bytes)
+  }
+  // The hash of the bytes setup saw. For valid UTF-8 it is the hash of the text, so a record written earlier still
+  // matches; FF and the EF BF BD it would decode to differ, so one is never taken for the other.
+  const ownHash = (file: string, text: string): string => hash(before.get(file)?.bytes ?? text)
+  // Every re-read after planning compares a path with what setup saw there (#1488): the batch check, the re-read just
+  // before each change and the read-back after it, in both writers. Before a write the path must be as planned, or
+  // already hold exactly the new bytes as the same kind of path, or as a new regular file where there was none: one
+  // file reached by a second name earlier in this batch (a skills folder linked to the shared one, or another letter
+  // case on Windows), so writing the same bytes over it loses nothing. Before a removal it must be as planned, or, only
+  // when its planned real path is a file this batch itself removed, already gone (a second name of that file) or the
+  // same link it was with its target gone (a file link to that file). A file or target another program removed or moved
+  // stops the batch. Anything else stops the batch, a link or other bytes put where the file was included.
+  // A second name may also find a regular file where it planned a file link, when this batch's own write replaced that
+  // link (a skills folder linked to the shared one whose SKILL.md is a file link): only when the path's real path is
+  // one this batch wrote and it holds exactly the new bytes (Greptile on #1594).
+  // After a write the rename target must be a regular file holding exactly the bytes; after a removal the path is gone.
+  // A plain rename or unlink cannot close the instant between the last re-read and the change: a file another program
+  // deletes in that instant stops the removal instead of counting as removed by setup (#1611).
+  // A stale .new copy and the pending list are read again just before the unlink, as planned, not through the re-read removal.
+  const isHolding = (now: Snap, text: string): boolean => sameBytes(now.bytes, Buffer.from(text, 'utf8'))
+  const ours = new Set<string>()
+  // The real paths of the entries this batch removed, each recorded once its removal was checked: a regular file by
+  // its own real path, a file link by the link entry's real path (its parent's real path plus its name), so a second
+  // name of either finds its own removal and the batch finishes (#1610). A link's target is never recorded here: the
+  // target still exists, and another link to it must not read as removed (F2).
+  const gone = new Set<string>()
+  const realOf = (file: string): string | null => { try { return realpathSync.native(file) } catch { return null } }
+  // The real path of a link entry itself: resolve the parent, keep the name. Two names of one link (a skills folder
+  // linked to the shared one) share it; two separate links to one target do not.
+  const entryReal = (file: string): string | null => { try { return join(realpathSync.native(dirname(file)), basename(file)) } catch { return null } }
+  const isOurs = (file: string, now: Snap, next: string): boolean => now.kind === 'file' && isHolding(now, next) && ours.has(realOf(file) ?? '')
+  // A .new path is the exception: a file that appeared there is a second name only when this batch wrote it, since bytes
+  // alone would also match a file another program put there (#1693).
+  const unchanged = (file: string, next: string | null): Snap => {
+    const was = before.get(file) ?? NO_PATH, now = take(file)
+    const isSecondName = next !== null && isHolding(now, next) && (now.kind === was.kind && now.link === was.link || was.kind === 'none' && now.kind === 'file' && !file.endsWith('.new') || isOurs(file, now, next))
+    // A path already gone, or the same link with its target gone, only where this batch itself removed the entry or
+    // the target: a second name of a file this batch removed (its own real path), a second name of a link this batch
+    // removed (the link entry's real path, not its target), a link whose target this batch removed, or a dangling
+    // link whose link text names an entry this batch removed (a chain H -> S -> C where S went first: H's final
+    // target C is not in `gone`, but the break is explained by setup's own verified removal of S).
+    const entry = was.kind === 'link' ? entryReal(file) : was.real
+    // The entry the link text names: resolve it against the link's folder, then take that entry's real path. The
+    // first removed entry in a chain explains the break; a target another program deleted is not named by the link
+    // text, so it still stops the batch (F2). `resolve` must not be used here: it collapses `hop/..` lexically
+    // before the OS follows `hop`, so the entry named is a file the link never read (Greptile 4627685622). Join
+    // the raw text instead, and let `entryReal` resolve the parent with realpath, so `..` goes up from the
+    // directory the OS reached through the link, not the lexical one.
+    const target = was.link !== null && isAbsolute(was.link) ? was.link : dirname(file) + sep + was.link
+    const linkEntry = was.kind === 'link' && was.link !== null ? entryReal(target) : null
+    const isGone = next === null && ((now.kind === 'none' && entry !== null && gone.has(entry)) || (was.kind === 'link' && now.kind === 'link' && now.link === was.link && now.bytes === null && was.real !== null && (gone.has(was.real) || (linkEntry !== null && gone.has(linkEntry)))))
+    if (!same(was, now) && !isSecondName && !isGone) throw new Error('INSTALL_CHANGED')
+    return now
+  }
+  const written = (file: string, text: string | null): void => {
+    const now = take(file)
+    if (text === null ? now.kind !== 'none' : now.kind !== 'file' || !isHolding(now, text)) throw new Error('INSTALL_CHANGED')
+  }
+  // A .new copy where the plan found nothing is created, never written over (#1693). A name this batch already wrote as
+  // the same file through another name (a skills folder linked to the shared one) is not written again: it holds the
+  // bytes already, and a person's save there would be lost.
+  const put = (file: string, text: string, target = file): void => {
+    const now = take(target)
+    // Last line of defence: whatever the plan, a path holding bytes that are not valid UTF-8 is not written over (#1607).
+    if (now.bytes !== null && !isPlain(now.bytes)) throw new Error('INSTALL_CHANGED')
+    if (isOurs(target, now, text)) return
+    atomic(target, text, () => unchanged(file, text), false, target.endsWith('.new') && (before.get(file) ?? NO_PATH).kind === 'none')
+    written(target, text)
+    const real = realOf(target)
+    if (real !== null) ours.add(real)
+  }
+  // unlinkSync, not an existsSync check first: a file link whose target this batch already removed reads as gone but
+  // is still there, and must go too. A path already gone by this batch's own earlier removal needs no unlink; a path
+  // that read as present when re-read, gone by the unlink, was taken by another program in that instant (#1611).
+  // Reuse the snapshot `unchanged` validated: a second read could see a deletion by another program and skip the
+  // unlink that would have caught it, crediting the outside deletion to setup (F1).
+  const drop = (file: string): void => {
+    const now = unchanged(file, null)
+    if (now.kind !== 'none') {
+      try { unlinkSync(file) } catch (error) {
+        if ((error as { code?: string }).code === 'ENOENT') throw new Error('INSTALL_CHANGED')
+        throw error
+      }
+    }
+    written(file, null)
+    const was = before.get(file)
+    // Record the entry this batch removed: for a link, the link entry itself (its parent's real path plus its name),
+    // not its target — the target still exists, and another link to it must not read as removed (F2).
+    if (was !== undefined && was.real !== null) {
+      const entry = was.kind === 'link' ? entryReal(file) : was.real
+      if (entry !== null) gone.add(entry)
+    }
+  }
+  const isAsPlanned = (file: string): boolean => same(take(file), before.get(file) ?? NO_PATH)
+  // A board run (a report, a hook event, a status, a hook recovery, the mailbox) only reads where the board is from the
+  // install records and writes none of them, so it reads them as main does (#1607).
+  const isInstallRun = mode === '--codex-setup' || mode === '--codex-remove' || mode === '--codex-trust' || mode === '--hermes-trust' || mode === '--codex-doctor'
   const jsonInitial = (file: string): Json => {
     try {
+      // An install record that is not valid UTF-8 stops setup, removal, trust and doctor, another agent's record too:
+      // skipping it could let a removal delete a shared file that record still names (#1607).
+      if (isInstallRun && isUnreadable(file)) throw new SyntaxError('not valid UTF-8')
       const record = object(JSON.parse(initial(file) ?? '{}'))
       if (record.files !== undefined) object(record.files)
       if (record.groups !== undefined) object(record.groups)
@@ -499,6 +666,32 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const loaded = jsonInitial(manifestFile)
   const otherAgents = localAgents.filter(one => one !== agent)
   const otherManifests = otherAgents.map(one => jsonInitial(join(root, `install-${one}.json`)))
+  // A .new copy reaches the disk before the install record names it, so a setup that stops between the two leaves a copy
+  // no record holds (#1302). This list is written before the copy and removed after the record, and it is how the next
+  // setup knows that copy is its own: the wanted bytes alone would also match a file the person put there.
+  // A file under that name is a list only when it reads as one setup could have written: a regular file holding a JSON
+  // object of .new paths, each with hashes. Its name alone says nothing, since a board named there or any note of the
+  // person's can have it too. So setup reads, writes over and deletes the file only when it reads so; anything else names
+  // nothing, a copy no record holds then stops that agent as any unknown file does, and the file stays.
+  // Setup writes into this agent's list only the .new path beside a text file of this run's plan, so its list may name
+  // only those. Another agent's list is only read here and its plan is not known, so its paths need only be full ones;
+  // an entry of it names a copy only under the exact path this run plans (isOurBeside). That is as far as setup can
+  // tell: a file naming this plan's own .new paths with hashes is its list, whoever wrote it.
+  const pendingFile = (one: string): string => join(root, `install-pending-${one}.json`)
+  const isOwnCopy = (path: string): boolean => isTextFile(path.slice(0, -4)) && Object.hasOwn(files, path.slice(0, -4))
+  const listOf = (snap: Snap | undefined, isNamed: (path: string) => boolean = isOwnCopy): Record<string, string[]> | null => {
+    if (snap?.kind !== 'file' || snap.bytes === null || !isPlain(snap.bytes)) return null
+    let held: unknown
+    try { held = JSON.parse(snap.bytes.toString('utf8')) } catch { return null }
+    if (typeof held !== 'object' || held === null || Array.isArray(held)) return null
+    const entries = Object.entries(held)
+    const isList = entries.length > 0 && entries.every(([path, hashes]) => path.endsWith('.new') && isNamed(path) && Array.isArray(hashes) && hashes.length > 0 && hashes.every(value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)))
+    return isList ? Object.fromEntries(entries) as Record<string, string[]> : null
+  }
+  const pendingOf = (one: string): Record<string, string[]> => {
+    initial(pendingFile(one))
+    return listOf(before.get(pendingFile(one)), one === agent ? isOwnCopy : isAbsolute) ?? {}
+  }
   const control = join(installControlRoot(home), 'legacy-connect.json')
   const authority = join(installControlRoot(home), 'legacy-connect-authority')
   let connection: ConnectTransaction['state'] | undefined
@@ -534,10 +727,21 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // OpenCode's plugin names the claim (12 hex), so it can release it again.
       if (ref !== undefined && (agent !== 'opencode' || !/^[0-9a-f]{12}$/.test(ref))) throw new Error('INVALID_MAILBOX_CALL')
       let message: Awaited<ReturnType<typeof mailbox.turnOrThrow>>
+      let taker = mailbox
       if (agent !== 'opencode') {
         // DeepSeek's receiver reads a failed take from the exit status and the code on stderr; a deferred take answers null (#1448).
-        message = await mailbox.turn(agent, session, surfaceOf(surface), Date.now())
-        if (message === null && mailbox.error !== null) throw new Error(mailbox.error)
+        // A refused or cut connection to the board is asked again within this take's own five seconds, counted from its
+        // first ask, as the receiver asks again after a deferred take, so a board back in a moment still delivers; one that
+        // keeps failing is reported. A cut take whose claim did not go back is reported at once: asking again would find
+        // nothing while the board still holds that message (#1631).
+        const until = Date.now() + 5000
+        message = await taker.turn(agent, session, surfaceOf(surface), Date.now())
+        while (message === null && taker.hasTransportError && !taker.hasHeldClaim && Date.now() + 500 < until) {
+          await new Promise(done => setTimeout(done, 250))
+          taker = hookMailbox(directory, Math.max(until - Date.now(), 0), 2000, 2000)
+          message = await taker.turn(agent, session, surfaceOf(surface), Date.now())
+        }
+        if (message === null && taker.error !== null) throw new Error(taker.error)
       } else {
         try {
           message = await mailbox.turnOrThrow(agent, session, surfaceOf(surface), Date.now(), ref)
@@ -552,7 +756,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
       // deferred: the board's store was busy, so null here is "not checked", not "nothing waiting"; the plugin asks again (#1429).
-      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary }, deferred: message === null && mailbox.hasDeferred })
+      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary }, deferred: message === null && taker.hasDeferred })
     } else if (action === 'open') {
       // OpenCode's plugin only. It claims nothing, and the plugin reads the board's file to see whether it worked. The answer
       // names the folder to watch. With no board folder at all no board can queue a message, so nothing is enrolled yet
@@ -675,7 +879,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const sidecarConflicts: string[] = []
     sidecarOnlyFiles.forEach((file, i) => {
       const existing = initial(file)
-      const isOwned = existing !== null && hash(existing) === recorded[file]
+      const isOwned = existing !== null && ownHash(file, existing) === recorded[file]
       if (existing !== null && !isOwned && (isRemoving || existing !== desired[i])) sidecarConflicts.push(file)
       else if (isRemoving ? isOwned : existing !== desired[i]) sidecarChanges.push({ file, action: isRemoving ? 'remove' : existing === null ? 'create' : 'update' })
     })
@@ -689,15 +893,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     if (args.includes('--apply') && !sidecarConflicts.length) {
       withInstallLock(home, () => {
-        for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
-        // Each file is read again just before its change and checked after it, so an edit made while setup runs
-        // is never overwritten or removed, and a change that did not land is not reported as applied.
+        for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED')
+        // Each file is read again just before its change and checked after it (put and drop), so an edit made before
+        // that last re-read is never overwritten or removed, and a change that did not land is not reported as applied.
         for (const change of sidecarChanges) {
-          const unchanged = (): void => { if (readLocal(change.file) !== before.get(change.file)) throw new Error('INSTALL_CHANGED') }
-          const text = change.action === 'remove' ? null : change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!
-          if (text === null) { unchanged(); unlinkSync(change.file) }
-          else atomic(change.file, text, unchanged)
-          if (readLocal(change.file) !== text) throw new Error('INSTALL_CHANGED')
+          if (change.action === 'remove') drop(change.file)
+          else put(change.file, change.file === sidecarRecord ? nextRecord : desired[sidecarOnlyFiles.indexOf(change.file)]!)
         }
       })
       if (isRemoving) try { rmdirSync(sidecarDirectory) } catch {}
@@ -763,6 +964,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       status: unknown; event?: string; folder?: string; folderDigest?: string; folderCanonicalDigest?: string; isBoardPrompt: boolean; isDelivery?: boolean; isPrompt: boolean; payload: Json
       // Who started the session, as far as the host's own words say (#399); absent when they say nothing.
       run?: RunSignal
+      antigravityIdentity?: AntigravityIdentity
+      // The Codex terminal this opening event's own hook found (#1092), null when it found none; kept with the
+      // event in the pending queue, removed with it once applied.
+      seenClaim?: AgentClaim | null
     }
     const reportSession = (targetAgent: LocalAgent = agent): string | undefined => {
       const identity = folderIdentity(process.cwd())
@@ -852,6 +1057,35 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
+    // The OpenCode process this event ran under (#1595), only for this process's own event from the hook worker.
+    // The Codex terminal (#1092): only a live opening event from the hook walks to it, and only on Linux.
+    const isLiveHook = current !== undefined && flag('--hook-deadline') !== undefined
+    const codexEventName = agent === 'codex' && mode === '--codex-event' ? String(current?.payload.hook_event_name ?? '') : undefined
+    const liveClaim = !isLiveHook ? null
+      : agent === 'opencode' ? hookParentClaim(process.env.AGENT_BOARD_HOOK_PARENT, readingHostHash())
+        : codexEventName === 'SessionStart' || codexEventName === 'UserPromptSubmit' ? codexProcessClaim() : null
+    // A Codex opening event keeps what its walk found, so a replay from the pending queue applies the same record.
+    if (current !== undefined && isLiveHook && (codexEventName === 'SessionStart' || codexEventName === 'UserPromptSubmit')) current.seenClaim = liveClaim
+    const antigravityDecision = (entry: Pending, payloadRaw: Json, allowProcWalk: boolean): AntigravityIdentity | undefined => {
+      if (entry.agent !== 'antigravity' || entry.mode !== '--agent-status') return undefined
+      const surface = antigravitySurface(payloadRaw.transcriptPath, payloadRaw.artifactDirectoryPath)
+      if (surface === SURFACE_IDS.antigravityIde) return { kind: 'clear' }
+      if (surface === SURFACE_IDS.antigravityTui) {
+        if (allowProcWalk) {
+          const found = antigravityProcessClaim(readingHostHash())
+          if (found !== null) return { kind: 'claim', claim: found }
+        }
+        if (process.platform === 'win32') {
+          const host = readingHostHash()
+          if (host !== null) return { kind: 'host', host }
+        }
+      }
+      return entry.event === 'SessionStart' || entry.event === 'PreInvocation' ? { kind: 'clear' } : undefined
+    }
+    if (current !== undefined && flag('--hook-deadline') !== undefined) {
+      const agyId = antigravityDecision(current, raw, true)
+      if (agyId !== undefined) current.antigravityIdentity = agyId
+    }
     const isInferredReport = mode === '--codex-report' && flag('--session') === undefined && (agent === 'codex' ? process.env.CODEX_THREAD_ID === undefined : !(process.env.AGENT_BOARD_AGENT === agent && process.env.AGENT_BOARD_SESSION_ID !== undefined) && !(agent === 'hermes' && process.env.HERMES_SESSION_ID) && !(agent === 'grok' && process.env.GROK_SESSION_ID))
     const rawEntry = (raw: Json): Pending => {
       if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
@@ -878,7 +1112,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
       const env = object(raw.env)
       if (Object.entries(env).some(([name, value]) => !(HOOK_SESSION_ENV[entryAgent] ?? []).includes(name) || typeof value !== 'string')) throw new Error('INVALID_RAW_ENV')
-      return buildEntry(entryMode, entryAgent, object(raw.payload), name => flags.get(name), env as NodeJS.ProcessEnv, resolve(flags.get('--progress-file')!), Number(raw.at))
+      const payload = object(raw.payload)
+      const entry = buildEntry(entryMode, entryAgent, payload, name => flags.get(name), env as NodeJS.ProcessEnv, resolve(flags.get('--progress-file')!), Number(raw.at))
+      const agyId = antigravityDecision(entry, payload, false)
+      if (agyId !== undefined) entry.antigravityIdentity = agyId
+      return entry
     }
     // A program holding progress.md open makes Windows refuse its read (EBUSY) and the rename
     // onto it (EPERM). A read-only progress.md fails the rename with the same EPERM, so its
@@ -1072,7 +1310,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A replay can skip writes only after a board completion reached the cache too.
       // A new hook event is not a replay even when the block reads the same: its record keeps the event.
       const repaired = reporterTail(bytes)
-      if (repaired.fragment === null && mode !== '--codex-report' && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? null) === JSON.stringify(report.askedOptions ?? null) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      const named = blockClaimOf(text, owner, agent, session)
+      const namedHost = agent === 'antigravity' ? blockHostOf(text, owner, agent, session) : null
+      const { claim, hostOnly } = agent === 'antigravity'
+        ? resolveAntigravityIdentity(cleanAntigravityIdentity(entry.antigravityIdentity) ?? undefined, named, namedHost)
+        : agent === 'codex'
+          ? { claim: codexClaimOf({ event: mode === '--codex-event' ? String(payload.hook_event_name ?? '') : undefined, seen: seenClaimOf(entry.seenClaim), named }), hostOnly: null }
+          : { claim: entry === current && liveClaim !== null ? liveClaim : named, hostOnly: null }
+      const namedHostOnly = named === null ? namedHost : null
+      if (repaired.fragment === null && mode !== '--codex-report' && claimText(named) === claimText(claim) && namedHostOnly === hostOnly && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? null) === JSON.stringify(report.askedOptions ?? null) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }
@@ -1080,7 +1326,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
         ...report, title: encoded(report.title), project: encoded(report.project), ...(report.context === undefined ? {} : { context: encoded(report.context) }), steps: report.steps.map(encoded),
-      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project, report.context === undefined ? undefined : encoded(s.contextNote(report.context)), encoded), 'latin1')
+      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project, report.context === undefined ? undefined : encoded(s.contextNote(report.context)), encoded, claim, hostOnly), 'latin1')
       saveFullText()
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
       try { atomic(progress, next, checkDeadline) } catch (error) {
@@ -1115,6 +1361,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       && (entry.event === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && statusEvents.antigravity?.[entry.event] === entry.status)
       // A live event's own session_id is either missing or the session it is filed under.
       && (entry.mode !== '--codex-event' || [undefined, entry.session].includes(object(entry.payload).session_id as string | undefined))
+      && (entry.antigravityIdentity === undefined || entry.agent === 'antigravity' && entry.mode === '--agent-status' && cleanAntigravityIdentity(entry.antigravityIdentity) !== null)
       && (object(entry.payload).options === undefined || Array.isArray(object(entry.payload).options) && (object(entry.payload).options as unknown[]).every(value => typeof value === 'string'))
     // Raw Codex events can precede a newer turn too. Milliseconds settle events in
     // the same second; older records and pending entries retain their timestamp fallback.
@@ -1311,7 +1558,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     return true
   }
-  const read = hasHooks && agent !== 'hermes' || agent === 'openclaw' ? readConfig(configText) : {}
+  const read = hasHooks && agent !== 'hermes' || agent === 'openclaw' ? isUnreadable(nativeConfig) ? null : readConfig(configText) : {}
   // Wrong shapes are the same one conflict as unreadable JSON, so other agents still preview (#465).
   const parsedConfig = read !== null && !isShaped(read) ? null : read
   const hookConfig = parsedConfig ?? {}
@@ -1319,7 +1566,49 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const isReadable = parsedConfig !== null
   const hooks = object(hookConfig.hooks ?? {})
   const worker = join(root, 'agent-board-hook.mjs')
-  const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(process.execPath, home, agent, worker, progress, event, state)
+  // Only the program is kept from the last install; every other word is written from this run.
+  const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
+  // Hermes records each event's command by name, not in groups.
+  const hermesRecord = agent === 'hermes' ? Object.values(object(manifest.groups.hooks ?? {})) : []
+  const earlier = [...commandsOf(Object.values(manifest.groups)), ...hermesRecord].filter((command): command is string => typeof command === 'string')
+  // The Node setup wrote last time, spelled as setup wrote it, still runs the same hooks. So it is
+  // kept even when this run's Node is a copy in another folder or another name for the same file:
+  // rewriting a command would drop the approval its host bound to it (#1662). Every path asked
+  // about here comes from setup's own records, so it was a working Node by any name when written.
+  const keptNodes = new Map<string, boolean>()
+  const isKeptNode = (path: string): boolean => {
+    if (!isAbsolute(path)) return false
+    const known = keptNodes.get(path)
+    if (known !== undefined) return known
+    const decide = (): boolean => {
+      try {
+        const kept = statSync(path, { bigint: true }), running = statSync(process.execPath, { bigint: true })
+        if (!kept.isFile()) return false
+        if (kept.ino > 0n && kept.dev === running.dev && kept.ino === running.ino) return true
+      } catch { return false }
+      // Another program in that place is not kept. A probe that runs out of time keeps it, so a
+      // slow computer does not change the command (#625). SIGKILL, since a program may ignore SIGTERM.
+      const probe = spawnSync(path, ['-p', 'process.release.name'], { encoding: 'utf8', windowsHide: true, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 4096 })
+      if ((probe.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') return true
+      return probe.error === undefined && probe.status === 0 && probe.stdout.trim() === 'node'
+    }
+    const isKept = decide()
+    keptNodes.set(path, isKept)
+    return isKept
+  }
+  // Every host reads the Node of the files beside its hooks from the skill they all share: a host's
+  // own hook commands would let two hosts write that skill with different Nodes in turn. Only a skill
+  // setup wrote and still owns is read: one the person edited may name any program.
+  const scriptWord = quote(script).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const skillNow = initial(skill)
+  const isSetupSkill = skillNow !== null && !isUnreadable(skill) && [manifest.files, ...otherManifests.map(one => object(one.files ?? {}))].some(files => files[skill] === ownHash(skill, skillNow))
+  const skillNode = isSetupSkill ? new RegExp('"([^"\\r\\n]+)" ' + scriptWord).exec(skillNow)?.[1] : undefined
+  const commandNode = skillNode !== undefined && isKeptNode(skillNode) ? skillNode : process.execPath
+  // A host's hooks keep the program they start, which on Windows may be an 8.3 name or sit inside an encoded launch.
+  // Antigravity's hooks carry no approval, and its PowerShell launch moves to a direct command once this run's Node
+  // can be verified, so they follow this run's Node as before.
+  const hookNode = agent === 'antigravity' ? process.execPath : earlier.map(hookProgram).find(isKeptNode) ?? commandNode
+  const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(hookNode, home, agent, worker, progress, event, state)
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
@@ -1335,7 +1624,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     })
     try {
       const text = initial(trustConfig)
-      if (text !== null) {
+      // A config.toml that is not valid UTF-8 is not edited, a linked one included: the snapshot reads through the link.
+      if (text !== null && isUnreadable(trustConfig)) conflicts.push(trustConfig)
+      else if (text !== null) {
         const result = removeCodexTrustEntries(text, keys)
         if (result.text !== text) { nextTrust = result.text; changes.push({ file: trustConfig, action: 'update' }) }
       }
@@ -1352,10 +1643,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // Muse Code 1.4.14 on Windows hands the line to cmd as one argument with each quote escaped as \",
   // which cmd does not read, so every quoted hook failed live. It gets Antigravity's quote-free line.
   const isQuoteFreeHost = agent === 'muse' && process.platform === 'win32'
-  // Only the program is kept from the last install; every other word is written from this run.
-  const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
-  const earlier = commandsOf(Object.values(manifest.groups)).filter((command): command is string => typeof command === 'string')
-  const hostNode = isPowerShellHost || isQuoteFreeHost ? windowsHookNode(process.execPath, earlier) : undefined
+  const hostNode = isPowerShellHost || isQuoteFreeHost ? windowsHookNode(hookNode, earlier) : undefined
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
     const argv = hookArgs(event, state)
@@ -1380,7 +1668,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     if (!remove) {
       // Exact generated bytes can be adopted after a partially interrupted install.
-      nextHooks[event] = [...kept.filter(entry => !isSame(entry, group)), group]
+      const next = kept.filter(entry => !isSame(entry, group))
+      // Codex binds approval to a group's slot, so replacing ours must not move a person's later group.
+      const index = agent === 'codex' ? entries.findIndex(entry => old !== undefined && isSame(entry, old) || isSame(entry, group)) : -1
+      next.splice(index < 0 ? next.length : index, 0, group)
+      nextHooks[event] = next
       groups[event] = group
     } else if (kept.length) nextHooks[event] = kept
     else delete nextHooks[event]
@@ -1438,10 +1730,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (remove) alreadyGone.push(`${nativeConfig}:agent-board-local`)
       else hasMissingGroup = true
     }
-    const patch = deepseekPatch(text, manifest.groups.patch, pathToFileURL(join(root, 'adapters', 'deepseek.mjs')).href, remove)
-    if (patch.conflict) conflicts.push(nativeConfig)
-    nextConfigText = patch.text
-    if (patch.group) groups.patch = patch.group
+    if (isUnreadable(nativeConfig)) { if (!conflicts.includes(nativeConfig)) conflicts.push(nativeConfig) }
+    else {
+      const patch = deepseekPatch(text, manifest.groups.patch, pathToFileURL(join(root, 'adapters', 'deepseek.mjs')).href, remove)
+      if (patch.conflict) conflicts.push(nativeConfig)
+      nextConfigText = patch.text
+      if (patch.group) groups.patch = patch.group
+    }
   }
   // The trust file Hermes keeps beside config.yaml: an approval is an (event, command) pair, and only ours are touched here.
   const allowlistFile = join(hermesDir, 'shell-hooks-allowlist.json')
@@ -1453,21 +1748,28 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     [planEvents.hermes!.event, hermesCommand(planEvents.hermes!.event), planEvents.hermes!.matcher],
   ]
   let nextAllowlist: string | undefined
+  let isHermesPartial = false
   if (agent === 'hermes') {
     const text = initial(nativeConfig) ?? ''
     const events = hermesEvents()
     const recorded = new Map(Object.entries(object(manifest.groups.hooks ?? {})).filter((pair): pair is [string, string] => typeof pair[1] === 'string'))
-    const patch = isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove) : null
+    const patch = !isUnreadable(nativeConfig) && isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove) : null
     if (manifest.groups.hooks !== undefined && patch !== null && !patch.hasOwned) {
       if (remove) alreadyGone.push(`${nativeConfig}:hooks`)
       else hasMissingGroup = true
     }
     if (patch === null) conflicts.push(nativeConfig)
+    // An entry the person changed is refused by its event, like the JSON agents' `${config}:${event}`,
+    // so the message names the exact lines instead of the whole file.
+    else for (const event of patch.refused) conflicts.push(`${nativeConfig}:${event}`)
+    isHermesPartial = manifest.groups.hooks !== undefined && patch !== null && !patch.isComplete
     nextConfigText = patch?.text ?? text
     if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
     if (remove) {
-      const approvals = readAllowlist(initial(allowlistFile))
+      const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
       const mine = Object.entries(object(manifest.groups.hooks ?? {}))
+      // A trust file that is not valid UTF-8 is not rewritten, so a removal stops on it (#1607).
+      if (approvals === null && isUnreadable(allowlistFile)) conflicts.push(allowlistFile)
       if (approvals !== null) {
         const kept = approvals.list.filter(entry => !mine.some(([event, command]) => entry.event === event && entry.command === command))
         if (kept.length !== approvals.list.length) {
@@ -1477,7 +1779,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
   }
-  const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(fileWords.localAgentSkillDescription)}\n---\n\n${fileWords.localAgentSkill(`${quote(process.execPath)} ${quote(script)}`)}\n\n${fileWords.localAgentHandoff}\n\n${fileWords.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
+  const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(fileWords.localAgentSkillDescription)}\n---\n\n${fileWords.localAgentSkill(`${quote(commandNode)} ${quote(script)}`)}\n\n${fileWords.localAgentHandoff}\n\n${fileWords.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
   // The connect writes its board beside the progress file it connected: the default one, one a
   // CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names, or the one its own record keeps (#285).
   // Releases before de40dde wrote the command as node "<path>" for any path; later ones use boardRun.
@@ -1495,15 +1797,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)), deliveryRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script, fileWords)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(commandNode, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script, fileWords)
   if (agent === 'openclaw') {
-    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
+    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(commandNode, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
     // activation.onStartup: OpenClaw 2026.6.35 loads a plugin when its gateway starts only when the manifest asks for it (#1489).
     files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', activation: { onStartup: true }, contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {
-    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(process.execPath, worker, progress, home, script, fileWords.deepseekBoardTool, fileWords.localAgentStepFormat)
+    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(commandNode, worker, progress, home, script, fileWords.deepseekBoardTool, fileWords.localAgentStepFormat)
     files[join(deepseekDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'hermes') files[join(hermesDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
@@ -1517,16 +1819,67 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       files[sidecarFiles[1]!] = antigravitySidecarSource(fileWords.antigravityWakeLine)
     }
   }
-  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)}}\n'''\n`
-  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'agent-board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)}\`\n`
+  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(commandNode)} ${quote(script)}}\n'''\n`
+  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'agent-board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(commandNode)} ${quote(script)}\`\n`
   // 0.24.2 and earlier wrote /board here. The command is now /agent-board, so setup takes the old file
   // away when it is still the bytes setup or a release wrote, and leaves one the person edited (#868).
   const retired = agent === 'gemini' ? [join(home, '.gemini', 'commands', 'board.toml')] : agent === 'opencode' ? [join(opencodeDir, 'commands', 'board.md')] : []
   const keptEdited: string[] = []
+  const records = [manifest.files, ...otherManifests.map(one => object(one.files ?? {}))]
+  const boardRecords = records.map(record => record[script]).filter(value => typeof value === 'string')
+  // A released board is one setup may replace: its body is a release's, and its settings line is exactly what setup or
+  // the connect writes for this install. Any other settings line is the person's own (#1302). A record that held this
+  // same body under another settings line means the line was changed after setup wrote it; a body other than the
+  // recorded one is a board a later connect replaced, which still upgrades.
   const isReleasedBoard = (text: string): boolean => {
-    const bodyHash = hash(text.replace(/^globalThis\.AGENT_BOARD[^\n]*\n/, ''))
-    return RELEASED.some(release => release.board.includes(bodyHash))
+    const head = /^globalThis\.AGENT_BOARD = ([^\n]*)\n/.exec(text)
+    if (head === null) return false
+    const body = text.slice(head[0].length)
+    if (!RELEASED.some(release => release.board.includes(hash(body)))) return false
+    let settings: unknown
+    try { settings = JSON.parse(head[1]!) } catch { return false }
+    if (!isRecord(settings) || JSON.stringify(settings) !== head[1]) return false
+    const { hookVersion, path, codexRoot, lang } = settings
+    const paths = boardRecords.length ? [progress] : [progress, ...legacyProgress.filter(one => one !== '')]
+    if (Object.keys(settings).some(key => !['hookVersion', 'path', 'codexRoot', 'lang'].includes(key))) return false
+    if (hookVersion !== undefined && !(Number.isInteger(hookVersion) && (hookVersion as number) >= 1 && (hookVersion as number) <= HOOK_VERSION)) return false
+    if (typeof path !== 'string' || !paths.includes(path) || codexRoot !== undefined && codexRoot !== root) return false
+    if (typeof lang !== 'string' || !Object.hasOwn(STRINGS, lang)) return false
+    const versions = [undefined, ...Array.from({ length: HOOK_VERSION }, (_, index) => index + 1)]
+    const heads = Object.keys(STRINGS).flatMap(one => versions.flatMap(version => [undefined, root].map(folder => JSON.stringify({ hookVersion: version, path: progress, codexRoot: folder, lang: one }))))
+    return !heads.some(line => boardRecords.includes(hash(`globalThis.AGENT_BOARD = ${line}\n${body}`)))
   }
+  // A file that is not valid UTF-8 is never setup's, even when its decoded text reads as a released board or skill (#1607).
+  const isOwnedFile = (file: string, existing: string): boolean => !isUnreadable(file) && (ownHash(file, existing) === manifest.files[file] || !remove && (otherManifests.some(one => object(one.files ?? {})[file] === ownHash(file, existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing)))
+  // Text a host only reads can take a new version beside it. Everything else is code a host loads or a manifest it trusts.
+  const isTextFile = (file: string): boolean => /\.(?:toml|md)$/.test(file)
+  const isKeptRunner = (file: string): boolean => {
+    const existing = initial(file)
+    return !remove && existing !== null && existing !== files[file] && !isOwnedFile(file, existing) && manifest.files[file] !== undefined
+  }
+  // The board script and the hook runner are what the host starts. While the person's copy of one stays, the code and
+  // the hook lines written for it stay too, since a new hook line could ask the old program for something it cannot do.
+  const isScriptHeld = isKeptRunner(script)
+  const isWorkerHeld = !isScriptHeld && isKeptRunner(worker)
+  const isHeld = isScriptHeld || isWorkerHeld
+  const heldBy = basename(isScriptHeld ? script : worker)
+  // A kept board script whose record is not this version's script, in any language, came from an earlier version: new
+  // words can ask it for options it lacks, and only the old /board command is known to work with it. So while it stays,
+  // setup writes no new command and no missing skill, and keeps the /board file with its record entry (#1698).
+  const isOlderHeld = isScriptHeld && !Object.keys(STRINGS).some(lang => manifest.files[script] === hash(`globalThis.AGENT_BOARD = ${JSON.stringify({ hookVersion: HOOK_VERSION, path: progress, codexRoot: root, lang })}\n${original}`))
+  const commandFile = agent === 'gemini' ? join(home, '.gemini', 'commands', 'agent-board.toml') : agent === 'opencode' ? join(opencodeDir, 'commands', 'agent-board.md') : ''
+  const keptFiles = new Set<string>()
+  const keptText: { file: string; beside: string }[] = []
+  const keptCode: string[] = []
+  const keptHeld: { file: string; by: string }[] = []
+  const missingHeld: { file: string; by: string }[] = []
+  // The limit, as far as setup can tell: a record or a pending list that names a .new path with the SHA-256 of the bytes
+  // now at it makes that copy setup's, whoever wrote that file. A list entry counts only under the exact path this run
+  // plans; only a record also counts through a second name for the same file (a skills folder linked to the shared one,
+  // or another letter case on Windows).
+  const pendingCopies = [agent, ...otherAgents].flatMap(one => Object.entries(pendingOf(one)).flatMap(([path, hashes]) => hashes.map((value): [string, unknown] => [path, value])))
+  const isOurBeside = (copy: string, text: string): boolean => pendingCopies.some(([path, value]) => path === copy && value === ownHash(copy, text))
+    || records.flatMap(record => Object.entries(record)).some(([path, value]) => value === ownHash(copy, text) && (path === copy || path.endsWith('.new') && realOf(path) !== null && realOf(path) === realOf(copy)))
   for (const [file, desired] of Object.entries(files)) {
     const existing = initial(file)
     const shared = file === script || file === worker || file === skill
@@ -1537,21 +1890,87 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (usedBy.length) { keptShared.push({ file, usedBy }); continue }
     }
     if (remove && existing === null && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
-    const owned = existing !== null && (hash(existing) === manifest.files[file] || (!remove && (otherManifests.some(one => object(one.files ?? {})[file] === hash(existing)) || (file === script && isReleasedBoard(existing)) || (file === skill || file === antigravitySkill) && legacySkills.includes(existing))))
-    if (existing !== null && !owned && existing !== desired) conflicts.push(file)
+    const owned = existing !== null && isOwnedFile(file, existing)
+    const isEdited = existing !== null && !owned && existing !== desired
+    // Words setup wrote earlier wait with the person's board script, since new words could ask that script for a flag it
+    // lacks. An edited text file still gets its .new copy. A missing one is written beside an edit of this version's
+    // script, which knows every option the words ask for, and waits beside an older one (#1698).
+    const isHeldText = isScriptHeld && isTextFile(file) && (owned || isOlderHeld && existing === null)
+    if (isHeld && (!isTextFile(file) || isHeldText) && !(isWorkerHeld && file === script)) {
+      if (existing === desired) continue
+      keptFiles.add(file)
+      if (isHeldText && !owned) keptHeld.push({ file, by: heldBy })
+      else if (isEdited && manifest.files[file] === undefined) conflicts.push(file)
+      else if (isEdited) keptCode.push(file)
+      else if (existing === null && manifest.files[file] !== undefined) { missingHeld.push({ file, by: heldBy }); conflicts.push(file) }
+      else keptHeld.push({ file, by: heldBy })
+    } else if (isEdited && !remove && isTextFile(file)) {
+      keptFiles.add(file)
+      const beside = `${file}.new`
+      const current = initial(beside)
+      // An edited text file stops this agent only when the .new path holds something setup did not write.
+      if (current === null ? before.get(beside)?.kind !== 'none' : !isOurBeside(beside, current)) conflicts.push(beside)
+      else {
+        keptText.push({ file, beside })
+        files[beside] = desired
+        if (current !== desired) changes.push({ file: beside, action: current === null ? 'create' : 'update' })
+      }
+    } else if (isEdited && !remove && manifest.files[file] !== undefined) {
+      keptFiles.add(file)
+      keptCode.push(file)
+    }
+    // An edited file with no record may not be setup's at all, and a removal never takes a file it did not write.
+    else if (isEdited) conflicts.push(file)
     else if (remove ? owned : existing !== desired) changes.push({ file, action: remove ? 'remove' : existing === null ? 'create' : 'update' })
   }
+  // A new version left beside a file that no longer needs one: the person's edit is gone, or setup is removing this
+  // agent. It goes only as setup wrote it, and only when no other agent that stays still names it.
+  const ownPending = pendingOf(agent)
+  const staleBeside = new Set([...Object.keys(manifest.files), ...Object.keys(ownPending)].filter(file => file.endsWith('.new') && !(file in files) && file.slice(0, -4) in files))
+  // One copy can have two names, as through a Hermes skills folder linked to the shared one (#1695). Names are compared
+  // by real path, so another agent that names the copy by either name keeps it, and the copy is removed once.
+  const isSameCopy = (one: string, other: string): boolean => one === other || other.endsWith('.new') && realOf(one) !== null && realOf(one) === realOf(other)
+  const removedCopies = new Set<string>()
+  for (const file of staleBeside) {
+    const current = initial(file)
+    const isStillNamed = otherAgents.some((one, index) => !removingAgents.includes(one) && [...Object.keys(object(otherManifests[index]?.files ?? {})), ...Object.keys(pendingOf(one))].some(name => isSameCopy(file, name)))
+    if (current === null) { if (remove && manifest.files[file] !== undefined) alreadyGone.push(file) }
+    else if ((ownHash(file, current) === manifest.files[file] || ownPending[file]?.includes(ownHash(file, current))) && !isStillNamed && !removedCopies.has(realOf(file) ?? file)) {
+      removedCopies.add(realOf(file) ?? file)
+      changes.push({ file, action: 'remove' })
+    }
+  }
+  const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
+  // The hook lines stay as the kept program knows them. A hook the person's program needs and no longer has cannot be
+  // put back from here, and a moved board file would leave that program writing to the old one.
+  if (isHeld) {
+    if (typeof loaded.progress === 'string' && resolve(loaded.progress) !== progress) conflicts.push(isScriptHeld ? script : worker)
+    if (hasMissingGroup || isHermesPartial) { missingHeld.push({ file: nativeConfig, by: heldBy }); conflicts.push(nativeConfig) }
+    else if (hasNativeConfig && Object.keys(groups).some(key => !isSame(groups[key], manifest.groups[key]))) keptHeld.push({ file: nativeConfig, by: heldBy })
+    for (const key of Object.keys(groups)) delete groups[key]
+    Object.assign(groups, manifest.groups)
+  }
+  // The old /board command the kept older script answers stays with it, as setup wrote it or as the person edited it.
+  const keptBoards = isOlderHeld ? retired.filter(file => initial(file) !== null) : []
+  // How the person opens the board in this agent once the plan is done, and the file that way rests on: /board while
+  // its /agent-board waits with an older script, the command file, else the agent's own skill or the shared one it reads.
+  // The plan names that file even when it is not there now: setup names the way only while it is a file as it prints its
+  // next steps, and otherwise gives the board command for a terminal. Cursor has no board command (#1698).
+  const isCommandHeld = isOlderHeld && keptFiles.has(commandFile)
+  const opensFile = isCommandHeld ? retired[0] : commandFile || Object.keys(files).find(file => file.endsWith('SKILL.md') && file !== skill) || (BOARD_FOR.skills?.includes(agent) ? skill : undefined)
+  const opens = remove || agent === 'cursor' || opensFile === undefined ? undefined : { way: isCommandHeld ? '/board' : commandFile ? '/agent-board' : 'skill', file: opensFile }
+  for (const file of keptBoards) keptHeld.push({ file, by: heldBy })
   for (const file of retired) {
     const existing = initial(file)
+    if (keptBoards.includes(file)) continue
     if (existing === null) {
       if (remove && Object.hasOwn(manifest.files, file)) alreadyGone.push(file)
-    } else if (hash(existing) === manifest.files[file] || [script, ...legacyBoards].some(board => isReleased(agent === 'gemini' ? 'gemini' : 'opencode', existing, { board }))) changes.push({ file, action: 'remove' })
+    } else if (ownHash(file, existing) === manifest.files[file] || [script, ...legacyBoards].some(board => isReleased(agent === 'gemini' ? 'gemini' : 'opencode', existing, { board }))) changes.push({ file, action: 'remove' })
     else keptEdited.push(file)
   }
   // A host-directory override must not strand an old active plugin outside the
   // new ownership record. Remove the old scoped install before changing roots.
-  for (const file of Object.keys(manifest.files)) if (!(file in files) && !retired.includes(file)) conflicts.push(file)
-  const hasNativeConfig = hasHooks || agent === 'openclaw' || agent === 'deepseek'
+  for (const file of Object.keys(manifest.files)) if (!(file in files) && !retired.includes(file) && !staleBeside.has(file)) conflicts.push(file)
   nextConfigText ??= `${JSON.stringify(nextConfig, null, 2)}\n`
   if (hasNativeConfig && (!remove || Object.keys(manifest.groups).length)) {
     const isHollowOpenclaw = (): boolean => {
@@ -1562,19 +1981,38 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (parsedConfig === null) conflicts.push(nativeConfig)
     else if (remove && initial(nativeConfig) === null) alreadyGone.push(nativeConfig)
     else if (remove && isReadable && isEmptyCreatedConfig) changes.push({ file: nativeConfig, action: 'remove' })
-    else if (agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig)) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
+    else if (!isHeld && (agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig))) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
   }
-  if (!remove && readLocal(progress) === null) { before.set(progress, null); changes.push({ file: progress, action: 'create' }) }
+  if (!remove && readLocal(progress) === null) { before.set(progress, NO_PATH); changes.push({ file: progress, action: 'create' }) }
   const createdDirs = new Set(Array.isArray(loaded.createdDirs) ? loaded.createdDirs.filter((value): value is string => typeof value === 'string') : [])
   const folderKey = (folder: string): string => process.platform === 'win32' ? resolve(folder).toLowerCase() : resolve(folder)
   const isBelow = (folder: string, parent: string): boolean => folderKey(folder).startsWith(`${folderKey(parent)}${process.platform === 'win32' ? '\\' : '/'}`)
+  // A board file named like a pending list stops setup before it writes, with the board named, so the person learns why.
+  // This is for the message only: the list is written over or deleted only when it reads as one (listOf), whatever path
+  // the board has. A name through a linked folder is compared by the real folder above it, so it is caught before the
+  // file exists.
+  const realNameOf = (file: string): string | null => {
+    const folder = realOf(dirname(file))
+    return folder === null ? null : join(folder, basename(file))
+  }
+  const isPendingList = (file: string, one: string): boolean => {
+    const real = realNameOf(file), list = realNameOf(pendingFile(one))
+    return folderKey(file) === folderKey(pendingFile(one)) || realOf(file) !== null && realOf(file) === realOf(pendingFile(one)) || real !== null && list !== null && folderKey(real) === folderKey(list)
+  }
+  if (!remove && localAgents.some(one => isPendingList(progress, one))) conflicts.push(progress)
+  // A .new copy is due, so setup would write its pending list first: a file there that is not a list stops it before that.
+  const ownList = before.get(pendingFile(agent)) ?? NO_PATH
+  const isCopyDue = keptText.some(one => changes.some(change => change.file === one.beside))
+  if (!remove && isCopyDue && ownList.kind !== 'none' && listOf(ownList) === null && !conflicts.includes(pendingFile(agent))) conflicts.push(pendingFile(agent))
   if (!remove) for (const file of [...changes.filter(change => change.action === 'create').map(change => change.file), ...(initial(manifestFile) === null ? [manifestFile] : [])]) {
     for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
   }
   const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
-  const nextManifest = `${JSON.stringify({ files: Object.fromEntries(Object.entries(files).map(([file, text]) => [file, hash(text)])), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
+  // A kept /board file keeps its record entry, so it still goes as setup wrote it once the script is taken (#1698).
+  const nextManifest = `${JSON.stringify({ files: Object.fromEntries([...Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]]), ...keptBoards.flatMap(file => manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])]), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   if (remove && agent === 'antigravity' && initial(sidecarRecord) !== null) changes.push({ file: sidecarRecord, action: 'remove' })
+  if (remove && listOf(ownList) !== null) changes.push({ file: pendingFile(agent), action: 'remove' })
   const removedDirs = new Set<string>()
   let handover: { file: string; text: string } | undefined
   if (remove) {
@@ -1615,7 +2053,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   const plan = {
     mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
-    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
+    alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), ...(opens === undefined ? {} : { opens }), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
   // setup-codex.mjs and its callers still read --codex-setup's JSON, so a person reaches its plain lines through the doctor's --plain.
@@ -1638,15 +2076,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // Hermes asks the person at a terminal, and a chat gateway cannot ask: this adds only the board's own commands to its trust file, on request.
     if (agent !== 'hermes' || conflicts.length || changes.length || readLocal(manifestFile) === null) throw new Error('OWNED_HERMES_INSTALL_REQUIRED')
     const wanted = Object.entries(object(manifest.groups.hooks ?? {})).filter((pair): pair is [string, string] => typeof pair[1] === 'string')
-    const approvals = readAllowlist(initial(allowlistFile))
+    const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
     if (approvals === null) throw new Error('INVALID_HERMES_ALLOWLIST')
     const missing = wanted.filter(([event, command]) => !approvals.list.some(entry => entry.event === event && entry.command === command))
     const isApplied = args.includes('--apply')
     if (isApplied && missing.length) {
       withInstallLock(home, () => {
-        if (readLocal(allowlistFile) !== initial(allowlistFile)) throw new Error('INSTALL_CHANGED')
+        if (!isAsPlanned(allowlistFile)) throw new Error('INSTALL_CHANGED')
         const stamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
-        atomic(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
+        // The allowlist is read again just before the rename and checked after it (put, as every other write in the
+        // batch does), so an edit made before that last re-read is kept; an edit saved after the re-read and before
+        // the rename is still written over (#1606).
+        put(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
       })
     }
     output({ mode: 'trust', agent, file: allowlistFile, entries: wanted.map(([event, command]) => ({ event, command, trusted: isApplied || !missing.some(one => one[0] === event) })), changes: missing.length, ...(isApplied ? { applied: true } : {}) })
@@ -1671,7 +2112,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     let hooksTrusted: boolean | 'unknown' = 'unknown'
     if (agent === 'hermes' && installed) {
-      const approvals = readAllowlist(initial(allowlistFile))
+      const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
       const wanted = Object.entries(object(manifest.groups.hooks ?? {}))
       hooksTrusted = approvals === null ? 'unknown' : wanted.length > 0 && wanted.every(([event, command]) => approvals.list.some(entry => entry.event === event && entry.command === command))
     }
@@ -1705,6 +2146,30 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     else process.stdout.write(codexDoctorOutput(result, s, nextCommand('--codex-setup', ['--plain']), host ? nextCommand('--codex-trust', explicitBin ? [] : ['--codex-bin', executable!]) : undefined))
     return true
   }
+  // A copy another setup run is writing reads as a file setup did not write until that run's record names it (#1694).
+  // So before a conflict is reported for an apply, the public command's preview for one included, it is checked again
+  // under the install lock: a path this plan was built from that changed since means another setup ran, and a lock
+  // still held means one is running. Either stops as busy, and the next run plans again from the files as they are.
+  // The lock lives in the home's .agent-board folder. With no folder no run holds it, so the check runs at once without
+  // taking it: a refused run leaves no empty folder behind, as on main, and a removal that emptied and deleted the
+  // folder after another run wrote does not skip the check.
+  if (conflicts.length && (args.includes('--apply') || args.includes('--check-conflicts'))) {
+    // A progress file setup cannot read, a link to nothing, is planned as absent, so it would never match and is left out
+    // while it still reads so (#1712): a new plan would read it the same way. One setup can read, setup's own record
+    // included, is checked like every other path, so a target that appeared since the plan stops the run as busy. A link
+    // to the install lock reads only while this check holds the lock, a file the check itself writes, and is left out too,
+    // only then: without the lock, a file there is not this run's.
+    const lockFile = join(installControlRoot(home), 'install.lock')
+    const isUnreadProgress = (file: string, isLocked: boolean): boolean => {
+      const now = file === progress && before.get(file)?.kind === 'none' ? take(file) : null
+      if (now?.kind !== 'link') return false
+      const real = isLocked && now.bytes !== null ? realOf(file) : null
+      return now.bytes === null || real !== null && real === realOf(lockFile)
+    }
+    const isChanged = (isLocked: boolean): void => { for (const file of before.keys()) if (!isUnreadProgress(file, isLocked) && !isAsPlanned(file)) throw new Error('INSTALL_CHANGED') }
+    if (existsSync(installControlRoot(home))) withInstallLock(home, () => isChanged(true))
+    else isChanged(false)
+  }
   if (!args.includes('--apply')) { outputPlan(plan); return true }
   if (conflicts.length) {
     outputPlan(plan)
@@ -1713,36 +2178,80 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     throw new Error('INSTALL_CONFLICT')
   }
   withInstallLock(home, () => {
-    // Compare the bytes used to build the plan, not a fresh snapshot taken after
-    // planning: another installer or host may have changed them in that interval.
-    for (const [file, expected] of before) if (readLocal(file) !== expected) throw new Error('INSTALL_CHANGED')
+    // Compare what each path held when the plan was built (its kind, link and bytes), not a fresh
+    // snapshot taken after planning: another installer or host may have changed them in that interval.
+    for (const file of before.keys()) if (!isAsPlanned(file)) throw new Error('INSTALL_CHANGED')
     local?.beforeApply?.(plan)
+    // Each file is read again just before its change and checked after it (#1488, put and drop, as runSidecarOnly does),
+    // so an edit made before that last re-read is never overwritten or removed, and a change that did not land is not
+    // reported as applied. A stale copy and the pending list go only as planned, not through the re-read removal.
+    // A mismatch stops the batch at once: files written or removed before it stay (no rollback, as in the connect
+    // transaction). This agent's install record changes after every planned file (on install, other agents'
+    // records are updated after it; on remove, the handover to another agent's record comes first), so a mismatch among
+    // the planned files leaves the record as it was. The next setup plans again from the files as they are. A .new copy is named in the pending list before any of them, and an older entry stays
+    // beside the new one, since a stop right here leaves the older copy on disk.
     // Setup is deliberately explicit. It changes neither hook trust nor config.toml; removal takes only the board's own trust tables.
+    const copies = keptText.filter(one => changes.some(change => change.file === one.beside))
+    const pendingWith = (named: typeof copies): string => `${JSON.stringify({ ...ownPending, ...Object.fromEntries(named.map(one => [one.beside, [...new Set([...(ownPending[one.beside] ?? []), hash(files[one.beside] ?? '')])]])) }, null, 2)}\n`
+    const pendingText = pendingWith(copies)
+    if (copies.length) put(pendingFile(agent), pendingText)
+    // A copy leaves the list only when its write stops on proof that someone else's file is at its name (#1693), and
+    // under every name of that file (a skills folder linked to the shared one): otherwise the next setup would take that
+    // file as its own. Any other failure leaves the list whole, as on main, so the next run still finds setup's copy.
+    // A list someone else changed in the meantime is left as it is.
+    const realName = (file: string): string => join(realOf(dirname(file)) ?? dirname(file), basename(file))
+    const dropPending = (file: string): void => {
+      const list = pendingFile(agent)
+      if (!isHolding(take(list), pendingText)) return
+      const kept = copies.filter(one => realName(one.beside) !== realName(file))
+      if (!kept.length && initial(list) === null) unlinkSync(list)
+      else atomic(list, pendingWith(kept), () => { if (!isHolding(take(list), pendingText)) throw new Error('INSTALL_CHANGED') })
+    }
     for (const change of changes) {
       if (change.file === manifestFile || removedDirs.has(change.file)) continue
       if (change.file === trustConfig && nextTrust !== undefined) {
         // A linked config.toml stays a link, and the person's permissions stay.
         const target = realpathSync(trustConfig)
         const mode = statSync(target).mode & 0o777
-        atomic(target, nextTrust)
+        put(trustConfig, nextTrust, target)
+        // A link further along config.toml's chain repointed after `target` was found leaves the write on a file
+        // config.toml no longer reaches (#1606): the write counts only where config.toml still points.
+        let resolved: string | null = null
+        try { resolved = realpathSync(trustConfig) } catch {}
+        // `put` already replaced the target (its temp file is 0600), so restore the person's
+        // permissions before the resolution check can report a failure (#1606).
         if (process.platform !== 'win32') chmodSync(target, mode)
+        if (resolved !== target) throw new Error('INSTALL_CHANGED')
       }
-      else if (change.file === allowlistFile && nextAllowlist !== undefined) atomic(allowlistFile, nextAllowlist)
+      else if (change.file === allowlistFile && nextAllowlist !== undefined) put(allowlistFile, nextAllowlist)
       else if (change.file === nativeConfig) {
-        if (change.action === 'remove') unlinkSync(nativeConfig)
-        else atomic(nativeConfig, nextConfigText!)
+        if (change.action === 'remove') drop(nativeConfig)
+        else put(nativeConfig, nextConfigText!)
       }
       else if (change.file === progress) {
         mkdirSync(dirname(progress), { recursive: true })
         writeFileSync(progress, '', { flag: 'wx', mode: 0o600 })
-      } else if (remove || retired.includes(change.file)) unlinkSync(change.file)
-      else atomic(change.file, files[change.file] ?? '')
+      } else if (staleBeside.has(change.file) || change.file === pendingFile(agent)) {
+        // The list goes as planned or not at all, as a stale copy does. A file saved there between this read and the
+        // unlink is a gap no check closes, the same for every file a removal deletes.
+        if (!isAsPlanned(change.file)) throw new Error('INSTALL_CHANGED')
+        unlinkSync(change.file)
+      } else if (remove || retired.includes(change.file)) drop(change.file)
+      else {
+        try { put(change.file, files[change.file] ?? '') }
+        catch (error) {
+          if ((error as Error).message === 'INSTALL_CHANGED' && copies.some(one => one.beside === change.file)) try { dropPending(change.file) } catch {}
+          throw error
+        }
+      }
     }
     if (remove) {
-      if (handover) atomic(handover.file, handover.text)
-      if (readLocal(manifestFile) !== null) unlinkSync(manifestFile)
+      if (handover) put(handover.file, handover.text)
+      unchanged(manifestFile, null)
+      // Only a record that read as one when setup planned, as the plan lists it: a dangling link there stays, as on main.
+      if (initial(manifestFile) !== null) drop(manifestFile)
     } else {
-      atomic(manifestFile, nextManifest)
+      put(manifestFile, nextManifest)
       for (const other of localAgents.filter(one => one !== agent)) {
         const siblingFile = join(root, `install-${other}.json`)
         const siblingText = initial(siblingFile)
@@ -1751,15 +2260,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (sibling.files === undefined) continue
         const siblingFiles = { ...object(sibling.files) } as Record<string, string>
         let updatedSibling = false
-        for (const sharedFile of [script, worker, skill]) {
+        for (const sharedFile of [script, worker, skill, ...Object.keys(siblingFiles).filter(one => one.endsWith('.new'))]) {
           const nextText = files[sharedFile]
           if (Object.hasOwn(siblingFiles, sharedFile) && nextText !== undefined && changes.some(change => change.file === sharedFile) && siblingFiles[sharedFile] !== hash(nextText)) {
             siblingFiles[sharedFile] = hash(nextText)
             updatedSibling = true
           }
         }
-        if (updatedSibling) atomic(siblingFile, `${JSON.stringify({ ...sibling, files: siblingFiles }, null, 2)}\n`)
+        if (updatedSibling) put(siblingFile, `${JSON.stringify({ ...sibling, files: siblingFiles }, null, 2)}\n`)
       }
+      // The records now name every copy. This also clears a list an earlier setup left when it stopped after its record;
+      // a file under that name that is not a list stays.
+      if (listOf(take(pendingFile(agent))) !== null) unlinkSync(pendingFile(agent))
     }
   })
   // A folder that cannot go (something appeared in it, or Windows holds it) stays and is not reported as removed.

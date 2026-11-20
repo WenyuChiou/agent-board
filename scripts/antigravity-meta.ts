@@ -1,6 +1,10 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync } from 'node:fs'
 import { basename, isAbsolute, join, posix, resolve } from 'node:path'
+import { performance } from 'node:perf_hooks'
+import { StringDecoder } from 'node:string_decoder'
 import { clip } from '../hooks/mirror'
+import { agentClaimOf } from '../hooks/session-liveness'
+import type { AgentClaim } from '../hooks/session-liveness'
 import { cutLine, oneLine } from '../hooks/step-words'
 
 export const ANTIGRAVITY_TRANSCRIPTS = new Set(['transcript.jsonl', 'transcript_full.jsonl'])
@@ -306,4 +310,169 @@ export const resolveAntigravityTitle = (
   }
   const promptTitle = readAntigravityFirstPrompt(transcriptPath, conversationId, home)
   return promptTitle === null ? null : { title: promptTitle, titleSource: 'prompt' }
+}
+
+const isKnownTranscript = (path: unknown): path is string =>
+  typeof path === 'string' && isAbsolute(path) && ANTIGRAVITY_TRANSCRIPTS.has(basename(path))
+const MAX_ACK_READ_BYTES = 8 * 1024 * 1024
+
+// The transcript's size when the turn-start hook hands a message over: the model's replies to it come after this
+// offset (#1416). A transcript not written yet reads as 0; an unknown or unreadable path as null.
+export const antigravityTranscriptSize = (path: unknown): number | null => {
+  if (!isKnownTranscript(path)) return null
+  try { const stat = lstatSync(path); return stat.isFile() ? stat.size : null } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : null
+  }
+}
+
+const ACK_READ_CHUNK_BYTES = 256 * 1024
+type TranscriptEntry = { type?: unknown; source?: unknown; content?: unknown }
+const entryOf = (line: string): TranscriptEntry | null => {
+  if (line.trim() === '') return null
+  try {
+    const entry: unknown = JSON.parse(line)
+    return typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? entry as TranscriptEntry : null
+  } catch { return null }
+}
+const replyFirstLine = ({ type, source, content }: TranscriptEntry): string | null =>
+  source === 'MODEL' && type === 'PLANNER_RESPONSE' && typeof content === 'string' && content.trim() !== '' ? content.split(/\r?\n/)[0]!.trim() : null
+
+// The first line of each model reply, read from the conversation's own transcript, because the turn-end hook does not
+// carry the reply text (#1416). With `from` (the size at the hand-over, still within the file), the replies of the turn
+// that hand-over started count, read forward from it up to 8 MiB, so a long turn after the ACK line does not push it out
+// of reach. That turn ends at the first USER_INPUT after one of its replies, or at the second USER_INPUT after `from`
+// (the turn's own input may be written after the hand-over), so a later turn citing the code never counts, even for a
+// claim a Stop could not read and kept. Without `from`, or when the file is now shorter, only the last turn's replies
+// (after its last USER_INPUT) in the last 256 KiB count.
+// Only the reply's own first line is returned (a blank first line stays blank, so an ACK on the line after it does not
+// count), and only for a regular file under one of the known transcript names; a line that is not JSON is skipped.
+// A path that is missing, unknown or cannot be read returns null, so the caller can keep its claims.
+export const antigravityReplyFirstLines = (path: unknown, from?: number): string[] | null => {
+  if (!isKnownTranscript(path)) return null
+  try {
+    if (!lstatSync(path).isFile()) return null
+    const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+    try {
+      const stat = fstatSync(fd)
+      if (!stat.isFile()) return null
+      if (from !== undefined && from <= stat.size) {
+        const replies: string[] = []
+        const decoder = new StringDecoder('utf8')
+        let position = from, carry = '', inputs = 0, isTurnEnded = false
+        const take = (line: string): void => {
+          const entry = entryOf(line)
+          if (entry === null) return
+          if (entry.type === 'USER_INPUT') {
+            inputs += 1
+            if (replies.length > 0 || inputs > 1) isTurnEnded = true
+            return
+          }
+          const first = replyFirstLine(entry)
+          if (first !== null) replies.push(first)
+        }
+        while (!isTurnEnded && position < stat.size && position - from < MAX_ACK_READ_BYTES) {
+          const size = Math.min(ACK_READ_CHUNK_BYTES, stat.size - position, from + MAX_ACK_READ_BYTES - position)
+          const bytes = Buffer.alloc(size)
+          if (readSync(fd, bytes, 0, size, position) !== size) return null
+          position += size
+          const lines = (carry + decoder.write(bytes)).split(/\r?\n/)
+          carry = lines.pop() ?? ''
+          for (const line of lines) { take(line); if (isTurnEnded) break }
+        }
+        // The file's last line may have no line break; a line cut at the 8 MiB limit is not read.
+        if (!isTurnEnded && position >= stat.size) take(carry + decoder.end())
+        return replies
+      }
+      const start = Math.max(0, stat.size - MAX_TRANSCRIPT_HEAD_BYTES)
+      const size = stat.size - start
+      if (size <= 0) return []
+      const bytes = Buffer.alloc(size)
+      if (readSync(fd, bytes, 0, size, start) !== size) return null
+      let text = bytes.toString('utf8')
+      // A read that starts inside the file starts mid-line.
+      if (start > 0) text = text.slice(text.indexOf('\n') + 1)
+      let replies: string[] = []
+      for (const line of text.split(/\r?\n/)) {
+        const entry = entryOf(line)
+        if (entry === null) continue
+        if (entry.type === 'USER_INPUT') replies = []
+        else {
+          const first = replyFirstLine(entry)
+          if (first !== null) replies.push(first)
+        }
+      }
+      return replies
+    } finally { closeSync(fd) }
+  } catch { return null }
+}
+
+export type ProcEntry = { ppid: number; startTicks: number; comm: string; exe: string | null; cmdline?: string[] }
+
+// Parse Linux `/proc/<pid>/stat` safely around process names that contain spaces or `)`.
+export const parseLinuxProcStat = (text: string): { ppid: number; startTicks: number } | null => {
+  if (!/^\d+\s+\(/.test(text)) return null
+  const end = text.lastIndexOf(')')
+  if (end < 0 || !/^\s/.test(text.slice(end + 1))) return null
+  const fields = text.slice(end + 1).trim().split(/\s+/)
+  const ppid = Number(fields[1])
+  const startTicks = Number(fields[19])
+  if (!Number.isSafeInteger(ppid) || ppid < 0) return null
+  if (!Number.isSafeInteger(startTicks) || startTicks <= 0) return null
+  return { ppid, startTicks }
+}
+
+const SHARED_ANTIGRAVITY_DAEMONS = new Set(['language_server', 'antigravity', 'electron', 'code'])
+const stripExecutableName = (value: string): string =>
+  posix.basename(value.replace(/ \(deleted\)$/, '')).toLowerCase().replace(/\.exe$/, '')
+
+// Walk upward from a Linux hook worker without spawning, stopping on shared daemons.
+export const findAgyProcess = (
+  startPid: number,
+  readProc: (pid: number) => ProcEntry | null,
+  maxSteps = 16,
+): { pid: number; startTicks: number } | null => {
+  const seen = new Set<number>()
+  let pid = startPid
+  for (let step = 0; step < maxSteps && Number.isSafeInteger(pid) && pid > 1; step += 1) {
+    if (seen.has(pid)) return null
+    seen.add(pid)
+    const entry = readProc(pid)
+    if (entry === null) return null
+    const comm = entry.comm.trim().toLowerCase()
+    const exeBase = entry.exe === null ? null : stripExecutableName(entry.exe)
+    if (SHARED_ANTIGRAVITY_DAEMONS.has(comm) || comm.startsWith('language_server')
+      || (exeBase !== null && (SHARED_ANTIGRAVITY_DAEMONS.has(exeBase) || exeBase.startsWith('language_server')))) {
+      return null
+    }
+    if (comm === 'agy' && exeBase === 'agy') return { pid, startTicks: entry.startTicks }
+    pid = entry.ppid
+  }
+  return null
+}
+
+const readLinuxProc = (pid: number): ProcEntry | null => {
+  try {
+    const stat = parseLinuxProcStat(readFileSync(`/proc/${pid}/stat`, 'utf8'))
+    if (stat === null) return null
+    const comm = readFileSync(`/proc/${pid}/comm`, 'utf8')
+    let exe: string | null = null
+    try { exe = readlinkSync(`/proc/${pid}/exe`) } catch {}
+    return { ppid: stat.ppid, startTicks: stat.startTicks, comm, exe }
+  } catch { return null }
+}
+
+// Record the owning `agy` CLI process on Linux without spawning a subprocess (#1589).
+export const antigravityProcessClaim = (host: string | null, startPid = process.ppid): AgentClaim | null => {
+  if (process.platform !== 'linux' || host === null) return null
+  const found = findAgyProcess(startPid, readLinuxProc)
+  if (found === null) return null
+  let started: number | undefined
+  try {
+    const self = parseLinuxProcStat(readFileSync(`/proc/${process.pid}/stat`, 'utf8'))
+    if (self !== null) {
+      const estimated = Math.round(performance.timeOrigin + (found.startTicks - self.startTicks) * 10)
+      if (Number.isSafeInteger(estimated) && estimated > 0) started = estimated
+    }
+  } catch {}
+  return agentClaimOf({ agentPid: found.pid, ...(started === undefined ? {} : { agentStarted: started }), host })
 }
