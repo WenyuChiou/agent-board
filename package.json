@@ -16,6 +16,7 @@
     "hooks/board-script-1.ts",
     "hooks/board-script-2.ts",
     "hooks/board-script-3.ts",
+    "hooks/board-script-4.ts",
     "hooks/released.ts"
   ],
   "engines": {

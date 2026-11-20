@@ -57,10 +57,12 @@ export const blockKey = (auto: { agent: string; session: string; resume: string 
 
 export type LivenessProbe = (claim: AgentClaim) => { alive: boolean; actual: number | 'inaccessible' | null }
 
-// The agents whose blocks can carry a liveness claim: Claude Code (#1092),
-// OpenCode (#1595), and Antigravity CLI on Linux (#1589). Another agent's pid
+// The agents whose blocks can carry a liveness claim: Claude Code, from its own
+// process (#1092), and OpenCode, from the process its plugin starts the hook
+// worker in (#1595), and Codex, from the terminal its hook walks up to on Linux
+// in process (#1092), and Antigravity CLI on Linux (#1589). Another agent's pid
 // fields are ignored, so its card keeps the 12 h backstop.
-export const CLAIMING_AGENTS: ReadonlySet<string> = new Set(['claude', 'opencode', 'antigravity'])
+export const CLAIMING_AGENTS: ReadonlySet<string> = new Set(['claude', 'opencode', 'codex', 'antigravity'])
 
 // An exited `agy -p` turn that asked a closing question leaves the process right
 // after Stop; keeping waiting+[?] rows out of `gone` preserves the Needs you card (#1589).
@@ -126,7 +128,10 @@ export const goneBlocks = (projects: readonly ProgressProject[], probe: Liveness
 // own progress file (#1092, PM Q3): every stored or transmitted copy drops
 // it — the question ledger, the plugin's stored mirror, the completion
 // overlay (finding 5). The in-memory mirror keeps it; only the stored copy
-// is stripped.
+// is stripped. The one exception (PM, #1731 round 3): a Codex opening event
+// waiting in the board's pending queue carries the claim its hook saw
+// (`seenClaim`) only until its replay writes it to progress.md and deletes
+// the entry.
 export const withoutProcessIdentity = <T extends { agentPid?: number; agentStarted?: number; host?: string }>(value: T): Omit<T, 'agentPid' | 'agentStarted' | 'host'> => {
   const { agentPid: _agentPid, agentStarted: _agentStarted, host: _host, ...rest } = value
   return rest

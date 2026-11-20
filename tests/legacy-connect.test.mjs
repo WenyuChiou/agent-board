@@ -6,11 +6,16 @@ import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import assert from 'node:assert/strict'
-import test from 'node:test'
+import { test as nodeTest } from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { RELEASE_0_20_5 } from './fixtures/released.ts'
 import { bundleFromDir, bundleFromRef } from '../scripts/bundle-text.mjs'
 import { generatedHookCommand } from './fixtures/generated-hook-command.mjs'
+import { partTest } from '../scripts/ci-impact.mjs'
+
+// CI's board jobs run this file in parts, each part its share of the tests: whole, it took 101-179 s on Windows and
+// sat in one part beside that part's share of codex-local, which then ran over its 480 s (#1741).
+const test = partTest(nodeTest)
 
 const bundle = bundleFromDir(new URL('..', import.meta.url))
 const fixture = async fn => {

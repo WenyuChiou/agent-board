@@ -181,7 +181,8 @@ test('a non-Claude agent records no pid, and its waiting card stays until the 12
   expect(claudeMarker).toContain(`agentpid=${livePid}`)
   expect(claudeMarker).toContain(`agentstarted=${liveStarted}`)
   expect(claudeMarker).toContain(`host=${host}`)
-  const text = file(block('b8c9d0e1', 'codex', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: deadPidValue, started: liveStarted, host }))
+  // Codex names its process on Linux since #1092; Grok still names none, so its pid fields are ignored.
+  const text = file(block('b8c9d0e1', 'grok', 'waiting', '- [?] Deploy the synthetic build, OK?', { pid: deadPidValue, started: liveStarted, host }))
   const view = viewOf(text, goneFor(text), observe(emptyQuestions(), text).ledger)
   expect(view.waiting.map(item => item.text)).toEqual(['Deploy the synthetic build, OK?'])
 })
