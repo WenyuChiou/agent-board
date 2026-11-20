@@ -4,7 +4,7 @@
 // what a press does are worked out in hooks/serve.ts; the writes are the terminal board's own
 // (board-cli.ts passes them in), so the page changes progress.md the way the pane does.
 import { createHash, randomBytes } from 'node:crypto'
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync, watch as fsWatch, writeFileSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync, watch as fsWatch, writeSync } from 'node:fs'
 import type { FSWatcher } from 'node:fs'
 import { createServer } from 'node:http'
 import type { IncomingMessage, Server, ServerResponse } from 'node:http'
@@ -163,9 +163,9 @@ const isOffMarkerAt = (addressFile: string): boolean => {
 const writeOffMarker = (addressFile: string, atIso: string): boolean => {
   const offPath = approvalsOffFile(addressFile)
   if (!isRealDir(dirname(offPath))) return false
+  let fd: number
   try {
-    writeFileSync(offPath, `${JSON.stringify({ at: atIso })}\n`, { flag: 'wx', mode: 0o600 })
-    return true
+    fd = openSync(offPath, 'wx', 0o600)
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code !== 'EEXIST') return false
     try {
@@ -174,6 +174,19 @@ const writeOffMarker = (addressFile: string, atIso: string): boolean => {
     } catch {
       return false
     }
+  }
+  // The file is ours now. If it cannot be written or closed it goes again: an empty marker would turn
+  // approvals off for the hook while the page says the switch failed.
+  let isOpen = true
+  try {
+    writeSync(fd, `${JSON.stringify({ at: atIso })}\n`)
+    isOpen = false
+    closeSync(fd)
+    return true
+  } catch {
+    if (isOpen) try { closeSync(fd) } catch {}
+    try { unlinkSync(offPath) } catch {}
+    return false
   }
 }
 
@@ -489,6 +502,8 @@ export const startServer = (o: ServeOptions): void => {
   // A host asked for an approval since the board started: only then does an open page that cannot
   // answer one make the board script open another.
   let hasAsked = false
+  // A page that held no secret pressed the approvals switch: the next board command opens a keyed page.
+  let isSwitchWanted = false
   const clockNow = o.now ?? Date.now
   let lastPassedAskAt = 0
   let isUserOff = o.addressFile !== undefined && isOffMarkerAt(o.addressFile)
@@ -881,7 +896,7 @@ export const startServer = (o: ServeOptions): void => {
       // wantsKeyedPage: approvals are in use and no open page can answer them, so the board script
       // opens one with a key rather than pointing at a page that cannot. A paired page that is only
       // hidden still can; before any host asked, the page that is open is enough.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserOff) && !hasLiveSecret(Date.now()) })
+      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserOff || isSwitchWanted) && !hasLiveSecret(Date.now()) })
       return json(res, 404, {})
     }
     const body = await readBody(req)
@@ -912,7 +927,7 @@ export const startServer = (o: ServeOptions): void => {
         hasAsked = true
         lastPassedAskAt = Math.max(lastPassedAskAt, clockNow())
         // Approvals turned off (by replay lockdown or the page switch), or too many kept: the host asks in its own window.
-        if (isApprovalOff || isUserOff || (o.addressFile !== undefined && isOffMarkerAt(o.addressFile))) return json(res, 200, {})
+        if (isApprovalOff || (o.addressFile !== undefined && isOffMarkerAt(o.addressFile))) return json(res, 200, {})
         for (const [id, one] of [...approvals]) {
           if (approvals.size < APPROVAL_MAX) break
           if (one.answer !== undefined) continue
@@ -1010,13 +1025,26 @@ export const startServer = (o: ServeOptions): void => {
         return json(res, 200, { secret })
       }
       const secret = secretOf(req.headers, now)
-      if (secret === '') return json(res, 403, { note: isApprovalOff ? o.s.approvalOff : o.s.approvalNoSecret })
+      if (secret === '') {
+        // The switch is drawn on every local page, so one that holds no secret asks for a keyed page.
+        if (url.pathname === '/api/approvals/switch' && !isApprovalOff) {
+          isSwitchWanted = true
+          return json(res, 403, { note: o.s.approvalSwitchNoSecret })
+        }
+        return json(res, 403, { note: isApprovalOff ? o.s.approvalOff : o.s.approvalNoSecret })
+      }
       if (url.pathname === '/api/approvals/switch') {
+        // A switch that failed leaves the marker as the hook reads it: if it is there, the hook is off, so the board is too.
+        const failedSwitch = (addressFile: string): void => {
+          isUserOff = isOffMarkerAt(addressFile)
+          if (isUserOff) for (const [id, one] of [...approvals]) if (one.answer !== undefined) settleApproval(id, null)
+          json(res, 409, { note: o.s.approvalSwitchFailed })
+        }
         if (isApprovalOff) return json(res, 403, { note: o.s.approvalOff })
         if (typeof body.enabled !== 'boolean') return json(res, 400, {})
         if (o.addressFile === undefined) return json(res, 409, { note: o.s.approvalSwitchFailed })
         if (body.enabled === false) {
-          if (!writeOffMarker(o.addressFile, new Date(clockNow()).toISOString())) return json(res, 409, { note: o.s.approvalSwitchFailed })
+          if (!writeOffMarker(o.addressFile, new Date(clockNow()).toISOString())) return failedSwitch(o.addressFile)
           hasAsked = true
           isUserOff = true
           isApprovalFilesDirty = false
@@ -1024,7 +1052,7 @@ export const startServer = (o: ServeOptions): void => {
           for (const [id, one] of [...approvals]) if (one.answer !== undefined) settleApproval(id, null)
           return json(res, 200, { isOff: true, note: o.s.settingsChanged(o.s.settingsApprovals, o.s.settingsOff) })
         }
-        if (!removeOffMarker(o.addressFile)) return json(res, 409, { note: o.s.approvalSwitchFailed })
+        if (!removeOffMarker(o.addressFile)) return failedSwitch(o.addressFile)
         hasAsked = true
         isUserOff = false
         isApprovalFilesDirty = false
