@@ -3167,6 +3167,73 @@ test('a marker write that fails after the file was created removes the file, ans
   assert.equal((await waiting).status, 200)
 })
 
+test('a marker close that fails after the write closes once, removes the file, answers 409 and leaves waiting asks alone', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-failed-close')))
+  await page.card('npm run synthetic-failed-close', 'asking')
+  const offFile = hook.approvalsOffFile(board.file)
+  // The marker's descriptor is the one its JSON is written to. Its close releases it, as a close that reports an error
+  // still does, and then fails. Every close of it in the same synchronous write is counted; after that the number may
+  // be given to another file, so later closes are left alone.
+  let markerFd
+  let isMarkerReleased = false
+  const markerCloses = []
+  const realWrite = fs.writeSync
+  const realClose = fs.closeSync
+  fs.writeSync = function (...args) {
+    if (typeof args[1] === 'string' && args[1].startsWith('{"at"')) markerFd = args[0]
+    return Reflect.apply(realWrite, this, args)
+  }
+  fs.closeSync = function (...args) {
+    if (markerFd === undefined || args[0] !== markerFd || isMarkerReleased) return Reflect.apply(realClose, this, args)
+    markerCloses.push(args[0])
+    if (markerCloses.length === 1) {
+      Reflect.apply(realClose, this, args)
+      queueMicrotask(() => { isMarkerReleased = true })
+    }
+    throw Object.assign(new Error('synthetic closeSync fault'), { code: 'EIO' })
+  }
+  syncBuiltinESMExports()
+  let refused
+  try { refused = await switchApprovals(board, page, false) } finally {
+    fs.writeSync = realWrite
+    fs.closeSync = realClose
+    syncBuiltinESMExports()
+  }
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.note, EN.approvalSwitchFailed)
+  assert.equal(markerCloses.length, 1)
+  assert.equal(existsSync(offFile), false)
+  assert.equal(hook.isSwitchedOff(board.file), false)
+  assert.equal((await boardAs(board, page))?.isOff, undefined)
+  // Still waiting for the page: a failed switch changed nothing.
+  assert.equal(await Promise.race([waiting, pause(500).then(() => 'waiting')]), 'waiting')
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  assert.equal((await waiting).status, 200)
+})
+
+test('a switch on that fails because a directory sits at the marker path reads Off and settles waiting asks', { timeout: 60_000 }, async () => {
+  const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-marker-directory')))
+  await page.card('npm run synthetic-marker-directory', 'asking')
+  const offFile = hook.approvalsOffFile(board.file)
+  mkdirSync(offFile)
+  const started = Date.now()
+  const refused = await switchApprovals(board, page, true)
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.note, EN.approvalSwitchFailed)
+  const answered = await waiting
+  // The long approval timers stay: only the failed switch can have answered this soon.
+  assert.ok(Date.now() - started < 3_000, `answered after ${Date.now() - started} ms`)
+  assert.equal(answered.status, 200)
+  assert.deepEqual(answered.body, {})
+  assert.equal(hook.isSwitchedOff(board.file), true)
+  assert.equal((await boardAs(board, page))?.isOff, true)
+  assert.equal(lstatSync(offFile).isDirectory(), true)
+})
+
 test('a marker write that fails and leaves the file behind settles waiting asks as the hook already is off', { timeout: 60_000 }, async () => {
   const board = await startBoard({ drawMs: 15_000, pressMs: 30_000 })
   const page = await openPage(board)
@@ -3227,17 +3294,17 @@ test('a watched board caches idle refusal and off-switch checks until the folder
   }
   const board = await startBoard({ isWatched: true, watchFs })
   const page = await openPage(board)
-  assert.equal(await page.look(), undefined)
+  assert.equal(await boardAs(board, page), undefined)
   const runtimeWatcher = watchers.find(one => one.path === dirname(board.file))
   assert.ok(runtimeWatcher)
   writeRefusalRecord(board, 'not-listening')
   // An idle poll before the folder watcher signals reads the cached state without touching disk.
-  assert.equal(await page.look(), undefined)
+  assert.equal(await boardAs(board, page), undefined)
   runtimeWatcher.listener('change', basename(hook.approvalsRefusedFile(board.file)))
-  assert.equal((await page.look())?.refusal?.reason, 'not-listening')
+  assert.equal((await boardAs(board, page))?.refusal?.reason, 'not-listening')
   rmSync(hook.approvalsRefusedFile(board.file))
   runtimeWatcher.listener('rename', basename(hook.approvalsRefusedFile(board.file)))
-  assert.equal(await page.look(), undefined)
+  assert.equal(await boardAs(board, page), undefined)
   const offFile = hook.approvalsOffFile(board.file)
   writeFileSync(offFile, `${JSON.stringify({ at: new Date().toISOString() })}\n`, { mode: 0o600 })
   assert.equal((await boardAs(board, page))?.isOff, undefined)
@@ -3256,4 +3323,21 @@ test('a watched board caches idle refusal and off-switch checks until the folder
   assert.equal(busyWatchers.length, 0)
   await board.close()
   assert.equal(runtimeWatcher.closed, true)
+})
+
+test('an ask sent after the off marker is removed, before the folder watcher signals, is admitted and waits for the page', { timeout: 60_000 }, async () => {
+  const watchFs = (path, listener) => Object.assign(new EventEmitter(), { path, listener, close() {} })
+  const board = await startBoard({ isWatched: true, watchFs, drawMs: 15_000, pressMs: 30_000 })
+  const page = await openPage(board)
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  rmSync(hook.approvalsOffFile(board.file))
+  // The board still shows its own Off until the watcher signals, but the hook already reads On: the ask is the page's.
+  assert.equal((await boardAs(board, page))?.isOff, true)
+  assert.equal(hook.isSwitchedOff(board.file), false)
+  const waiting = board.call('/api/approvals/ask', hook.askBody(request('npm run synthetic-marker-removed')))
+  assert.equal(await Promise.race([waiting, pause(500).then(() => 'waiting')]), 'waiting')
+  assert.equal((await switchApprovals(board, page, false)).status, 200)
+  const answered = await waiting
+  assert.equal(answered.status, 200)
+  assert.deepEqual(answered.body, {})
 })
