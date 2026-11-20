@@ -54,6 +54,7 @@ Keys are English camelCase; values use the board's selected language. Every stri
 | `options` | The page's answer choices; an empty array when none are offered. |
 | `askedAt` | Source timestamp as an ISO 8601 UTC string, or `null` when unknown. |
 | `age` | The page's relative age wording, or its localized unknown-time label. |
+| `mayBeClosed` | `true` for a Codex question whose session names no process the board can check and has been quiet for more than two minutes: its window may be closed. The card still counts; `true` is never a proof that the window closed. `false` otherwise. |
 
 ## Working, waiting and stopped rows
 
