@@ -57,11 +57,13 @@ took up to 294.4 s of such a part and now runs in a part of its own). Each Windo
 files one at a time (`CI_TEST_SERIAL`), and the other Windows jobs run at most two files at once. When
 three spawn-heavy files ran side by side on the 4-vCPU runner, every test ran about 1.35x slower, and
 the tests with the tightest time limits failed, a different one each run (#910). Each part runs a share
-of the other files, dealt out slowest first by their time budgets, each to the part with the least time
-so far (`partFiles`, #1059): on Windows one file at a time, each in its own Node run, and on Ubuntu in one
-Node run. `tests/codex-local.test.mjs` and `tests/board.test.mjs` take
+of the other files, dealt out slowest first, each to the part with the least time so far (`partFiles`, #1059):
+on Windows one file at a time, each in its own Node run, and on Ubuntu in one Node run. A file weighs about
+its slowest Windows time, read back from its time budget, and a file with no budget 5 s. `tests/codex-local.test.mjs` and `tests/board.test.mjs` take
 far longer than the rest (about 8 and 5 minutes there), so every part runs them, each part taking an
-equal share of their tests. On Ubuntu the board set runs in two parts: files run side by side there, but
+equal number of their tests. Those shares do not take equal time, so in the seven Windows board parts each part
+starts from its measured share of the self-parted files (`BOARD_SELF_PARTED_SHARES_MS`): before that, the slowest
+other file went to part 1, the part with the largest share, and part 1 ran over its 480 s (#1733). On Ubuntu the board set runs in two parts: files run side by side there, but
 Node runs one file's tests one after another, so a single part ran about as long as `codex-local` alone
 (449.9 s of that file in a 498.5 s run, over the 480 s part budget; #1130). A serial run times one file at a time and records the times, and a step
 after the tests checks them against the budgets in `scripts/ci-impact.mjs` (#902 step 4): a file over
