@@ -43,19 +43,40 @@ const quoteFreeProgram = (command: string): string | undefined => {
   } catch { return undefined }
 }
 
-// encodedLaunch writes `& 'program' ...` in UTF-16LE base64, doubling each single quote it holds.
+// encodedLaunch writes `& 'program' ...` in UTF-16LE base64, doubling each single quote it holds. Its compact
+// form, for a long command, first sets `$w='worker'; & ` and may build the program from the worker's folder:
+// `($w.Substring(0,N)+'rest')` (hooks/local-agents.ts).
 const encodedProgram = (command: string): string | undefined => {
   const encoded = /^powershell\.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)$/.exec(command)?.[1]
   if (encoded === undefined) return undefined
   const source = Buffer.from(encoded, 'base64').toString('utf16le')
-  if (!source.startsWith("& '")) return undefined
-  let program = ''
-  for (let at = 3; at < source.length; at++) {
-    const char = source[at] ?? ''
-    if (!/['‘’‚‛]/.test(char)) { program += char; continue }
-    if (source[at + 1] !== char) return program
-    program += char
-    at++
+  let at = 0
+  let worker: string | undefined
+  if (source.startsWith('$w=')) {
+    const word = singleQuoted(source, 3)
+    if (word === undefined || !source.startsWith('; ', word.end)) return undefined
+    worker = word.value
+    at = word.end + 2
+  }
+  if (!source.startsWith('& ', at)) return undefined
+  at += 2
+  if (source[at] === "'") return singleQuoted(source, at)?.value
+  const shared = worker === undefined ? null : /^\(\$w\.Substring\(0,(\d+)\)\+/.exec(source.slice(at))
+  if (worker === undefined || shared === null) return undefined
+  const rest = singleQuoted(source, at + shared[0].length)
+  return rest !== undefined && source[rest.end] === ')' ? worker.slice(0, Number(shared[1])) + rest.value : undefined
+}
+
+// A single-quoted PowerShell word that starts at `at`: its text, and the index just past its closing quote.
+const singleQuoted = (source: string, at: number): { value: string; end: number } | undefined => {
+  if (source[at] !== "'") return undefined
+  let value = ''
+  for (let index = at + 1; index < source.length; index++) {
+    const char = source[index] ?? ''
+    if (!/['‘’‚‛]/.test(char)) { value += char; continue }
+    if (source[index + 1] !== char) return { value, end: index + 1 }
+    value += char
+    index++
   }
   return undefined
 }

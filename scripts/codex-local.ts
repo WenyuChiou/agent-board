@@ -1508,13 +1508,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const worker = join(root, 'agent-board-hook.mjs')
   // Only the program is kept from the last install; every other word is written from this run.
   const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
-  const earlier = commandsOf(Object.values(manifest.groups)).filter((command): command is string => typeof command === 'string')
+  // Hermes records each event's command by name, not in groups.
+  const hermesRecord = agent === 'hermes' ? Object.values(object(manifest.groups.hooks ?? {})) : []
+  const earlier = [...commandsOf(Object.values(manifest.groups)), ...hermesRecord].filter((command): command is string => typeof command === 'string')
   // The Node setup wrote last time, spelled as setup wrote it, still runs the same hooks. So it is
   // kept even when this run's Node is a copy in another folder or another name for the same file:
-  // rewriting a command would drop the approval its host bound to it (#1662).
+  // rewriting a command would drop the approval its host bound to it (#1662). Every path asked
+  // about here comes from setup's own records, so it was a working Node by any name when written.
   const keptNodes = new Map<string, boolean>()
   const isKeptNode = (path: string): boolean => {
-    if (!isAbsolute(path) || !/^node(js)?(\.exe)?$/i.test(basename(path))) return false
+    if (!isAbsolute(path)) return false
     const known = keptNodes.get(path)
     if (known !== undefined) return known
     const decide = (): boolean => {
@@ -1524,8 +1527,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         if (kept.ino > 0n && kept.dev === running.dev && kept.ino === running.ino) return true
       } catch { return false }
       // Another program in that place is not kept. A probe that runs out of time keeps it, so a
-      // slow computer does not change the command (#625).
-      const probe = spawnSync(path, ['-p', 'process.release.name'], { encoding: 'utf8', windowsHide: true, timeout: 5000, maxBuffer: 4096 })
+      // slow computer does not change the command (#625). SIGKILL, since a program may ignore SIGTERM.
+      const probe = spawnSync(path, ['-p', 'process.release.name'], { encoding: 'utf8', windowsHide: true, timeout: 5000, killSignal: 'SIGKILL', maxBuffer: 4096 })
       if ((probe.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT') return true
       return probe.error === undefined && probe.status === 0 && probe.stdout.trim() === 'node'
     }
@@ -1534,9 +1537,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     return isKept
   }
   // Every host reads the Node of the files beside its hooks from the skill they all share: a host's
-  // own hook commands would let two hosts write that skill with different Nodes in turn.
+  // own hook commands would let two hosts write that skill with different Nodes in turn. Only a skill
+  // setup wrote and still owns is read: one the person edited may name any program.
   const scriptWord = quote(script).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const skillNode = new RegExp('"([^"\\r\\n]+)" ' + scriptWord).exec(readLocal(skill) ?? '')?.[1]
+  const skillNow = initial(skill)
+  const isSetupSkill = skillNow !== null && !isUnreadable(skill) && [manifest.files, ...otherManifests.map(one => object(one.files ?? {}))].some(files => files[skill] === ownHash(skill, skillNow))
+  const skillNode = isSetupSkill ? new RegExp('"([^"\\r\\n]+)" ' + scriptWord).exec(skillNow)?.[1] : undefined
   const commandNode = skillNode !== undefined && isKeptNode(skillNode) ? skillNode : process.execPath
   // A host's hooks keep the program they start, which on Windows may be an 8.3 name or sit inside an encoded launch.
   // Antigravity's hooks carry no approval, and its PowerShell launch moves to a direct command once this run's Node
