@@ -3418,9 +3418,14 @@ test('on Windows setup keeps the Node program it wrote last time when the short-
   assert.equal(first.status, 0, first.stderr)
   const written = readFileSync(f.hooks, 'utf8')
   assert.ok(written.includes(JSON.stringify(short).slice(1, -1)), 'the first install starts Node by its short name')
+  // The skill names Node by the path it runs from, not by the short name the hooks start it by (#1662).
+  const skillFile = join(f.home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+  const skill = readFileSync(skillFile, 'utf8')
+  assert.ok(skill.includes(spaced), 'the skill names the Node it was set up from')
   const again = install({ ...f.env, ComSpec: missing })
   assert.equal(again.status, 0, again.stderr)
   assert.equal(readFileSync(f.hooks, 'utf8'), written)
+  assert.equal(readFileSync(skillFile, 'utf8'), skill, 'setup again from the same Node leaves the skill as it was')
 }))
 
 test('setup replaces a Codex hook command an earlier release wrote with every word quoted, without the person removing it', () => fixture(async f => {
