@@ -80,21 +80,21 @@ test('/proc text is read as the kernel writes it, including a command name with 
   assert.equal(procEntryOf('5 (x) S notanumber', 'x\0'), null)
 })
 
-test('only a live SessionStart or UserPromptSubmit from the hook replaces a Codex block\'s record; anything else keeps it', async () => {
+test('a SessionStart or UserPromptSubmit replaces a Codex block\'s record with what its own hook saw; anything else keeps it', async () => {
   const { codexClaimOf } = await import('../hooks/codex.ts')
   const host = 'a'.repeat(64)
   const named = { pid: 11, started: 1000, host }
-  const live = { pid: 22, started: 2000, host }
-  // A live opening event with a record writes it; one with none (Windows, the shared server) clears the old one,
+  const seen = { pid: 22, started: 2000, host }
+  // An opening event with a record writes it; one whose walk found none (Windows, the shared server) clears the old one,
   // so a session that moved to the shared server is never judged by a process it no longer runs in.
-  assert.deepEqual(codexClaimOf({ isLive: true, event: 'SessionStart', live, named }), live)
-  assert.deepEqual(codexClaimOf({ isLive: true, event: 'UserPromptSubmit', live, named }), live)
-  assert.equal(codexClaimOf({ isLive: true, event: 'SessionStart', live: null, named }), null)
-  assert.equal(codexClaimOf({ isLive: true, event: 'UserPromptSubmit', live: null, named }), null)
-  // Other events, a replay from the recovery queue and a report keep the block's own record.
-  for (const event of ['Stop', 'PermissionRequest', 'Interrupt', 'SessionEnd', undefined]) assert.deepEqual(codexClaimOf({ isLive: true, event, live: null, named }), named)
-  assert.deepEqual(codexClaimOf({ isLive: false, event: 'SessionStart', live, named }), named)
-  assert.deepEqual(codexClaimOf({ isLive: false, event: 'UserPromptSubmit', live: null, named }), named)
+  assert.deepEqual(codexClaimOf({ event: 'SessionStart', seen, named }), seen)
+  assert.deepEqual(codexClaimOf({ event: 'UserPromptSubmit', seen, named }), seen)
+  assert.equal(codexClaimOf({ event: 'SessionStart', seen: null, named }), null)
+  assert.equal(codexClaimOf({ event: 'UserPromptSubmit', seen: null, named }), null)
+  // An opening event with nothing seen (a raw replay the board script never ran for) clears it too: when in doubt, no verdict.
+  assert.equal(codexClaimOf({ event: 'SessionStart', seen: undefined, named }), null)
+  // Other events and a report keep the block's own record.
+  for (const event of ['Stop', 'PermissionRequest', 'Interrupt', 'SessionEnd', undefined]) assert.deepEqual(codexClaimOf({ event, seen: undefined, named }), named)
 })
 
 test('a Codex block keeps its process record in progress.md, and the board judges it like Claude Code\'s', async () => {

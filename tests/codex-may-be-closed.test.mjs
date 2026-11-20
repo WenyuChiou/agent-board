@@ -18,7 +18,7 @@ const { buildView } = await import('../hooks/view.ts')
 const { takeTask } = await import('../hooks/blocks.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
 const { boardDocument } = await import('../hooks/board-json.ts')
-const { boardItems, boardKey, emptyBoardState, pinned } = await import('../hooks/board.ts')
+const { boardItems, boardKey, boardScreen, emptyBoardState, pinned } = await import('../hooks/board.ts')
 
 const NOW = Date.parse('2026-11-19T12:00:00Z')
 const SECOND = 1000
@@ -114,4 +114,33 @@ test('on the terminal board, a archives a may-be-closed card and says the live a
   const early = pressA(60 * SECOND)
   assert.equal(early.action, null)
   assert.equal(early.state.note, STRINGS.en.archiveLive)
+})
+
+test('on the terminal board, a may-be-closed card\'s footer lists the archive key, and a younger card\'s does not (review of #1731)', () => {
+  const footer = ago => {
+    const view = viewOf(block({ ago }))
+    const items = boardItems(view, [])
+    const at = items.findIndex(item => item.type === 'ask')
+    return boardScreen(view, [], pinned({ ...emptyBoardState, selected: at }, items), STRINGS.en, { width: 120, isColor: false })
+  }
+  assert.ok(footer(121 * SECOND).includes(STRINGS.en.boardKeyArchive), footer(121 * SECOND))
+  assert.ok(!footer(60 * SECOND).includes(STRINGS.en.boardKeyArchive), footer(60 * SECOND))
+})
+
+test('a resume SessionStart that waited in the pending queue keeps the new window\'s process when a later hook applies it (review of #1731)', async () => {
+  const { codexClaimOf, seenClaimOf } = await import('../hooks/codex.ts')
+  const host = 'e'.repeat(64)
+  const old = { pid: 11, started: 1000, host }
+  const fresh = { pid: 22, started: 2000, host }
+  // The queue writes the event as JSON and a later hook reads it back.
+  const stored = JSON.parse(JSON.stringify({ version: 1, payload: { hook_event_name: 'SessionStart' }, seenClaim: fresh }))
+  assert.deepEqual(codexClaimOf({ event: stored.payload.hook_event_name, seen: seenClaimOf(stored.seenClaim), named: old }), fresh)
+  // The same event whose walk found nothing clears the old window's process; a raw event the board script never ran for too.
+  assert.equal(codexClaimOf({ event: 'SessionStart', seen: seenClaimOf(JSON.parse(JSON.stringify({ seenClaim: null })).seenClaim), named: old }), null)
+  assert.equal(codexClaimOf({ event: 'UserPromptSubmit', seen: seenClaimOf(undefined), named: old }), null)
+  // A tampered record is none.
+  assert.equal(seenClaimOf({ pid: -1, host }), null)
+  assert.equal(seenClaimOf('22'), null)
+  // A Stop after the resume keeps the record the resume wrote.
+  assert.deepEqual(codexClaimOf({ event: 'Stop', seen: undefined, named: fresh }), fresh)
 })

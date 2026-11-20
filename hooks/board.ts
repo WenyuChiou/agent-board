@@ -860,6 +860,8 @@ const keysFor = (item: BoardItem | undefined, s: Strings, routes: Readonly<Recor
           ? [s.boardKeyCopyResume]
           : []),
       ...(ask.hideKey !== '' && ask.canHide !== false ? [s.boardKeyHide] : []),
+      // A card that says the window may be closed archives with a (#1092), so its footer says so.
+      ...(ask.archive !== undefined ? [s.boardKeyArchive] : []),
     ]
   }
   if (item.type === 'row') {

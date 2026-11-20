@@ -465,13 +465,23 @@ export const blockClaimOf = (text: string, owner: string, agent: string, session
   const attrs = parseAttrs(lines[span.start] ?? '')
   return agentClaimOf({ agentPid: Number(attrs.agentpid), ...(attrs.agentstarted === undefined ? {} : { agentStarted: Number(attrs.agentstarted) }), host: attrs.host })
 }
-// The process a Codex block names after this event (#1092, M7). Only a live SessionStart or UserPromptSubmit from
-// the hook walks to the Codex terminal (a quick resume on the shared server sends no SessionStart, C1), and its
-// result replaces the block's: no record (Windows, macOS, the shared server) clears an older one, so a session that
-// moved to the shared server is never judged by a process it no longer runs in. Every other event, a replay from
-// the recovery queue and a report keep what the block names.
-export const codexClaimOf = ({ isLive, event, live, named }: { isLive: boolean; event: string | undefined; live: AgentClaim | null; named: AgentClaim | null }): AgentClaim | null =>
-  isLive && (event === 'SessionStart' || event === 'UserPromptSubmit') ? live : named
+// The process a Codex block names after this event (#1092, M7). A SessionStart or UserPromptSubmit replaces the
+// block's record with the one its own hook saw (`seen`): the Codex terminal its walk found, or null where the walk
+// named none (Windows, macOS, the shared server), so a session that moved to the shared server is never judged by a
+// process it no longer runs in. `seen` travels with the event when it waits in the pending queue, so a resume
+// replayed by a later hook keeps the new window's process, not the old one (review of #1731, P1 1). An opening event
+// with no `seen` (a raw event the board script never ran for) clears the record: the card then keeps the two-minute
+// line, never a dead process's verdict. Every other event and a report keep what the block names.
+export const codexClaimOf = ({ event, seen, named }: { event: string | undefined; seen: AgentClaim | null | undefined; named: AgentClaim | null }): AgentClaim | null =>
+  event === 'SessionStart' || event === 'UserPromptSubmit' ? seen ?? null : named
+// The record an event carried through the pending queue, validated again as any read of a file is: anything else is
+// none. Only a Codex opening event the board script ran for carries the field.
+export const seenClaimOf = (value: unknown): AgentClaim | null | undefined => {
+  if (value === undefined) return undefined
+  if (value === null || typeof value !== 'object') return null
+  const one = value as { pid?: unknown; started?: unknown; host?: unknown }
+  return agentClaimOf({ agentPid: Number(one.pid), ...(one.started === undefined ? {} : { agentStarted: Number(one.started) }), host: typeof one.host === 'string' ? one.host : undefined })
+}
 export const claimText = (claim: AgentClaim | null): string => claim === null ? '' : `${claim.pid}:${claim.started ?? ''}:${claim.host}`
 
 // The full digest prevents an eight-character collision or a pasted block from acquiring ownership.
