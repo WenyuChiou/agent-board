@@ -1,10 +1,12 @@
-import { readFileSync } from 'node:fs'
-import { hostname } from 'node:os'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, readFileSync } from 'node:fs'
+import { homedir, hostname } from 'node:os'
+import { join } from 'node:path'
+import { RESUME } from '../hooks/parse'
 import { processStarted, processStartedMany } from './local-lock'
 import { codexTerminalPid, procEntryOf } from '../hooks/codex-process'
 import type { ProcEntry } from '../hooks/codex-process'
 import type { ProcessStart } from './local-lock'
-import { agentClaimOf, claimedBlocksOf, goneBlocks, hostHashOf } from '../hooks/session-liveness'
+import { agentClaimOf, claimedBlocksOf, goneBlocks, hostHashOf, isAntigravityQuestionWaiting, newestAntigravityBlocks } from '../hooks/session-liveness'
 import type { AgentClaim } from '../hooks/session-liveness'
 import type { ProgressProject } from '../types'
 
@@ -54,16 +56,39 @@ const isAlivePid = (pid: number): boolean => {
   }
 }
 
-// Keys (`blockKey(auto)`) of working/waiting Claude Code and OpenCode session blocks whose claimed
-// agent process is gone on this machine (#1092). The kill runs first for every
-// claimed pid; dead pids evict the cache without spawning a start lookup, and
-// live pids with an uncached `(pid, started)` share ONE `lookupStart` call.
+export type AntigravityPresence = 'locked' | 'unlocked' | 'missing'
+
+export type GoneBlocksOptions = {
+  home?: string
+  platform?: NodeJS.Platform
+  presenceProbe?: (lockFile: string) => AntigravityPresence
+}
+
+// Windows `agy` CLI holds a mandatory OS lock on `<home>/.gemini/antigravity-cli/presence/<id>.lock`
+// for its full lifetime and releases it immediately on exit (#1589).
+export const probeAntigravityPresenceLock = (lockFile: string): AntigravityPresence => {
+  try {
+    if (!lstatSync(lockFile).isFile()) return 'missing'
+    const fd = openSync(lockFile, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+    try {
+      if (!fstatSync(fd).isFile()) return 'missing'
+      readSync(fd, Buffer.alloc(1), 0, 1, 0)
+      return 'unlocked'
+    } finally { closeSync(fd) }
+  } catch (error) {
+    const code = (error as { code?: string }).code
+    return code === 'EBUSY' || code === 'EACCES' || code === 'EPERM' ? 'locked' : 'missing'
+  }
+}
+
+// Keys (`blockKey(auto)`) of working/waiting session blocks whose agent process is gone on this machine (#1092, #1589).
 export const goneBlocksOf = (
   projects: readonly ProgressProject[],
   hostHash: string | null = readingHostHash(),
   cache: Map<string, ClaimStart> = startedCache,
   timeoutMs: number = START_LOOKUP_TIMEOUT_MS,
   lookupStart: (pids: readonly number[], timeoutMs: number) => Map<number, ProcessStart> = processStartedMany,
+  options?: GoneBlocksOptions,
 ): ReadonlySet<string> => {
   if (hostHash === null) return new Set()
   const claims = claimedBlocksOf(projects, hostHash)
@@ -85,13 +110,28 @@ export const goneBlocksOf = (
     if (!toLookup.has(claim.pid) || claim.started === undefined) continue
     cache.set(cacheKey(claim.pid, claim.started), { claimed: claim.started, actual: freshStarts.get(claim.pid) ?? null })
   }
-  return goneBlocks(projects, claim => {
+  const gone = new Set(goneBlocks(projects, claim => {
     const alive = alivePids.get(claim.pid) ?? true
     if (!alive || claim.started === undefined) return { alive, actual: null }
     if (toLookup.has(claim.pid)) return { alive: true, actual: freshStarts.get(claim.pid) ?? null }
     const held = cache.get(cacheKey(claim.pid, claim.started))
     return { alive: true, actual: held !== undefined && held.claimed === claim.started ? held.actual : null }
-  }, hostHash)
+  }, hostHash))
+  if ((options?.platform ?? process.platform) === 'win32') {
+    const home = options?.home ?? homedir()
+    const probe = options?.presenceProbe ?? probeAntigravityPresenceLock
+    if (home !== '') {
+      for (const [key, { auto, steps }] of newestAntigravityBlocks(projects)) {
+        if (gone.has(key)) continue
+        if (auto.state !== 'working' && auto.state !== 'waiting') continue
+        if (isAntigravityQuestionWaiting(auto, steps)) continue
+        if (auto.agentPid !== undefined || auto.host !== hostHash) continue
+        if (auto.resume === null || !RESUME.test(auto.resume)) continue
+        if (probe(join(home, '.gemini', 'antigravity-cli', 'presence', `${auto.resume}.lock`)) === 'unlocked') gone.add(key)
+      }
+    }
+  }
+  return gone
 }
 
 // One process as Linux's /proc says, or null when either file cannot be read.

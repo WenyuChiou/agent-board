@@ -27,7 +27,7 @@ const splitPaths = text => text.split('\0').filter(Boolean)
 // would load hooks/messaging.ts), and messaging. A file joins the list only in a reviewed change, so preflight does
 // not guess which files are too long or which tests a change reaches (#1392 review): it says the file was not run,
 // and the author runs the tests they changed by name.
-export const leftToCi = new Set(['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs'])
+export const leftToCi = new Set(['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs'])
 // Where Playwright keeps the account's browsers on Windows: under LOCALAPPDATA, which the nested run's temp home replaces.
 // A value the account already set wins; the other platforms are left as they are (#1471).
 export const pinnedBrowsersPath = (env, platform = process.platform) => {

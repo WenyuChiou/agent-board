@@ -1,7 +1,10 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync, readlinkSync, readSync, realpathSync } from 'node:fs'
 import { basename, isAbsolute, join, posix, resolve } from 'node:path'
+import { performance } from 'node:perf_hooks'
 import { StringDecoder } from 'node:string_decoder'
 import { clip } from '../hooks/mirror'
+import { agentClaimOf } from '../hooks/session-liveness'
+import type { AgentClaim } from '../hooks/session-liveness'
 import { cutLine, oneLine } from '../hooks/step-words'
 
 export const ANTIGRAVITY_TRANSCRIPTS = new Set(['transcript.jsonl', 'transcript_full.jsonl'])
@@ -401,4 +404,75 @@ export const antigravityReplyFirstLines = (path: unknown, from?: number): string
       return replies
     } finally { closeSync(fd) }
   } catch { return null }
+}
+
+export type ProcEntry = { ppid: number; startTicks: number; comm: string; exe: string | null; cmdline?: string[] }
+
+// Parse Linux `/proc/<pid>/stat` safely around process names that contain spaces or `)`.
+export const parseLinuxProcStat = (text: string): { ppid: number; startTicks: number } | null => {
+  if (!/^\d+\s+\(/.test(text)) return null
+  const end = text.lastIndexOf(')')
+  if (end < 0 || !/^\s/.test(text.slice(end + 1))) return null
+  const fields = text.slice(end + 1).trim().split(/\s+/)
+  const ppid = Number(fields[1])
+  const startTicks = Number(fields[19])
+  if (!Number.isSafeInteger(ppid) || ppid < 0) return null
+  if (!Number.isSafeInteger(startTicks) || startTicks <= 0) return null
+  return { ppid, startTicks }
+}
+
+const SHARED_ANTIGRAVITY_DAEMONS = new Set(['language_server', 'antigravity', 'electron', 'code'])
+const stripExecutableName = (value: string): string =>
+  posix.basename(value.replace(/ \(deleted\)$/, '')).toLowerCase().replace(/\.exe$/, '')
+
+// Walk upward from a Linux hook worker without spawning, stopping on shared daemons.
+export const findAgyProcess = (
+  startPid: number,
+  readProc: (pid: number) => ProcEntry | null,
+  maxSteps = 16,
+): { pid: number; startTicks: number } | null => {
+  const seen = new Set<number>()
+  let pid = startPid
+  for (let step = 0; step < maxSteps && Number.isSafeInteger(pid) && pid > 1; step += 1) {
+    if (seen.has(pid)) return null
+    seen.add(pid)
+    const entry = readProc(pid)
+    if (entry === null) return null
+    const comm = entry.comm.trim().toLowerCase()
+    const exeBase = entry.exe === null ? null : stripExecutableName(entry.exe)
+    if (SHARED_ANTIGRAVITY_DAEMONS.has(comm) || comm.startsWith('language_server')
+      || (exeBase !== null && (SHARED_ANTIGRAVITY_DAEMONS.has(exeBase) || exeBase.startsWith('language_server')))) {
+      return null
+    }
+    if (comm === 'agy' && exeBase === 'agy') return { pid, startTicks: entry.startTicks }
+    pid = entry.ppid
+  }
+  return null
+}
+
+const readLinuxProc = (pid: number): ProcEntry | null => {
+  try {
+    const stat = parseLinuxProcStat(readFileSync(`/proc/${pid}/stat`, 'utf8'))
+    if (stat === null) return null
+    const comm = readFileSync(`/proc/${pid}/comm`, 'utf8')
+    let exe: string | null = null
+    try { exe = readlinkSync(`/proc/${pid}/exe`) } catch {}
+    return { ppid: stat.ppid, startTicks: stat.startTicks, comm, exe }
+  } catch { return null }
+}
+
+// Record the owning `agy` CLI process on Linux without spawning a subprocess (#1589).
+export const antigravityProcessClaim = (host: string | null, startPid = process.ppid): AgentClaim | null => {
+  if (process.platform !== 'linux' || host === null) return null
+  const found = findAgyProcess(startPid, readLinuxProc)
+  if (found === null) return null
+  let started: number | undefined
+  try {
+    const self = parseLinuxProcStat(readFileSync(`/proc/${process.pid}/stat`, 'utf8'))
+    if (self !== null) {
+      const estimated = Math.round(performance.timeOrigin + (found.startTicks - self.startTicks) * 10)
+      if (Number.isSafeInteger(estimated) && estimated > 0) started = estimated
+    }
+  } catch {}
+  return agentClaimOf({ agentPid: found.pid, ...(started === undefined ? {} : { agentStarted: started }), host })
 }

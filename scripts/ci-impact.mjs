@@ -152,6 +152,8 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // these tests, and 86.9-147.0 s on main's last three pushes (Node 22 up to 174.7 s, run 44523734737).
   'tests/codex-local.test.mjs': 315_000, // slowest 167.4 s
   'tests/board.test.mjs': 200_000, // slowest 105.5 s
+  // Since #1741 every part runs a share of this file; the budget stays the whole file's until main's runs give share
+  // times to re-derive it from by the same rule.
   'tests/legacy-connect.test.mjs': 275_000, // slowest 148.0 s
   'tests/page-regressions.test.mjs': 90_000,
   'tests/codex-fallback.test.mjs': 115_000, // slowest 60.0 s
@@ -411,7 +413,9 @@ const parsePart = part => {
 // board about 5, each far longer than any other file (#899). messaging joined when the Windows exchange
 // job used 75-80% of its 10 minutes (#1445). opencode-receiver joined when its fault matrix took it to 157.7 and
 // 164.0 s, and the Windows board part that held it to 448.6 s of its 480 s (#1366, runs 43641832826, 43644841624).
-export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
+// legacy-connect joined when, whole, it took 162.2 and 167.0 s in Windows Node 22 part 4 of 7 beside that part's share
+// of codex-local, and the part ran 487.9 and 494.4 s of its 480 s on main e977c727 (#1741, run 44697238483).
+export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
 
 export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
   const { index, total } = parsePart(part)
@@ -439,13 +443,15 @@ const PART_WEIGHTS_MS = Object.freeze({ 'tests/e2e/l3c-message-store-ownership.t
 const partWeight = path => BOARD_FILE_BUDGETS_MS[path] !== undefined ? Math.round(BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3) : PART_WEIGHTS_MS[path] ?? 5_000
 
 // Every Windows board part also runs its share of the self-parted board files, and the shares are not equal: partTest
-// deals tests by their place in the file, not by time. Over eleven Windows Node 24 runs since 850ff067 (main 44635858111,
-// 44642014114, 44651103054 and pull request runs), codex-local, board and opencode-receiver together took on average
-// 263, 220, 257, 215, 232, 223 and 253 s in parts 1 to 7. The split starts each part from its share, so the other files
-// fill the lighter parts first. Starting every part from zero put legacy-connect, the slowest of them, in part 1, the part
-// with the largest share, and part 1 ran 383-520 s of its 480 s, against 302-357 s on average for parts 4 to 6 (#1733). Measure the
-// shares again when one of these files gains or loses many tests.
-export const BOARD_SELF_PARTED_SHARES_MS = Object.freeze({ 7: Object.freeze([263_000, 220_000, 257_000, 215_000, 232_000, 223_000, 253_000]) })
+// deals tests by their place in the file, not by time. Over nine main and pull request runs from 44615703631 to
+// 44697238483 (Windows Node 22 and 24, 18 to 20 jobs per part), codex-local, board and opencode-receiver together took on
+// average 242, 239, 253, 235, 244, 238 and 242 s in parts 1 to 7. Since #1741 each part also runs its share of
+// legacy-connect: over 21 Windows runs that held the whole file (143.1 s on average), the tests a part would get took
+// 19, 16, 15, 33, 17, 14 and 30 s. The shares below are the two added. The split starts each part from its share, so
+// the other files fill the lighter parts first. Starting every part from zero put legacy-connect, then the slowest of
+// them, in part 1, the part with the largest share, and part 1 ran 383-520 s of its 480 s, against 302-357 s on average
+// for parts 4 to 6 (#1733). Measure the shares again when one of these files gains or loses many tests.
+export const BOARD_SELF_PARTED_SHARES_MS = Object.freeze({ 7: Object.freeze([262_000, 255_000, 268_000, 268_000, 260_000, 252_000, 271_000]) })
 
 // The Node run of one part: its share of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
