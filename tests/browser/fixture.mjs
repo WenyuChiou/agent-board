@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -303,6 +303,17 @@ export const browserFixture = async (name, run, { hasTouch = false } = {}) => {
 export const writeProgress = (path, text) => {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, text)
+}
+
+// Replaces progress.md the way agents' hooks do, a temporary file renamed over it, so the open page's server never
+// reads it between writeFileSync's truncate and its write. That empty read draws a board without the task, and the board
+// with the change then comes only from the watch probe, about 2-3 s later (#1728). The temporary name starts with
+// progress.md's stem, which the server's folder watch counts (scripts/board-watch.ts).
+export const replaceProgress = (path, text) => {
+  mkdirSync(dirname(path), { recursive: true })
+  const temporary = `${path}.${process.pid}.tmp`
+  writeFileSync(temporary, text)
+  renameSync(temporary, path)
 }
 
 export const monthlyArchive = progress => {
