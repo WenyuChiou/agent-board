@@ -32,14 +32,14 @@ import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
-import { deliverTurnEvent } from './hook-delivery'
+import { antigravitySurface, deliverTurnEvent } from './hook-delivery'
 import { checkStoreFile, hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
 import { currentPart } from '../hooks/retention'
 import { lastQuestion } from '../hooks/digest'
-import { ANTIGRAVITY_TRANSCRIPTS, resolveAntigravityTitle } from './antigravity-meta'
+import { antigravityProcessClaim, ANTIGRAVITY_TRANSCRIPTS, resolveAntigravityTitle } from './antigravity-meta'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -91,7 +91,7 @@ const antigravityQuestion = (path: unknown): string | null => {
   if (typeof path !== 'string' || !isAbsolute(path) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(path))) return null
   try {
     if (!lstatSync(path).isFile()) return null
-    const fd = openSync(path, 'r')
+    const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
     try {
       const stat = fstatSync(fd)
       if (!stat.isFile()) return null
@@ -113,8 +113,8 @@ const antigravityQuestion = (path: unknown): string | null => {
         if (typeof entry.source !== 'string' || typeof entry.type !== 'string') return null
         if (entry.type === 'USER_INPUT') reply = null
         else if (entry.source === 'MODEL' && entry.type === 'PLANNER_RESPONSE') {
-          if (typeof entry.content !== 'string') return null
-          if (entry.content.trim() !== '') reply = entry.content
+          if (entry.content !== undefined && typeof entry.content !== 'string') return null
+          if (typeof entry.content === 'string' && entry.content.trim() !== '') reply = entry.content
         }
       }
       return reply === null ? null : lastQuestion(reply)
@@ -1049,8 +1049,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
-    // The OpenCode process this event ran under (#1595), only for this process's own event from the hook worker.
-    const liveClaim = current !== undefined && agent === 'opencode' && flag('--hook-deadline') !== undefined ? hookParentClaim(process.env.AGENT_BOARD_HOOK_PARENT, readingHostHash()) : null
+    const isAntigravityHook = current !== undefined && agent === 'antigravity' && mode === '--agent-status' && flag('--hook-deadline') !== undefined
+    const isAntigravityCliHook = isAntigravityHook && antigravitySurface(raw.transcriptPath, raw.artifactDirectoryPath) === SURFACE_IDS.antigravityTui
+    const isAntigravityOpen = isAntigravityHook && (current.event === 'SessionStart' || current.event === 'PreInvocation')
+    // The OpenCode or Linux Antigravity CLI process this event ran under (#1595, #1589), only for live hook worker events.
+    const liveClaim = current !== undefined && flag('--hook-deadline') !== undefined
+      ? agent === 'opencode' ? hookParentClaim(process.env.AGENT_BOARD_HOOK_PARENT, readingHostHash())
+        : isAntigravityCliHook ? antigravityProcessClaim(readingHostHash())
+          : null
+      : null
     const isInferredReport = mode === '--codex-report' && flag('--session') === undefined && (agent === 'codex' ? process.env.CODEX_THREAD_ID === undefined : !(process.env.AGENT_BOARD_AGENT === agent && process.env.AGENT_BOARD_SESSION_ID !== undefined) && !(agent === 'hermes' && process.env.HERMES_SESSION_ID) && !(agent === 'grok' && process.env.GROK_SESSION_ID))
     const rawEntry = (raw: Json): Pending => {
       if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
@@ -1272,7 +1279,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A new hook event is not a replay even when the block reads the same: its record keeps the event.
       const repaired = reporterTail(bytes)
       const named = blockClaimOf(text, owner, agent, session)
-      const claim = entry === current && liveClaim !== null ? liveClaim : named
+      const clearClaim = entry === current && isAntigravityOpen
+      const claim = entry === current && liveClaim !== null ? liveClaim : clearClaim ? null : named
       if (repaired.fragment === null && mode !== '--codex-report' && claimText(named) === claimText(claim) && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? null) === JSON.stringify(report.askedOptions ?? null) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report

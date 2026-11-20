@@ -1,5 +1,5 @@
 import { sha256 } from './sha256.ts'
-import type { ProgressProject } from '../types'
+import type { ProgressAuto, ProgressProject, ProgressStep } from '../types'
 
 // The liveness of an agent session, as pure data (#1092): whether the agent process
 // that wrote a block is gone, from the pid, start time and host hash the block
@@ -55,11 +55,15 @@ export const blockKey = (auto: { agent: string; session: string; resume: string 
 
 export type LivenessProbe = (claim: AgentClaim) => { alive: boolean; actual: number | 'inaccessible' | null }
 
-// The agents whose blocks can carry a liveness claim: Claude Code, from its own
-// process (#1092), and OpenCode, from the process its plugin starts the hook
-// worker in (#1595). Another agent's pid fields are ignored, so its card keeps
-// the 12 h backstop.
-export const CLAIMING_AGENTS: ReadonlySet<string> = new Set(['claude', 'opencode'])
+// The agents whose blocks can carry a liveness claim: Claude Code (#1092),
+// OpenCode (#1595), and Antigravity CLI on Linux (#1589). Another agent's pid
+// fields are ignored, so its card keeps the 12 h backstop.
+export const CLAIMING_AGENTS: ReadonlySet<string> = new Set(['claude', 'opencode', 'antigravity'])
+
+// An exited `agy -p` turn that asked a closing question leaves the process right
+// after Stop; keeping waiting+[?] rows out of `gone` preserves the Needs you card (#1589).
+export const isAntigravityQuestionWaiting = (auto: ProgressAuto | null, steps: readonly ProgressStep[]): boolean =>
+  auto !== null && auto.agent === 'antigravity' && auto.state === 'waiting' && steps.some(step => step.status === 'waiting')
 
 // Every working/waiting session block of a claiming agent (excluding runs) that
 // carries a valid liveness claim for `hostHash`, with its blockKey and validated claim.
@@ -70,6 +74,7 @@ export const claimedBlocksOf = (projects: readonly ProgressProject[], hostHash: 
   for (const project of projects) for (const task of project.tasks) {
     const auto = task.auto
     if (auto === null || (auto.state !== 'working' && auto.state !== 'waiting') || !CLAIMING_AGENTS.has(auto.agent) || auto.isRun === true) continue
+    if (isAntigravityQuestionWaiting(auto, task.steps)) continue
     const claim = agentClaimOf(auto)
     if (claim === null || claim.host !== hostHash) continue
     const key = blockKey(auto)
