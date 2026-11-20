@@ -7871,6 +7871,157 @@ test('a Windows page start leaves its new address file and its folder owned by t
   } finally { await board.end([url]) }
 })
 
+// Helper for #1674: runs a board command inside a Windows Job Object configured with
+// JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000) and no breakaway flags, then lets the wrapper
+// exit so Windows closes the job handle and terminates anything left inside it.
+const runInWindowsKillOnCloseJob = (board, commandArgs, env, { nestedZeroFlagsChild = false } = {}) => {
+  const resultFile = join(board.dir, `job-result-${Math.random().toString(16).slice(2)}.txt`)
+  const quoted = value => `"${String(value).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
+  const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+  const innerSetup = !nestedZeroFlagsChild ? [] : [
+    `$inner = $k32::CreateJobObjectW([IntPtr]::Zero, $null)`,
+    `if ($inner -eq [IntPtr]::Zero) { throw 'CreateJobObjectW inner failed' }`,
+    `if (-not $k32::AssignProcessToJobObject($inner, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'AssignProcessToJobObject inner failed' }`,
+  ]
+  const psScript = [
+    `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'`,
+    `$ab = [AppDomain]::CurrentDomain.DefineDynamicAssembly([Reflection.AssemblyName]::new('TestJob'), [Reflection.Emit.AssemblyBuilderAccess]::Run)`,
+    `$mb = $ab.DefineDynamicModule('M')`,
+    `$tb = $mb.DefineType('K32', 'Public, Abstract, Sealed')`,
+    `$cc = [Runtime.InteropServices.CallingConvention]::Winapi; $cs = [Runtime.InteropServices.CharSet]::Unicode`,
+    `foreach ($sp in @(`,
+    `  @('CreateJobObjectW', [IntPtr], @([IntPtr], [string])),`,
+    `  @('SetInformationJobObject', [bool], @([IntPtr], [int], [IntPtr], [int])),`,
+    `  @('AssignProcessToJobObject', [bool], @([IntPtr], [IntPtr]))`,
+    `)) {`,
+    `  $m = $tb.DefinePInvokeMethod($sp[0], 'kernel32.dll', 'Public, Static, PinvokeImpl', [Reflection.CallingConventions]::Standard, $sp[1], $sp[2], $cc, $cs)`,
+    `  $m.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)`,
+    `}`,
+    `$k32 = $tb.CreateType()`,
+    `$job = $k32::CreateJobObjectW([IntPtr]::Zero, $null)`,
+    `if ($job -eq [IntPtr]::Zero) { throw 'CreateJobObjectW failed' }`,
+    `$extLen = if ([IntPtr]::Size -eq 8) { 144 } else { 112 }`,
+    `$buf = [Runtime.InteropServices.Marshal]::AllocHGlobal($extLen)`,
+    `for ($i = 0; $i -lt $extLen; $i += 4) { [Runtime.InteropServices.Marshal]::WriteInt32($buf, $i, 0) }`,
+    `[Runtime.InteropServices.Marshal]::WriteInt32($buf, 16, 0x2000)`,
+    `if (-not $k32::SetInformationJobObject($job, 9, $buf, $extLen)) { throw 'SetInformationJobObject failed' }`,
+    `[Runtime.InteropServices.Marshal]::FreeHGlobal($buf)`,
+    `if (-not $k32::AssignProcessToJobObject($job, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'AssignProcessToJobObject failed' }`,
+    ...innerSetup,
+    `$psi = [Diagnostics.ProcessStartInfo]::new($env:TEST_JOB_NODE)`,
+    `$psi.Arguments = $env:TEST_JOB_ARGS`,
+    `$psi.WorkingDirectory = $env:TEST_JOB_CWD`,
+    `$psi.UseShellExecute = $false`,
+    `$psi.RedirectStandardOutput = $true`,
+    `$psi.RedirectStandardError = $true`,
+    `$psi.CreateNoWindow = $true`,
+    `$proc = [Diagnostics.Process]::Start($psi)`,
+    `$errTask = $proc.StandardError.ReadToEndAsync()`,
+    `$stdout = $proc.StandardOutput.ReadToEnd()`,
+    `$stderr = $errTask.GetAwaiter().GetResult()`,
+    `$proc.WaitForExit()`,
+    `$b64Out = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($stdout))`,
+    `$b64Err = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($stderr))`,
+    `[System.IO.File]::WriteAllText($env:TEST_JOB_OUT, "$($proc.ExitCode)|$b64Out|$b64Err")`,
+  ].join('\n')
+  execFileSync(join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+    '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(psScript, 'utf16le').toString('base64'),
+  ], {
+    env: {
+      ...env,
+      TEST_JOB_NODE: process.execPath,
+      TEST_JOB_ARGS: [board.script, ...commandArgs].map(quoted).join(' '),
+      TEST_JOB_CWD: board.dir,
+      TEST_JOB_OUT: resultFile,
+    },
+    windowsHide: true,
+    timeout: 30_000,
+  })
+  const [codeStr, outB64, errB64] = readFileSync(resultFile, 'utf8').split('|')
+  return {
+    status: Number(codeStr),
+    stdout: Buffer.from(outB64 ?? '', 'base64').toString('utf8'),
+    stderr: Buffer.from(errB64 ?? '', 'base64').toString('utf8'),
+  }
+}
+
+test('#1674: a Windows board server started inside a kill-on-close job (including nested jobs) outlives command exit, or refuses plainly even if readiness races check', { skip: process.platform !== 'win32' && 'Windows job objects only', timeout: 90_000 }, async () => {
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    assert.ok(words.serveJobLocked && !words.serveFailed(words.serveJobLocked).includes('Opened Agent Board') && !words.serveFailed(words.serveJobLocked).includes('http:'))
+  }
+  const board = serveIn()
+  let url = null
+  let nestedUrl = null
+  try {
+    const alive = runInWindowsKillOnCloseJob(board, ['--serve', '--no-open', '--quiet-board'], board.env)
+    assert.equal(alive.status, 0, alive.stderr)
+    url = board.urlOf(alive.stdout)
+    assert.ok(url, alive.stdout)
+    await new Promise(done => setTimeout(done, 1200))
+    const page = await fetch(url)
+    assert.equal(page.status, 200, 'board page still answers after the command job closes')
+
+    // Nested job: inner job has LimitFlags=0 inside an outer 0x2000 kill-on-close job.
+    const nested = serveIn()
+    try {
+      const escaped = runInWindowsKillOnCloseJob(nested, ['--serve', '--no-open', '--quiet-board'], nested.env, { nestedZeroFlagsChild: true })
+      assert.equal(escaped.status, 0, escaped.stderr)
+      nestedUrl = nested.urlOf(escaped.stdout)
+      assert.ok(nestedUrl, escaped.stdout)
+      await new Promise(done => setTimeout(done, 1200))
+      assert.equal((await fetch(nestedUrl)).status, 200, 'board page outlives nested inner=0 outer=0x2000 job close')
+    } finally { await nested.end(nestedUrl ? [nestedUrl] : []) }
+
+    // When escape is blocked inside either direct or nested kill-on-close jobs, --serve and --html
+    // fail honestly without leaving a doomed server or printing an Opened Agent Board / URL line,
+    // even when the launcher containment check is delayed until after the trapped child writes ready.
+    const locked = serveIn()
+    try {
+      const blockedEnv = { ...locked.env, AGENT_BOARD_TEST_NO_JOB_ESCAPE: '1' }
+      for (const [label, opts, extraEnv] of [
+        ['direct', {}, blockedEnv],
+        ['nested', { nestedZeroFlagsChild: true }, blockedEnv],
+      ]) {
+        for (const flag of ['--serve', '--html']) {
+          const stopped = runInWindowsKillOnCloseJob(locked, [flag, '--quiet-board'], extraEnv, opts)
+          assert.equal(stopped.status, 1, `${label}/${flag}: ${stopped.stderr}`)
+          assert.equal(stopped.stdout.trim(), EN.serveFailed(EN.serveJobLocked), `${label}/${flag}`)
+          assert.ok(!stopped.stdout.includes('Opened Agent Board') && !stopped.stdout.includes('http:'), stopped.stdout)
+          assert.ok(!existsSync(locked.served), `${label}/${flag}: no doomed address file left`)
+        }
+      }
+      const delayPreload = join(locked.dir, 'delay-launcher-check.cjs')
+      const needle = 'if($nj -and -not $ia -and (-not $started.HasExited) -and ((& $ij $started.Id)'
+      writeFileSync(delayPreload, `const cp = require('node:child_process')
+const orig = cp.spawn
+cp.spawn = function (file, args, options) {
+  if (/(?:^|[\\\\/])powershell(?:\\.exe)?$/i.test(String(file)) && Array.isArray(args)) {
+    const at = args.indexOf('-EncodedCommand')
+    if (at >= 0) {
+      const cmd = Buffer.from(args[at + 1], 'base64').toString('utf16le')
+      if (cmd.includes('--serve-child')) {
+        if (!cmd.includes(${JSON.stringify(needle)})) throw new Error('delay-launcher-check patch did not match')
+        const patched = cmd.replace(${JSON.stringify(needle)}, '[Threading.Thread]::Sleep(1200); ' + ${JSON.stringify(needle)})
+        const copy = [...args]
+        copy[at + 1] = Buffer.from(patched, 'utf16le').toString('base64')
+        return orig.call(this, file, copy, options)
+      }
+    }
+  }
+  return orig.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+      const raceEnv = { ...blockedEnv, NODE_OPTIONS: `--require ${JSON.stringify(delayPreload)}` }
+      const raced = runInWindowsKillOnCloseJob(locked, ['--serve', '--no-open', '--quiet-board'], raceEnv)
+      assert.equal(raced.status, 1, `race: ${raced.stderr}`)
+      assert.equal(raced.stdout.trim(), EN.serveFailed(EN.serveJobLocked))
+      assert.ok(!raced.stdout.includes('http:'), 'ready file written before containment kill never leaks a URL')
+      assert.ok(!existsSync(locked.served), 'trapped child address file is removed')
+    } finally { await locked.end([]) }
+  } finally { await board.end([url]) }
+})
+
 test('server memory arguments retain explicit heap choices and ignore unrelated Node flags', () => {
   assert.deepEqual(serverMemoryArgs([], ''), ['--optimize-for-size'])
   assert.deepEqual(serverMemoryArgs(['--inspect=0', '--require', '--max-semi-space-size=8'], ''), ['--optimize-for-size'])
@@ -11764,6 +11915,59 @@ test('a reply button on an unconnected question says it copies and the card then
   } finally { await board.close() }
 })
 
+test('the page says the installed script is older and how to update it (#1304)', async () => {
+  const runtime = await sourceBoard()
+  const view = (words) => runtime.buildView([], [], null, groupedNow, 0, {}, words)
+  const model = (words, versions, olderScript) => runtime.serveModel(view(words), [], words, new Set(), false, undefined, false, { now: groupedNow, repoOf: () => null, versions, unreadable: [], ...(olderScript === undefined ? {} : { olderScript }) })
+  const command = 'npx @wenyuchiou/agent-board@9.9.9 setup'
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const setup = model(words, { board: '1.2.3', package: '9.9.9' }, { update: 'setup', command })
+    assert.equal(setup.health?.length, 1, JSON.stringify(setup.health))
+    assert.equal(setup.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', command))
+    const plugin = model(words, { board: '1.2.3', package: '9.9.9' }, { update: 'plugin' })
+    assert.equal(plugin.health?.length, 1, JSON.stringify(plugin.health))
+    assert.equal(plugin.health[0], words.serveOlderScriptPlugin('1.2.3', '9.9.9'))
+    // No package, the same version, or a newer script: the page shows nothing.
+    for (const versions of [{ board: '1.2.3', package: null }, { board: '1.2.3', package: '1.2.3' }, { board: '9.9.9', package: '1.2.3' }]) {
+      assert.equal(model(words, versions, { update: 'setup', command }).health, undefined)
+    }
+    // A newer package with no update instruction: nothing to say.
+    assert.equal(model(words, { board: '1.2.3', package: '9.9.9' }).health, undefined)
+  }
+})
+
+test('the page on the local network gets update advice without the data folder (#1304)', async () => {
+  const runtime = await sourceBoard()
+  const view = (words) => runtime.buildView([], [], null, groupedNow, 0, {}, words)
+  const model = (words, isLan, olderScript) => runtime.serveModel(view(words), [], words, new Set(), isLan, undefined, false, { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: '9.9.9' }, unreadable: [], olderScript })
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    // A custom data folder, bare, quoted, or holding a `$`, a backtick or a double quote: the
+    // phone's page keeps the advice the board script built without the folder, and no path
+    // survives in it, whatever the folder holds.
+    for (const [command, lanCommand] of [
+      ['npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir /home/person/custom-data', 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ['npx @wenyuchiou/agent-board@9.9.9 setup --data-dir "/home/person/my data"', 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir '/home/person/data$cache'", 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir '/home/person/data`x`'", 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '/home/person/board\"private\"/sensitive-project'", 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '/home/person/data$cache more'", 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+    ]) {
+      const lan = model(words, true, { update: 'setup', command, lanCommand })
+      assert.equal(lan.health?.length, 1, JSON.stringify(lan.health))
+      assert.equal(lan.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', lanCommand))
+      assert.equal(lan.health[0].includes('/home/person'), false, lan.health[0])
+      // The computer's own page keeps the full command, so the person can run it as written.
+      const local = model(words, false, { update: 'setup', command, lanCommand })
+      assert.equal(local.health?.length, 1, JSON.stringify(local.health))
+      assert.equal(local.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', command))
+    }
+    // A plugin copy has no folder in its advice, so the phone's page is unchanged.
+    const plugin = model(words, true, { update: 'plugin' })
+    assert.equal(plugin.health?.length, 1, JSON.stringify(plugin.health))
+    assert.equal(plugin.health[0], words.serveOlderScriptPlugin('1.2.3', '9.9.9'))
+  }
+})
+
 test('the empty page lists the connected agents and how their work appears', async () => {
   const runtime = await sourceBoard()
   const options = { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null } }
@@ -14334,15 +14538,15 @@ test('#1085: a style picked on the page is written to the settings file with its
   } finally { await board.close() }
 })
 
-test('Settings has one labelled button and four accessible sections in every language and keeps focus inside until closed', async () => {
+test('Settings has one labelled button and five accessible sections in every language and keeps focus inside until closed', async () => {
   for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
     const html = await sourcePage(lang)
     assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
     assert.doesNotMatch(html, /data-theme-toggle|data-look-menu/)
     assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
     const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
-    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
-    assert.equal((panel.match(/<section\b/g) ?? []).length, 4)
+    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsApprovals, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 5)
     const dom = await pageDom(html, redesignModel(), { width: 375 })
     assert.equal(dom.node('settings').hidden, true)
     dom.node('settings-toggle').click()

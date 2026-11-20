@@ -281,7 +281,7 @@ test('#1084: the computer\'s page keeps the window place in a file of its own an
 // The launch PowerShell itself, on Windows: the probe's line, the arguments read back from stdin,
 // the program started with them; a program that does not start, and no arguments, both fail so
 // the caller opens today's plain window. The stand-in program is Node, started hidden.
-const literal = value => `'${value.replace(/'/g, "''")}'`
+const literal = value => `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'`
 const runLaunch = (programs, answer, cwd, env = process.env) => new Promise(done => {
   const command = dockCommand(programs, literal(cwd), 1500, true)
   const child = spawn(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env })
@@ -316,6 +316,26 @@ test('#1084: the launch PowerShell reads the screens, then starts the program wi
     assert.equal(none.code, 1)
     const unanswered = await runLaunch(literal(process.execPath), null, root)
     assert.equal(unanswered.code, 2)
+
+    const obrien = join(root, 'Board O\u2019Brien')
+    mkdirSync(obrien)
+    const obrienSeen = join(obrien, 'seen.json')
+    const obrienStand = join(obrien, 'stand-in.mjs')
+    writeFileSync(obrienStand, `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(obrienSeen)}, JSON.stringify(process.argv.slice(2)))\n`)
+    const eightCandidates = [
+      'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Users\\user\\AppData\\Local\\Microsoft\\Edge\\Application\\msedge.exe',
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Users\\user\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe',
+      'msedge',
+    ].map(literal).concat(literal(process.execPath)).join(', ')
+    assert.ok(Buffer.from(dockCommand(eightCandidates, literal(obrien), 1500, true), 'utf16le').toString('base64').length < 30_000, 'eight browser candidates + curly-apostrophe cwd fit well under the Windows EncodedCommand limit')
+    const curly = await runLaunch(`${literal(join(obrien, 'no-such-browser.exe'))}, ${literal(process.execPath)}`, `"${obrienStand}" "--app=${address}"`, obrien)
+    assert.equal(curly.code, 0, curly.lines.join('\n'))
+    for (let i = 0; i < 100 && !existsSync(obrienSeen); i++) await new Promise(r => setTimeout(r, 100))
+    assert.deepEqual(JSON.parse(readFileSync(obrienSeen, 'utf8')), [`--app=${address}`])
   } finally {
     rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 })
   }

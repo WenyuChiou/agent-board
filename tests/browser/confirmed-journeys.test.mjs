@@ -480,6 +480,12 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
               const root = document.getElementById('board')
               const liveFold = [...root.querySelectorAll('details:not(.clip)')].find(node => node.querySelector('summary')?.textContent === '2 more steps')
               const liveClip = [...root.querySelectorAll('.steps details.clip')].find(node => node.textContent.includes('Review the complete synthetic rollout plan'))
+              // A throw here would make the page drop this answer and draw the task from its next poll, 2 s later,
+              // with the race never run (#1728): say what the page held instead, so the failure names its cause.
+              if (liveFold === undefined || liveClip === undefined) {
+                window.__race = { ...window.__race, error: 'race found no ' + (liveFold === undefined ? 'fold' : 'clip'), summaries: [...root.querySelectorAll('summary')].map(node => node.textContent.slice(0, 40)) }
+                return data
+              }
               let toggled = false
               const mark = () => { toggled = true }
               liveFold.addEventListener('toggle', mark, { once: true })
@@ -513,8 +519,11 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
 
       writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger redraw\n`)
       await board.task('Synthetic redraw race task').waitFor()
+      // Wait for the race's own end, not a moment after the task shows: the observer records it on the redraw that
+      // draws the task, and an error says why it did not run (#1728).
+      await page.waitForFunction(() => window.__race.done === true || window.__race.error !== undefined).catch(() => {})
       const race = await page.evaluate(() => window.__race)
-      assert.equal(race.done, true)
+      assert.equal(race.done, true, JSON.stringify(race))
       assert.equal(race.toggledBeforeDraw, false)
       assert.deepEqual(race.closedSync, [false, false])
       assert.deepEqual(race.afterDraw, [false, false])
