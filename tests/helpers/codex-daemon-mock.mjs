@@ -33,6 +33,8 @@
 //   endStatus  the status the delivery turn ends with: 'completed' (default), 'failed', 'interrupted', 'none' (no status field) or any other word
 //   approval   when true, the daemon asks its client for an approval during the turn
 //   beginFlag  a file whose appearance starts the person's own turn ('turn-person') on an idle thread
+//   beginLate  ms the notices of the person's own turn reach this connection after that turn has begun (thread/read shows it at
+//              once), as when they arrive behind the receiver's other answers; none are sent if the turn has ended by then
 //   endFlag    a file whose appearance ends the running turn
 //   userAgent  what initialize says the daemon is (default: a version that unloads a thread 60 s after its last subscriber left)
 //   person     file whose presence stands for a person's own client being open on the thread: without it, the thread is listed only
@@ -143,9 +145,14 @@ const begin = threadId => {
   stamp += 1
   const typed = typedBy(threadId)
   first = typed.params.item
-  notice({ method: 'turn/started', params: { threadId, turn: { id: running } } })
-  notice({ method: 'thread/status/changed', params: { threadId, status: { type: 'active' } } })
-  notice(typed)
+  const tell = () => {
+    if (running !== 'turn-person') return
+    notice({ method: 'turn/started', params: { threadId, turn: { id: running } } })
+    notice({ method: 'thread/status/changed', params: { threadId, status: { type: 'active' } } })
+    notice(typed)
+  }
+  if (config.beginLate) setTimeout(tell, config.beginLate)
+  else tell()
 }
 const finish = (id, threadId, text) => {
   if (config.approval) notice({ id: 999, method: 'item/commandExecution/requestApproval', params: { threadId, turnId: id } })
