@@ -241,6 +241,9 @@ export type ServeAsk = {
   // That session has ended, as its progress record says: the page shows its agent as offline when no other
   // session of it is open.
   isClosed?: true
+  // A Codex card with no process record, quiet past two minutes (#1092): the card says the window may be closed
+  // and offers Archive of its task. It still counts, and the session is not marked closed.
+  mayBeClosed?: true
 }
 
 export type ServeRow = {
@@ -609,6 +612,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         reopen: hint.reopen,
         isSending: isSending(ask.target) || connection !== undefined && (messaging?.messages.some(one => one.to === address(connection.agent, connection.session) && isOpen(one) && !isUncertainEnded(one) && !(one.status === 'accepted' && isMailboxTarget(one.target)) && !isMessageSurfaceLost(one)) ?? false),
         ...(ask.target?.isClosed === true ? { isClosed: true as const } : {}),
+        ...(ask.mayBeClosed === true && ask.archive !== undefined ? { mayBeClosed: true as const } : {}),
       })
       continue
     }
@@ -866,6 +870,8 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'hide') return item.type === 'ask' && item.ask.hideKey !== '' && item.ask.canHide !== false ? { type: 'hide', key: item.ask.hideKey, text: item.ask.text } : { type: 'refuse', note: '' }
   if (request.type === 'archive') {
     if (item.type === 'row' && item.row.archive !== null) return { type: 'archive', ref: item.row.archive, title: item.row.title }
+    // A card that says the window may be closed archives its task (#1092); the write guard checks again.
+    if (item.type === 'ask' && item.ask.archive !== undefined) return { type: 'archive', ref: item.ask.archive, title: item.ask.task }
     const isLive = item.type === 'row' && (item.row.auto === 'working' || item.row.auto === 'waiting') || item.type === 'ask' && item.ask.where !== 'manual'
     return { type: 'refuse', note: isLive ? s.archiveLive : s.archiveGone }
   }
@@ -972,7 +978,7 @@ const PAGE_WORDS = [
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
   'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesSentUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
-  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure',
+  'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
   'archiveNow', 'cleanUp', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
@@ -2260,6 +2266,11 @@ const PAGE_SCRIPT = String.raw`
     if (!isStuck && !isOlder && ask.command) add(body, el('code', '', '$ ' + ask.command));
     var mode = ask.send;
     var answers = el('div', 'answers');
+    // A Codex card with no process to check, quiet past two minutes (#1092): it may be closed, never closed.
+    if (!isStuck && !isOlder && ask.mayBeClosed === true) {
+      add(body, el('p', 'note', w('windowMayBeClosed')));
+      add(answers, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', ask.fp); }));
+    }
     var choiceArea = answers;
     var pickerSend = null;
     var others = [];

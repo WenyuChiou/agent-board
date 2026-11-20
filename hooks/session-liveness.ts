@@ -57,9 +57,10 @@ export type LivenessProbe = (claim: AgentClaim) => { alive: boolean; actual: num
 
 // The agents whose blocks can carry a liveness claim: Claude Code, from its own
 // process (#1092), and OpenCode, from the process its plugin starts the hook
-// worker in (#1595). Another agent's pid fields are ignored, so its card keeps
+// worker in (#1595), and Codex, from the terminal its hook walks up to on Linux
+// in process (#1092). Another agent's pid fields are ignored, so its card keeps
 // the 12 h backstop.
-export const CLAIMING_AGENTS: ReadonlySet<string> = new Set(['claude', 'opencode'])
+export const CLAIMING_AGENTS: ReadonlySet<string> = new Set(['claude', 'opencode', 'codex'])
 
 // Every working/waiting session block of a claiming agent (excluding runs) that
 // carries a valid liveness claim for `hostHash`, with its blockKey and validated claim.

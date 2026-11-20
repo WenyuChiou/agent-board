@@ -465,10 +465,17 @@ export const blockClaimOf = (text: string, owner: string, agent: string, session
   const attrs = parseAttrs(lines[span.start] ?? '')
   return agentClaimOf({ agentPid: Number(attrs.agentpid), ...(attrs.agentstarted === undefined ? {} : { agentStarted: Number(attrs.agentstarted) }), host: attrs.host })
 }
+// The process a Codex block names after this event (#1092, M7). Only a live SessionStart or UserPromptSubmit from
+// the hook walks to the Codex terminal (a quick resume on the shared server sends no SessionStart, C1), and its
+// result replaces the block's: no record (Windows, macOS, the shared server) clears an older one, so a session that
+// moved to the shared server is never judged by a process it no longer runs in. Every other event, a replay from
+// the recovery queue and a report keep what the block names.
+export const codexClaimOf = ({ isLive, event, live, named }: { isLive: boolean; event: string | undefined; live: AgentClaim | null; named: AgentClaim | null }): AgentClaim | null =>
+  isLive && (event === 'SessionStart' || event === 'UserPromptSubmit') ? live : named
 export const claimText = (claim: AgentClaim | null): string => claim === null ? '' : `${claim.pid}:${claim.started ?? ''}:${claim.host}`
 
 // The full digest prevents an eight-character collision or a pasted block from acquiring ownership.
-// `claim` is the OpenCode process the block names (#1595): only an OpenCode block carries it, and only in progress.md.
+// `claim` is the OpenCode (#1595) or Codex (#1092) process the block names: only those blocks carry it, and only in progress.md.
 export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false, contextLine?: string, encode: (value: string) => string = value => value, claim: AgentClaim | null = null): string => {
   if (!/^[a-f0-9]{64}$/.test(owner)) throw new Error('INVALID_OWNER')
   const id = owner.slice(0, 8)
@@ -478,7 +485,7 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   // Only a run is marked: a person's session is the default, so its block stays as it was.
   const run = report.origin === 'run' ? ` origin=run${report.parent !== undefined && RESUME.test(report.parent) ? ` parent=${report.parent}` : ''}` : ''
   const replied = report.replied ? ` replied=${report.replied}` : ''
-  const valid = agent === 'opencode' ? agentClaimOf(claim === null ? null : { agentPid: claim.pid, agentStarted: claim.started, host: claim.host }) : null
+  const valid = agent === 'opencode' || agent === 'codex' ? agentClaimOf(claim === null ? null : { agentPid: claim.pid, agentStarted: claim.started, host: claim.host }) : null
   const liveness = valid === null ? '' : ` agentpid=${valid.pid}${valid.started === undefined ? '' : ` agentstarted=${valid.started}`} host=${valid.host}`
   const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${replied}${resume}${run}${liveness} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'

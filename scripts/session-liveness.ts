@@ -1,7 +1,11 @@
+import { readFileSync } from 'node:fs'
 import { hostname } from 'node:os'
-import { processStartedMany } from './local-lock'
+import { processStarted, processStartedMany } from './local-lock'
+import { codexTerminalPid, procEntryOf } from '../hooks/codex-process'
+import type { ProcEntry } from '../hooks/codex-process'
 import type { ProcessStart } from './local-lock'
-import { claimedBlocksOf, goneBlocks, hostHashOf } from '../hooks/session-liveness'
+import { agentClaimOf, claimedBlocksOf, goneBlocks, hostHashOf } from '../hooks/session-liveness'
+import type { AgentClaim } from '../hooks/session-liveness'
 import type { ProgressProject } from '../types'
 
 // The liveness of agent sessions, as the shell sees it (#1092): whether the agent
@@ -88,4 +92,30 @@ export const goneBlocksOf = (
     const held = cache.get(cacheKey(claim.pid, claim.started))
     return { alive: true, actual: held !== undefined && held.claimed === claim.started ? held.actual : null }
   }, hostHash)
+}
+
+// One process as Linux's /proc says, or null when either file cannot be read.
+const procEntry = (pid: number): ProcEntry | null => {
+  try {
+    return procEntryOf(readFileSync(`/proc/${pid}/stat`, 'utf8'), readFileSync(`/proc/${pid}/cmdline`, 'utf8'))
+  } catch { return null }
+}
+
+// The Codex terminal this event ran under, with its start time and this machine's
+// host hash (#1092, M7). Linux only: the walk reads /proc and starts no process.
+// Elsewhere naming the terminal would need a spawn in the hook, which the board
+// never does (#1092, PM Q5), so Windows and macOS name no process and keep
+// SessionEnd and the may-be-closed line. `start` is the hook worker that started
+// this board script.
+export const codexProcessClaim = (
+  platform: string = process.platform,
+  start: number = process.ppid,
+  read: (pid: number) => ProcEntry | null = procEntry,
+  host: string | null = readingHostHash(),
+): AgentClaim | null => {
+  if (platform !== 'linux' || host === null) return null
+  const pid = codexTerminalPid(start, read)
+  if (pid === null) return null
+  const started = processStarted(pid, 0)
+  return agentClaimOf({ agentPid: pid, ...(typeof started === 'number' ? { agentStarted: started } : {}), host })
 }

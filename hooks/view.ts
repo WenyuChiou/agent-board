@@ -11,7 +11,7 @@ import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
-import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, validOptions } from './parse'
+import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isMaybeClosed, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, validOptions } from './parse'
 import { cellsOf, plainBar } from './progress-bar'
 import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
@@ -141,6 +141,10 @@ export type WaitingItem = {
   // The state of that session's block as the row shows it (a stopped or silent one is ended), so the
   // receiver's route is read for the state the session is in, not always for idle (#1351).
   auto?: 'working' | 'waiting' | 'ended'
+  // A Codex card with no process record, quiet past two minutes (#1092): it says the window may be
+  // closed and offers Archive of its task, the only way the person can see to clear it. It still counts.
+  mayBeClosed?: true
+  archive?: TaskRef
 }
 
 // The one thing the top of the pane puts in front of the person: the most pressing thing
@@ -1029,6 +1033,7 @@ export const buildView = (
       const isGone = isStopped(task.auto, now, updated, staleMs, gone)
       const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || isGone || isSilence || task.auto?.state === 'ended')
+      const mayBeClosed = !isInactive && task.auto !== null && isMaybeClosed(task.auto, task.steps, now, updated, clock.isFuture)
       const repliedAt = task.auto?.replied
       const isRepliedTask = repliedAt !== undefined && Number.isFinite(repliedAt) && repliedAt >= (task.auto?.updated ?? 0)
       if (isRepliedTask && !isInactive && !isFrozen && task.auto !== null && task.auto.resume !== null && repliedAt <= now) {
@@ -1168,6 +1173,7 @@ export const buildView = (
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
           target: targetOf(task.auto),
           ...(task.auto === null ? {} : { auto: task.auto.state === 'done' || isComplete || isGone || isSilence ? 'ended' as const : task.auto.state, nativeSession: task.auto.resume ?? task.auto.session }),
+          ...(mayBeClosed && task.auto !== null ? { mayBeClosed: true as const, archive: { project: name, title: task.title, line: task.line, session: task.auto.session } } : {}),
         })
       })
       const unresolved = taskQuestions.filter(item => {
