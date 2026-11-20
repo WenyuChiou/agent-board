@@ -810,6 +810,10 @@ export const startCodexReceiver = ({
             else isKept = true
             return isKept
           }
+          // The board's answer to `starting` holds for the whole claim: once it took the receipt, a busy read and a new join lead to
+          // a fresh idle read and turn/start, with no second `starting`, whose answer, if lost, would end a claim the board has
+          // already marked.
+          let said = null
           try {
             for (;;) {
               for (;;) {
@@ -846,7 +850,7 @@ export const startCodexReceiver = ({
               // holds the claim as a busy read does (#1370). A busy store saved nothing, so the receiver stays in the thread and asks
               // again after the next event: leaving and joining again would start the daemon's delay, and with it a whole wait. A
               // claim that is done, or too short of time for that wait, leaves as a busy one does, so the wait above gives it back.
-              let said = null, status
+              let status
               for (;;) {
                 status = undefined
                 try { status = await readStatus() } catch (error) {

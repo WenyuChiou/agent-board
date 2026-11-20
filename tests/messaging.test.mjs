@@ -2724,9 +2724,9 @@ test('a store rename refused for another reason is not retried, and the receiver
 
 // A disposable loopback proxy faults only heartbeat responses. The real store still
 // decides whether a message was durably claimed before the response was lost.
-const pollingProxy = async (board, mode, onClaim, onStarting) => {
+const pollingProxy = async (board, mode, onClaim, onStarting, isStarted = () => true) => {
   const upstream = new URL(board.address)
-  let faults = 0, polls = 0, registrations = 0, startings = 0, offers = 0, active = 0, hasClaimed = false, startedBy = null
+  let faults = 0, polls = 0, registrations = 0, startings = 0, offers = 0, handed = 0, active = 0, hasClaimed = false, startedBy = null
   const server = createServer(async (req, res) => {
     active += 1
     res.on('close', () => { active -= 1 })
@@ -2744,15 +2744,14 @@ const pollingProxy = async (board, mode, onClaim, onStarting) => {
       // forbidden-after-claim: the poll that hands a message out is answered, every later poll is refused for good (403).
       if (isPoll && mode === 'forbidden-after-claim' && hasClaimed) return fail(403)
       // A starting receipt (#1507). starting-busy: the first is answered as a busy store that saved nothing (503); starting-lost:
-      // each reaches the board and its answer is lost; forbidden-after-starting: every later poll of the connection that said it
-      // is refused for good, and the polls of any other connection reach the board, counted (offers) when they may take a message.
+      // each reaches the board and its answer is lost; forbidden-after-starting: once the fake daemon has turn/start (isStarted),
+      // every later poll of the connection that said it is refused for good, and the polls of any other connection reach the
+      // board, counted (offers) when they may take a message, with the messages the board hands them (handed).
       const isStarting = req.url === '/api/messages/receipt' && JSON.parse(body || '{}').status === 'starting'
       if (isStarting) startings += 1
-      if (isPoll && mode === 'forbidden-after-starting' && startedBy !== null) {
-        const { connection, receive } = JSON.parse(body)
-        if (connection === startedBy) return fail(403)
-        if (receive !== false) offers += 1
-      }
+      const isOffer = isPoll && mode === 'forbidden-after-starting' && startedBy !== null && isStarted() && JSON.parse(body).connection !== startedBy && JSON.parse(body).receive !== false
+      if (isPoll && mode === 'forbidden-after-starting' && startedBy !== null && isStarted() && JSON.parse(body).connection === startedBy) return fail(403)
+      if (isOffer) offers += 1
       if (isStarting && mode === 'starting-busy' && faults === 0) {
         faults += 1
         res.writeHead(503, { 'content-type': 'application/json' })
@@ -2786,6 +2785,7 @@ const pollingProxy = async (board, mode, onClaim, onStarting) => {
       if (isStarting && mode === 'starting-lost') { faults += 1; req.socket.destroy(); return }
       // unsent-lost: an unsent receipt reaches the board, and its answer is lost on the way back.
       if (mode === 'unsent-lost' && req.url === '/api/messages/receipt' && JSON.parse(body).status === 'unsent') { faults += 1; req.socket.destroy(); return }
+      if (isOffer) handed += JSON.parse(text).messages?.length ?? 0
       if (isPoll && mode === 'forbidden-after-claim' && JSON.parse(text).messages?.length) hasClaimed = true
       if (isPoll && faults === 0 && mode === 'after-claim' && JSON.parse(text).messages?.length) return fail(503)
       if (isPoll && onClaim && JSON.parse(text).messages?.length) await onClaim()
@@ -2796,7 +2796,7 @@ const pollingProxy = async (board, mode, onClaim, onStarting) => {
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   return {
     address: `http://127.0.0.1:${server.address().port}/?t=${upstream.searchParams.get('t')}`,
-    faults: () => faults, polls: () => polls, registrations: () => registrations, startings: () => startings, offers: () => offers, isIdle: () => active === 0,
+    faults: () => faults, polls: () => polls, registrations: () => registrations, startings: () => startings, offers: () => offers, handed: () => handed, isIdle: () => active === 0,
     // Waits for the clients' own keep-alive connections to end instead of cutting them: a cut one can leave a client's parser
     // timer running after the test has ended.
     // Bounded: past 6 s (a client keeps a connection 4 s after its last request) the rest are cut, as close() does.
@@ -7306,7 +7306,7 @@ test('a Codex message that went back to the queue stays queued through a second 
 
 // The Codex receiver's side of #1507, through a proxy in front of the board that can fault the starting receipt.
 const m5aReceiver = async (board, daemon, mode = 'pass', onStarting) => {
-  const proxy = await pollingProxy(board, mode, undefined, onStarting)
+  const proxy = await pollingProxy(board, mode, undefined, onStarting, () => codexStarts(daemon) > 0)
   const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs })
   // The receiver's last receipts finish before the proxy drops its connections, so none is cut off after the test has ended.
   return { proxy, close: async () => { await receiver.close(); await waitFor(() => proxy.isIdle()); await proxy.closeGently() } }
@@ -7354,14 +7354,16 @@ test('a turn heard to start while the Codex receiver says starting holds the cla
     assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
     writeFileSync(endFlag, '')
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
-    assert.equal(codexStarts(daemon), 1)
+    // The board's answer to starting held through the busy read and the new join: one starting receipt for the claim.
+    assert.deepEqual([codexStarts(daemon), held.proxy.startings()], [1, 1])
   } finally { await held.close() }
 }))
 
 test('a Codex thread that turns busy while the board hears starting gets no turn/start, and the message starts once that turn ends (#1370)', () => codexFixture(async (board, dir) => {
-  // The person's turn begins while the starting receipt is out, and its notices reach the receiver only after the board's answer:
-  // only a fresh read of the thread shows it.
-  const beginFlag = join(dir, 'begin-turn'), endFlag = join(dir, 'end-turn'), daemon = codexDaemon(dir, { beginFlag, endFlag, beginLate: 1000 })
+  // The person's turn begins while the starting receipt is out, and its notices reach the receiver only once the test has seen
+  // that nothing was started: only a fresh read of the thread shows that turn, whatever the machine's speed.
+  const beginFlag = join(dir, 'begin-turn'), endFlag = join(dir, 'end-turn'), noticeFlag = join(dir, 'turn-notices')
+  const daemon = codexDaemon(dir, { beginFlag, endFlag, beginLate: noticeFlag })
   let isFirst = true
   const held = await m5aReceiver(board, daemon, 'pass', async () => {
     if (!isFirst) return
@@ -7374,9 +7376,12 @@ test('a Codex thread that turns busy while the board hears starting gets no turn
     await waitFor(() => !isFirst)
     await pause(1200)
     assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
+    writeFileSync(noticeFlag, '')
+    await waitFor(async () => !existsSync(noticeFlag))
     writeFileSync(endFlag, '')
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
-    assert.equal(codexStarts(daemon), 1)
+    // The board's answer to starting held through the busy read and the new join: one starting receipt for the claim.
+    assert.deepEqual([codexStarts(daemon), held.proxy.startings()], [1, 1])
   } finally { await held.close() }
 }))
 
@@ -7386,10 +7391,11 @@ test('a Codex claim whose turn/start had left when its board connection ended st
   try {
     assert.equal(await codexSend(board, await codexConnection(board)), 200)
     await codexUncertain(board, 'AB-CX-001', 'DISCONNECTED')
-    // The receiver's next connection, once the delivery has ended, polls as one that can take a message: nothing is handed out.
+    // The claiming connection's polls are refused only once turn/start has reached the daemon, so it had left when the connection
+    // ended. The receiver's next connection, once the delivery has ended, polls as one that can take a message: nothing is handed out.
     await waitFor(() => held.proxy.offers() >= 2)
     const one = await codexMessage(board, 'AB-CX-001')
-    assert.deepEqual([one.status, one.error, codexStarts(daemon)], ['uncertain', 'DISCONNECTED', 1])
+    assert.deepEqual([one.status, one.error, codexStarts(daemon), held.proxy.handed()], ['uncertain', 'DISCONNECTED', 1, 0])
   } finally { await held.close() }
 }))
 
