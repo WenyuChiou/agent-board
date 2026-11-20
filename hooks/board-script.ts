@@ -3,4 +3,5 @@
 import { LINES as PART_1 } from './board-script-1.ts'
 import { LINES as PART_2 } from './board-script-2.ts'
 import { LINES as PART_3 } from './board-script-3.ts'
-export const BOARD_SCRIPT = [...PART_1, ...PART_2, ...PART_3].join('\n')
+import { LINES as PART_4 } from './board-script-4.ts'
+export const BOARD_SCRIPT = [...PART_1, ...PART_2, ...PART_3, ...PART_4].join('\n')

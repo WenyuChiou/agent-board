@@ -8,6 +8,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { bundleFiles, bundleFromDir } from '../scripts/bundle-text.mjs'
+import { privateRuntimeFolder, writePrivateRuntimeFile } from '../scripts/runtime-folder.ts'
 import { setupPrograms } from './helpers/setup-programs.mjs'
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
@@ -795,6 +796,10 @@ test('a later launcher that reuses a server through the retry wait or the claim 
     // folder; elsewhere it is in the runtime folder itself (board-cli.ts runFolder).
     const recordDir = process.platform === 'win32' ? join(runDir, 'agent-board') : runDir
     mkdirSync(recordDir, { mode: 0o700, recursive: true })
+    // On Windows the launcher reads the address file only when its access list names this
+    // account alone: a plain file under an inherited %TEMP% list is refused, and the wait loop
+    // never finds the page. The record is written the way a real server writes it.
+    if (process.platform === 'win32') privateRuntimeFolder(recordDir)
     const recordName = `agent-board-${createHash('sha256').update(resolve(progressPath)).digest('hex').slice(0, 16)}.json`
     const recordPath = join(recordDir, recordName)
     const messagesDir = recordPath.replace(/\.json$/, '-messages')
@@ -845,7 +850,11 @@ test('a later launcher that reuses a server through the retry wait or the claim 
     await new Promise(done => fake.listen(0, '127.0.0.1', done))
     const port = fake.address().port
     const fakeUrl = `http://127.0.0.1:${port}/?t=retrytesttoken`
-    const writeRecord = () => writeFileSync(recordPath, JSON.stringify({ pid: 2147483647, port, url: fakeUrl, path: resolve(progressPath), built }), { mode: 0o600 })
+    const writeRecord = () => {
+      const text = JSON.stringify({ pid: 2147483647, port, url: fakeUrl, path: resolve(progressPath), built })
+      if (process.platform === 'win32') writePrivateRuntimeFile(recordPath, text)
+      else writeFileSync(recordPath, text, { mode: 0o600 })
+    }
     const sleep = ms => new Promise(done => setTimeout(done, ms))
     const waitFor = async (check, timeoutMs, what) => {
       const until = Date.now() + timeoutMs
