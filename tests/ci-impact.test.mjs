@@ -561,6 +561,21 @@ test('the budgeted slow files go to different parts, and the parts together run 
   }
 })
 
+test('in seven Windows board parts each part starts from its self-parted share, and none is expected to take over 400 s (#1733)', async () => {
+  const { partFiles, selfPartedTests, BOARD_FILE_BUDGETS_MS } = await import('../scripts/ci-impact.mjs')
+  // The board set main's run 44651103054 planned on 5419f63b, where Windows Node 22 part 1/7 took 483.2 s of its 480 s.
+  const files = ['1317-repro', 'accepted-disconnect', 'answer-guidance', 'antigravity-ack', 'antigravity-sidecar', 'approvals', 'background-resume', 'board-dock', 'board-entry', 'board-json', 'board-status', 'board-storage', 'board-surfaces', 'board', 'checkbox-identity', 'classifier-exit-proof', 'codex-done-lifecycle', 'codex-fallback', 'codex-host', 'codex-local', 'codex-project-move', 'codex-resume-guidance', 'connect-worker', 'deepseek-receiver', 'delivery-states', 'folder-identity', 'folder-watchers', 'hook-declarations', 'host-upgrade', 'legacy-connect', 'local-agent-manifest', 'local-lock', 'mcp-tools', 'merge-check', 'messaging-matrix', 'opencode-receiver', 'page-look', 'page-regressions', 'page-state', 'page-titles', 'pane-queued', 'parity', 'path-journeys', 'performance-budgets', 'plugin-tests', 'preflight-lock-policy', 'prompt-hooks', 'question-clarity', 'queued-count', 'readme-codex-trust', 'report-tail', 'report-validation', 'row-keys', 'row-states-surfaces', 'runtime-folder', 'serve-opener', 'serve-watch', 'session-liveness', 'settings-agents', 'settings-symlink', 'setup-board-command', 'setup-guidance', 'setup-readme', 'setup-remove', 'setup-sidecar', 'setup-terminal', 'tidy', 'view-index-mutation', 'ws-stdio'].map(name => 'tests/' + name + '.test.mjs')
+  // What codex-local, board and opencode-receiver took together in each part, on average over eleven Windows Node 24 runs
+  // since 850ff067; and a file's slowest Windows time, read back from its budget (that time x 1.3 / 0.7), else 5 s.
+  const shares = [263, 220, 257, 215, 232, 223, 253]
+  const slowest = path => BOARD_FILE_BUDGETS_MS[path] !== undefined ? BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3 / 1000 : 5
+  const parts = Array.from({ length: 7 }, (_, i) => partFiles(files, (i + 1) + '/7'))
+  const expected = parts.map((part, i) => Math.round(shares[i] + part.filter(path => !selfPartedTests.includes(path)).reduce((sum, path) => sum + slowest(path), 0)))
+  // 400 s leaves a part 20% for a slow runner under its 480 s budget.
+  assert.ok(expected.every(seconds => seconds <= 400), 'expected seconds per part: ' + expected.join(' '))
+  assert.deepEqual(parts.flat().filter(path => !selfPartedTests.includes(path)).sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
+})
+
 test('the message-store journey gets a Windows journeys part to itself, and the three parts together run every journey once (#1722)', async () => {
   const { partFiles } = await import('../scripts/ci-impact.mjs')
   // The journeys in the order main's Windows run 44615703631 listed them. l3c took 289.1 s of part 2/2's 529 s there.
@@ -642,6 +657,14 @@ test('setup-sidecar has a budget of its own: the 49.0 s that failed #1680 on Win
   assert.deepEqual(checkBoardTimes(timings), { ok: true, errors: [], warnings: [] })
 })
 
+test('host-upgrade\'s budget passes the 109.1 s that failed #1730 on Windows Node 24 (#1662)', async () => {
+  const { checkBoardTimes } = await import('../scripts/ci-impact.mjs')
+  // #1730 adds three Windows tests that start setup from a copied Node: 109.1 s on Windows Node 24 (run 44681768984),
+  // over the 105 s line of the 150 s budget. 109 149 ms is the slowest time that run could have printed as 109.1 s.
+  const timings = { part: '2/7', totalMs: 448_800, files: [{ path: 'tests/host-upgrade.test.mjs', ms: 109_149 }] }
+  assert.deepEqual(checkBoardTimes(timings), { ok: true, errors: [], warnings: [] })
+})
+
 test('the time check passes the Windows times that failed pull requests after #1361, and its 70% line is at least 1.3x each file\'s slowest recent run (#1364)', async () => {
   const { checkBoardTimes, BOARD_FILE_BUDGETS_MS, BOARD_FILE_BUDGET_DEFAULT_MS } = await import('../scripts/ci-impact.mjs')
   const budgetOf = path => BOARD_FILE_BUDGETS_MS[path] ?? BOARD_FILE_BUDGET_DEFAULT_MS
@@ -670,6 +693,8 @@ test('the time check passes the Windows times that failed pull requests after #1
   Object.assign(slowest, { 'tests/approvals.test.mjs': 47_100, 'tests/codex-local.test.mjs': 167_400, 'tests/host-upgrade.test.mjs': 80_600, 'tests/setup-terminal.test.mjs': 73_400 })
   // #1680: setup-sidecar's slowest Windows Node 24 time with its eleven removal re-read tests (run 44650276536).
   slowest['tests/setup-sidecar.test.mjs'] = 49_000
+  // #1730: host-upgrade's Windows Node 24 time with its three copied-Node setup tests (run 44681768984).
+  slowest['tests/host-upgrade.test.mjs'] = 109_100
   for (const [path, ms] of Object.entries(slowest)) assert.ok(budgetOf(path) * 7 / 10 >= ms * 13 / 10, path + ': ' + budgetOf(path))
 })
 
