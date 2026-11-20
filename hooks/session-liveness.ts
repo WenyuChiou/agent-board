@@ -98,7 +98,10 @@ export const goneBlocks = (projects: readonly ProgressProject[], probe: Liveness
 // own progress file (#1092, PM Q3): every stored or transmitted copy drops
 // it — the question ledger, the plugin's stored mirror, the completion
 // overlay (finding 5). The in-memory mirror keeps it; only the stored copy
-// is stripped.
+// is stripped. The one exception (PM, #1731 round 3): a Codex opening event
+// waiting in the board's pending queue carries the claim its hook saw
+// (`seenClaim`) only until its replay writes it to progress.md and deletes
+// the entry.
 export const withoutProcessIdentity = <T extends { agentPid?: number; agentStarted?: number; host?: string }>(value: T): Omit<T, 'agentPid' | 'agentStarted' | 'host'> => {
   const { agentPid: _agentPid, agentStarted: _agentStarted, host: _host, ...rest } = value
   return rest
