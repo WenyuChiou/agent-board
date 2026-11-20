@@ -7516,9 +7516,9 @@ test('Copy-only Codex cards use the same honest hint before and after the board 
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
   const session = '11111111-2222-4333-8444-555555555555'
   const words = [
-    [EN, "Copy and paste into Codex for now; if this session isn't connected to the board or sending hasn't been checked live, the board can't send, but once both are in place messages can arrive on a later turn."],
-    [ZH_TW, '現在請複製後貼到 Codex；這個會話若未連上看板或傳送方式尚未經過現場驗證，看板就不能傳送，兩個條件都具備後，訊息才可能在之後的一輪送達。'],
-    [ZH_CN, '现在请复制后粘贴到 Codex；这个会话若未连上看板或发送方式尚未经过现场验证，看板就不能发送，两个条件都具备后，消息才可能在之后的一轮送达。'],
+    [EN, "The board can't send to this Codex conversation yet: copy the message, paste it into Codex, and Codex reads it when you send it there."],
+    [ZH_TW, '看板還不能傳訊息到這個 Codex 對話：請複製訊息、貼到 Codex，你在那裡送出後 Codex 就會讀到。'],
+    [ZH_CN, '看板还不能发消息到这个 Codex 对话：请复制消息、粘贴到 Codex，你在那里发送后 Codex 就会读到。'],
   ]
   for (const state of ['idle', 'working']) for (const [s, expected] of words) {
     const now = Date.now()

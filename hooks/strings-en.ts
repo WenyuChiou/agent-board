@@ -945,7 +945,7 @@ export const EN: Strings = {
   serveReopenRunning: (agent: string): string => `Running the turn in the background; open ${agent}'s window to see it there.`,
   serveReopenDone: (agent: string): string => `Turn ran in the background; open ${agent}'s window to see it there.`,
   serveLineNone: (agent: string): string => `${agent} can't receive messages from the board yet: copy this and paste it into its chat.`,
-  serveCodexCopyHint: "Copy and paste into Codex for now; if this session isn't connected to the board or sending hasn't been checked live, the board can't send, but once both are in place messages can arrive on a later turn.",
+  serveCodexCopyHint: "The board can't send to this Codex conversation yet: copy the message, paste it into Codex, and Codex reads it when you send it there.",
   serveCodexResumePrompt: 'Resume this Codex conversation on the computer, then submit one prompt in Codex to reconnect. Once connected, send from the board on that computer; reopening alone does not reconnect it.',
   serveLineUnrecorded: 'This route has not been checked live yet, so only Copy is offered.',
   serveLineStateUnknown: 'The session state is unclear, so only Copy is offered.',
