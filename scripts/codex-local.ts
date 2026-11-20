@@ -1460,7 +1460,24 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const isReadable = parsedConfig !== null
   const hooks = object(hookConfig.hooks ?? {})
   const worker = join(root, 'agent-board-hook.mjs')
-  const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(process.execPath, home, agent, worker, progress, event, state)
+  // Only the program is kept from the last install; every other word is written from this run.
+  const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
+  const earlier = commandsOf(Object.values(manifest.groups)).filter((command): command is string => typeof command === 'string')
+  // A program setup wrote last time that is still there runs the same command, so it is kept even
+  // when this run's Node is a copy in another folder: rewriting the command would drop the
+  // approval its host bound to it (#1662).
+  const keptProgram = (commands: string[]): string | undefined => {
+    for (const command of commands) {
+      // quote() always double-quotes a word, so a quoted program runs to its closing quote;
+      // an unquoted one ends at the first space. A path with a space still reads as one program.
+      const kept = /^"([^"]+)"/.exec(command)?.[1] ?? command.split(' ')[0] ?? ''
+      if (!isAbsolute(kept)) continue
+      try { if (statSync(kept).isFile()) return kept } catch {}
+    }
+    return undefined
+  }
+  const commandNode = keptProgram(earlier) ?? process.execPath
+  const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(commandNode, home, agent, worker, progress, event, state)
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'
   const conflicts: string[] = []
@@ -1495,9 +1512,6 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // Muse Code 1.4.14 on Windows hands the line to cmd as one argument with each quote escaped as \",
   // which cmd does not read, so every quoted hook failed live. It gets Antigravity's quote-free line.
   const isQuoteFreeHost = agent === 'muse' && process.platform === 'win32'
-  // Only the program is kept from the last install; every other word is written from this run.
-  const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
-  const earlier = commandsOf(Object.values(manifest.groups)).filter((command): command is string => typeof command === 'string')
   const hostNode = isPowerShellHost || isQuoteFreeHost ? windowsHookNode(process.execPath, earlier) : undefined
   for (const event of ownEvents) {
     const state = statusEvents[agent]?.[event]
@@ -1630,7 +1644,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
   }
-  const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(fileWords.localAgentSkillDescription)}\n---\n\n${fileWords.localAgentSkill(`${quote(process.execPath)} ${quote(script)}`)}\n\n${fileWords.localAgentHandoff}\n\n${fileWords.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
+  const skillText = `---\nname: agent-board\ndescription: ${JSON.stringify(fileWords.localAgentSkillDescription)}\n---\n\n${fileWords.localAgentSkill(`${quote(commandNode)} ${quote(script)}`)}\n\n${fileWords.localAgentHandoff}\n\n${fileWords.codexTrust}\n\nCodex: ${configs.codex}\n${codexEvents.join(', ')}\n`
   // The connect writes its board beside the progress file it connected: the default one, one a
   // CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names, or the one its own record keeps (#285).
   // Releases before de40dde wrote the command as node "<path>" for any path; later ones use boardRun.
@@ -1648,15 +1662,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     [worker]: hookWorker(home, script, boardPromptHelper(boardRequestWords(Object.values(STRINGS)), deliveryRequestWords(Object.values(STRINGS)))),
     [skill]: skillText,
   }
-  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(process.execPath, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script, fileWords)
+  if (agent === 'opencode') files[join(opencodeDir, 'plugins', 'agent-board-local.js')] = opencodePlugin(commandNode, worker, progress, fileWords.localAgentSkillDescription, home, fileWords.localAgentStepFormat, script, fileWords)
   if (agent === 'openclaw') {
-    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(process.execPath, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
+    files[join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')] = openclawLocalPlugin(commandNode, worker, progress, home, fileWords.openclawProgressTool, fileWords.localAgentStepFormat)
     // activation.onStartup: OpenClaw 2026.6.35 loads a plugin when its gateway starts only when the manifest asks for it (#1489).
     files[join(root, 'adapters', 'openclaw', 'openclaw.plugin.json')] = `${JSON.stringify({ id: 'agent-board-local', activation: { onStartup: true }, contracts: { tools: ['progress_card'] }, configSchema: { type: 'object', additionalProperties: false, properties: {} } }, null, 2)}\n`
     files[join(openclawDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'deepseek') {
-    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(process.execPath, worker, progress, home, script, fileWords.deepseekBoardTool, fileWords.localAgentStepFormat)
+    files[join(root, 'adapters', 'deepseek.mjs')] = deepseekLocalPlugin(commandNode, worker, progress, home, script, fileWords.deepseekBoardTool, fileWords.localAgentStepFormat)
     files[join(deepseekDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
   }
   if (agent === 'hermes') files[join(hermesDir, 'skills', 'agent-board', 'SKILL.md')] = skillText
@@ -1670,8 +1684,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       files[sidecarFiles[1]!] = antigravitySidecarSource(fileWords.antigravityWakeLine)
     }
   }
-  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(process.execPath)} ${quote(script)}}\n'''\n`
-  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'agent-board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(process.execPath)} ${quote(script)}\`\n`
+  if (agent === 'gemini') files[join(home, '.gemini', 'commands', 'agent-board.toml')] = `description = ${JSON.stringify(fileWords.boardCommandDescription)}\nprompt = '''${fileWords.boardCommandPrompt}\n\n!{${quote(commandNode)} ${quote(script)}}\n'''\n`
+  if (agent === 'opencode') files[join(opencodeDir, 'commands', 'agent-board.md')] = `---\ndescription: ${JSON.stringify(fileWords.boardCommandDescription)}\n---\n\n${fileWords.boardCommandPrompt}\n\n!\`${quote(commandNode)} ${quote(script)}\`\n`
   // 0.24.2 and earlier wrote /board here. The command is now /agent-board, so setup takes the old file
   // away when it is still the bytes setup or a release wrote, and leaves one the person edited (#868).
   const retired = agent === 'gemini' ? [join(home, '.gemini', 'commands', 'board.toml')] : agent === 'opencode' ? [join(opencodeDir, 'commands', 'board.md')] : []

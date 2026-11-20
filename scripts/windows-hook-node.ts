@@ -12,6 +12,10 @@ export const windowsHookNode = (executable: string, earlier: string[] = []): str
   for (const command of earlier) {
     const kept = command.split(' ')[0] ?? ''
     if (isSameFile(executable, kept)) return kept
+    // A program setup wrote last time that is still there runs the same hook, so it is kept
+    // even when this run's Node is a copy in another folder: rewriting the command would drop
+    // the approval the host bound to it (#1662).
+    if (isExistingFile(kept)) return kept
   }
   try {
     const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/v:off', '/s', '/c', 'for %I in ("%AGENT_BOARD_NODE_EXECUTABLE%") do @echo %~sI'], {
@@ -23,6 +27,12 @@ export const windowsHookNode = (executable: string, earlier: string[] = []): str
     if (isSameFile(executable, candidate)) return candidate
   } catch {}
   return undefined
+}
+
+// A path setup wrote that still names a file, whatever Node this run started from.
+const isExistingFile = (candidate: string): boolean => {
+  if (!/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i.test(candidate)) return false
+  try { return statSync(candidate).isFile() } catch { return false }
 }
 
 // realpath on Windows can preserve an 8.3 alias. Nonzero file identities
