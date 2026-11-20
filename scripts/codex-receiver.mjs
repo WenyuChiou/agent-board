@@ -778,9 +778,10 @@ export const startCodexReceiver = ({
           }
           // Tells the board, right before turn/start, that this delivery is about to ask Codex for the message: until then a
           // connection that ends sends the claim back to the queue (#1507). 'said': the board took it; 'held': its store was busy
-          // and saved nothing, so it is asked again a tick later, as a give-back is (#1625); 'end': any other answer, or none. The
-          // board may have taken it or not, so, as for a give-back whose answer is not known, this delivery ends with no turn/start
-          // and asks nothing again: a claim the board did not mark goes back when the connection ends, and one it marked expires.
+          // and saved nothing, so it is asked again after the next event, from inside the thread (below); 'end': any other answer,
+          // or none. The board may have taken it or not, so, as for a give-back whose answer is not known, this delivery ends with
+          // no turn/start and asks nothing again: a claim the board did not mark goes back when the connection ends, and one it
+          // marked expires.
           let wasStartBusy = false
           const sayStarting = async () => {
             try { await starting(); return 'said' } catch (error) {
@@ -840,18 +841,28 @@ export const startCodexReceiver = ({
                 await nextEvent()
                 continue
               }
-              let status
-              try { status = await readStatus() } catch (error) {
-                // A read that got no answer started nothing either: it is asked again. A refused or odd answer is a refusal.
-                if (error?.message === 'OWNER_DISCONNECTED') return undefined
-                if (error?.message !== 'OWNER_TIMEOUT') throw error
-              }
-              if (status === 'idle' && isIdle() && !isDone()) {
-                const said = await sayStarting()
+              // The thread is read before the starting receipt and again after the board's answer, so turn/start follows a fresh
+              // read with no board request between them: a turn begun while the board was asked, whose notice has not come yet,
+              // holds the claim as a busy read does (#1370). A busy store saved nothing, so the receiver stays in the thread and asks
+              // again after the next event: leaving and joining again would start the daemon's delay, and with it a whole wait. A
+              // claim that is done, or too short of time for that wait, leaves as a busy one does, so the wait above gives it back.
+              let said = null, status
+              for (;;) {
+                status = undefined
+                try { status = await readStatus() } catch (error) {
+                  // A read that got no answer started nothing either: it is asked again. A refused or odd answer is a refusal.
+                  if (error?.message === 'OWNER_DISCONNECTED') return undefined
+                  if (error?.message !== 'OWNER_TIMEOUT') throw error
+                }
+                if (status !== 'idle' || !isIdle() || isDone() || said === 'said') break
+                said = await sayStarting()
                 if (said === 'end') return undefined
-                // A turn heard to start while the board was asked holds the claim, as a busy read does (#1370).
-                if (said === 'said' && isIdle() && !isDone()) break
+                if (said === 'held') {
+                  if (isDone() || isShort()) break
+                  await nextEvent()
+                }
               }
+              if (said === 'said' && status === 'idle' && isIdle() && !isDone()) break
               // Busy: the receiver leaves again, so the thread is not kept loaded for a person who has gone.
               release()
               await leave(thread)
