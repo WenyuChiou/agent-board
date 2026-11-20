@@ -42,6 +42,10 @@ export type Message = {
   // The surface the board checked the route for (set only by the board). Another surface of the same session
   // cannot claim the message, since the record shown for the first says nothing of it.
   surface?: string
+  // A claim handed to a receiver that says `starting` right before it asks its host for anything (the Codex receiver), until it
+  // says so. A connection that ends while this is set never asked for the message to be sent, so the claim goes back as if it
+  // were still queued (#1507).
+  awaitsStart?: true
   // When an automatic receiver left with this message still queued. The board refuses the message a fixed time after
   // this, working from the store alone; the next receiver of the session takes it over and clears the stamp (#318).
   leftAt?: number
@@ -360,7 +364,7 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
   return { state: { ...state, messages: [...state.messages, message] }, message }
 }
-export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string): { state: MessageState; messages: Message[] } => {
+export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string, marksStart = false): { state: MessageState; messages: Message[] } => {
   if (target.contested || target.expires <= now) return { state, messages: [] }
   const to = address(target.agent, target.session)
   // A message the board checked a route for goes only to a claimant on that same surface; on any other it stays queued.
@@ -381,6 +385,7 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   const claimed = messages.map(({ ref: previous, ...one }) => ({
     ...one, target: target.id, turn: target.turn, status: 'uncertain' as const, claimed: now, nonce: one.nonce || nonce, updated: now,
     ...(one.status === 'uncertain' && !isAtMostOnce({ to: one.to, ref: previous }) ? { redelivered: (one.redelivered ?? 0) + 1 } : {}), ...(ref === undefined ? {} : { ref }),
+    ...(marksStart ? { awaitsStart: true as const } : {}),
   }))
   return { state: { ...state, messages: state.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }
 }
@@ -399,9 +404,13 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   // unsent: the connection that holds a claim says it never asked for any of it to be sent, so the message goes back to the
   // queue with its text and the next claim gets its own 30 minutes (#1578). Only a claim nothing else was said of (no accept,
   // no error) and only from the connection the board handed it to; a receiver that cannot tell whether it was sent says uncertain.
-  if (input.status === 'unsent') {
+  if (input.status === 'unsent' || input.status === 'starting') {
     if (one.status !== 'uncertain' || one.error !== '' || one.hasAccepted === true || one.target !== target.id || isMailboxTarget(one.target) || input.reply !== undefined || input.error !== undefined) throw new Error('INVALID_RECEIPT')
-    return { ...state, messages: state.messages.map(message => message === one ? { ...one, status: 'queued' as const, claimed: 0, updated: now } : message) }
+    const { awaitsStart: _awaitsStart, ...rest } = one
+    // starting: the receiver is about to ask its host for the message, so from now on a connection that ends leaves it in doubt.
+    // Said twice it changes nothing. It changes nothing else either: the claim still waits for its accept.
+    if (input.status === 'starting') return one.awaitsStart === true ? { ...state, messages: state.messages.map(message => message === one ? rest : message) } : state
+    return { ...state, messages: state.messages.map(message => message === one ? { ...rest, status: 'queued' as const, claimed: 0, updated: now } : message) }
   }
   if (!['uncertain', 'accepted', 'acknowledged', 'rejected'].includes(String(input.status))) throw new Error('INVALID_RECEIPT')
   const status = input.status as Message['status']
@@ -421,7 +430,8 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   // An accept that reaches the board after the wake read "sent, not confirmed" is recorded, and the message stays as it is:
   // it must not hold the session's next message for another 30 minutes (#1366 review). Its day-long retention does not restart.
   if (one.status === 'uncertain' && one.error === UNCONFIRMED && status === 'accepted' && one.to.startsWith('opencode:')) return one.hasAccepted === true ? state : { ...state, messages: state.messages.map(message => message === one ? { ...one, hasAccepted: true } : message) }
-  return { ...state, messages: state.messages.map(message => message === one ? settled({ ...one, status, reply, error, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
+  const { awaitsStart: _awaitsStart, ...rest } = one
+  return { ...state, messages: state.messages.map(message => message === one ? settled({ ...rest, status, reply, error, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
 }
 // A wake the plugin started (marked by an attempt) whose reply may still be on its way, accepted by the host or not: a
 // disconnection does not change it, so it reads "sent, not confirmed" at the open limit, counted from its attempt or its
@@ -434,10 +444,14 @@ export const disconnectMessages = (state: MessageState, target: string, now: num
   ...state,
   messages: state.messages.map(one => {
     if (one.target !== target || isFinished(one) || isMarkedWake(one) || one.status === 'uncertain' && one.error !== '') return one
+    // A claim its receiver never said `starting` for was never asked of the host: it ends as a queued message does (#1507).
+    // One past the open limit is left to expire as before: its claim's time is up, whatever ended the connection.
+    const { awaitsStart, leftAt: _leftAt, ...rest } = one
+    const isUnstarted = awaitsStart === true && one.status === 'uncertain' && now - one.updated <= OPEN_LIMIT_MS
+    if (keepQueued && isUnstarted) return { ...rest, status: 'queued', claimed: 0, updated: now, leftAt: now }
     if (keepQueued && one.status === 'queued') return one.leftAt === undefined ? { ...one, leftAt: now } : one
-    const { leftAt: _leftAt, ...rest } = one
     return settled({
-      ...rest, status: one.status === 'queued' ? 'rejected' : one.status === 'accepted' ? 'accepted' : 'uncertain', error: 'DISCONNECTED', updated: one.error === 'DISCONNECTED' || one.status === 'uncertain' ? one.updated : now,
+      ...rest, status: one.status === 'queued' || isUnstarted ? 'rejected' : one.status === 'accepted' ? 'accepted' : 'uncertain', error: 'DISCONNECTED', updated: one.error === 'DISCONNECTED' || one.status === 'uncertain' && !isUnstarted ? one.updated : now,
     })
   }),
 })
