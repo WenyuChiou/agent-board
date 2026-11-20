@@ -2275,6 +2275,7 @@ const serveChild = (): void => {
   }
   try {
     startServer({
+      addressFile: file,
       allowResume: args.includes('--allow-resume'),
       routes: routesStandIn(),
       messagesDirectory: messagesDirectory(),
