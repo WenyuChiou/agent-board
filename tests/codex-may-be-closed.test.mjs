@@ -52,6 +52,8 @@ test('a Codex card with no process record says the window may be closed only pas
 test('no line for a working Codex block, a waiting one with no question, a future time, another agent, or a block with a process record', () => {
   const ago = 30 * 60 * SECOND
   const host = 'd'.repeat(64)
+  // The same quiet waiting Codex block with nothing taken away does say it: each case below differs in one thing.
+  assert.equal(cardOf(viewOf(block({ ago })))?.mayBeClosed, true, 'control')
   const cases = {
     working: block({ ago, state: 'working', steps: '- [~] Build' }),
     noQuestion: block({ ago, steps: '- [x] Build\n- [ ] Wait for the next instruction' }),

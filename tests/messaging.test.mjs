@@ -8451,7 +8451,10 @@ test('a number another program takes while the proof is read again is never sign
   assert.deepEqual(kills, [])
 })
 
-test('a Codex card the process check proved gone has no route to send on, and no route cites the C1 process-walk note as its record (#1092)', () => {
+test('a Codex card the process check proved gone has no route to send on, and no route cites the C1 process-walk note as its record (#1092)', async () => {
+  // A Codex card can be proved gone now: the process check covers Codex blocks.
+  const { CLAIMING_AGENTS } = await import('../hooks/session-liveness.ts')
+  assert.equal(CLAIMING_AGENTS.has('codex'), true)
   // The C1 note is a failure: on the shared server the walk never reaches the window, so it cannot stand behind Send.
   const c1 = 'docs/validation/2026-11-18-c1-codex-terminal-process.md'
   for (const record of RECEIVER_ROUTES) for (const route of Object.values(record.routes)) {
