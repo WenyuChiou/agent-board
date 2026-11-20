@@ -1,10 +1,10 @@
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { join, resolve } from 'node:path'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, tempFolder } from './e2e/lib/host-journey.mjs'
+import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, insideHome, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, tempFolder } from './e2e/lib/host-journey.mjs'
 import { spawnIsolated } from './e2e/lib/spawn.mjs'
 
 // The upgrade journey of #466. It reads the 0.24.0 files from the release tag, so it stays in
@@ -386,4 +386,68 @@ test('an upgrade from 0.24.3 updates a Hermes config of an earlier release whose
   const repaired = JSON.parse(readFileSync(manifest, 'utf8'))
   assert.deepEqual(Object.keys(repaired.groups.hooks).sort(), [...hermesEvents1588].sort(), 'the upgrade re-records the hooks')
   assertRepeat(await repeatApply(f), ['hermes'])
+})
+
+// The moved Node of #1662: the same Node copied to another folder, as an upgrade from a
+// second install would run it. Setup from it must keep the hook commands the first install
+// wrote, so the approvals Codex bound to them stay, and the trust command from the Node on
+// PATH still passes its ownership gate.
+// Runs a command with a given executable in the fixture's world, like run() but not the test's Node.
+const runWith = (f, executable, args, { input, timeoutMs, env }) => new Promise((resolveRun, reject) => {
+  const child = spawnIsolated(executable, args, { env: env ? { ...f.env, ...env } : f.env, cwd: f.world.root, stdio: ['pipe', 'pipe', 'pipe'] })
+  let stdout = '', stderr = '', failure
+  const timer = setTimeout(() => { failure = new Error(`timed out after ${timeoutMs} ms`); child.kill() }, timeoutMs)
+  child.on('error', error => { failure = error })
+  child.stdin.on('error', error => { if (error.code !== 'EPIPE') failure = error })
+  child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk })
+  child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk })
+  child.once('close', status => { clearTimeout(timer); if (failure) reject(failure); else resolveRun({ status, stdout, stderr }) })
+  child.stdin.end(input)
+})
+
+// Runs setup-agent.mjs with a given Node, like setup() but not the test's Node.
+const setupFrom = async (f, executable, args = []) => {
+  const result = await runWith(f, executable, [join(repoRoot, 'scripts', 'setup-agent.mjs'), '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--lang', 'en', ...args], { timeoutMs: 120000 })
+  checked(result, `setup from ${executable} ${args.join(' ')}`)
+  const plan = JSON.parse(result.stdout)
+  for (const target of plan.plans) {
+    assert.deepEqual(target.conflicts, [], `${target.agent}: no setup conflicts`)
+    for (const change of target.changes) insideHome(f.home, change.file)
+  }
+  return plan
+}
+
+test('setup from a Node in another folder keeps the Codex hook commands and the trust command still works from the Node on PATH (#1662)', async () => {
+  const f = fixture(['.codex'])
+  await apply(f, ['codex'])
+  const config = join(f.home, '.codex', 'hooks.json')
+  const before = readFileSync(config, 'utf8')
+  const parsed = JSON.parse(before)
+  const events = Object.keys(parsed.hooks)
+  assert.equal(events.length, 7, 'All seven Codex hook events are covered')
+  for (const event of events) {
+    assert.equal(parsed.hooks[event].length, 1, `${event}: the initial install has one board group`)
+    assert.equal(parsed.hooks[event][0].hooks[0].type, 'command', `${event}: the board group is a command hook`)
+  }
+  // The same Node copied to another folder: the Node on PATH stays where it was, so the
+  // commands setup wrote still run.
+  const movedDir = join(f.world.root, 'moved-node')
+  mkdirSync(movedDir, { recursive: true })
+  const movedNode = join(movedDir, process.platform === 'win32' ? 'node.exe' : 'node')
+  copyFileSync(process.execPath, movedNode)
+  if (process.platform !== 'win32') chmodSync(movedNode, 0o755)
+  const plan = await setupFrom(f, movedNode, ['--apply', '--json'])
+  assert.deepEqual(plan.targets, ['codex'])
+  assert.equal(plan.applied, true)
+  assert.deepEqual(plan.plans[0].changes, [], 'the moved Node reports no changes')
+  assert.equal(readFileSync(config, 'utf8'), before, 'the hook commands stay byte-identical')
+  assert.ok(!readFileSync(config, 'utf8').includes(movedNode), 'no hook command names the moved Node')
+  // The trust command from the Node on PATH still passes its ownership gate: with no Codex
+  // binary in this home it stops at the binary, not at the install. The trust mode runs on
+  // the installed board script itself, not through setup-agent.mjs, which always forwards
+  // --codex-setup.
+  const trust = await run(f, [f.script, '--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--agent', 'codex', '--codex-trust', '--json'], { timeoutMs: 60000 })
+  assert.notEqual(trust.status, 0)
+  assert.match(trust.stderr, /CODEX_BINARY_REQUIRED/)
+  assertRepeat(await repeatApply(f), ['codex'])
 })
