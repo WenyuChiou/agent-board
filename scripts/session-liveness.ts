@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { RESUME } from '../hooks/parse'
 import { processStartedMany } from './local-lock'
 import type { ProcessStart } from './local-lock'
-import { blockKey, claimedBlocksOf, goneBlocks, hostHashOf, isAntigravityQuestionWaiting } from '../hooks/session-liveness'
+import { claimedBlocksOf, goneBlocks, hostHashOf, isAntigravityQuestionWaiting, newestAntigravityBlocks } from '../hooks/session-liveness'
 import type { ProgressProject } from '../types'
 
 // The liveness of agent sessions, as the shell sees it (#1092): whether the agent
@@ -118,14 +118,12 @@ export const goneBlocksOf = (
     const home = options?.home ?? homedir()
     const probe = options?.presenceProbe ?? probeAntigravityPresenceLock
     if (home !== '') {
-      for (const project of projects) for (const task of project.tasks) {
-        const auto = task.auto
-        if (auto === null || auto.agent !== 'antigravity' || auto.isRun === true || (auto.state !== 'working' && auto.state !== 'waiting')) continue
-        if (isAntigravityQuestionWaiting(auto, task.steps)) continue
-        if (auto.resume === null || !RESUME.test(auto.resume)) continue
-        if (auto.host !== undefined && auto.host !== hostHash) continue
-        const key = blockKey(auto)
+      for (const [key, { auto, steps }] of newestAntigravityBlocks(projects)) {
         if (gone.has(key)) continue
+        if (auto.state !== 'working' && auto.state !== 'waiting') continue
+        if (isAntigravityQuestionWaiting(auto, steps)) continue
+        if (auto.agentPid !== undefined || auto.host !== hostHash) continue
+        if (auto.resume === null || !RESUME.test(auto.resume)) continue
         if (probe(join(home, '.gemini', 'antigravity-cli', 'presence', `${auto.resume}.lock`)) === 'unlocked') gone.add(key)
       }
     }

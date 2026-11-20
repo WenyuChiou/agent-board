@@ -330,7 +330,7 @@ test('Windows Antigravity CLI working row ends when its presence lock is unlocke
     assert.notEqual(host, null)
     const otherHost = sha256('win32:another-host')
     const resume = '11111111-2222-4333-8444-555555555555'
-    const text = file(`<!-- auto session=a1b2c3d4 agent=antigravity state=working updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${resume} -->\n### Ship a1b2c3d4\n- [~] Working in progress\n<!-- /auto session=a1b2c3d4 -->\n`)
+    const text = file(`<!-- auto session=a1b2c3d4 agent=antigravity state=working updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${resume} host=${host} -->\n### Ship a1b2c3d4\n- [~] Working in progress\n<!-- /auto session=a1b2c3d4 -->\n`)
     const projects = parseProgress(text)
     const auto = projects[0].tasks[0].auto
     const noopLookup = () => new Map()
@@ -344,6 +344,10 @@ test('Windows Antigravity CLI working row ends when its presence lock is unlocke
       assert.equal(view.groups.flatMap(g => g.rows).find(r => r.title === 'Ship a1b2c3d4')?.auto, 'working')
       assert.equal(view.stopped.length, 0)
     }
+
+    const desktopText = file(`<!-- auto session=a1b2c3d4 agent=antigravity state=working updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${resume} -->\n### Ship a1b2c3d4\n- [~] Working in progress\n<!-- /auto session=a1b2c3d4 -->\n`)
+    const desktopGone = goneBlocksOf(parseProgress(desktopText), host, new Map(), 2000, noopLookup, { home, platform: 'win32', presenceProbe: () => 'unlocked' })
+    assert.deepEqual([...desktopGone], [])
 
     const foreignText = file(`<!-- auto session=a1b2c3d4 agent=antigravity state=working updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${resume} host=${otherHost} -->\n### Ship a1b2c3d4\n- [~] Working in progress\n<!-- /auto session=a1b2c3d4 -->\n`)
     const foreignGone = goneBlocksOf(parseProgress(foreignText), host, new Map(), 2000, noopLookup, { home, platform: 'win32', presenceProbe: () => 'unlocked' })
@@ -390,8 +394,8 @@ test('exited Antigravity CLI run ends a question-free waiting row while keeping 
 
     // Windows presence-lock mode
     const winText = file(
-      `<!-- auto session=a1b2c3d4 agent=antigravity state=waiting updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${plainResume} -->\n### Ship plain\n- [ ] Waiting for the next instruction\n<!-- /auto session=a1b2c3d4 -->\n`,
-      `<!-- auto session=b2c3d4e5 agent=antigravity state=waiting updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${askResume} -->\n### Ship question\n- [?] Blue or green?\n<!-- /auto session=b2c3d4e5 -->\n`,
+      `<!-- auto session=a1b2c3d4 agent=antigravity state=waiting updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${plainResume} host=${host} -->\n### Ship plain\n- [ ] Waiting for the next instruction\n<!-- /auto session=a1b2c3d4 -->\n`,
+      `<!-- auto session=b2c3d4e5 agent=antigravity state=waiting updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${askResume} host=${host} -->\n### Ship question\n- [?] Blue or green?\n<!-- /auto session=b2c3d4e5 -->\n`,
     )
     const winProjects = parseProgress(winText)
     const winGone = goneBlocksOf(winProjects, host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })
@@ -554,7 +558,7 @@ test('board-cli --json shows the agy -p question card and ends an exited working
       const presDir = join(home, '.gemini', 'antigravity-cli', 'presence')
       mkdirSync(presDir, { recursive: true })
       writeFileSync(join(presDir, `${deniedId}.lock`), '')
-      seed = `## antigravity\n\n<!-- auto session=${deniedOwner.slice(0, 8)} agent=antigravity source=antigravity-local owner=${deniedOwner} state=working updated=${recentIso} resume=${deniedId} -->\n### Denied agy run\n- [~] Working in progress\n<!-- /auto session=${deniedOwner.slice(0, 8)} -->\n`
+      seed = `## antigravity\n\n<!-- auto session=${deniedOwner.slice(0, 8)} agent=antigravity source=antigravity-local owner=${deniedOwner} state=working updated=${recentIso} resume=${deniedId} host=${host} -->\n### Denied agy run\n- [~] Working in progress\n<!-- /auto session=${deniedOwner.slice(0, 8)} -->\n`
     } else {
       const dead = deadPid()
       seed = `## antigravity\n\n<!-- auto session=${deniedOwner.slice(0, 8)} agent=antigravity source=antigravity-local owner=${deniedOwner} state=working updated=${recentIso} resume=${deniedId} agentpid=${dead} agentstarted=${aliveStarted} host=${host} -->\n### Denied agy run\n- [~] Working in progress\n<!-- /auto session=${deniedOwner.slice(0, 8)} -->\n`
@@ -572,13 +576,17 @@ test('board-cli --json shows the agy -p question card and ends an exited working
     ].map(entry => JSON.stringify(entry)).join('\n') + '\n')
 
     const env = { ...process.env, HOME: home, USERPROFILE: home, LANG: 'en', CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
-    const stopRes = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'waiting', '--event', 'Stop'], {
+    const stopRes = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'waiting', '--event', 'Stop', '--hook-deadline', String(Date.now() + 30_000)], {
       cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15_000,
       input: JSON.stringify({ conversationId: askId, transcriptPath: transcript }),
     })
     assert.equal(stopRes.status, 0, stopRes.stderr)
 
+    const { parseProgress } = await import('../hooks/parse.ts')
     if (process.platform === 'win32') {
+      const askTask = parseProgress(readFileSync(progress, 'utf8')).flatMap(p => p.tasks).find(t => t.auto?.resume === askId)
+      assert.equal(askTask?.auto?.host, host)
+      assert.equal(askTask?.auto?.agentPid, undefined)
       const presDir = join(home, '.gemini', 'antigravity-cli', 'presence')
       mkdirSync(presDir, { recursive: true })
       writeFileSync(join(presDir, `${askId}.lock`), '')
@@ -601,6 +609,138 @@ test('board-cli --json shows the agy -p question card and ends an exited working
     assert.equal(doc.counts.working, 0, `expected 0 working rows: ${jsonRes.stdout}`)
     assert.equal(doc.working.length, 0)
     assert.equal(doc.stopped.find(row => row.title === 'Denied agy run')?.state, 'ended')
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// #1589 Test 7: Duplicate blocks keep the newest Antigravity closing question in Needs you, and Windows Desktop resume ignores a stale CLI lock.
+test('duplicate blocks keep the newest Antigravity closing question in Needs you and Windows Desktop resume ignores a stale CLI presence lock (#1589)', async () => {
+  const { BOARD_SCRIPT } = await import('../hooks/board-script.ts')
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { blockHostOf, putCodexBlock } = await import('../hooks/codex.ts')
+  const { antigravityQuestionWaitingKeys, blockKey } = await import('../hooks/session-liveness.ts')
+  const { buildView } = await import('../hooks/view.ts')
+  const { EN } = await import('../hooks/strings-en.ts')
+  const { goneBlocksOf, readingHostHash } = await import('../scripts/session-liveness.ts')
+  const home = mkdtempSync(join(tmpdir(), 'ab-1589-dup-'))
+  try {
+    const host = readingHostHash()
+    assert.notEqual(host, null)
+    const dead = deadPid()
+    const linuxResume = '44444444-5555-4666-8777-888888888888'
+    const winResume = '55555555-6666-4777-8888-999999999999'
+
+    // Greptile P1 (Linux dead-PID duplicates sharing blockKey):
+    const olderWorking = block('e5f6a7b8', 'antigravity', 'working', '- [~] Working in progress', { pid: dead, started: aliveStarted, host }, 10, linuxResume)
+    const newerAsk = block('e5f6a7b8', 'antigravity', 'waiting', '- [?] Blue or green?', { pid: dead, started: aliveStarted, host }, 5, linuxResume)
+    for (const ordered of [file(olderWorking, newerAsk), file(newerAsk, olderWorking)]) {
+      const projects = parseProgress(ordered)
+      const sharedKey = blockKey(projects[0].tasks[0].auto)
+      assert.equal(antigravityQuestionWaitingKeys(projects).has(sharedKey), true)
+      const gone = goneBlocksOf(projects, host, new Map(), 2000, () => new Map(), { platform: 'linux' })
+      assert.deepEqual([...gone], [])
+      const view = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, gone)
+      assert.deepEqual(view.waiting.map(item => item.text), ['Blue or green?'])
+      assert.equal(view.stopped.some(row => !row.archive?.isDuplicate), false)
+    }
+
+    // Reverse state on Linux: older waiting question superseded by newer working block -> enters gone/stopped once CLI exits.
+    const olderAsk = block('e5f6a7b8', 'antigravity', 'waiting', '- [?] Old question?', { pid: dead, started: aliveStarted, host }, 10, linuxResume)
+    const newerWorking = block('e5f6a7b8', 'antigravity', 'working', '- [~] Working in progress', { pid: dead, started: aliveStarted, host }, 5, linuxResume)
+    const linuxSuperseded = parseProgress(file(olderAsk, newerWorking))
+    const linuxSupersededKey = blockKey(linuxSuperseded[0].tasks[1].auto)
+    assert.equal(antigravityQuestionWaitingKeys(linuxSuperseded).has(linuxSupersededKey), false)
+    const linuxGone = goneBlocksOf(linuxSuperseded, host, new Map(), 2000, () => new Map(), { platform: 'linux' })
+    assert.deepEqual([...linuxGone], [linuxSupersededKey])
+    const linuxSupersededView = buildView(linuxSuperseded, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, linuxGone)
+    assert.equal(linuxSupersededView.stopped.some(row => row.isProcessGone === true && row.auto === 'ended'), true)
+
+    // Greptile P1 (Windows presence-lock duplicates sharing blockKey):
+    const winOlderWork = `<!-- auto session=f6a7b8c9 agent=antigravity state=working updated=${new Date(NOW - 10 * 60_000).toISOString()} resume=${winResume} host=${host} -->\n### Ship win\n- [~] Working in progress\n<!-- /auto session=f6a7b8c9 -->\n`
+    const winNewerAsk = `<!-- auto session=f6a7b8c9 agent=antigravity state=waiting updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${winResume} host=${host} -->\n### Ship win\n- [?] Blue or green?\n<!-- /auto session=f6a7b8c9 -->\n`
+    for (const ordered of [file(winOlderWork, winNewerAsk), file(winNewerAsk, winOlderWork)]) {
+      const projects = parseProgress(ordered)
+      const gone = goneBlocksOf(projects, host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })
+      assert.deepEqual([...gone], [])
+      const view = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, gone)
+      assert.deepEqual(view.waiting.map(item => item.text), ['Blue or green?'])
+      assert.equal(view.stopped.some(row => !row.archive?.isDuplicate), false)
+    }
+
+    const winOlderAsk = `<!-- auto session=f6a7b8c9 agent=antigravity state=waiting updated=${new Date(NOW - 10 * 60_000).toISOString()} resume=${winResume} host=${host} -->\n### Ship win\n- [?] Old question?\n<!-- /auto session=f6a7b8c9 -->\n`
+    const winNewerWork = `<!-- auto session=f6a7b8c9 agent=antigravity state=working updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${winResume} host=${host} -->\n### Ship win\n- [~] Working in progress\n<!-- /auto session=f6a7b8c9 -->\n`
+    const winSuperseded = parseProgress(file(winOlderAsk, winNewerWork))
+    const winSupersededGone = goneBlocksOf(winSuperseded, host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })
+    assert.deepEqual([...winSupersededGone], [blockKey(winSuperseded[0].tasks[1].auto)])
+    assert.equal(buildView(winSuperseded, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, winSupersededGone).stopped.some(row => row.isProcessGone === true && row.auto === 'ended'), true)
+
+    // Codex P2: Windows CLI -> Desktop App resume ignores stale unlocked CLI presence lock, and duplicate CLI/Desktop keeps Desktop alive.
+    const resumeSession = '66666666-7777-4888-8999-aaaaaaaaaaaa'
+    const resumeOwner = createHash('sha256').update(`antigravity:${resumeSession}`).digest('hex')
+    const recentAt = Date.now() - 60_000
+    const cliSeeded = putCodexBlock('', {
+      session: resumeSession,
+      agent: 'antigravity',
+      project: 'antigravity',
+      title: 'CLI then Desktop task',
+      state: 'working',
+      updated: new Date(recentAt).toISOString(),
+      steps: ['- [~] Working in progress'],
+    }, resumeOwner, false, undefined, v => v, null, host)
+    assert.equal(blockHostOf(cliSeeded, resumeOwner, 'antigravity', resumeSession), host)
+    const root = join(home, '.agent-board')
+    const progress = join(root, 'progress.md')
+    const script = join(root, 'agent-board.mjs')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(progress, cliSeeded)
+    writeFileSync(script, BOARD_SCRIPT)
+    const presDir = join(home, '.gemini', 'antigravity-cli', 'presence')
+    mkdirSync(presDir, { recursive: true })
+    writeFileSync(join(presDir, `${resumeSession}.lock`), '')
+
+    const cliGone = goneBlocksOf(parseProgress(cliSeeded), host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })
+    assert.deepEqual([...cliGone], [blockKey(parseProgress(cliSeeded)[0].tasks[0].auto)])
+
+    const env = { ...process.env, HOME: home, USERPROFILE: home, LANG: 'en', CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1' }
+    if (process.platform === 'win32') {
+      const cliTranscript = join(home, '.gemini', 'antigravity-cli', 'brain', resumeSession, '.system_generated', 'logs', 'transcript_full.jsonl')
+      mkdirSync(dirname(cliTranscript), { recursive: true })
+      writeFileSync(cliTranscript, JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'CLI turn' }) + '\n')
+      const cliLive = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'working', '--event', 'PreInvocation', '--hook-deadline', String(Date.now() + 30_000)], {
+        cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+        input: JSON.stringify({ conversationId: resumeSession, transcriptPath: cliTranscript }),
+      })
+      assert.equal(cliLive.status, 0, cliLive.stderr)
+      assert.equal(blockHostOf(readFileSync(progress, 'utf8'), resumeOwner, 'antigravity', resumeSession), host)
+    }
+
+    const desktopTranscript = join(home, '.gemini', 'antigravity', 'brain', resumeSession, '.system_generated', 'logs', 'transcript.jsonl')
+    mkdirSync(dirname(desktopTranscript), { recursive: true })
+    writeFileSync(desktopTranscript, JSON.stringify({ source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Desktop resume' }) + '\n')
+    const desktopLive = spawnSync(process.execPath, [script, '--home', home, '--data-dir', root, '--progress-file', progress, '--agent', 'antigravity', '--agent-status', '--state', 'working', '--event', 'PreInvocation', '--hook-deadline', String(Date.now() + 30_000)], {
+      cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 15_000,
+      input: JSON.stringify({ conversationId: resumeSession, transcriptPath: desktopTranscript }),
+    })
+    assert.equal(desktopLive.status, 0, desktopLive.stderr)
+    const afterDesktop = readFileSync(progress, 'utf8')
+    assert.equal(blockHostOf(afterDesktop, resumeOwner, 'antigravity', resumeSession), null)
+    const afterProjects = parseProgress(afterDesktop)
+    const afterGone = goneBlocksOf(afterProjects, host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })
+    assert.deepEqual([...afterGone], [])
+    const afterView = buildView(afterProjects, [], null, Date.now(), 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, afterGone)
+    assert.equal(afterView.groups.flatMap(g => g.rows).some(row => row.auto === 'working'), true)
+    assert.equal(afterView.stopped.length, 0)
+
+    // Duplicate older CLI copy + newer Desktop copy sharing blockKey stays live too.
+    const dupCliWork = `<!-- auto session=77778888 agent=antigravity state=working updated=${new Date(NOW - 10 * 60_000).toISOString()} resume=${resumeSession} host=${host} -->\n### CLI copy\n- [~] Working in progress\n<!-- /auto session=77778888 -->\n`
+    const dupDesktopWork = `<!-- auto session=77778888 agent=antigravity state=working updated=${new Date(NOW - 5 * 60_000).toISOString()} resume=${resumeSession} -->\n### Desktop copy\n- [~] Working in progress\n<!-- /auto session=77778888 -->\n`
+    const dupProjects = parseProgress(file(dupCliWork, dupDesktopWork))
+    const dupGone = goneBlocksOf(dupProjects, host, new Map(), 2000, () => new Map(), { home, platform: 'win32', presenceProbe: () => 'unlocked' })
+    assert.deepEqual([...dupGone], [])
+    const dupView = buildView(dupProjects, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, dupGone)
+    assert.equal(dupView.groups.flatMap(g => g.rows).find(r => r.title === 'Desktop copy')?.auto, 'working')
+    assert.equal(dupView.stopped.some(row => !row.archive?.isDuplicate), false)
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }

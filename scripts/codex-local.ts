@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
-import { blockClaimOf, boardConfirmedReport, claimText, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
+import { blockClaimOf, blockHostOf, boardConfirmedReport, claimText, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { CodexReport } from '../hooks/codex'
 import { hermesHome } from '../hooks/hermes-home'
 import { agentHooks, BOARD_FOR, editHermesSetup, isReleased, readConfig } from '../hooks/connect-pure'
@@ -1050,7 +1050,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     const current = isRecovery ? undefined : buildEntry(mode, agent, raw, flag, process.env, progress, started)
     const isAntigravityHook = current !== undefined && agent === 'antigravity' && mode === '--agent-status' && flag('--hook-deadline') !== undefined
-    const isAntigravityCliHook = isAntigravityHook && antigravitySurface(raw.transcriptPath, raw.artifactDirectoryPath) === SURFACE_IDS.antigravityTui
+    const antigravityHookSurface = isAntigravityHook ? antigravitySurface(raw.transcriptPath, raw.artifactDirectoryPath) : SURFACE_IDS.unknown
+    const isAntigravityCliHook = isAntigravityHook && antigravityHookSurface === SURFACE_IDS.antigravityTui
+    const isAntigravityDesktopHook = isAntigravityHook && antigravityHookSurface === SURFACE_IDS.antigravityIde
     const isAntigravityOpen = isAntigravityHook && (current.event === 'SessionStart' || current.event === 'PreInvocation')
     // The OpenCode or Linux Antigravity CLI process this event ran under (#1595, #1589), only for live hook worker events.
     const liveClaim = current !== undefined && flag('--hook-deadline') !== undefined
@@ -1058,6 +1060,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         : isAntigravityCliHook ? antigravityProcessClaim(readingHostHash())
           : null
       : null
+    const liveHost = isAntigravityCliHook && liveClaim === null && process.platform === 'win32' ? readingHostHash() : null
     const isInferredReport = mode === '--codex-report' && flag('--session') === undefined && (agent === 'codex' ? process.env.CODEX_THREAD_ID === undefined : !(process.env.AGENT_BOARD_AGENT === agent && process.env.AGENT_BOARD_SESSION_ID !== undefined) && !(agent === 'hermes' && process.env.HERMES_SESSION_ID) && !(agent === 'grok' && process.env.GROK_SESSION_ID))
     const rawEntry = (raw: Json): Pending => {
       if (raw.version !== 1 || raw.kind !== 'raw' || !Number.isSafeInteger(raw.at) || Number(raw.at) < 0 || Number(raw.at) > Date.now() + 60000) throw new Error('INVALID_RAW_ENTRY')
@@ -1279,9 +1282,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       // A new hook event is not a replay even when the block reads the same: its record keeps the event.
       const repaired = reporterTail(bytes)
       const named = blockClaimOf(text, owner, agent, session)
-      const clearClaim = entry === current && isAntigravityOpen
-      const claim = entry === current && liveClaim !== null ? liveClaim : clearClaim ? null : named
-      if (repaired.fragment === null && mode !== '--codex-report' && claimText(named) === claimText(claim) && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? null) === JSON.stringify(report.askedOptions ?? null) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
+      const namedHost = agent === 'antigravity' ? blockHostOf(text, owner, agent, session) : null
+      const clearIdentity = entry === current && (isAntigravityDesktopHook || isAntigravityOpen)
+      const claim = entry === current && liveClaim !== null ? liveClaim : entry === current && liveHost !== null ? null : clearIdentity ? null : named
+      const hostOnly = claim !== null ? null : entry === current && liveHost !== null ? liveHost : clearIdentity ? null : namedHost
+      const namedHostOnly = named === null ? namedHost : null
+      if (repaired.fragment === null && mode !== '--codex-report' && claimText(named) === claimText(claim) && namedHostOnly === hostOnly && previous === original && original !== null && previous !== null && previous.state === report.state && previous.turn === report.turn && previous.title === report.title && previous.context === report.context && previous.startedAt === report.startedAt && previous.titleSource === report.titleSource && JSON.stringify(previous.steps) === JSON.stringify(report.steps) && JSON.stringify(previous.askedOptions ?? null) === JSON.stringify(report.askedOptions ?? null) && JSON.stringify(previous.events) === JSON.stringify(report.events) && JSON.stringify(previous.retiredTurns) === JSON.stringify(report.retiredTurns) && previous.origin === report.origin && previous.parent === report.parent && previous.isWeak === report.isWeak && previous.folder === report.folder && previous.folderDigest === report.folderDigest && previous.folderCanonicalDigest === report.folderCanonicalDigest && (event === undefined || priorActivity.at(-1)?.event === event)) {
         if (report.appliedAt > (original.appliedAt ?? Date.parse(original.updated))) atomic(recordFile, `${JSON.stringify({ ...original, appliedAt: report.appliedAt }, null, 2)}\n`, checkDeadline, true)
         return report
       }
@@ -1289,7 +1295,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const encoded = (value: string): string => Buffer.from(value, 'utf8').toString('latin1')
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
         ...report, title: encoded(report.title), project: encoded(report.project), ...(report.context === undefined ? {} : { context: encoded(report.context) }), steps: report.steps.map(encoded),
-      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project, report.context === undefined ? undefined : encoded(s.contextNote(report.context)), encoded, claim), 'latin1')
+      }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project, report.context === undefined ? undefined : encoded(s.contextNote(report.context)), encoded, claim, hostOnly), 'latin1')
       saveFullText()
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
       try { atomic(progress, next, checkDeadline) } catch (error) {
