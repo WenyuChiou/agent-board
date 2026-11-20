@@ -10716,6 +10716,25 @@ test('Windows Antigravity fallback commands stay within the command limit at lon
   }
 })
 
+test('the Node a compact encoded hook launch starts is read back, when it shares the worker\'s folder and when it does not (#1662)', async () => {
+  const { antigravityCommand, hookCommandArgs, windowsHookCommand } = await importTs('../hooks/local-agents.ts')
+  const { hookProgram, windowsHookNode } = await importTs('../scripts/windows-hook-node.ts')
+  const quote = value => "'" + value.replace(/['‘’‚‛]/g, mark => mark + mark) + "'"
+  const home = "C:\\synthetic f'‘ " + 'h'.repeat(150)
+  const folder = home + '\\.agent-board'
+  // Inside the home the program word is built from the worker's folder; outside it, it is quoted whole.
+  for (const node of [home + "\\n s'\\node.exe", "C:\\node space'‘\\node.exe"]) {
+    const argv = hookCommandArgs(node, home, 'muse', folder + '\\agent-board-hook.mjs', folder + '\\progress.md', 'Stop', 'waiting')
+    assert.ok(windowsHookCommand(argv, quote).length >= 8191, 'the fixture must reach the compact launch')
+    const command = antigravityCommand(argv, true, quote)
+    const source = Buffer.from(command.split(' ').pop(), 'base64').toString('utf16le')
+    assert.ok(source.startsWith('$w='), 'the launch is the compact one')
+    assert.equal(hookProgram(command), node, 'the program the compact launch starts')
+    // On Windows the same Node keeps the compact launch: no direct command takes its place.
+    if (process.platform === 'win32') assert.equal(windowsHookNode(node, [command]), undefined)
+  }
+})
+
 test('compact Antigravity fallback preserves hook arguments and Codex trust command bytes', async () => {
   const { antigravityCommand, hookCommandArgs, windowsHookCommand } = await importTs('../hooks/local-agents.ts')
   const quote = value => "'" + value.replace(/['‘’‚‛]/g, mark => mark + mark) + "'"

@@ -511,6 +511,72 @@ test('setup does not keep a file that is not Node in the place of the Node it wa
   assert.ok(readFileSync(sharedSkill(f), 'utf8').includes(`"${movedNode}"`), 'the skill names the Node that ran setup')
 })
 
+// The person's own line in the shared skill: setup keeps that copy as it is and reads no Node from it.
+const editSkill = f => appendFileSync(sharedSkill(f), '\n# my own note\n')
+// A copy of the test's Node under a name of its own, as some installers name it.
+const copyNodeAs = (f, folder, name) => {
+  const node = join(f.world.root, folder, process.platform === 'win32' ? `${name}.exe` : name)
+  mkdirSync(join(f.world.root, folder), { recursive: true })
+  copyFileSync(process.execPath, node)
+  if (process.platform !== 'win32') chmodSync(node, 0o755)
+  return node
+}
+
+test('setup takes no Node from a shared skill the person edited (#1662)', async () => {
+  const f = fixture(['.codex'])
+  const firstNode = copyNode(f, 'first-node')
+  await setupFrom(f, firstNode, ['--apply', '--json'])
+  // The person points the skill at a Node of their own: a working one, so only the edit keeps setup from using it.
+  const personNode = copyNode(f, 'person-node')
+  writeFileSync(sharedSkill(f), readFileSync(sharedSkill(f), 'utf8').replaceAll(firstNode, personNode))
+  const mine = readFileSync(sharedSkill(f), 'utf8')
+  const movedNode = copyNode(f, 'moved-node')
+  await setupFrom(f, movedNode, ['--apply', '--json'])
+  assert.equal(readFileSync(sharedSkill(f), 'utf8'), mine, 'the skill the person edited stays as it is')
+  const beside = readFileSync(`${sharedSkill(f)}.new`, 'utf8')
+  assert.ok(beside.includes(`"${movedNode}"`), 'the new version beside it names the Node that ran setup')
+  assert.ok(!beside.includes(personNode), 'the new version does not take the Node from the edited skill')
+})
+
+test('setup for Hermes from a Node in another folder keeps the hook commands it wrote, when the shared skill no longer names that Node (#1662)', async () => {
+  const f = fixture(['.hermes'])
+  await setupFrom(f, copyNode(f, 'first-node'), ['--apply', '--json'])
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const before = readFileSync(config, 'utf8')
+  assert.ok(before.includes('agent-board-hook.mjs'), 'the first install wrote the board hooks')
+  editSkill(f)
+  const plan = await setupFrom(f, copyNode(f, 'moved-node'), ['--apply', '--json'])
+  assert.ok(plan.plans[0].changes.every(change => change.file !== config), 'Hermes config is not rewritten')
+  assert.equal(readFileSync(config, 'utf8'), before, 'the hook commands Hermes approved stay byte-identical')
+})
+
+test('setup from a Node in another folder keeps the hook commands it wrote for a Node with a name of its own (#1662)', async () => {
+  const f = fixture(['.codex'])
+  await setupFrom(f, copyNodeAs(f, 'first-node', 'node22'), ['--apply', '--json'])
+  const config = join(f.home, '.codex', 'hooks.json')
+  const before = { config: readFileSync(config, 'utf8'), skill: readFileSync(sharedSkill(f), 'utf8') }
+  const plan = await setupFrom(f, copyNode(f, 'moved-node'), ['--apply', '--json'])
+  assert.deepEqual(plan.plans[0].changes, [], 'the moved Node reports no changes')
+  assert.equal(readFileSync(config, 'utf8'), before.config, 'the hook commands stay byte-identical')
+  assert.equal(readFileSync(sharedSkill(f), 'utf8'), before.skill, 'the shared skill still names the Node it was set up from')
+})
+
+test('setup does not wait on a recorded program that ignores the stop signal, and keeps its commands as for a slow Node (#1662, #625)', { skip: process.platform === 'win32' && 'POSIX signals only' }, async () => {
+  const f = fixture(['.codex'])
+  const firstNode = copyNode(f, 'first-node')
+  await setupFrom(f, firstNode, ['--apply', '--json'])
+  const config = join(f.home, '.codex', 'hooks.json')
+  const before = readFileSync(config, 'utf8')
+  // Where the Node was, a program that ignores SIGTERM and never answers: only SIGKILL ends its probe.
+  renameSync(firstNode, join(f.world.root, 'first-node', 'moved-away'))
+  writeFileSync(firstNode, "#!/bin/sh\ntrap '' TERM\nexec sleep 90\n")
+  chmodSync(firstNode, 0o755)
+  const started = performance.now()
+  await setupFrom(f, copyNode(f, 'moved-node'), ['--apply', '--json'])
+  assert.ok(performance.now() - started < 60_000, 'setup ends the probe at its time limit instead of waiting for the program')
+  assert.equal(readFileSync(config, 'utf8'), before, 'a probe that runs out of time keeps the commands (#625)')
+})
+
 test('on Windows setup from a Node in another folder keeps the encoded launch it wrote for a Node whose path needs one (#1662)', { skip: process.platform !== 'win32' && 'Windows only' }, async () => {
   const f = fixture(['.codex'])
   // Brackets are not among the characters a hook may start a program by, so the first install encodes the launch.
@@ -518,8 +584,9 @@ test('on Windows setup from a Node in another folder keeps the encoded launch it
   const config = join(f.home, '.codex', 'hooks.json')
   const before = readFileSync(config, 'utf8')
   assert.ok(hookCommands(config).every(command => command.startsWith('powershell.exe ')), 'the first install starts Node inside an encoded launch')
+  // With the skill edited, only the encoded launch itself can say which Node the hooks start.
+  editSkill(f)
   const plan = await setupFrom(f, copyNode(f, 'moved-node'), ['--apply', '--json'])
-  assert.deepEqual(plan.plans[0].changes, [], 'the moved Node reports no changes')
+  assert.ok(plan.plans[0].changes.every(change => change.file !== config), 'the hooks are not rewritten')
   assert.equal(readFileSync(config, 'utf8'), before, 'the encoded launches stay byte-identical')
-  assertRepeat(await repeatApply(f), ['codex'])
 })
