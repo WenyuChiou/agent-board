@@ -677,7 +677,8 @@ const main = () => {
         const plan = plans[i]
         // A skipped agent's preview line already names its files and the command to apply it.
         if (plan.conflicts.length) continue
-        if (!changedAgents.includes(agent) && !approvals.includes(agent)) continue
+        // A repair reports only the agents it repairs; any other run reports every agent, as #1698 needs.
+        if (isRepair && !changedAgents.includes(agent) && !approvals.includes(agent)) continue
         // With nothing to apply, an agent setup writes for is done only while the board script every way runs is there
         // after the applies; else the line says to run setup for it again, which writes the script back. An agent the
         // connector manages has no file of setup's to look at (#1698).
