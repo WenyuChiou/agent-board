@@ -1463,20 +1463,30 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // Only the program is kept from the last install; every other word is written from this run.
   const commandsOf = (value: unknown): unknown[] => !value || typeof value !== 'object' ? [] : Array.isArray(value) ? value.flatMap(commandsOf) : [(value as Json).command, ...commandsOf((value as Json).hooks)]
   const earlier = commandsOf(Object.values(manifest.groups)).filter((command): command is string => typeof command === 'string')
-  // A program setup wrote last time that is still there runs the same command, so it is kept even
+  // A Node setup wrote last time that is still there runs the same command, so it is kept even
   // when this run's Node is a copy in another folder: rewriting the command would drop the
-  // approval its host bound to it (#1662).
+  // approval its host bound to it (#1662). Another program in that place is not kept.
   const keptProgram = (commands: string[]): string | undefined => {
     for (const command of commands) {
       // quote() always double-quotes a word, so a quoted program runs to its closing quote;
       // an unquoted one ends at the first space. A path with a space still reads as one program.
       const kept = /^"([^"]+)"/.exec(command)?.[1] ?? command.split(' ')[0] ?? ''
-      if (!isAbsolute(kept)) continue
+      if (!isAbsolute(kept) || !/^node(js)?(\.exe)?$/i.test(basename(kept))) continue
       try { if (statSync(kept).isFile()) return kept } catch {}
     }
     return undefined
   }
-  const commandNode = keptProgram(earlier) ?? process.execPath
+  // On Windows the hooks start Node by its short 8.3 name. The same Node keeps the path this run
+  // has, and another Node's short name reads back as its long path, as the files beside the hooks name it.
+  const isSameNode = (a: string, b: string): boolean => {
+    try {
+      const x = statSync(a, { bigint: true }), y = statSync(b, { bigint: true })
+      return x.ino > 0n && x.dev === y.dev && x.ino === y.ino
+    } catch { return false }
+  }
+  const longPath = (path: string): string => { try { return realpathSync.native(path) } catch { return path } }
+  const earlierNode = keptProgram(earlier)
+  const commandNode = earlierNode === undefined || isSameNode(earlierNode, process.execPath) ? process.execPath : process.platform === 'win32' ? longPath(earlierNode) : earlierNode
   const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(commandNode, home, agent, worker, progress, event, state)
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'

@@ -7,16 +7,15 @@ import { statSync } from 'node:fs'
 // file is kept without a probe, so a slow probe cannot change the command and its hook hash (#625).
 export const windowsHookNode = (executable: string, earlier: string[] = []): string | undefined => {
   if (process.platform !== 'win32') return undefined
-  if (/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i.test(executable)) return executable
-  if (!/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/ -]+\.exe$/i.test(executable)) return undefined
+  // A Node setup wrote last time that is still there runs the same hook, so it is kept even when
+  // this run's Node is a copy in another folder, whatever its path: rewriting the command would
+  // drop the approval the host bound to it (#1662).
   for (const command of earlier) {
     const kept = command.split(' ')[0] ?? ''
-    if (isSameFile(executable, kept)) return kept
-    // A program setup wrote last time that is still there runs the same hook, so it is kept
-    // even when this run's Node is a copy in another folder: rewriting the command would drop
-    // the approval the host bound to it (#1662).
-    if (isExistingFile(kept)) return kept
+    if (isSameFile(executable, kept) || isNodeFile(kept)) return kept
   }
+  if (/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i.test(executable)) return executable
+  if (!/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/ -]+\.exe$/i.test(executable)) return undefined
   try {
     const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/v:off', '/s', '/c', 'for %I in ("%AGENT_BOARD_NODE_EXECUTABLE%") do @echo %~sI'], {
       env: { ...process.env, AGENT_BOARD_NODE_EXECUTABLE: executable }, windowsVerbatimArguments: true,
@@ -29,9 +28,10 @@ export const windowsHookNode = (executable: string, earlier: string[] = []): str
   return undefined
 }
 
-// A path setup wrote that still names a file, whatever Node this run started from.
-const isExistingFile = (candidate: string): boolean => {
-  if (!/^[A-Za-z]:[\\/][A-Za-z0-9_.~\\/-]+\.exe$/i.test(candidate)) return false
+// A path setup wrote that still names a node.exe, whatever Node this run started from.
+// Another program in that place is not kept.
+const isNodeFile = (candidate: string): boolean => {
+  if (!/^[A-Za-z]:[\\/](?:[A-Za-z0-9_.~\\/-]*[\\/])?node\.exe$/i.test(candidate)) return false
   try { return statSync(candidate).isFile() } catch { return false }
 }
 
