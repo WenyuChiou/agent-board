@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFile
 import { dirname, join } from 'node:path'
 import { describe, test } from 'node:test'
 import { BoardPage } from './board-page.mjs'
-import { browserFixture, hiddenQuestion, installAntigravity, monthlyArchive, writeProgress } from './fixture.mjs'
+import { browserFixture, hiddenQuestion, installAntigravity, monthlyArchive, replaceProgress, writeProgress } from './fixture.mjs'
 
 // One second in the past: the board refuses a pasted source time ahead of its own clock (#954).
 const block = (session, agent, state, project, title, steps, context = 'Synthetic browser fixture only.', updated = new Date(Date.now() - 1000).toISOString()) => `## ${project}
@@ -464,6 +464,8 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       }))
       assert.equal(await fold.evaluate(node => node.open), true)
       assert.equal(await clip.evaluate(node => node.open), true)
+      // The race below reads both folds from #board when the next board answer arrives: they are there before it is armed.
+      assert.deepEqual(await Promise.all([fold, clip].map(one => one.evaluate(node => document.getElementById('board').contains(node)))), [true, true])
 
       await page.evaluate(() => {
         const origFetch = window.fetch
@@ -517,7 +519,9 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
         document.dispatchEvent(new Event('visibilitychange'))
       })
 
-      writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger redraw\n`)
+      // Replaced, not rewritten in place: a read between truncate and write would draw a board without the open task's
+      // folds, and the race would find none (#1728).
+      replaceProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger redraw\n`)
       await board.task('Synthetic redraw race task').waitFor()
       // Wait for the race's own end, not a moment after the task shows: the observer records it on the redraw that
       // draws the task, and an error says why it did not run (#1728).
@@ -532,7 +536,7 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       // Re-opening after the race still sticks across a subsequent redraw.
       await fold.locator('summary', { hasText: '2 more steps' }).click()
       await clip.locator('summary').click()
-      writeProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger second redraw\n`)
+      replaceProgress(progress, `## Synthetic race\n### Close before toggle\n${steps.join('\n')}\n\n### Synthetic redraw race task\n- [ ] Trigger second redraw\n`)
       await page.locator('.short', { hasText: 'Trigger second redraw' }).waitFor()
       assert.deepEqual(await Promise.all([fold.evaluate(node => node.open), clip.evaluate(node => node.open)]), [true, true])
     })
