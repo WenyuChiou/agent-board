@@ -551,14 +551,27 @@ test('the budgeted slow files go to different parts, and the parts together run 
   // The board set in the order main's Windows run 42281474369 listed it, where every-nth put all four budgeted files in part 2 of 6.
   const files = ['answer-guidance', 'board-entry', 'board-json', 'board-status', 'board-storage', 'board-surfaces', 'board', 'classifier-exit-proof', 'codex-fallback', 'codex-host', 'codex-local', 'codex-project-move', 'connect-worker', 'folder-identity', 'host-upgrade', 'legacy-connect', 'local-agent-manifest', 'local-lock', 'mcp-tools', 'messaging-matrix', 'page-look', 'page-regressions', 'page-state', 'page-titles', 'parity', 'performance-budgets', 'preflight-lock-policy', 'prompt-hooks', 'question-clarity', 'readme-codex-trust', 'report-tail', 'report-validation', 'row-keys', 'runtime-folder', 'setup-guidance', 'setup-readme', 'tidy', 'view-index-mutation', 'ws-stdio'].map(name => 'tests/' + name + '.test.mjs')
   const slow = Object.keys(BOARD_FILE_BUDGETS_MS).filter(path => !selfPartedTests.includes(path))
-  for (const total of [4, 6]) {
+  for (const total of [4, 6, 7]) {
     const shares = Array.from({ length: total }, (_, i) => partFiles(files, (i + 1) + '/' + total))
-    // Spread evenly: one per part while there are no more slow files than parts (Windows' 6), else at most one more.
+    // Spread evenly: one per part while there are no more slow files than parts (Windows' 7), else at most one more.
     for (const share of shares) assert.ok(share.filter(path => slow.includes(path)).length <= Math.ceil(slow.length / total), total + ' parts: ' + share.join(' '))
     const others = shares.flat().filter(path => !selfPartedTests.includes(path))
     assert.deepEqual([...others].sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
     for (const share of shares) for (const path of selfPartedTests.filter(one => files.includes(one))) assert.ok(share.includes(path))
   }
+})
+
+test('the message-store journey gets a Windows journeys part to itself, and the three parts together run every journey once (#1722)', async () => {
+  const { partFiles } = await import('../scripts/ci-impact.mjs')
+  // The journeys in the order main's Windows run 44615703631 listed them. l3c took 289.1 s of part 2/2's 529 s there.
+  const files = ['host-journeys', 'l0-readme', 'l1-first-run', 'l2-working-day', 'l2b-desktop-app', 'l3-across-agents', 'l3b-messaging', 'l3c-message-store-ownership', 'l4-startup-time', 'l4-time', 'l5-faults', 'l7-plain-words', 'latency-observation', 'processes', 'receipt-trace', 'recovery-observation', 'retirement', 'runner', 'soak-args'].map(name => 'tests/e2e/' + name + '.test.mjs')
+  const l3c = 'tests/e2e/l3c-message-store-ownership.test.mjs'
+  const shares = [1, 2, 3].map(index => partFiles(files, index + '/3'))
+  const alone = shares.filter(share => share.includes(l3c))
+  assert.deepEqual(alone, [[l3c]], shares.map(share => share.join(' ')).join(' | '))
+  const others = shares.filter(share => !share.includes(l3c))
+  assert.deepEqual(others.map(share => share.length), [9, 9])
+  assert.deepEqual(shares.flat().sort(), [...files].sort())
 })
 
 test('the part given to a run reaches its test processes, even when the environment names another part', async () => {
@@ -599,6 +612,10 @@ test('the board time check fails a file over seventy percent of its budget and a
   assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/prompt-hooks.test.mjs', ms: 67_900 }] }), { ok: true, errors: [], warnings: [] })
   // merge-check's slowest Windows run so far, 46.4 s, failed the 60 s default budget (#1464); its own budget passes it.
   assert.deepEqual(checkBoardTimes({ ...base, files: [{ path: 'tests/merge-check.test.mjs', ms: 46_400 }] }), { ok: true, errors: [], warnings: [] })
+  // The Windows Node 24 times that failed #1709 with every test green (#1715) pass the files' new budgets.
+  for (const [path, ms] of [['tests/approvals.test.mjs', 47_100], ['tests/codex-local.test.mjs', 167_400], ['tests/host-upgrade.test.mjs', 80_600], ['tests/setup-terminal.test.mjs', 73_400]]) {
+    assert.deepEqual(checkBoardTimes({ ...base, files: [{ path, ms }] }), { ok: true, errors: [], warnings: [] }, path)
+  }
   const slowFile = { ...base, files: [{ path: 'tests/board.test.mjs', ms: 141_000 }] }
   const overFile = checkBoardTimes(slowFile)
   assert.equal(overFile.ok, false)
@@ -639,6 +656,10 @@ test('the time check passes the Windows times that failed pull requests after #1
   // #1366's receiver tests run in parts since 164.0 s on Windows Node 24 (run 43644841624): one part's share, estimated
   // from that run's test times (40.6 s at most, with the file's start about 44 s).
   slowest['tests/opencode-receiver.test.mjs'] = 44_000
+  // #1302 adds upgrade journeys: host-upgrade's slowest Windows Node 24 run with the first two of them (run 43181075103).
+  slowest['tests/host-upgrade.test.mjs'] = 57_600
+  // #1715: the slowest Windows Node 24 times on #1709 (runs 44543091708, 44550262085, 44553112605).
+  Object.assign(slowest, { 'tests/approvals.test.mjs': 47_100, 'tests/codex-local.test.mjs': 167_400, 'tests/host-upgrade.test.mjs': 80_600, 'tests/setup-terminal.test.mjs': 73_400 })
   for (const [path, ms] of Object.entries(slowest)) assert.ok(budgetOf(path) * 7 / 10 >= ms * 13 / 10, path + ': ' + budgetOf(path))
 })
 
@@ -881,12 +902,12 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   assert.ok(text.includes(`plugin_os: \${{ ${onPr} && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}`))
   assert.match(text, /plugin_os:'\["ubuntu-latest","windows-latest"\]'/)
   // The board job and the journeys take the same pairs, with the Windows sets in serial parts so each
-  // keeps ten minutes: the board in six (#1059), the journeys in two (#910). The Ubuntu board set runs in two
+  // keeps ten minutes: the board in seven (#1059, #1718), the journeys in three (#910, #1722). The Ubuntu board set runs in two
   // parts, since its job lasts as long as codex-local alone (#1130).
   const parts = (node, n, os = 'windows-latest') => Array.from({ length: n }, (_, i) => `{"os":"${os}","node":${node},"part":"${i + 1}/${n}"}`).join(',')
   const ubuntu = '{"os":"ubuntu-latest","node":22,"part":"1/1"}', ubuntu24 = '{"os":"ubuntu-latest","node":24,"part":"1/1"}'
-  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 6)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 6)},${parts(24, 6)}]' }}`))
-  assert.ok(text.includes(`journeys_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 2)}]' || '[${ubuntu},${ubuntu24},${parts(22, 2)},${parts(24, 2)}]' }}`))
+  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 7)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 7)},${parts(24, 7)}]' }}`))
+  assert.ok(text.includes(`journeys_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 3)}]' || '[${ubuntu},${ubuntu24},${parts(22, 3)},${parts(24, 3)}]' }}`))
   // The local exchange job runs in two parts on Ubuntu and three on Windows: with the Codex delivery tests the whole
   // Ubuntu run took 92-94% of ten minutes and each Windows part of two up to 67% on main (#1445).
   assert.ok(text.includes(`messaging_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 3)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 3)},${parts(24, 3)}]' }}`))

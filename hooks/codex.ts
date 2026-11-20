@@ -7,6 +7,8 @@ import { scanBlocks, sectionOfProject } from './blocks'
 import { cutLine } from './step-words'
 import type { BlockSpan } from './blocks'
 import { sha256 } from './sha256'
+import { agentClaimOf } from './session-liveness'
+import type { AgentClaim } from './session-liveness'
 import type { Origin } from './runs'
 import type { JournalEntry } from './journal'
 
@@ -446,8 +448,28 @@ export const boardConfirmedReport = (text: string, previous: CodexReport, owner:
   return { ...previous, state: 'done', steps, updated: new Date(at).toISOString() }
 }
 
+// The OpenCode process an event ran under (#1595): the hook worker names its own parent, which is OpenCode, in
+// AGENT_BOARD_HOOK_PARENT, and the board script adds this machine's host hash. Anything else is no claim.
+export const hookParentClaim = (parent: string | undefined, host: string | null): AgentClaim | null => {
+  const pid = Number(parent)
+  return host === null || !Number.isSafeInteger(pid) || pid <= 1 ? null : agentClaimOf({ agentPid: pid, host })
+}
+// The process a block names (#1595). An OpenCode event that names none (the board's replay of a queued event, a command a
+// person typed) keeps it, so a session whose OpenCode has quit is not reopened by a late or hand-made status.
+// It is read from the block putCodexBlock writes: the one visible block this session owns, never a copy in a code example.
+export const blockClaimOf = (text: string, owner: string, agent: string, session: string): AgentClaim | null => {
+  const lines = text.split('\n')
+  const found = localBlockSpans(lines, owner, agent, session)
+  const span = found?.length === 1 ? found[0] : undefined
+  if (span === undefined) return null
+  const attrs = parseAttrs(lines[span.start] ?? '')
+  return agentClaimOf({ agentPid: Number(attrs.agentpid), ...(attrs.agentstarted === undefined ? {} : { agentStarted: Number(attrs.agentstarted) }), host: attrs.host })
+}
+export const claimText = (claim: AgentClaim | null): string => claim === null ? '' : `${claim.pid}:${claim.started ?? ''}:${claim.host}`
+
 // The full digest prevents an eight-character collision or a pasted block from acquiring ownership.
-export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false, contextLine?: string, encode: (value: string) => string = value => value): string => {
+// `claim` is the OpenCode process the block names (#1595): only an OpenCode block carries it, and only in progress.md.
+export const putCodexBlock = (text: string, report: CodexReport, owner: string, isProjectChanged = false, contextLine?: string, encode: (value: string) => string = value => value, claim: AgentClaim | null = null): string => {
   if (!/^[a-f0-9]{64}$/.test(owner)) throw new Error('INVALID_OWNER')
   const id = owner.slice(0, 8)
   const agent = report.agent ?? 'codex'
@@ -456,7 +478,9 @@ export const putCodexBlock = (text: string, report: CodexReport, owner: string, 
   // Only a run is marked: a person's session is the default, so its block stays as it was.
   const run = report.origin === 'run' ? ` origin=run${report.parent !== undefined && RESUME.test(report.parent) ? ` parent=${report.parent}` : ''}` : ''
   const replied = report.replied ? ` replied=${report.replied}` : ''
-  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${replied}${resume}${run} -->`
+  const valid = agent === 'opencode' ? agentClaimOf(claim === null ? null : { agentPid: claim.pid, agentStarted: claim.started, host: claim.host }) : null
+  const liveness = valid === null ? '' : ` agentpid=${valid.pid}${valid.started === undefined ? '' : ` agentstarted=${valid.started}`} host=${valid.host}`
+  const marker = `<!-- auto session=${id} agent=${agent} source=${agent}-local owner=${owner} state=${report.state} updated=${report.updated}${replied}${resume}${run}${liveness} -->`
   const eol = text.includes('\r\n') ? '\r\n' : '\n'
   const note = contextLine ?? (report.context === undefined ? undefined : STRINGS['zh-TW'].contextNote(report.context))
   const block = [marker, `### ${report.title}`, ...(note === undefined ? [] : [note]), ...stepLines(report, owner, true, report.approval, encode), `<!-- /auto session=${id} -->`].join(eol)

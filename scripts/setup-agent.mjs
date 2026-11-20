@@ -58,8 +58,12 @@ const summaries = [
     "shared": "Shared",
     "retire": "{file} (the old /board command; setup removes it)",
     "keptEdited": "{file} (your edited old /board command; setup leaves it; the command is now /agent-board)",
+    "keptText": "{file} (you edited it, so setup leaves your copy as it is; the new version goes in {beside})",
+    "keptCode": "{file} (you edited it and the agent runs it, so setup kept your copy and did not install the new version; to get the new one, move your copy aside and run setup again)",
+    "keptHeld": "{file} (not updated: it works with your edited {by}, which setup kept; to update both, move that file aside and run setup again)",
+    "heldMissing": "{file} (missing: setup cannot put back the old version while your edited {by} stays; restore or move your {by}, then run setup again)",
     "ready": "already set up",
-    "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry with {command}.",
+    "skipped": "skipped: setup cannot safely update {files}. Fix or move the conflicting files, then retry.",
     "retry": "Retry after fixing the conflicting files: {command}",
     "skillOnly": "board skill only; automatic reporting is unavailable",
     "claude": "connects through its plugin",
@@ -96,6 +100,10 @@ const summaries = [
     "open": "Open a new session in each of: {agents}.",
     "openOne": "Open a new session in {agents}.",
     "thenBoardOne": "Then type /agent-board there.",
+    "thenBoardIn": "Then type /agent-board in {agents}.",
+    "thenBoardOld": "In {agents}, type /board. /agent-board comes once you move your edited agent-board.mjs aside and run setup again.",
+    "thenBoardCodex": "In Codex, type $agent-board.",
+    "thenBoardHermes": "In Hermes Agent, ask it to run the Agent Board skill.",
     "appliedRemove": "removed {count} setup files",
     "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",
@@ -120,8 +128,12 @@ const summaries = [
     "shared": "共用",
     "retire": "{file}（舊的 /board 命令；setup 會移除）",
     "keptEdited": "{file}（你改過的舊 /board 命令；setup 不動它；命令已改成 /agent-board）",
+    "keptText": "{file}（你改過這個檔案，所以 setup 不動它，新版放在 {beside}）",
+    "keptCode": "{file}（你改過這個檔案，而且 agent 會直接執行它，所以 setup 保留你的版本，沒有裝新版；想換成新版，請先把你的版本移開，再執行一次 setup）",
+    "keptHeld": "{file}（沒有更新：它要配合你改過的 {by}，而 setup 保留了你的版本；要一起更新，請先把該檔案移開，再執行一次 setup）",
+    "heldMissing": "{file}（找不到：你改過的 {by} 還在，setup 無法補回舊版；請還原或移開你的 {by}，再執行一次 setup）",
     "ready": "已設定完成",
-    "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案，再執行 {command} 重試。",
+    "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案後重試。",
     "retry": "修正衝突的檔案後重試：{command}",
     "skillOnly": "僅提供看板技能；尚無自動回報功能",
     "claude": "透過外掛接上看板",
@@ -158,6 +170,10 @@ const summaries = [
     "open": "在 {agents} 各開一個新的工作階段。",
     "openOne": "在 {agents} 開一個新的工作階段。",
     "thenBoardOne": "接著在那裡輸入 /agent-board。",
+    "thenBoardIn": "接著在 {agents} 輸入 /agent-board。",
+    "thenBoardOld": "在 {agents} 請輸入 /board。把你改過的 agent-board.mjs 移開、再執行一次 setup 後，就會有 /agent-board。",
+    "thenBoardCodex": "在 Codex 請輸入 $agent-board。",
+    "thenBoardHermes": "在 Hermes Agent 請它執行 Agent Board skill。",
     "appliedRemove": "已移除 {count} 個設定檔案",
     "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
@@ -182,8 +198,12 @@ const summaries = [
     "shared": "共用",
     "retire": "{file}（旧的 /board 命令；setup 会移除）",
     "keptEdited": "{file}（你改过的旧 /board 命令；setup 不动它；命令已改成 /agent-board）",
+    "keptText": "{file}（你改过这个文件，所以 setup 不动它，新版放在 {beside}）",
+    "keptCode": "{file}（你改过这个文件，而且 agent 会直接运行它，所以 setup 保留了你的版本，没有装新版；想换成新版，请先把你的版本移走，再运行一次 setup）",
+    "keptHeld": "{file}（没有更新：它要配合你改过的 {by}，而 setup 保留了你的版本；要一起更新，请先把该文件移走，再运行一次 setup）",
+    "heldMissing": "{file}（找不到：你改过的 {by} 还在，setup 无法补回旧版；请还原或移走你的 {by}，再运行一次 setup）",
     "ready": "已设置完成",
-    "skipped": "已跳过：无法安全更新 {files}。请修复或移走冲突的文件，再运行 {command} 重试。",
+    "skipped": "已跳过：无法安全更新 {files}。请修复或移走冲突的文件后重试。",
     "retry": "修复冲突的文件后重试：{command}",
     "skillOnly": "仅提供看板技能；暂无自动报告功能",
     "claude": "通过插件接上看板",
@@ -220,6 +240,10 @@ const summaries = [
     "open": "在 {agents} 各开一个新的会话。",
     "openOne": "在 {agents} 开一个新的会话。",
     "thenBoardOne": "接着在那里输入 /agent-board。",
+    "thenBoardIn": "接着在 {agents} 输入 /agent-board。",
+    "thenBoardOld": "在 {agents} 请输入 /board。把你改过的 agent-board.mjs 移走、再运行一次 setup 后，就会有 /agent-board。",
+    "thenBoardCodex": "在 Codex 请输入 $agent-board。",
+    "thenBoardHermes": "在 Hermes Agent 请让它执行 Agent Board skill。",
     "appliedRemove": "已移除 {count} 个设置文件",
     "appliedRemoveOne": "已移除 {count} 个设置文件",
     "noInstalled": "没有已安装的 Agent Board 设置可供移除",
@@ -402,7 +426,7 @@ const main = () => {
   const hasDisabledPlugin = isPluginInstalled && isPluginDisabled(claudeDirectory)
   const isPluginNeeded = isAsking && !!claude && !isPluginInstalled
   const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
-  const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
+  const quote = value => /^[\w./:@=,-]+$/.test(value) ? value : process.platform === 'win32'
     ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
   const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
   const context = installContext(args)
@@ -435,7 +459,9 @@ const main = () => {
   let removing = selected
   const run = (agent, isApplying, extra = []) => {
     const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')] : common
-    const result = spawnSync(process.execPath, [script, ...runArgs, ...extra, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : [])], { encoding: 'utf8', windowsHide: true })
+    // A preview taken for an apply checks a conflict again under the install lock, so a copy another setup run is
+    // writing stops this command as busy instead of being shown as a file to fix or move (#1694).
+    const result = spawnSync(process.execPath, [script, ...runArgs, ...extra, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : apply ? ['--check-conflicts'] : [])], { encoding: 'utf8', windowsHide: true })
     const fallback = () => {
       const cause = isCode(result.error?.code) ? result.error.code : 'UNKNOWN'
       const reason = result.error?.message || (result.stderr ?? '').trim().split(/\r?\n/).filter(Boolean).pop() || 'The setup helper did not return a result.'
@@ -509,7 +535,7 @@ const main = () => {
   }
   const fileLine = (file, changes) => {
     const change = changes.find(one => one.file === file)
-    return `  ${change?.action === 'remove' && !isRemove ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
+    return `  ${change?.action === 'remove' && !isRemove && !file.endsWith('.new') ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
   }
   const sharedChanges = [...new Map(results.flatMap(plan => plan.conflicts.length ? [] : changesFor(plan, true)).map(change => [change.file, change])).values()]
   const sharedFiles = [...new Set(filesByAgent.flat().filter(file => shared.has(file)))]
@@ -528,16 +554,23 @@ const main = () => {
     const alreadyCurrent = isShowingApplied && !plan.conflicts.length && plan.managedBy !== 'connector'
       ? changesFor(plans[i], false).filter(change => !changed.has(change.file)).length : 0
     const current = alreadyCurrent > 0 ? `; ${words('current', { count: alreadyCurrent })}` : ''
-    const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.map(shortPath).join(', '), command: setupCommand([isRemove ? '--remove' : '', '--agent', agent, '--apply'].filter(Boolean)) })
+    const status = plan.managedBy === 'connector' ? words('connector', { progress: plan.progress }) : plan.conflicts.length ? words('skipped', { files: plan.conflicts.map(shortPath).join(', ') })
       : describe(ownChanges) || (isRemove ? words('noInstalled') : words('ready'))
     const capability = !isRemove && plan.managedBy !== 'connector' && !plan.conflicts.length && plan.capabilities.lifecycle === 'adapter-pending' ? `; ${words('skillOnly')}` : ''
     // An install plan removes a file only to retire the old /board command (#868), so the preview says so.
     const files = !isShowingApplied && !plan.conflicts.length ? filesByAgent[i].filter(file => !shared.has(file)).map(file => fileLine(file, ownChanges)) : []
     // An old /board file the person edited stays; say so in the preview and after applying.
-    const kept = plan.conflicts.length ? [] : (plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`)
+    const missing = (plan.missingHeld ?? []).map(one => `  ${words('heldMissing', { file: shortPath(one.file), by: one.by })}`)
+    const kept = plan.conflicts.length ? missing : (plan.keptEdited ?? []).map(file => `  ${words('keptEdited', { file: shortPath(file) })}`)
     return [`${names[agent]}: ${status}${current}${capability}`, ...files, ...kept].join('\n')
   })
   lines.push(...agentLines)
+  // A file the person edited is named once, even when several agents share it (#1302).
+  lines.push(...new Set(results.filter(plan => !plan.conflicts.length).flatMap(plan => [
+    ...(plan.keptText ?? []).map(one => `  ${words('keptText', { file: shortPath(one.file), beside: shortPath(one.beside) })}`),
+    ...(plan.keptCode ?? []).map(file => `  ${words('keptCode', { file: shortPath(file) })}`),
+    ...(plan.keptHeld ?? []).map(one => `  ${words('keptHeld', { file: shortPath(one.file), by: one.by })}`),
+  ])))
   // The sidecar's files are in this run's plan, by the flag or the question: say what they are and who switches them on.
   if (!isRemove && hasSidecar(results)) lines.push(words('sidecarTerms'))
   if (hasClaude && !isRemove) lines.push(`Claude Code: ${words('claude')}`)
@@ -626,21 +659,31 @@ const main = () => {
       process.stdout.write('\n')
     }
     if (hasConsent) {
+      // A folder or a link to nothing is not a file a way can rest on; a link to a file is (#1698).
+      const isFile = file => { try { return statSync(file).isFile() } catch { return false } }
       const completed = []
+      // What each apply did. The files can change while setup waits for the answer, and the apply plans again (#1698).
+      const appliedPlans = {}
+      // Every apply runs before any agent is called done: a later agent's apply can write back the board script an
+      // earlier agent with nothing to apply shares (#1698).
+      for (const [i, agent] of selected.entries()) {
+        if (plans[i].conflicts.length || !plans[i].changes.length) continue
+        try {
+          const applied = run(agent, true)
+          if (applied.applied === true && !applied.conflicts.length) appliedPlans[agent] = applied
+        } catch {}
+      }
       for (const [i, agent] of selected.entries()) {
         const plan = plans[i]
         // A skipped agent's preview line already names its files and the command to apply it.
         if (plan.conflicts.length) continue
         if (!changedAgents.includes(agent) && !approvals.includes(agent)) continue
-        let isDone = true
-        try {
-          if (plan.changes.length) {
-            const applied = run(agent, true)
-            isDone = applied.applied === true && !applied.conflicts.length
-          }
-          if (isDone) completed.push(agent)
-        } catch { isDone = false }
-        if (!isDone) process.exitCode = 1
+        // With nothing to apply, an agent setup writes for is done only while the board script every way runs is there
+        // after the applies; else the line says to run setup for it again, which writes the script back. An agent the
+        // connector manages has no file of setup's to look at (#1698).
+        const isDone = plan.changes.length ? appliedPlans[agent] !== undefined : plan.managedBy === 'connector' || isFile(join(plan.data, 'agent-board.mjs'))
+        if (isDone) completed.push(agent)
+        else process.exitCode = 1
         report(words('filesPart', { host: names[agent] }), isDone, setupCommand(['--agent', agent, '--apply']))
       }
       for (const agent of approvals) {
@@ -684,8 +727,13 @@ const main = () => {
       if (completed.includes('antigravity')) offerSidecar()
       const next = []
       const sessions = []
+      // How each agent opens the board (docs/SETUP.md, After setup): /agent-board, $agent-board in Codex, the skill in
+      // Hermes Agent, and /board where /agent-board waits with an edited older board script. The plan names the way and
+      // the file it rests on; a way is named only while that file is there now. An agent with no way left, and Cursor,
+      // which has no command, is named in no "then" line: a terminal command for them waits for #1714 (#1698).
+      const ways = new Map()
       for (const agent of completed) {
-        const plan = plans[selected.indexOf(agent)]
+        const plan = appliedPlans[agent] ?? plans[selected.indexOf(agent)]
         if (plan.managedBy === 'connector') continue
         if (plan.capabilities.lifecycle === 'adapter-pending') next.push(words('skill', { host: names[agent] }))
         else {
@@ -693,13 +741,30 @@ const main = () => {
           // Started from Git Bash, cursor-agent hands its PowerShell hook commands to bash and none runs (#1159).
           if (agent === 'cursor' && process.platform === 'win32') next.push(words('cursorWindows'))
           sessions.push(names[agent])
+          const opens = plan.opens
+          const isThere = opens !== undefined && isFile(opens.file)
+          ways.set(names[agent], !isThere ? 'none' : opens.way === '/board' ? 'old' : opens.way === 'skill' && ['codex', 'hermes'].includes(agent) ? agent : 'slash')
         }
       }
+      // One retry command for every agent that was skipped, here as in the run without a terminal.
+      const skippedAgents = selected.filter((agent, i) => plans[i].conflicts.length)
+      if (skippedAgents.length) next.push(words('retry', { command: setupCommand(['--agent', skippedAgents.join(','), '--apply']) }))
       if (!isRepair && hasInstalledPlugin && isPluginDisabled(claudeDirectory)) next.push(enablePluginStep())
-      if (!isRepair && isPluginReady) sessions.push('Claude Code')
+      if (!isRepair && isPluginReady) {
+        sessions.push('Claude Code')
+        ways.set('Claude Code', 'slash')
+      }
       if (sessions.length) {
         next.push(words(sessions.length === 1 ? 'openOne' : 'open', { agents: sessions.join(message(', ', '、', '、')) }))
-        next.push(words(sessions.length === 1 ? 'thenBoardOne' : 'thenBoard'))
+        // Agents are named only when they do not all open the board the same way.
+        const named = way => sessions.filter(one => ways.get(one) === way).join(message(', ', '、', '、'))
+        if (sessions.every(one => ways.get(one) === 'slash')) next.push(words(sessions.length === 1 ? 'thenBoardOne' : 'thenBoard'))
+        else {
+          if (named('slash')) next.push(words('thenBoardIn', { agents: named('slash') }))
+          if (named('codex')) next.push(words('thenBoardCodex'))
+          if (named('hermes')) next.push(words('thenBoardHermes'))
+          if (named('old')) next.push(words('thenBoardOld', { agents: named('old') }))
+        }
       }
       if (next.length) process.stdout.write(`\n${words('next')}\n${next.map((step, i) => `${i + 1}. ${step}`).join('\n')}\n`)
       return
@@ -727,6 +792,9 @@ const main = () => {
         steps.push(words('directRemoved', { command: launcherCommand }))
       }
     }
+    // One retry command, still a removal, for every agent that was skipped.
+    const skippedAgents = selected.filter((agent, i) => plans[i].conflicts.length)
+    if (skippedAgents.length) steps.push(words('retry', { command: setupCommand(['--remove', '--agent', skippedAgents.join(','), '--apply']) }))
   } else {
     if (!apply && hasChanges) steps.push(words('apply', { command: setupCommand(['--agent', changedAgents.join(','), '--apply']) }))
     const sessionAgents = []
@@ -765,7 +833,9 @@ const main = () => {
     }
     if (!isRepair && isPluginInstalled && !hasDisabledPlugin && hasChanges) sessionAgents.push('Claude Code')
     if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
-    for (const agent of selected.filter((agent, i) => plans[i].conflicts.length)) steps.push(words('retry', { command: setupCommand(['--agent', agent, '--apply']) }))
+    // One retry command for every agent that was skipped.
+    const skippedAgents = selected.filter((agent, i) => plans[i].conflicts.length)
+    if (skippedAgents.length) steps.push(words('retry', { command: setupCommand(['--agent', skippedAgents.join(','), '--apply']) }))
     if (!isRepair && hasDisabledPlugin) steps.push(enablePluginStep())
     else if (!isRepair && hasClaude && !isPluginInstalled) steps.push(words('plugin'))
     if (available.length && hasChanges) {

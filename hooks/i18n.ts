@@ -145,6 +145,12 @@ export const ZH_TW = {
     setupWritten: (file: string): string => `已寫入：${file}`,
     setupApply: (command: string): string => `下一步：套用這次修復：${command}`,
     setupCheck: (command: string): string => `下一步：再檢查一次：${command}`,
+    keptText: (file: string, beside: string): string => `已保留你改過的檔案：${file}；新版放在 ${beside}`,
+    keptCode: (file: string): string => `已保留你改過的檔案：${file}；agent 會直接執行它，所以沒有裝新版`,
+    keptHeld: (file: string, by: string): string => `沒有更新：${file}；它要配合你改過的 ${by}，而 setup 保留了你的版本`,
+    heldMissing: (file: string, by: string): string => `找不到：${file}；你改過的 ${by} 還在，setup 無法補回舊版。請還原或移開你的 ${by}，再執行一次 setup。`,
+    outdated: '已安裝，但不是最新版',
+    outdatedNext: '下一步：想更新，請先把你改過的檔案移開，再執行一次 setup。',
     connectRepair: '下一步：在 Claude Code 執行 /progress connect 來修復。',
   },
   setupSummary: {
@@ -162,8 +168,12 @@ export const ZH_TW = {
     "shared": "共用",
     "retire": "{file}（舊的 /board 命令；setup 會移除）",
     "keptEdited": "{file}（你改過的舊 /board 命令；setup 不動它；命令已改成 /agent-board）",
+    "keptText": "{file}（你改過這個檔案，所以 setup 不動它，新版放在 {beside}）",
+    "keptCode": "{file}（你改過這個檔案，而且 agent 會直接執行它，所以 setup 保留你的版本，沒有裝新版；想換成新版，請先把你的版本移開，再執行一次 setup）",
+    "keptHeld": "{file}（沒有更新：它要配合你改過的 {by}，而 setup 保留了你的版本；要一起更新，請先把該檔案移開，再執行一次 setup）",
+    "heldMissing": "{file}（找不到：你改過的 {by} 還在，setup 無法補回舊版；請還原或移開你的 {by}，再執行一次 setup）",
     "ready": "已設定完成",
-    "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案，再執行 {command} 重試。",
+    "skipped": "已略過：無法安全更新 {files}。請修正或移開衝突的檔案後重試。",
     "retry": "修正衝突的檔案後重試：{command}",
     "skillOnly": "僅提供看板技能；尚無自動回報功能",
     "claude": "透過外掛接上看板",
@@ -200,6 +210,10 @@ export const ZH_TW = {
     "open": "在 {agents} 各開一個新的工作階段。",
     "openOne": "在 {agents} 開一個新的工作階段。",
     "thenBoardOne": "接著在那裡輸入 /agent-board。",
+    "thenBoardIn": "接著在 {agents} 輸入 /agent-board。",
+    "thenBoardOld": "在 {agents} 請輸入 /board。把你改過的 agent-board.mjs 移開、再執行一次 setup 後，就會有 /agent-board。",
+    "thenBoardCodex": "在 Codex 請輸入 $agent-board。",
+    "thenBoardHermes": "在 Hermes Agent 請它執行 Agent Board skill。",
     "appliedRemove": "已移除 {count} 個設定檔案",
     "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
@@ -803,6 +817,7 @@ export const ZH_TW = {
   serveRuntimePrivate: '無法將看板網頁的位址檔保護為僅此帳號可用；沒有啟動網頁。',
   serveRuntimeDenied: '這個 AI 的沙箱不能寫入看板網頁的位址資料夾，所以沒有啟動網頁。請在一般的終端機開啟看板；在 DeepSeek Harness 裡則用它的 agent_board 工具。',
   serveRuntimeCheckTimeout: 'Windows 檢查看板網頁的位址檔花了太久；電腦可能正忙，請稍後再試一次。',
+  serveJobLocked: '這個環境會在指令結束時一併關閉背景程式，看板網頁一開就會被關掉。請在一般的終端機執行 agent-board 來開啟。',
   serveLanAt: (url: string): string => `同一個網路上的手機，打開 ${url} 或掃這個 QR 碼：`,
   serveLanWarn: '這個連結沒有加密，只在你信任的網路上使用；10 分鐘沒人用就會自動關閉。',
   serveLanNone: '找不到這台電腦在區域網路上的位址，手機開不了這個看板。',
@@ -842,6 +857,9 @@ export const ZH_TW = {
     : `連接埠 ${port} 無效（需為 1–65535）。請改用其他 --port，或省略 --port 自動選擇。`,
   servePortInUse: (port: number): string => `連接埠 ${port} 已被使用。請改用其他 --port，或省略 --port 自動選擇。`,
   servePortDenied: (port: number): string => `連接埠 ${port} 無法使用（權限不足）。請改用 1023 以上的 --port，或省略 --port 自動選擇。`,
+  serveStoreHeld: (pid: number, isBoard: boolean): string => isBoard
+    ? `Agent Board 沒有開啟：一個 Agent Board 頁面（程序 ${pid}）佔著它的訊息資料夾，看板無法確認它已停止服務。請結束程序 ${pid}，再開啟看板。`
+    : `Agent Board 沒有開啟：程序 ${pid} 佔著它的訊息資料夾，它不是這個看板能停止的 Agent Board 頁面。請結束程序 ${pid}，再開啟看板。`,
   serveStoreFailed: (code: string, folder: string) => code === 'MESSAGE_STORE_IN_USE'
     ? `看板無法開啟訊息資料夾（${code}）：${folder}。請先停止所有看板 server，一併檢查 server.lock、server.owner 與 .message-claim-*.json。確認沒有 hub 執行後，僅移除已核實過期的持有者資料。請保留 messages.json 與不確定是否送達的紀錄，勿重送這些訊息。`
     : code === 'MESSAGE_STORE_CLOSED'

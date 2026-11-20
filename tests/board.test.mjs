@@ -6049,40 +6049,50 @@ const closeFixturePage = async board => {
 const processAlive = pid => { try { process.kill(pid, 0); return true } catch { return false } }
 
 // A stand-in browser: a small Windows program built here, so no real browser opens on the tester's
-// screen. `body` is its Main. Synthetic data only.
-// Each body is built once per test run and copied into place. The .NET Framework compiler that
-// ships with Windows builds one in about a second; Add-Type starts PowerShell and the compiler in
-// one process and took more than 15 s on a cold CI runner (#1166), so it is only the fallback.
-const standInBuilds = new Map()
-const buildStandIn = (body, env) => {
-  const built = standInBuilds.get(body)
-  if (built !== undefined) return built
+// screen. One program serves every test: the `.mode` file beside each copy says what it does, so a
+// run compiles once. Synthetic data only.
+// The build starts when this file loads and has no time limit of its own: a cold runner took more
+// than 15 s for it, which failed a browser test before any board code ran (#1666). It runs beside
+// the tests that come first, and a test that needs it waits on it instead of building it itself
+// (#1166: Add-Type starts PowerShell and the compiler in one process and took longer still, so it
+// is only the fallback when csc.exe is missing).
+const STAND_IN_SOURCE = `using System; using System.IO; using System.Diagnostics; using System.Threading;
+public static class Browser { public static void Main() {
+  string mode = File.ReadAllText(System.Reflection.Assembly.GetEntryAssembly().Location + ".mode");
+  int pid = Process.GetCurrentProcess().Id;
+  if (mode == "sleep") { File.WriteAllText(Environment.GetEnvironmentVariable("BOARD_TEST_BROWSER_PID"), pid.ToString()); Thread.Sleep(20000); }
+  else { File.AppendAllText(Environment.GetEnvironmentVariable("BOARD_TEST_FAILED_BROWSERS"), pid.ToString() + "\\n"); Environment.Exit(1); }
+} }`
+const buildStandIn = () => new Promise((done, fail) => {
   const dir = mkdtempSync(join(tmpdir(), 'board-standin-'))
   process.on('exit', () => rmSync(dir, { recursive: true, force: true }))
   const source = join(dir, 'browser.cs')
   const exe = join(dir, 'browser.exe')
-  writeFileSync(source, `using System; using System.IO; using System.Diagnostics; using System.Threading;\npublic static class Browser { public static void Main() { ${body} } }`)
+  writeFileSync(source, STAND_IN_SOURCE)
   const windows = process.env.SystemRoot ?? 'C:\\Windows'
   const csc = join(windows, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
+  const finish = (error, output) => error ? fail(new Error(`${error.message}\n${output ?? ''}`.trim())) : done(exe)
   if (existsSync(csc)) {
-    execFileSync(csc, ['/nologo', '/target:winexe', `/out:${exe}`, source], { windowsHide: true, stdio: 'pipe', timeout: 15_000 })
+    execFile(csc, ['/nologo', '/target:winexe', `/out:${exe}`, source], { windowsHide: true }, finish)
   } else {
     const powershell = join(windows, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-    execFileSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
-      env: { ...env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: exe }, windowsHide: true, stdio: 'pipe', timeout: 15_000,
-    })
+    execFile(powershell, ['-NoProfile', '-NonInteractive', '-Command', 'Add-Type -Path $env:BOARD_TEST_BROWSER_SOURCE -OutputAssembly $env:BOARD_TEST_BROWSER_EXE -OutputType WindowsApplication'], {
+      env: { ...process.env, BOARD_TEST_BROWSER_SOURCE: source, BOARD_TEST_BROWSER_EXE: exe }, windowsHide: true,
+    }, finish)
   }
-  standInBuilds.set(body, exe)
-  return exe
-}
-const compileStandIn = (board, exe, body) => {
+})
+const standInBuilt = process.platform === 'win32' ? buildStandIn().then(exe => ({ exe }), error => ({ error })) : undefined
+const placeStandIn = async (exe, mode) => {
+  const { exe: built, error } = await standInBuilt
+  if (error) throw new Error(`the stand-in browser could not be built: ${error.message}`)
   mkdirSync(resolve(exe, '..'), { recursive: true })
-  copyFileSync(buildStandIn(body, board.env), exe)
+  copyFileSync(built, exe)
+  writeFileSync(`${exe}.mode`, mode)
 }
 // Writes its PID for the test and stays up, as a browser window does.
-const SLEEPING_BROWSER = 'File.WriteAllText(Environment.GetEnvironmentVariable("BOARD_TEST_BROWSER_PID"), Process.GetCurrentProcess().Id.ToString()); Thread.Sleep(20000);'
+const SLEEPING_BROWSER = 'sleep'
 // Notes that it was started, then exits with an error at once, as a browser with no display does.
-const FAILING_BROWSER = 'File.AppendAllText(Environment.GetEnvironmentVariable("BOARD_TEST_FAILED_BROWSERS"), Process.GetCurrentProcess().Id.ToString() + "\\n"); Environment.Exit(1);'
+const FAILING_BROWSER = 'fail'
 
 // Loaded into the `--html` process: notes every PowerShell it starts, with its exit code, time and
 // stderr (read here instead of dropped), so a run that lost Cursor's pipes says what its launcher did.
@@ -6424,8 +6434,8 @@ test('Windows browser startup releases Cursor pipes while the browser stays runn
   // The Edge slot holds a file that is not a program, so the launcher has to move on to Chrome.
   mkdirSync(resolve(fixture.edge, '..'), { recursive: true })
   writeFileSync(fixture.edge, 'synthetic invalid executable')
-  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
-  log.mark('stand-in browser compiled')
+  await placeStandIn(fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browser placed')
   const result = await htmlThroughCursor(board, fixture, log, signal)
   assert.ok(board.urlOf(result.stdout), result.stdout)
   assert.match(result.stdout, /Opened Agent Board/, result.stdout)
@@ -6437,9 +6447,9 @@ test('Windows browser startup releases Cursor pipes while the browser stays runn
 test('a Windows browser that exits with an error at once gives way to the next browser, and Cursor pipes are still released', { skip: process.platform !== 'win32', timeout: 25_000 }, t => browserStartupTest(async (board, fixture, log, signal) => {
   // Start-Process returns once the program exists, so a browser that exits with an error right
   // away (no display, no sandbox) would otherwise count as opened and the person would see nothing.
-  compileStandIn(board, fixture.edge, FAILING_BROWSER)
-  compileStandIn(board, fixture.chrome, SLEEPING_BROWSER)
-  log.mark('stand-in browsers compiled')
+  await placeStandIn(fixture.edge, FAILING_BROWSER)
+  await placeStandIn(fixture.chrome, SLEEPING_BROWSER)
+  log.mark('stand-in browsers placed')
   const result = await htmlThroughCursor(board, fixture, log, signal)
   assert.ok(board.urlOf(result.stdout), result.stdout)
   assert.match(result.stdout, /Opened Agent Board/, result.stdout)
@@ -7858,6 +7868,157 @@ test('a Windows page start leaves its new address file and its folder owned by t
       const acl = windowsAcl(target, board.env)
       assert.equal(acl.OwnerSid, acl.CurrentSid, target)
     }
+  } finally { await board.end([url]) }
+})
+
+// Helper for #1674: runs a board command inside a Windows Job Object configured with
+// JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (0x2000) and no breakaway flags, then lets the wrapper
+// exit so Windows closes the job handle and terminates anything left inside it.
+const runInWindowsKillOnCloseJob = (board, commandArgs, env, { nestedZeroFlagsChild = false } = {}) => {
+  const resultFile = join(board.dir, `job-result-${Math.random().toString(16).slice(2)}.txt`)
+  const quoted = value => `"${String(value).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`
+  const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
+  const innerSetup = !nestedZeroFlagsChild ? [] : [
+    `$inner = $k32::CreateJobObjectW([IntPtr]::Zero, $null)`,
+    `if ($inner -eq [IntPtr]::Zero) { throw 'CreateJobObjectW inner failed' }`,
+    `if (-not $k32::AssignProcessToJobObject($inner, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'AssignProcessToJobObject inner failed' }`,
+  ]
+  const psScript = [
+    `$ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'; $PSModuleAutoLoadingPreference = 'None'`,
+    `$ab = [AppDomain]::CurrentDomain.DefineDynamicAssembly([Reflection.AssemblyName]::new('TestJob'), [Reflection.Emit.AssemblyBuilderAccess]::Run)`,
+    `$mb = $ab.DefineDynamicModule('M')`,
+    `$tb = $mb.DefineType('K32', 'Public, Abstract, Sealed')`,
+    `$cc = [Runtime.InteropServices.CallingConvention]::Winapi; $cs = [Runtime.InteropServices.CharSet]::Unicode`,
+    `foreach ($sp in @(`,
+    `  @('CreateJobObjectW', [IntPtr], @([IntPtr], [string])),`,
+    `  @('SetInformationJobObject', [bool], @([IntPtr], [int], [IntPtr], [int])),`,
+    `  @('AssignProcessToJobObject', [bool], @([IntPtr], [IntPtr]))`,
+    `)) {`,
+    `  $m = $tb.DefinePInvokeMethod($sp[0], 'kernel32.dll', 'Public, Static, PinvokeImpl', [Reflection.CallingConventions]::Standard, $sp[1], $sp[2], $cc, $cs)`,
+    `  $m.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)`,
+    `}`,
+    `$k32 = $tb.CreateType()`,
+    `$job = $k32::CreateJobObjectW([IntPtr]::Zero, $null)`,
+    `if ($job -eq [IntPtr]::Zero) { throw 'CreateJobObjectW failed' }`,
+    `$extLen = if ([IntPtr]::Size -eq 8) { 144 } else { 112 }`,
+    `$buf = [Runtime.InteropServices.Marshal]::AllocHGlobal($extLen)`,
+    `for ($i = 0; $i -lt $extLen; $i += 4) { [Runtime.InteropServices.Marshal]::WriteInt32($buf, $i, 0) }`,
+    `[Runtime.InteropServices.Marshal]::WriteInt32($buf, 16, 0x2000)`,
+    `if (-not $k32::SetInformationJobObject($job, 9, $buf, $extLen)) { throw 'SetInformationJobObject failed' }`,
+    `[Runtime.InteropServices.Marshal]::FreeHGlobal($buf)`,
+    `if (-not $k32::AssignProcessToJobObject($job, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'AssignProcessToJobObject failed' }`,
+    ...innerSetup,
+    `$psi = [Diagnostics.ProcessStartInfo]::new($env:TEST_JOB_NODE)`,
+    `$psi.Arguments = $env:TEST_JOB_ARGS`,
+    `$psi.WorkingDirectory = $env:TEST_JOB_CWD`,
+    `$psi.UseShellExecute = $false`,
+    `$psi.RedirectStandardOutput = $true`,
+    `$psi.RedirectStandardError = $true`,
+    `$psi.CreateNoWindow = $true`,
+    `$proc = [Diagnostics.Process]::Start($psi)`,
+    `$errTask = $proc.StandardError.ReadToEndAsync()`,
+    `$stdout = $proc.StandardOutput.ReadToEnd()`,
+    `$stderr = $errTask.GetAwaiter().GetResult()`,
+    `$proc.WaitForExit()`,
+    `$b64Out = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($stdout))`,
+    `$b64Err = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($stderr))`,
+    `[System.IO.File]::WriteAllText($env:TEST_JOB_OUT, "$($proc.ExitCode)|$b64Out|$b64Err")`,
+  ].join('\n')
+  execFileSync(join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe'), [
+    '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(psScript, 'utf16le').toString('base64'),
+  ], {
+    env: {
+      ...env,
+      TEST_JOB_NODE: process.execPath,
+      TEST_JOB_ARGS: [board.script, ...commandArgs].map(quoted).join(' '),
+      TEST_JOB_CWD: board.dir,
+      TEST_JOB_OUT: resultFile,
+    },
+    windowsHide: true,
+    timeout: 30_000,
+  })
+  const [codeStr, outB64, errB64] = readFileSync(resultFile, 'utf8').split('|')
+  return {
+    status: Number(codeStr),
+    stdout: Buffer.from(outB64 ?? '', 'base64').toString('utf8'),
+    stderr: Buffer.from(errB64 ?? '', 'base64').toString('utf8'),
+  }
+}
+
+test('#1674: a Windows board server started inside a kill-on-close job (including nested jobs) outlives command exit, or refuses plainly even if readiness races check', { skip: process.platform !== 'win32' && 'Windows job objects only', timeout: 90_000 }, async () => {
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    assert.ok(words.serveJobLocked && !words.serveFailed(words.serveJobLocked).includes('Opened Agent Board') && !words.serveFailed(words.serveJobLocked).includes('http:'))
+  }
+  const board = serveIn()
+  let url = null
+  let nestedUrl = null
+  try {
+    const alive = runInWindowsKillOnCloseJob(board, ['--serve', '--no-open', '--quiet-board'], board.env)
+    assert.equal(alive.status, 0, alive.stderr)
+    url = board.urlOf(alive.stdout)
+    assert.ok(url, alive.stdout)
+    await new Promise(done => setTimeout(done, 1200))
+    const page = await fetch(url)
+    assert.equal(page.status, 200, 'board page still answers after the command job closes')
+
+    // Nested job: inner job has LimitFlags=0 inside an outer 0x2000 kill-on-close job.
+    const nested = serveIn()
+    try {
+      const escaped = runInWindowsKillOnCloseJob(nested, ['--serve', '--no-open', '--quiet-board'], nested.env, { nestedZeroFlagsChild: true })
+      assert.equal(escaped.status, 0, escaped.stderr)
+      nestedUrl = nested.urlOf(escaped.stdout)
+      assert.ok(nestedUrl, escaped.stdout)
+      await new Promise(done => setTimeout(done, 1200))
+      assert.equal((await fetch(nestedUrl)).status, 200, 'board page outlives nested inner=0 outer=0x2000 job close')
+    } finally { await nested.end(nestedUrl ? [nestedUrl] : []) }
+
+    // When escape is blocked inside either direct or nested kill-on-close jobs, --serve and --html
+    // fail honestly without leaving a doomed server or printing an Opened Agent Board / URL line,
+    // even when the launcher containment check is delayed until after the trapped child writes ready.
+    const locked = serveIn()
+    try {
+      const blockedEnv = { ...locked.env, AGENT_BOARD_TEST_NO_JOB_ESCAPE: '1' }
+      for (const [label, opts, extraEnv] of [
+        ['direct', {}, blockedEnv],
+        ['nested', { nestedZeroFlagsChild: true }, blockedEnv],
+      ]) {
+        for (const flag of ['--serve', '--html']) {
+          const stopped = runInWindowsKillOnCloseJob(locked, [flag, '--quiet-board'], extraEnv, opts)
+          assert.equal(stopped.status, 1, `${label}/${flag}: ${stopped.stderr}`)
+          assert.equal(stopped.stdout.trim(), EN.serveFailed(EN.serveJobLocked), `${label}/${flag}`)
+          assert.ok(!stopped.stdout.includes('Opened Agent Board') && !stopped.stdout.includes('http:'), stopped.stdout)
+          assert.ok(!existsSync(locked.served), `${label}/${flag}: no doomed address file left`)
+        }
+      }
+      const delayPreload = join(locked.dir, 'delay-launcher-check.cjs')
+      const needle = 'if($nj -and -not $ia -and (-not $started.HasExited) -and ((& $ij $started.Id)'
+      writeFileSync(delayPreload, `const cp = require('node:child_process')
+const orig = cp.spawn
+cp.spawn = function (file, args, options) {
+  if (/(?:^|[\\\\/])powershell(?:\\.exe)?$/i.test(String(file)) && Array.isArray(args)) {
+    const at = args.indexOf('-EncodedCommand')
+    if (at >= 0) {
+      const cmd = Buffer.from(args[at + 1], 'base64').toString('utf16le')
+      if (cmd.includes('--serve-child')) {
+        if (!cmd.includes(${JSON.stringify(needle)})) throw new Error('delay-launcher-check patch did not match')
+        const patched = cmd.replace(${JSON.stringify(needle)}, '[Threading.Thread]::Sleep(1200); ' + ${JSON.stringify(needle)})
+        const copy = [...args]
+        copy[at + 1] = Buffer.from(patched, 'utf16le').toString('base64')
+        return orig.call(this, file, copy, options)
+      }
+    }
+  }
+  return orig.apply(this, arguments)
+}
+require('node:module').syncBuiltinESMExports()
+`)
+      const raceEnv = { ...blockedEnv, NODE_OPTIONS: `--require ${JSON.stringify(delayPreload)}` }
+      const raced = runInWindowsKillOnCloseJob(locked, ['--serve', '--no-open', '--quiet-board'], raceEnv)
+      assert.equal(raced.status, 1, `race: ${raced.stderr}`)
+      assert.equal(raced.stdout.trim(), EN.serveFailed(EN.serveJobLocked))
+      assert.ok(!raced.stdout.includes('http:'), 'ready file written before containment kill never leaks a URL')
+      assert.ok(!existsSync(locked.served), 'trapped child address file is removed')
+    } finally { await locked.end([]) }
   } finally { await board.end([url]) }
 })
 
@@ -10029,6 +10190,33 @@ test('the page sends its ETag and keeps its current view on a 304', { timeout: 3
   assert.equal(dom.node('offline').textContent, '')
 })
 
+test('serve: the shipped page asks again at once while it holds the board, and in 2 s without it (#359)', { timeout: 30_000 }, async () => {
+  const html = await sourcePage()
+  const model = cardsModel()
+  const etag = `W/"${'c'.repeat(64)}"`
+  const asked = []
+  const dom = await pageDom(html, model, { getBoard: async options => {
+    asked.push({ etag: options.headers['if-none-match'], wait: options.headers['x-board-wait'] })
+    if (asked.length === 3) throw new Error('synthetic offline server')
+    if (asked.length === 2) return { ok: false, status: 304, json: async () => { throw new Error('a 304 body must never be read') } }
+    return { ok: true, status: 200, headers: { get: name => name === 'etag' ? etag : null }, json: async () => ({ model, now: 1 }) }
+  } })
+  await dom.settle()
+  // The first answer brought the board and its etag: the next request goes at once and asks the server to hold it.
+  assert.equal(dom.pollMs, 0)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.deepEqual(asked.slice(0, 2), [{ etag: undefined, wait: undefined }, { etag, wait: '1' }])
+  // "No change" from the held request: it asks again at once, still holding the board.
+  assert.equal(dom.pollMs, 0)
+  await dom.redraw(model)
+  await dom.settle()
+  // Offline: no board to hold, so it asks in 2 s, as before (#242).
+  assert.equal(asked.length, 3)
+  assert.ok(dom.node('offline').textContent, 'the page says it lost the board')
+  assert.equal(dom.pollMs, 2000)
+})
+
 test('the page requests a full board when reconnecting after a failed poll', async () => {
   const html = await sourcePage()
   const model = cardsModel()
@@ -11640,6 +11828,26 @@ test('a working Codex session with no block of its own names its project once an
     assert.ok(!sectionWords(dom, 'working').includes(EN.codexLifecycle), sectionWords(dom, 'working'))
     assert.ok(sectionWords(dom, 'others').includes(EN.codexLifecycle), sectionWords(dom, 'others'))
   } finally { await waiting.board.close() }
+})
+
+// Review of #1670 (codex_501, P1 2): the row read ended, but the Agents list still said open, because its presence
+// reads only a closed source and fell back to the recent activity.
+test('the Agents list reads OpenCode as closed, not open, once the OpenCode process its row names has quit (#1595)', async () => {
+  const { hostHashOf } = await import('../hooks/session-liveness.ts')
+  const { hostname } = await import('node:os')
+  const host = hostHashOf(process.platform, process.platform === 'win32' ? process.env.COMPUTERNAME ?? hostname() : process.env.HOSTNAME ?? hostname())
+  assert.notEqual(host, null, 'this machine has a host hash')
+  const quit = spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid
+  assert.throws(() => process.kill(quit, 0), error => error.code === 'ESRCH', `stand-in OpenCode ${quit} is unexpectedly alive`)
+  const opencode = pid => groupedBlock('47700009', 'opencode', 'waiting', 'tools-repo', 'Pick the parser', ['- [?] Which parser?'], 2).replace(' -->\n###', ` agentpid=${pid} host=${host} -->\n###`)
+  for (const [label, pid, expected] of [['open', process.pid, 'open'], ['quit', quit, 'offline']]) {
+    const { board, model, html } = await groupedPage([groupedSource(), opencode(pid)].join('\n'))
+    try {
+      const dom = await pageDom(html, model, { width: 1280 })
+      assert.equal(rowAgent(dom, 'opencode')?.getAttribute('data-presence'), expected, label)
+      if (expected === 'offline') assert.ok(shownWords(rowAgent(dom, 'opencode')).includes(EN.pgOffline), shownWords(rowAgent(dom, 'opencode')))
+    } finally { await board.close() }
+  }
 })
 
 test('an agent not heard from for 30 minutes keeps its icon colours, and its state is a mark and a word in every language', async () => {
