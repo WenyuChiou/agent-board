@@ -41,11 +41,14 @@ test('L5 recovery observation waits for a claimed event to land before judging a
     })()
 
     const started = performance.now()
-    const observed = await observeHookRecovery({ read: fixture.read, sessions: ['codex-race-session-2'], withinMs: 500, pollMs: 5 })
+    // The write lands after about 70 ms, so a 5 s bound does not weaken what the test checks:
+    // the observer still returns as soon as the write is seen. It only leaves room for a stalled
+    // Windows runner, which spent over 500 ms before the observer saw anything (#1740).
+    const observed = await observeHookRecovery({ read: fixture.read, sessions: ['codex-race-session-2'], withinMs: 5000, pollMs: 5 })
     const observedElapsed = performance.now() - started
     await write
 
-    assert.equal(observed.isSettled, true)
+    assert.equal(observed.isSettled, true, JSON.stringify(observed.snapshots))
     assert.equal(observed.hasTimedOut, false)
     assert.ok(observedElapsed >= 50, 'the observer returned before the delayed progress write could land')
     assert.deepEqual(observed.counts, { 'codex-race-session-2': 1 })
