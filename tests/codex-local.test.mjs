@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test as nodeTest } from 'node:test'
@@ -680,6 +680,10 @@ syncBuiltinESMExports()
   // config.toml still reaches the file the write did not land on: its trust entries are still there.
   assert.equal(readFileSync(toml, 'utf8'), planned)
   assert.equal(readFileSync(other, 'utf8'), planned)
+  // Only the row's event passes these two: the repoint ran, and the write landed on the original target before
+  // the resolution check stopped it.
+  assert.equal(readlinkSync(mid), other)
+  assert.equal(readFileSync(target, 'utf8'), '# User settings\nmodel = "synthetic"\n')
   // The failed write replaced the original target, so its permissions must stay the person's.
   assert.equal(statSync(target).mode & 0o777, 0o644)
 }))
@@ -5601,7 +5605,8 @@ test('Hermes trust is only what the person asks for: the board\'s exact commands
 }))
 
 // --hermes-trust --apply re-reads the allowlist just before the rename and checks it after (put, as every other
-// write in the batch does), so an edit made between the plan check and the rename is never written over (#1606).
+// write in the batch does), so an edit made before that last re-read is kept; an edit saved after the re-read and
+// before the rename is still written over (#1606).
 test('an edit to Hermes\'s allowlist made after setup planned is kept: --hermes-trust --apply fails instead of writing over it', () => fixture(f => {
   assert.equal(f.install('--agent', 'hermes', '--apply').status, 0)
   const foreign = { approvals: [{ approved_at: '2026-01-01T00:00:00Z', command: 'C:/person/my-guard.sh', event: 'pre_tool_call', script_mtime_at_approval: null }] }
