@@ -1,5 +1,5 @@
 import { sha256 } from './sha256.ts'
-import type { ProgressProject } from '../types'
+import type { ProgressAuto, ProgressProject, ProgressStep } from '../types'
 
 // The liveness of an agent session, as pure data (#1092): whether the agent process
 // that wrote a block is gone, from the pid, start time and host hash the block
@@ -18,6 +18,8 @@ export const hostHashOf = (platform: string, name: string | undefined): string |
   return sha256(`${platform}:${name.toLowerCase()}`)
 }
 
+export const HOST_HASH = /^[0-9a-f]{64}$/
+
 // A block's liveness claim, validated: a pid that is not a safe positive integer, a
 // start time that is not a safe positive epoch, or a host that is not a 64-hex hash
 // is no claim at all, so the session keeps the 12 h backstop.
@@ -26,7 +28,7 @@ export const agentClaimOf = (auto: { agentPid?: number; agentStarted?: number; h
   const pid = auto.agentPid
   const host = auto.host
   if (pid === undefined || !Number.isSafeInteger(pid) || pid <= 0) return null
-  if (host === undefined || !/^[0-9a-f]{64}$/.test(host)) return null
+  if (host === undefined || !HOST_HASH.test(host)) return null
   const started = auto.agentStarted
   if (started !== undefined && (!Number.isSafeInteger(started) || started <= 0)) return null
   return { pid, ...(started === undefined ? {} : { started }), host }
@@ -58,14 +60,42 @@ export type LivenessProbe = (claim: AgentClaim) => { alive: boolean; actual: num
 // The agents whose blocks can carry a liveness claim: Claude Code, from its own
 // process (#1092), and OpenCode, from the process its plugin starts the hook
 // worker in (#1595), and Codex, from the terminal its hook walks up to on Linux
-// in process (#1092). Another agent's pid fields are ignored, so its card keeps
-// the 12 h backstop.
-export const CLAIMING_AGENTS: ReadonlySet<string> = new Set(['claude', 'opencode', 'codex'])
+// in process (#1092), and Antigravity CLI on Linux (#1589). Another agent's pid
+// fields are ignored, so its card keeps the 12 h backstop.
+export const CLAIMING_AGENTS: ReadonlySet<string> = new Set(['claude', 'opencode', 'codex', 'antigravity'])
+
+// An exited `agy -p` turn that asked a closing question leaves the process right
+// after Stop; keeping waiting+[?] rows out of `gone` preserves the Needs you card (#1589).
+export const isAntigravityQuestionWaiting = (auto: ProgressAuto | null, steps: readonly ProgressStep[]): boolean =>
+  auto !== null && auto.agent === 'antigravity' && auto.state === 'waiting' && steps.some(step => step.status === 'waiting')
+
+// Newest non-run `antigravity` block per `blockKey(auto)` (#1589).
+export const newestAntigravityBlocks = (projects: readonly ProgressProject[]): Map<string, { auto: ProgressAuto; steps: readonly ProgressStep[] }> => {
+  const newest = new Map<string, { auto: ProgressAuto; steps: readonly ProgressStep[] }>()
+  for (const project of projects) for (const task of project.tasks) {
+    const auto = task.auto
+    if (auto === null || auto.agent !== 'antigravity' || auto.isRun === true) continue
+    const key = blockKey(auto)
+    const prev = newest.get(key)
+    if (prev === undefined || auto.updated >= prev.auto.updated) newest.set(key, { auto, steps: task.steps })
+  }
+  return newest
+}
+
+// Keys (`blockKey(auto)`) whose newest Antigravity block holds an unresolved `[?]` step (#1589).
+export const antigravityQuestionWaitingKeys = (projects: readonly ProgressProject[]): ReadonlySet<string> => {
+  const keys = new Set<string>()
+  for (const [key, { auto, steps }] of newestAntigravityBlocks(projects)) {
+    if (isAntigravityQuestionWaiting(auto, steps)) keys.add(key)
+  }
+  return keys
+}
 
 // Every working/waiting session block of a claiming agent (excluding runs) that
 // carries a valid liveness claim for `hostHash`, with its blockKey and validated claim.
 export const claimedBlocksOf = (projects: readonly ProgressProject[], hostHash: string | null): Array<{ key: string; claim: AgentClaim }> => {
   if (hostHash === null) return []
+  const questionKeys = antigravityQuestionWaitingKeys(projects)
   const seen = new Set<string>()
   const out: Array<{ key: string; claim: AgentClaim }> = []
   for (const project of projects) for (const task of project.tasks) {
@@ -74,7 +104,7 @@ export const claimedBlocksOf = (projects: readonly ProgressProject[], hostHash: 
     const claim = agentClaimOf(auto)
     if (claim === null || claim.host !== hostHash) continue
     const key = blockKey(auto)
-    if (seen.has(key)) continue
+    if (questionKeys.has(key) || seen.has(key)) continue
     seen.add(key)
     out.push({ key, claim })
   }

@@ -46,8 +46,9 @@ export type Liveness = 'alive' | 'dead' | 'unknown'
 // the gone set already drives the ended display.
 export const livenessOf = (auto: ProgressAuto | null, gone: ReadonlySet<string>): Liveness => {
   if (auto === null) return 'unknown'
+  if (gone.has(blockKey(auto))) return 'dead'
   if (agentClaimOf(auto) === null) return 'unknown'
-  return gone.has(blockKey(auto)) ? 'dead' : 'alive'
+  return 'alive'
 }
 
 export type RowStateInput = {
