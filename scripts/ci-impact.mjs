@@ -439,7 +439,20 @@ export const testArgs = (files, { isSerial = false, isWindows = false } = {}) =>
 // seconds. l3c took 294.4 s in the Node 22 journeys part 2/2 that main's run 44601640119 cancelled at ten minutes
 // (#1722), and 289.1 s of a 529 s part 2/2 on main 7685f8ed (run 44615703631), where no other journey in that part
 // took more than 61.3 s. At this weight it gets a part to itself.
-const PART_WEIGHTS_MS = Object.freeze({ 'tests/e2e/l3c-message-store-ownership.test.mjs': 295_000 })
+// #1356 added nine setup files, each weighed at 5 s. setup-repair-guidance took 28.2 and 29.9 s in Windows board part
+// 6/7 of main's run 44881995497, which took that part to 491.5 and 498.7 s of its 480 s (#1757). The others' Windows
+// times are their local Windows times x 1.42, the ratio host-upgrade showed (78.7 s locally, 109.6-112.5 s in that
+// run): setup-repair-trust 20.8 s locally, five more 7.7-9.7 s. Each weighs that time rounded up to five seconds.
+const PART_WEIGHTS_MS = Object.freeze({
+  'tests/e2e/l3c-message-store-ownership.test.mjs': 295_000,
+  'tests/setup-repair-guidance.test.mjs': 30_000,
+  'tests/setup-repair-trust.test.mjs': 30_000,
+  'tests/setup-guidance-followup.test.mjs': 15_000,
+  'tests/setup-command-trust-context.test.mjs': 15_000,
+  'tests/setup-new-agent-trust.test.mjs': 15_000,
+  'tests/setup-command-preview.test.mjs': 15_000,
+  'tests/setup-command-stop-context.test.mjs': 15_000,
+})
 const partWeight = path => BOARD_FILE_BUDGETS_MS[path] !== undefined ? Math.round(BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3) : PART_WEIGHTS_MS[path] ?? 5_000
 
 // Every Windows board part also runs its share of the self-parted board files, and the shares are not equal: partTest
@@ -451,7 +464,12 @@ const partWeight = path => BOARD_FILE_BUDGETS_MS[path] !== undefined ? Math.roun
 // the other files fill the lighter parts first. Starting every part from zero put legacy-connect, then the slowest of
 // them, in part 1, the part with the largest share, and part 1 ran 383-520 s of its 480 s, against 302-357 s on average
 // for parts 4 to 6 (#1733). Measure the shares again when one of these files gains or loses many tests.
-export const BOARD_SELF_PARTED_SHARES_MS = Object.freeze({ 7: Object.freeze([262_000, 255_000, 268_000, 268_000, 260_000, 252_000, 271_000]) })
+// Measured again on main 9313b838 (run 44881995497, #1757): a part's total less what its other files are expected to
+// take (their weights above, 4.2 s for a file with none, the average of the 5 s files on 5419f63b). The parts gave 183,
+// 220, 288, 193, 201, 320 and 231 s on Node 24 and 267, 314, 305, 344, 161, 327 and 260 s on Node 22; each share is the
+// slower of the two. Part 6, at 252 s before, was the lightest start, so it took the new files, while its share had
+// grown to 320-327 s.
+export const BOARD_SELF_PARTED_SHARES_MS = Object.freeze({ 7: Object.freeze([267_000, 314_000, 305_000, 344_000, 201_000, 327_000, 260_000]) })
 
 // The Node run of one part: its share of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
