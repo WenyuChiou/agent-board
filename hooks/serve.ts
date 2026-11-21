@@ -116,7 +116,10 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   // promising a start right away: with nobody on the thread, or a delay it cannot read, the receiver holds it, and the board
   // is not told why (#1506). Other Codex surfaces have no such watch.
   const isWatched = agent === 'codex' && surface === SURFACE_IDS.codexDaemon
-  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : isWatched ? s.serveLineSoon(name) : s.serveLineNow(name))
+  // The Antigravity app has no "send only if idle": a wake the board hands out just as the person starts a turn may
+  // land in that turn, a window the owner accepted on 2026-11-18 on the condition that the card says so (#1396).
+  const idleNow = agent === 'antigravity' ? `${s.serveLineNow(name)} ${s.agyMayJoin}` : s.serveLineNow(name)
+  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : isWatched ? s.serveLineSoon(name) : idleNow)
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
     : line === 'nextTurn' ? s.serveNextTurnHint(name)
     : line === 'chatOpen' ? s.serveNextOpenHint
