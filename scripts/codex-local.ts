@@ -35,7 +35,7 @@ import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { antigravitySurface, deliverTurnEvent } from './hook-delivery'
-import { checkStoreFile, hookMailbox, markTurnOrder, readTurnOrder } from './board-messaging'
+import { checkStoreFile, hookMailbox, markTurnOrder, readTurnOrder, workerTurnMark } from './board-messaging'
 import { isTurnStart } from '../hooks/hook-messages'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
@@ -1392,9 +1392,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const turnMark = current?.agent === 'antigravity' && current.mode === '--agent-status' && current.event !== undefined
       ? isTurnStart('antigravity', current.event) ? 'start' : current.event === 'Stop' ? 'stop' : undefined : undefined
     let turnSeq: number | undefined
+    // The hook worker usually marked the turn already and handed on what it wrote (hooks/hook-safety.ts), for this
+    // process only.
+    const handed = process.env.AGENT_BOARD_TURN_MARK
+    delete process.env.AGENT_BOARD_TURN_MARK
     if (current !== undefined && turnMark !== undefined) {
       const messages = defaultMessagesDirectory(progress, home, process.env, process.platform)
-      try {
+      const marked = workerTurnMark(handed, messages, 'antigravity', current.session, turnMark)
+      if (marked !== undefined) {
+        if (turnMark === 'start') turnSeq = marked
+      } else try {
         const count = markTurnOrder(messages, 'antigravity', current.session, turnMark, Date.now(), Math.max(0, Math.min(500, hookDeadline - Date.now() - 500)))
         if (turnMark === 'start') turnSeq = count
       } catch {

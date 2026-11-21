@@ -727,6 +727,16 @@ export const markTurnOrder = (directory: string, agent: string, session: string,
     return next.started
   }, { waitMs })
 }
+// The hook worker marks the turn before it starts the board script (hooks/hook-safety.ts) and hands on what it wrote:
+// the file, the mark and the number. The number counts only for the file this board would write and for the same mark;
+// anything else is undefined, and the board script then marks the turn itself, so a turn counts once.
+export const workerTurnMark = (handed: string | undefined, directory: string, agent: string, session: string, mark: 'start' | 'stop'): number | undefined => {
+  try {
+    const found = JSON.parse(handed ?? 'null') as Record<string, unknown> | null
+    const count = found?.count
+    return found?.file === turnOrderFile(directory, agent, session) && found.mark === mark && isCount(count) && (mark === 'stop' || count > 0) ? count : undefined
+  } catch { return undefined }
+}
 // A turn-start hook has little time, so its waits are short (150 ms for the board, 120 ms for the store). An
 // in-process receiver that has seconds to spare may pass longer ones, so a busy board or store is waited for.
 export const hookMailbox = (directory: string, budget: number, boardWait = 150, storeWait = 120) => {
