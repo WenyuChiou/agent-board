@@ -11155,6 +11155,8 @@ test('failed native tree termination reports a bounded error and retains its fix
     const started = Date.now()
     const env = { ...isolatedEnv(control), AGENT_BOARD_NATIVE_EXIT_PROBE: marker }
     delete env.NODE_TEST_CONTEXT
+    // The probe runs alone, so it is not dealt to a CI part: the table deals its title to another part than this test's (#1762).
+    delete env.CI_TEST_PART
     const result = spawnSync(process.execPath, ['--test', '--test-name-pattern=^native unreaped-tree subprocess probe$', fileURLToPath(import.meta.url)], {
       env, encoding: 'utf8', windowsHide: true, timeout: 45000,
     })
