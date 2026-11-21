@@ -126,7 +126,11 @@ if ($Mode -eq 'run') {
         $fresh = Get-CpuSnapshot
         $gain = Get-CpuGain $snapshot $fresh
         $freeMb = $null
-        try { $freeMb = [int]((Get-CimInstance Win32_OperatingSystem -Property FreePhysicalMemory).FreePhysicalMemory / 1024) } catch { }
+        # A read that fails, even without stopping, stays unknown: 0 would read as no free memory.
+        try {
+          $os = Get-CimInstance Win32_OperatingSystem -Property FreePhysicalMemory -ErrorAction Stop
+          if ($null -ne $os -and $null -ne $os.FreePhysicalMemory) { $freeMb = [int]($os.FreePhysicalMemory / 1024) }
+        } catch { }
         $queue = $null
         try { $queue = [math]::Round((Get-Counter '\PhysicalDisk(_Total)\Current Disk Queue Length' -MaxSamples 1 -ErrorAction Stop).CounterSamples[0].CookedValue, 2) } catch { }
         $record = [ordered]@{
@@ -205,7 +209,7 @@ if (Test-Path -LiteralPath $gapFile -PathType Leaf) {
 if ($alive) {
   $summary = "windows sampler: $($alive.ticks) ticks, $($alive.gaps) gaps over $($alive.gapMs) ms"
   if (-not $alive.ended) { $summary += ', the loop had not ended after 3 s' }
-  elseif ($alive.gaps -gt $alive.saved) { $summary += ", $($alive.gaps - $alive.saved) not saved (the record is incomplete)" }
+  if ($alive.gaps -gt $alive.saved) { $summary += ", $($alive.gaps - $alive.saved) not saved (the record is incomplete)" }
 } else {
   $summary = "windows sampler: ? ticks, $($records.Count + $unreadable) gaps over $GapMs ms, no readable alive.json"
 }

@@ -115,6 +115,11 @@ test('a gap that could not be saved shows the record as incomplete', { skip }, a
     const stopped = stop(dir)
     assert.equal(stopped.status, 0, stopped.stderr)
     assert.match(stopped.stdout, new RegExp(`, ${alive.gaps} not saved \\(the record is incomplete\\)`))
+    // A loop that has not ended still shows its unsaved gaps.
+    writeFileSync(join(dir, 'alive.json'), JSON.stringify({ ...ended, ended: false, gaps: 3, saved: 1 }))
+    const late = stop(dir)
+    assert.equal(late.status, 0, late.stderr)
+    assert.match(late.stdout, /^windows sampler: 40 ticks, 3 gaps over 1000 ms, the loop had not ended after 3 s, 2 not saved \(the record is incomplete\)\r?$/m)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -166,15 +171,37 @@ test('stop prints accounted = (busy + idle) / (gap x cores) for the 20 largest g
   }
 })
 
+test('a memory read that fails without stopping is recorded as unknown, not as no free memory', { skip }, async () => {
+  const dir = scratch()
+  // A function of the same name runs instead of the cmdlet: it reports an error and returns nothing, as a failed CIM query can.
+  const child = spawn(shell, ['-NoProfile', '-Command', `function Get-CimInstance { Write-Error 'synthetic CIM failure' }; & '${script.replaceAll("'", "''")}' run '${dir.replaceAll("'", "''")}' -GapMs 0`], { stdio: 'ignore', windowsHide: true })
+  const exited = new Promise(done => child.on('exit', done))
+  try {
+    assert.ok(await waitFor(() => gapLines(dir).length >= 1, 30000), 'a gap was written')
+    writeFileSync(join(dir, 'stop'), 'stop')
+    await Promise.race([exited, sleep(10000)])
+    const gaps = gapLines(dir).map(line => JSON.parse(line))
+    assert.ok(gaps.length >= 1)
+    for (const gap of gaps) assert.equal(gap.freeMemoryMB, null)
+  } finally {
+    if (child.exitCode === null) {
+      child.kill()
+      await Promise.race([exited, sleep(5000)])
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('start returns at once, and stop ends the loop it started without ending it by force', { skip }, async () => {
   const dir = scratch()
   let pid = 0
   try {
     const began = Date.now()
     const started = spawnSync(shell, ['-NoProfile', '-File', script, 'start', dir], { encoding: 'utf8' })
+    // The pid is read first, so `finally` can end the sampler even when an assertion below fails.
+    pid = Number(started.stdout.match(/sampler started \(pid (\d+)\)/)?.[1])
     assert.equal(started.status, 0, started.stderr)
     assert.ok(Date.now() - began < 15000, 'start does not wait for the sampler')
-    pid = Number(started.stdout.match(/sampler started \(pid (\d+)\)/)?.[1])
     assert.ok(pid > 0, started.stdout)
     assert.ok(await waitFor(() => aliveOf(dir)?.ticks >= 1, 30000), 'the loop ticked')
     const stopped = stop(dir)
