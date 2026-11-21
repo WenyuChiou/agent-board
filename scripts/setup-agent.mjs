@@ -436,6 +436,8 @@ const main = () => {
       target: 'setup', mode: extra.includes('--remove') ? '--remove' : undefined,
       agent: at < 0 ? undefined : extra[at + 1], apply: extra.includes('--apply'),
       extra: [...(args.includes('--antigravity-sidecar') ? ['--antigravity-sidecar'] : []), ...extra],
+      // The Codex the person named stays the one the copied command uses (#1356).
+      codexBin: flag('--codex-bin'),
     }, quote).text
   }
   const enablePluginStep = () => words('enablePlugin', { command: 'claude plugin enable agent-board@agent-board --scope user' })
