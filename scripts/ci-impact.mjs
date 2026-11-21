@@ -400,9 +400,9 @@ const emitPlan = plan => {
     '\n\nFull plan: ' + plan.full + '\n\nSoak recommended: ' + plan.soakRecommended + '\n\nChanged paths:\n' + plan.files.map(path => '- ' + path).join('\n') + '\n')
 }
 
-// A part such as 2/4 lets a long set fit several jobs (#899, #910). Part i of n takes every nth file, but a file is
-// never split, so a file far longer than the rest splits its own tests instead: part i of n keeps every
-// nth test, and the parts together run each test once.
+// A part such as 2/4 lets a long set fit several jobs (#899, #910). The files go out to the parts by their times, but a file is
+// never split, so a file far longer than the rest splits its own tests instead: part i of n keeps the tests the deal below
+// gives it, and the parts together run each test once.
 const parsePart = part => {
   const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(part)
   if (part !== '' && (!match || Number(match[1]) > Number(match[2]))) throw new Error('test part must be <index>/<total>, such as 1/2')
@@ -417,10 +417,78 @@ const parsePart = part => {
 // of codex-local, and the part ran 487.9 and 494.4 s of its 480 s on main e977c727 (#1741, run 44697238483).
 export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
 
-export const partTest = (test, part = process.env.CI_TEST_PART ?? '') => {
+// The table of times that deals both the files and the tests out to the parts (#1762): the time of each test file, and of each
+// top-level test of a self-parted file, from a main run's job logs. `node scripts/ci-test-times.mjs <job logs>` writes it; see
+// that script for when to refresh it.
+const TIMES = (() => {
+  const path = join(dirname(fileURLToPath(import.meta.url)), 'ci-test-times.json')
+  try {
+    const table = JSON.parse(readFileSync(path, 'utf8'))
+    if (!table || typeof table.files !== 'object' || typeof table.tests !== 'object') throw new Error('no files and tests')
+    return table
+  } catch (error) {
+    throw new Error('cannot read ' + path + ': ' + error.message)
+  }
+})()
+const REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+const repoPath = path => relative(REPO_ROOT, path).split(/[\\/]/).join('/')
+
+// A test with no time in the table (one added since the table was made) goes to the part its title hashes to, so adding a
+// test moves no other.
+const hashOf = text => {
+  let hash = 2166136261
+  for (const char of text) hash = Math.imul(hash ^ char.codePointAt(0), 16777619) >>> 0
+  return hash
+}
+
+// The test file that called partTest: the first file in the stack that is not this one, else the file Node was started on.
+const callerFile = () => {
+  for (const frame of (new Error().stack ?? '').split('\n')) {
+    const match = /(file:\/\/\/[^\s)]+?\.mjs)(?::\d+){2}/.exec(frame)
+    if (!match) continue
+    const path = repoPath(fileURLToPath(match[1]))
+    if (path !== 'scripts/ci-impact.mjs') return path
+  }
+  return process.argv[1] ? repoPath(resolve(process.argv[1])) : ''
+}
+
+// Which part runs each test of a self-parted file that the table holds: the tests of the files that share jobs (the same
+// group: the four board files, or messaging alone) go out together, slowest first, each to the part with the least time so
+// far, so the parts of a job get the same time from all of them. It depends only on the table and the number of parts, so
+// every job works out the same split and the parts together run each test once.
+const dealCache = new WeakMap()
+const dealTests = (times, total) => {
+  if (!dealCache.has(times)) dealCache.set(times, new Map())
+  const cache = dealCache.get(times)
+  if (cache.has(total)) return cache.get(total)
+  const deal = new Map(selfPartedTests.map(file => [file, new Map()]))
+  for (const group of new Set(selfPartedTests.map(groupForTest))) {
+    const tests = selfPartedTests.flatMap((file, order) => groupForTest(file) === group ? Object.entries(times.tests[file] ?? {}).map(([key, ms]) => ({ file, order, key, ms })) : [])
+    tests.sort((a, b) => b.ms - a.ms || a.order - b.order || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+    const loads = Array(total).fill(0)
+    for (const test of tests) {
+      const lightest = loads.indexOf(Math.min(...loads))
+      loads[lightest] += test.ms
+      deal.get(test.file).set(test.key, lightest)
+    }
+  }
+  cache.set(total, deal)
+  return deal
+}
+
+// A repeated title is told apart by its place among the file's tests: the second is "title #2", as the table writes it.
+export const partTest = (test, part = process.env.CI_TEST_PART ?? '', file = callerFile(), times = TIMES) => {
   const { index, total } = parsePart(part)
-  let ordinal = 0
-  return Object.assign((...args) => (ordinal++ % total === index - 1 ? test(...args) : undefined), { skip: test.skip, only: test.only, todo: test.todo })
+  const seen = new Map()
+  const dealt = total === 1 ? undefined : dealTests(times, total).get(file)
+  const runs = (...args) => {
+    if (total === 1) return true
+    const title = typeof args[0] === 'string' ? args[0] : typeof args[0] === 'function' ? args[0].name || '<anonymous>' : String(args[0]?.name ?? '')
+    seen.set(title, (seen.get(title) ?? 0) + 1)
+    const key = seen.get(title) === 1 ? title : title + ' #' + seen.get(title)
+    return (dealt?.get(key) ?? hashOf(title) % total) === index - 1
+  }
+  return Object.assign((...args) => (runs(...args) ? test(...args) : undefined), { skip: test.skip, only: test.only, todo: test.todo })
 }
 
 // A Windows job ran three spawn-heavy files at once on a 4-vCPU runner: every test slowed about 1.35x and the
@@ -429,63 +497,51 @@ export const testArgs = (files, { isSerial = false, isWindows = false } = {}) =>
 
 // Taking every nth file by its place in the list put all four budgeted files in Windows part 2 of 6, which ran
 // 445-497 s while the other parts ran 145-250 s (#1059, run 42281474369). So the files go out slowest first, each
-// to the part with the least so far. When every file weighs the same, this is the old every-nth split. Every job works
-// out the same split, so the parts together still run each file once.
-// A file weighs about its slowest Windows time (#1733): a budget is that time x 1.3 / 0.7 (above), so the weight is the
-// budget x 0.7 / 1.3, and a file with no budget weighs 5 s (on main 5419f63b half of them took under 2 s on Windows
-// Node 24, 4.2 s on average). Weighed by their budgets, the slow files counted about 1.9 times their time and the rest
-// 15 s each, so the split did not follow the times.
-// A file with no budget that runs far longer than that weighs its slowest Windows time instead, rounded up to five
-// seconds. l3c took 294.4 s in the Node 22 journeys part 2/2 that main's run 44601640119 cancelled at ten minutes
-// (#1722), and 289.1 s of a 529 s part 2/2 on main 7685f8ed (run 44615703631), where no other journey in that part
-// took more than 61.3 s. At this weight it gets a part to itself.
-// #1356 added nine setup files, each weighed at 5 s. setup-repair-guidance took 28.2 and 29.9 s in Windows board part
-// 6/7 of main's run 44881995497, which took that part to 491.5 and 498.7 s of its 480 s (#1757). The others' Windows
-// times are their local Windows times x 1.42, the ratio host-upgrade showed (78.7 s locally, 109.6-112.5 s in that
-// run): setup-repair-trust 20.8 s locally, five more 7.7-9.7 s. Each weighs that time rounded up to five seconds.
-const PART_WEIGHTS_MS = Object.freeze({
-  'tests/e2e/l3c-message-store-ownership.test.mjs': 295_000,
-  'tests/setup-repair-guidance.test.mjs': 30_000,
-  'tests/setup-repair-trust.test.mjs': 30_000,
-  'tests/setup-guidance-followup.test.mjs': 15_000,
-  'tests/setup-command-trust-context.test.mjs': 15_000,
-  'tests/setup-new-agent-trust.test.mjs': 15_000,
-  'tests/setup-command-preview.test.mjs': 15_000,
-  'tests/setup-command-stop-context.test.mjs': 15_000,
-})
-const partWeight = path => BOARD_FILE_BUDGETS_MS[path] !== undefined ? Math.round(BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3) : PART_WEIGHTS_MS[path] ?? 5_000
+// to the part with the least so far, and every job works out the same split, so the parts together run each file once.
+// Each part starts from the time of the self-parted tests it runs (dealTests above), then takes the other files.
+// A file weighs its time in the table (#1762), else the old estimates: about its slowest Windows time, read back from its
+// budget (a budget is that time x 1.3 / 0.7, #1733), else 5 s. The one file with its own weight is the message-store
+// journey, which is in no job the table was made from: l3c took 294.4 s in the Node 22 journeys part 2/2 that main's run
+// 44601640119 cancelled at ten minutes (#1722), and 289.1 s of a 529 s part 2/2 on main 7685f8ed (run 44615703631), where no
+// other journey in that part took more than 61.3 s. At this weight it gets a part to itself.
+// The table is a measurement, and it goes stale as tests are added. When a pull request adds or removes many tests or a test
+// file, refresh it in that pull request from the logs of the newest main run (one command: scripts/ci-test-times.mjs). A
+// test the table does not know still runs, in the part its title hashes to; tests/ci-impact.test.mjs fails when the table
+// says a part would take over its budget on a runner 1.6 times slower (BOARD_PART_BUDGET_MS), so a pull request that adds
+// too much has to add a part or make tests faster.
+const PART_WEIGHTS_MS = Object.freeze({ 'tests/e2e/l3c-message-store-ownership.test.mjs': 295_000 })
+const partWeight = path => TIMES.files[path] ?? (BOARD_FILE_BUDGETS_MS[path] !== undefined ? Math.round(BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3) : PART_WEIGHTS_MS[path] ?? 5_000)
 
-// Every Windows board part also runs its share of the self-parted board files, and the shares are not equal: partTest
-// deals tests by their place in the file, not by time. Over nine main and pull request runs from 44615703631 to
-// 44697238483 (Windows Node 22 and 24, 18 to 20 jobs per part), codex-local, board and opencode-receiver together took on
-// average 242, 239, 253, 235, 244, 238 and 242 s in parts 1 to 7. Since #1741 each part also runs its share of
-// legacy-connect: over 21 Windows runs that held the whole file (143.1 s on average), the tests a part would get took
-// 19, 16, 15, 33, 17, 14 and 30 s. The shares below are the two added. The split starts each part from its share, so
-// the other files fill the lighter parts first. Starting every part from zero put legacy-connect, then the slowest of
-// them, in part 1, the part with the largest share, and part 1 ran 383-520 s of its 480 s, against 302-357 s on average
-// for parts 4 to 6 (#1733). Measure the shares again when one of these files gains or loses many tests.
-// Measured again on main 9313b838 (run 44881995497, #1757): a part's total less what its other files are expected to
-// take (their weights above, 4.2 s for a file with none, the average of the 5 s files on 5419f63b). The parts gave 183,
-// 220, 288, 193, 201, 320 and 231 s on Node 24 and 267, 314, 305, 344, 161, 327 and 260 s on Node 22; each share is the
-// slower of the two. Part 6, at 252 s before, was the lightest start, so it took the new files, while its share had
-// grown to 320-327 s.
-export const BOARD_SELF_PARTED_SHARES_MS = Object.freeze({ 7: Object.freeze([267_000, 314_000, 305_000, 344_000, 201_000, 327_000, 260_000]) })
+// The split of a set of files into `total` parts: the files of each part, the time of its self-parted tests (its share), and
+// its expected time in all.
+const dealFiles = (files, total) => {
+  const rest = files.filter(path => !selfPartedTests.includes(path))
+  const shares = Array(total).fill(0)
+  const deal = dealTests(TIMES, total)
+  for (const file of selfPartedTests) if (files.includes(file)) for (const [key, part] of deal.get(file)) shares[part] += TIMES.tests[file][key]
+  const loads = [...shares]
+  const parts = Array.from({ length: total }, () => new Set())
+  for (const path of [...rest].sort((a, b) => partWeight(b) - partWeight(a))) {
+    const lightest = loads.indexOf(Math.min(...loads))
+    loads[lightest] += partWeight(path)
+    parts[lightest].add(path)
+  }
+  return { shares, loads, parts }
+}
+
+// What each part of `total` is expected to take, in ms, by the table: the self-parted tests, and in all.
+export const partLoads = (files, total) => {
+  const { shares, loads } = dealFiles(files, total)
+  return { shares, loads }
+}
 
 // The Node run of one part: its share of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
 export const partFiles = (files, part = '') => {
   const { index, total } = parsePart(part)
   if (total === 1) return [...files]
-  const rest = files.filter(path => !selfPartedTests.includes(path))
-  const shares = files.includes('tests/codex-local.test.mjs') ? BOARD_SELF_PARTED_SHARES_MS[total] : undefined
-  const loads = shares ? [...shares] : Array(total).fill(0)
-  const mine = new Set()
-  for (const path of [...rest].sort((a, b) => partWeight(b) - partWeight(a))) {
-    const lightest = loads.indexOf(Math.min(...loads))
-    loads[lightest] += partWeight(path)
-    if (lightest === index - 1) mine.add(path)
-  }
-  return [...rest.filter(path => mine.has(path)), ...files.filter(path => selfPartedTests.includes(path))]
+  const mine = dealFiles(files, total).parts[index - 1]
+  return [...files.filter(path => !selfPartedTests.includes(path) && mine.has(path)), ...files.filter(path => selfPartedTests.includes(path))]
 }
 
 export const testRuns = (files, { isSerial = false, isWindows = false, part = '' } = {}) => {

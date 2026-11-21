@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { test } from 'node:test'
@@ -526,26 +526,107 @@ test('the summary command writes the recorded run time and its share of the job 
   }
 })
 
+// The self-parted tests are dealt by the table of measured times (#1762): scripts/ci-test-times.json.
+const readTimes = async () => JSON.parse(await readFile(new URL('../scripts/ci-test-times.json', import.meta.url), 'utf8'))
+// The tests of a self-parted file in the order the table keeps them, as the test file calls them: a key such as "title #2"
+// is the second call with "title".
+const callsOf = table => Object.fromEntries(Object.entries(table.tests).map(([file, own]) => [file, Object.keys(own).map(key => key.replace(/ #\d+$/, ''))]))
+const boardTestFiles = async () => {
+  const { groupForTest } = await import('../scripts/ci-impact.mjs')
+  const all = (await readdir(new URL('../tests', import.meta.url), { recursive: true })).map(path => 'tests/' + path.split(sep).join('/')).filter(path => path.endsWith('.test.mjs'))
+  return all.filter(path => groupForTest(path) === 'board').sort()
+}
+// The number of parts of the Windows board job: the largest part total of a Windows entry in either board_matrix list.
+const windowsBoardParts = async () => {
+  const line = (await workflow()).split('\n').find(text => /^\s*board_matrix:/.test(text))
+  assert.ok(line, 'no board_matrix line in test.yml')
+  const lists = [...line.matchAll(/'(\[[^']*\])'/g)].map(match => JSON.parse(match[1]))
+  assert.equal(lists.length, 2, 'board_matrix should hold a pull request list and a main list')
+  const totals = lists.flat().filter(entry => entry.os === 'windows-latest').map(entry => Number(entry.part.split('/')[1]))
+  assert.ok(totals.length && totals.every(total => Number.isInteger(total) && total > 0), 'no Windows board part in board_matrix')
+  return Math.max(...totals)
+}
+
 test('a self-parted test file runs whole in every part and keeps its share, so the parts together run each of its tests once', async () => {
-  const { testRuns, partTest, selfPartedTests } = await import('../scripts/ci-impact.mjs')
+  const { testRuns, partTest, selfPartedTests, partFiles } = await import('../scripts/ci-impact.mjs')
   const files = ['tests/a.test.mjs', 'tests/board.test.mjs', 'tests/b.test.mjs', 'tests/codex-local.test.mjs']
   assert.deepEqual(testRuns(files), [['--test', ...files]])
   assert.deepEqual(testRuns(files, { part: '1/1' }), [['--test', ...files]])
-  assert.deepEqual(testRuns(files, { part: '1/2' }), [['--test', 'tests/a.test.mjs', 'tests/board.test.mjs', 'tests/codex-local.test.mjs']])
-  assert.deepEqual(testRuns(files, { part: '2/2' }), [['--test', 'tests/b.test.mjs', 'tests/board.test.mjs', 'tests/codex-local.test.mjs']])
   assert.deepEqual(testRuns(['tests/board.test.mjs'], { isSerial: true, part: '1/2' }), [['--test', '--test-concurrency=1', 'tests/board.test.mjs']])
+  // Every part runs both self-parted files whole, and the two other files go out once between the parts.
+  const shares = [1, 2].map(index => partFiles(files, index + '/2'))
+  for (const share of shares) for (const path of ['tests/board.test.mjs', 'tests/codex-local.test.mjs']) assert.ok(share.includes(path), share.join(' '))
+  assert.deepEqual(shares.flat().filter(path => !selfPartedTests.includes(path)).sort(), ['tests/a.test.mjs', 'tests/b.test.mjs'])
+  // The deal of tests: slowest first, each to the part with the least so far, ties to the lower part.
+  const times = { files: {}, tests: { 'tests/board.test.mjs': { t0: 50, t1: 40, t2: 30, t3: 20, t4: 10 } } }
   const ran = part => {
     const names = []
-    const test = partTest(name => names.push(name), part)
+    const test = partTest(name => names.push(name), part, 'tests/board.test.mjs', times)
     for (const name of ['t0', 't1', 't2', 't3', 't4']) test(name)
     return names
   }
   assert.deepEqual(ran(''), ['t0', 't1', 't2', 't3', 't4'])
-  assert.deepEqual(ran('1/2'), ['t0', 't2', 't4'])
-  assert.deepEqual(ran('2/2'), ['t1', 't3'])
+  assert.deepEqual(ran('1/1'), ['t0', 't1', 't2', 't3', 't4'])
+  assert.deepEqual(ran('1/2'), ['t0', 't3', 't4'])
+  assert.deepEqual(ran('2/2'), ['t1', 't2'])
   assert.deepEqual([...ran('1/3'), ...ran('2/3'), ...ran('3/3')].sort(), ['t0', 't1', 't2', 't3', 't4'])
   assert.throws(() => partTest(() => {}, '2/1'), /test part/)
   for (const path of selfPartedTests) assert.match(await readFile(path, 'utf8'), /^const test = partTest\(nodeTest\)$/m, path)
+})
+
+test('the parts together run each test of each self-parted file once, whether or not the table knows its title', async () => {
+  const table = await readTimes()
+  const calls = callsOf(table)
+  const { selfPartedTests } = await import('../scripts/ci-impact.mjs')
+  assert.deepEqual(Object.keys(calls).sort(), [...selfPartedTests].sort())
+  for (const total of [2, 3, 7, 10]) for (const file of selfPartedTests) {
+    // The table's tests, a repeated title called twice, and two tests the table has never seen.
+    const titles = [...calls[file], 'a new test the table has not seen', calls[file][0], 'another new test, with #2 in it']
+    const ran = new Map()
+    const { partTest } = await import('../scripts/ci-impact.mjs')
+    for (let index = 1; index <= total; index++) {
+      const test = partTest((title, number) => ran.set(number, [...(ran.get(number) ?? []), index]), index + '/' + total, file)
+      titles.forEach((title, number) => test(title, number))
+    }
+    assert.equal(ran.size, titles.length, file + ' in ' + total + ' parts')
+    for (const [number, parts] of ran) assert.equal(parts.length, 1, file + ' in ' + total + ' parts: test ' + number + ' (' + titles[number] + ') ran in parts ' + parts.join(' '))
+  }
+})
+
+test('adding a test to a self-parted file moves none of its other tests to another part', async () => {
+  const table = await readTimes()
+  const calls = callsOf(table)
+  const { partTest } = await import('../scripts/ci-impact.mjs')
+  const placed = (file, titles, total) => {
+    const where = new Map()
+    for (let index = 1; index <= total; index++) {
+      const test = partTest((title, number) => where.set(number, index), index + '/' + total, file)
+      titles.forEach((title, number) => test(title, number))
+    }
+    return where
+  }
+  for (const total of [7, 10]) for (const file of Object.keys(calls)) {
+    const titles = calls[file]
+    const before = placed(file, titles, total)
+    for (const at of [0, Math.floor(titles.length / 2), titles.length]) {
+      const added = [...titles.slice(0, at), 'a test added since the table was made', ...titles.slice(at)]
+      const after = placed(file, added, total)
+      titles.forEach((title, number) => assert.equal(after.get(number < at ? number : number + 1), before.get(number), file + ' in ' + total + ' parts: "' + title + '" moved when a test was added at ' + at))
+    }
+  }
+})
+
+test('the parts of a job take the same time of self-parted tests, within 5%, at seven and at ten parts (#1762)', async () => {
+  const { partLoads } = await import('../scripts/ci-impact.mjs')
+  const files = await boardTestFiles()
+  for (const total of [7, 10]) {
+    const { shares } = partLoads(files, total)
+    assert.equal(shares.length, total)
+    assert.ok(Math.max(...shares) <= Math.min(...shares) * 1.05, total + ' parts, seconds of self-parted tests: ' + shares.map(ms => Math.round(ms / 1000)).join(' '))
+  }
+  // The local exchange job has the messaging tests alone, in three parts on Windows.
+  const { shares } = partLoads(['tests/exchange.test.mjs', 'tests/messaging.test.mjs'], 3)
+  assert.ok(Math.max(...shares) <= Math.min(...shares) * 1.05, 'messaging, seconds in each of three parts: ' + shares.map(ms => Math.round(ms / 1000)).join(' '))
 })
 
 test('the budgeted slow files go to different parts, and the parts together run every other file once', async () => {
@@ -563,41 +644,45 @@ test('the budgeted slow files go to different parts, and the parts together run 
   }
 })
 
-test('in seven Windows board parts each part starts from its self-parted share, and none is expected to take over 440 s (#1733, #1757)', async () => {
-  const { partFiles, selfPartedTests, BOARD_FILE_BUDGETS_MS, BOARD_SELF_PARTED_SHARES_MS } = await import('../scripts/ci-impact.mjs')
-  // The board set main's run 44651103054 planned on 5419f63b, where Windows Node 22 part 1/7 took 483.2 s of its 480 s.
+test('in every number of Windows board parts each part starts from its share of the self-parted tests, and the other files go out once (#1733, #1762)', async () => {
+  const { partFiles, partLoads, selfPartedTests } = await import('../scripts/ci-impact.mjs')
+  // The board set main's run 44651103054 planned on 5419f63b.
   const files = ['1317-repro', 'accepted-disconnect', 'answer-guidance', 'antigravity-ack', 'antigravity-sidecar', 'approvals', 'background-resume', 'board-dock', 'board-entry', 'board-json', 'board-status', 'board-storage', 'board-surfaces', 'board', 'checkbox-identity', 'classifier-exit-proof', 'codex-done-lifecycle', 'codex-fallback', 'codex-host', 'codex-local', 'codex-project-move', 'codex-resume-guidance', 'connect-worker', 'deepseek-receiver', 'delivery-states', 'folder-identity', 'folder-watchers', 'hook-declarations', 'host-upgrade', 'legacy-connect', 'local-agent-manifest', 'local-lock', 'mcp-tools', 'merge-check', 'messaging-matrix', 'opencode-receiver', 'page-look', 'page-regressions', 'page-state', 'page-titles', 'pane-queued', 'parity', 'path-journeys', 'performance-budgets', 'plugin-tests', 'preflight-lock-policy', 'prompt-hooks', 'question-clarity', 'queued-count', 'readme-codex-trust', 'report-tail', 'report-validation', 'row-keys', 'row-states-surfaces', 'runtime-folder', 'serve-opener', 'serve-watch', 'session-liveness', 'settings-agents', 'settings-symlink', 'setup-board-command', 'setup-guidance', 'setup-readme', 'setup-remove', 'setup-sidecar', 'setup-terminal', 'tidy', 'view-index-mutation', 'ws-stdio'].map(name => 'tests/' + name + '.test.mjs')
-  // What codex-local, board, opencode-receiver and legacy-connect take together in each part, as the split counts it
-  // (measured again on main 9313b838, #1757); and a file's slowest Windows time, read back from its budget (that time
-  // x 1.3 / 0.7), else 5 s.
-  const shares = BOARD_SELF_PARTED_SHARES_MS[7].map(ms => ms / 1000)
-  const slowest = path => BOARD_FILE_BUDGETS_MS[path] !== undefined ? BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3 / 1000 : 5
-  const parts = Array.from({ length: 7 }, (_, i) => partFiles(files, (i + 1) + '/7'))
-  const expected = parts.map((part, i) => Math.round(shares[i] + part.filter(path => !selfPartedTests.includes(path)).reduce((sum, path) => sum + slowest(path), 0)))
-  // The shares grew from 1836 s in all to 2018 s (#1757), so no split of seven parts keeps the 20% this test once
-  // left: 440 s leaves about 8% under the 480 s budget. More room needs an eighth part, a change to the workflow.
-  assert.ok(expected.every(seconds => seconds <= 440), 'expected seconds per part: ' + expected.join(' '))
-  assert.deepEqual(parts.flat().filter(path => !selfPartedTests.includes(path)).sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
+  // The split starts every part from a share at any number of parts: with a table of shares for seven only, any other number
+  // started every part from zero, and the slowest files went to part 1, which ran 383-520 s of its 480 s (#1733).
+  for (const total of [2, 3, 5, 7, 8, 10, 12]) {
+    const { shares, loads } = partLoads(files, total)
+    assert.ok(shares.every(ms => ms > 0), total + ' parts, shares: ' + shares.join(' '))
+    assert.ok(Math.max(...loads) <= Math.min(...loads) * 1.15, total + ' parts, seconds: ' + loads.map(ms => Math.round(ms / 1000)).join(' '))
+    const parts = Array.from({ length: total }, (_, i) => partFiles(files, (i + 1) + '/' + total))
+    assert.deepEqual(parts.flat().filter(path => !selfPartedTests.includes(path)).sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
+  }
 })
 
-test('with the setup files #1356 added at their measured weights, no Windows board part of main 9313b838 is expected over 440 s on either Node version (#1757)', async () => {
-  const { partFiles, selfPartedTests, BOARD_FILE_BUDGETS_MS } = await import('../scripts/ci-impact.mjs')
-  // The board set main's run 44881995497 planned on 9313b838, where Windows part 6/7 took 491.5 s (Node 24) and 498.7 s
-  // (Node 22) of its 480 s.
-  const files = ['1317-repro', 'accepted-disconnect', 'answer-guidance', 'antigravity-ack', 'antigravity-sidecar', 'approvals', 'background-resume', 'board-dock', 'board-entry', 'board-json', 'board-status', 'board-storage', 'board-surfaces', 'board', 'checkbox-identity', 'classifier-exit-proof', 'codex-done-lifecycle', 'codex-fallback', 'codex-host', 'codex-local', 'codex-may-be-closed', 'codex-process', 'codex-project-move', 'codex-resume-guidance', 'connect-worker', 'deepseek-receiver', 'delivery-states', 'folder-identity', 'folder-watchers', 'hook-declarations', 'host-upgrade', 'legacy-connect', 'local-agent-manifest', 'local-lock', 'mcp-tools', 'merge-check', 'messaging-matrix', 'opencode-receiver', 'page-look', 'page-regressions', 'page-state', 'page-titles', 'pane-queued', 'parity', 'path-journeys', 'performance-budgets', 'plugin-tests', 'preflight-lock-policy', 'prompt-hooks', 'question-clarity', 'queued-count', 'readme-codex-trust', 'report-tail', 'report-validation', 'row-keys', 'row-states-surfaces', 'runtime-folder', 'serve-opener', 'serve-watch', 'session-liveness', 'settings-agents', 'settings-symlink', 'setup-board-command', 'setup-command-launcher-context', 'setup-command-preview', 'setup-command-stop-context', 'setup-command-trust-context', 'setup-command', 'setup-guidance-followup', 'setup-guidance', 'setup-new-agent-trust', 'setup-readme', 'setup-remove', 'setup-repair-guidance', 'setup-repair-trust', 'setup-sidecar', 'setup-terminal', 'tidy', 'view-index-mutation', 'ws-stdio'].map(name => 'tests/' + name + '.test.mjs')
-  // The new files' Windows times (setup-repair-guidance from that run, the rest local Windows times x 1.42), a budgeted
-  // file's slowest time read back from its budget, else 4.2 s; and what the self-parted files took in each part of that
-  // run on each Node version: the part's total less its other files (#1757).
-  const measured = { 'setup-repair-guidance': 29.9, 'setup-repair-trust': 29.5, 'setup-guidance-followup': 13.8, 'setup-command-trust-context': 13.5, 'setup-new-agent-trust': 12.5, 'setup-command-preview': 11.8, 'setup-command-stop-context': 10.9, 'setup-command-launcher-context': 6.1, 'setup-command': 0.2 }
-  const seconds = path => measured[path.slice(6, -9)] ?? (BOARD_FILE_BUDGETS_MS[path] !== undefined ? BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3 / 1000 : 4.2)
-  const shares = { 24: [183, 220, 288, 193, 201, 320, 231], 22: [267, 314, 305, 344, 161, 327, 260] }
-  const parts = Array.from({ length: 7 }, (_, i) => partFiles(files, (i + 1) + '/7'))
-  for (const node of [24, 22]) {
-    const expected = parts.map((part, i) => Math.round(shares[node][i] + part.filter(path => !selfPartedTests.includes(path)).reduce((sum, path) => sum + seconds(path), 0)))
-    // 440 s leaves a part about 8% under its 480 s budget for a slower runner.
-    assert.ok(expected.every(total => total <= 440), 'Node ' + node + ', expected seconds per part: ' + expected.join(' '))
+test('the setup files #1356 added keep their measured weights, so the two slowest are not in one Windows board part (#1757, #1762)', async () => {
+  const { partFiles } = await import('../scripts/ci-impact.mjs')
+  const table = await readTimes()
+  // setup-repair-guidance took 28.2 and 29.9 s in Windows board part 6/7 of main's run 44881995497, which took that part to
+  // 491.5 and 498.7 s of its 480 s (#1757); setup-repair-trust 20.8 s locally (19.5 s in the table's run).
+  const slow = ['tests/setup-repair-guidance.test.mjs', 'tests/setup-repair-trust.test.mjs']
+  for (const path of slow) assert.ok(table.files[path] >= 15_000 && table.files[path] <= 40_000, path + ': ' + table.files[path])
+  const files = (await boardTestFiles())
+  for (const total of [7, 10]) {
+    const parts = Array.from({ length: total }, (_, i) => partFiles(files, (i + 1) + '/' + total))
+    assert.equal(parts.filter(part => slow.every(path => part.includes(path))).length, 0, total + ' parts')
   }
-  assert.deepEqual(parts.flat().filter(path => !selfPartedTests.includes(path)).sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
+})
+
+test('the heaviest Windows board part, on a runner 1.6 times slower than the table, fits its time budget (#1762)', async () => {
+  const { partLoads, BOARD_PART_BUDGET_MS } = await import('../scripts/ci-impact.mjs')
+  // Windows runners ran the same tests 1.4 to 1.6 times slower from one run to the next, so the load check allows 1.6, and no
+  // Windows runner's speed decides it: the table does. A pull request that adds enough test time to cross the line fails
+  // here every time, not one run in four on a slow runner.
+  const total = await windowsBoardParts()
+  const { loads } = partLoads(await boardTestFiles(), total)
+  const heaviest = Math.max(...loads)
+  const seconds = ms => Math.round(ms / 1000)
+  assert.ok(heaviest * 1.6 <= BOARD_PART_BUDGET_MS, 'Windows board part ' + (loads.indexOf(heaviest) + 1) + ' of ' + total + ' is predicted to take ' + seconds(heaviest) + ' s by the table, ' + seconds(heaviest * 1.6) + ' s on a runner 1.6 times slower, over its ' + seconds(BOARD_PART_BUDGET_MS) + ' s budget: add a part or make tests faster. The parts are predicted at ' + loads.map(seconds).join(' ') + ' s.')
 })
 
 test('every Windows and Ubuntu board part runs a share of legacy-connect, so no part holds the whole file beside its share of codex-local (#1741)', async () => {
@@ -607,6 +692,15 @@ test('every Windows and Ubuntu board part runs a share of legacy-connect, so no 
   assert.ok(selfPartedTests.includes('tests/legacy-connect.test.mjs'))
   const files = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/host-upgrade.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/prompt-hooks.test.mjs']
   for (const total of [2, 7]) for (let index = 1; index <= total; index++) assert.ok(partFiles(files, index + '/' + total).includes('tests/legacy-connect.test.mjs'), index + '/' + total)
+  // And the deal gives each part some of its tests, at any number of parts.
+  const { partTest } = await import('../scripts/ci-impact.mjs')
+  const titles = Object.keys((await readTimes()).tests['tests/legacy-connect.test.mjs'])
+  for (const total of [2, 7, 10]) for (let index = 1; index <= total; index++) {
+    let ran = 0
+    const run = partTest(() => ran++, index + '/' + total, 'tests/legacy-connect.test.mjs')
+    for (const title of titles) run(title)
+    assert.ok(ran > 0, 'legacy-connect runs no test in part ' + index + '/' + total)
+  }
 })
 
 test('the message-store journey gets a Windows journeys part to itself, and the three parts together run every journey once (#1722)', async () => {
@@ -777,27 +871,26 @@ test('a serial run times one file at a time and records the times for the time c
   process.env.CI_TEST_TIMINGS = join(dir, 'timings.json')
   try {
     const files = ['tests/ws-stdio.test.mjs', 'tests/connect-worker.test.mjs', 'tests/board.test.mjs']
-    assert.deepEqual(partFiles(files, '1/2'), ['tests/ws-stdio.test.mjs', 'tests/board.test.mjs'])
+    const mine = partFiles(files, '1/2')
+    assert.ok(mine.length >= 1 && mine.length <= 3)
+    assert.ok(mine.includes('tests/board.test.mjs'))
     const calls = []
     runTestFiles(files, '1/2', (command, args) => { calls.push(args); return { status: 0 } }, 'win32')
-    assert.deepEqual(calls, [
-      ['--test', '--test-concurrency=1', 'tests/ws-stdio.test.mjs'],
-      ['--test', '--test-concurrency=1', 'tests/board.test.mjs'],
-    ])
+    assert.deepEqual(calls, mine.map(path => ['--test', '--test-concurrency=1', path]))
     const recorded = JSON.parse(await readFile(process.env.CI_TEST_TIMINGS, 'utf8'))
     assert.equal(recorded.version, 1)
     assert.equal(recorded.part, '1/2')
     assert.equal(recorded.serial, true)
     assert.equal(typeof recorded.totalMs, 'number')
-    assert.equal(recorded.files.length, 2)
-    assert.equal(recorded.files[0].path, 'tests/ws-stdio.test.mjs')
+    assert.equal(recorded.files.length, mine.length)
+    assert.equal(recorded.files[0].path, mine[0])
     assert.equal(typeof recorded.files[0].ms, 'number')
     // A failing file does not stop the rest, and the times are still recorded.
     const failing = []
     assert.throws(() => runTestFiles(files, '1/2', (command, args) => { failing.push(args); return { status: args.includes('tests/board.test.mjs') ? 1 : 0 } }, 'win32'), /selected tests failed: 1/)
-    assert.equal(failing.length, 2)
+    assert.equal(failing.length, mine.length)
     const recordedAfterFailure = JSON.parse(await readFile(process.env.CI_TEST_TIMINGS, 'utf8'))
-    assert.equal(recordedAfterFailure.files.length, 2)
+    assert.equal(recordedAfterFailure.files.length, mine.length)
   } finally {
     if (serial === undefined) delete process.env.CI_TEST_SERIAL
     else process.env.CI_TEST_SERIAL = serial
