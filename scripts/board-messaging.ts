@@ -452,7 +452,11 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         return { ok: true }
       }
       if (action === 'wake-poll' || action === 'wake-attempt' || action === 'wake-report') {
-        const next = wakeAction(state, action, body, now, gate?.turnsOfSession ?? (() => undefined))
+        const turnsOf = gate?.turnsOfSession
+        const next = wakeAction(state, action, body, now, (agent, session) => {
+          const turns = turnsOf?.(agent, session)
+          return turns === undefined || isTurnOrderLocked(root, agent, session) ? undefined : turns
+        })
         if (action === 'wake-poll') sidecarSeen = now
         if (next.state !== state) save(next.state, now)
         return next.result
@@ -726,6 +730,15 @@ export const markTurnOrder = (directory: string, agent: string, session: string,
     } finally { try { unlinkSync(temp) } catch {} }
     return next.started
   }, { waitMs })
+}
+// The order file's lock is there while a hook writes a turn's number, or after a hook died holding it, so the file may be
+// a turn behind: a wake waits until the lock is gone (round 4, codex_481). It is looked at after the file is read, so a
+// write that held the lock at either moment holds the wake. One that cannot be looked at holds it too.
+export const isTurnOrderLocked = (directory: string, agent: string, session: string): boolean => {
+  try {
+    lstatSync(`${turnOrderFile(directory, agent, session)}.lock`)
+    return true
+  } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT' }
 }
 // The hook worker marks the turn before it starts the board script (hooks/hook-safety.ts) and hands on what it wrote:
 // the file, the mark and the number. The number counts only for the file this board would write and for the same mark;
