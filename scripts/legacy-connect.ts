@@ -1,4 +1,4 @@
-import { reporterPs1, reporterSh, agentHooks, setupOwnership, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHermesHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
+import { reporterPs1, reporterSh, agentHooks, setupOwnership, boardLangOf, boardScriptFor, connectDataRoots, connectPath, COLLISION, DELETE, generatedFile, hasAntigravityHook, hasInstallerAntigravityHook, hasOurHook, HOOK_WORKER, isInstallerSkill, isNodeSupported, isReleased, isReleasedBoard, NODE_MIN, OPENCLAW_MIN, openclawSavedBy, openclawTooOld, setupAgents, setupLines, setupProblemText, worseHook } from '../hooks/connect-pure'
 import type { AgentSetup, HookState, SetupNotice, SetupProblem, SetupState } from '../hooks/connect-pure'
 import { langOf, STRINGS } from '../hooks/strings'
 import type { ConnectTransaction, LegacyConnectRequest } from './connect-transaction'
@@ -68,6 +68,9 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     hookStates.set(hook.label, { agent: hook.agent, label: hook.label, hook: was?.hook === undefined || was.hook === null ? state : worseHook(was.hook, state) })
   }
   const failedLabels = new Set<string>()
+  // Whether this run left Hermes' config (not its skill) as it should be: with this folder's hooks,
+  // or none on removal.
+  let hasHermesLanded = false
   let canRemoveBoard = true
   const previousOutput = (file: string): string | undefined => transaction.previous(file)
   const removeFile = (file: string): void => transaction.change(file, null)
@@ -131,7 +134,9 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
     warn(`removeFailed:${folder}`, { message: 'connectRemoveFailed', args: [folder] })
     failedLabels.add(label)
   }
-  const hooks = agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, node: nodePath, antigravityNode, progress: path, s: STRINGS[fileLang] })
+  // Only Hermes reads the old folder, to tell its hooks from a person's: the folder its config names.
+  const hermesFolder = transaction.state.hermesProgress ?? transaction.state.connectedProgress
+  const hooks = agentHooks({ home, sep, isWindows: isWin, script, inbox: inboxPath(path), codexHome, grokHome, hermesHome, openclawHome, opencodeHome, board, node: nodePath, antigravityNode, progress: path, previousProgress: hermesFolder, s: STRINGS[fileLang] })
   const { managed: setupManaged, skillOnly: setupSkillOnly, held: setupHeld } = setupOwnership(hooks, home, sep, existsSync, readMaybe)
   // A file with none of ours is left as it is: taking nothing out could still reformat it.
   // OpenClaw's config names our plugin, not the reporter, and its edit checks for that itself;
@@ -144,7 +149,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         if (!existsSync(file)) continue
         const before = readLocal(file)
         isReading = false
-        if (before === '' || (!hook.generated && hook.agent !== 'openclaw' && !(hook.agent === 'antigravity' ? before.includes('"agent-board"') : hook.agent === 'hermes' ? hasOurHermesHook(before) : hasOurHook(before)))) continue
+        if (before === '' || (!hook.generated && hook.agent !== 'openclaw' && hook.agent !== 'hermes' && !(hook.agent === 'antigravity' ? before.includes('"agent-board"') : hasOurHook(before)))) continue
         const after = hook.edit(before, true, previousOutput(file))
         if (after === COLLISION) preserve(file)
         else if (after === null) warn(`removeFailed:${file}`, { message: 'connectRemoveFailed', args: [file] })
@@ -319,6 +324,7 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
         )
       if (hasMovedHook) hasMovedData = true
       mark(hook, 'configured')
+      if (hook.agent === 'hermes' && hook.label !== '') hasHermesLanded = true
       if ((remove || isAuto) && after === before && !hadOld) continue
       // A session that only brings our own hook up to date (a new timeout, say) does not
       // announce the agent as newly connected.
@@ -395,6 +401,16 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   else if (hasBoardCommand && node !== null && !isNodeReady) warn(`node:old:${node}`, { message: 'setupNodeOld', args: [node, NODE_MIN] })
   const state: SetupState = { agents: setupAgents([...hookStates.values()], boardFiles, isNodeReady), problems, node, codexTrusted }
   if (request.mode === 'connect') transaction.state.connectedProgress = path
+  // Hermes' config can fail to change while the other hosts move on. Until a connect or remove
+  // lands there, the folder it still names stays recorded, so the next run counts that folder's
+  // hooks as ours instead of adding a second set beside them (#1664). A probe never clears it: it
+  // can leave a host that reports to another folder alone.
+  if (request.mode === 'connect' || remove) {
+    const hermesConfig = hooks.find(one => one.agent === 'hermes' && one.label !== '')?.file
+    const named = hasHermesLanded || hermesConfig === undefined || !existsSync(hermesConfig) ? undefined : hermesFolder
+    if (named === undefined || named === transaction.state.connectedProgress) delete transaction.state.hermesProgress
+    else transaction.state.hermesProgress = named
+  }
   // Kept for `/progress connect status`; taking the hooks out leaves nothing to show, unless
   // the removal could not finish, whose problems stay to be shown.
   if (remove) {

@@ -42,6 +42,22 @@ const fixture = async fn => {
 
 const taggedBoards = new Map()
 
+const originalForeignHermes = mode => fixture(async f => {
+  const folder = join(f.home, '.hermes')
+  mkdirSync(folder)
+  const config = join(folder, 'config.yaml')
+  const original = 'model: synthetic\nhooks:\n  post_tool_call:\n    - {command: "node ./tools/progress-hook.mjs --hook-version 1 --hook-event post_tool_call --plan-event --agent hermes --progress-file ./synthetic-progress.md", matcher: external, timeout: 5}\n    - {command: "node ./tools/keep-this.mjs", matcher: terminal, timeout: 5}\n'
+  writeFileSync(config, original)
+  f.run(f.request(mode))
+  const after = readFileSync(config, 'utf8')
+  for (const line of original.split('\n').filter(line => line.includes('command:'))) assert.ok(after.includes(line), `${mode} must preserve the original foreign hook and its metadata`)
+  if (mode === 'remove') assert.equal(after, original, 'Without an installation, removal must not alter the foreign config')
+})
+
+test('Hermes legacy connect preserves the original foreign-hook reproduction', () => originalForeignHermes('connect'))
+test('Hermes legacy probe preserves the original foreign-hook reproduction', () => originalForeignHermes('auto'))
+test('Hermes legacy removal without an installation preserves the original foreign-hook reproduction', () => originalForeignHermes('remove'))
+
 test('a malformed remembered Codex approval makes the connect state invalid', () => fixture(async f => {
   f.run(f.request('connect'))
   const state = JSON.parse(readFileSync(f.control, 'utf8'))
@@ -285,6 +301,59 @@ test('a Hermes config that cannot be changed keeps the worker and board script u
   run('remove')
   assert.equal(existsSync(worker), false)
   assert.equal(existsSync(board), false)
+}))
+
+// Connected at A, then a move to B that cannot write Hermes' config (#1664 review): Hermes still
+// runs A's hooks, so the next connect or remove must still count them as ours. The person's own
+// hooks are #1202's: one with the board's hook file name, one without.
+const failedHermesMove = fn => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const foreign = [
+    '    - {command: "node ./tools/progress-hook.mjs --hook-version 1 --hook-event post_tool_call --plan-event --agent hermes --progress-file ./synthetic-progress.md", matcher: external, timeout: 5}',
+    '    - {command: "node ./tools/keep-this.mjs", timeout: 5}',
+  ]
+  writeFileSync(config, `model: synthetic\nhooks:\n  post_tool_call:\n${foreign[0]}\n  on_session_start:\n${foreign[1]}\n`)
+  f.run(f.request('connect'))
+  const atA = readFileSync(config, 'utf8')
+  const count = (text, folder) => text.split(folder).length - 1
+  assert.ok(count(atA, 'data-a') > 0, 'the first connect wrote hooks that name data-a')
+  const moved = join(f.home, 'data-b', 'progress.md')
+  const lock = isLocked => process.platform === 'win32'
+    ? execFileSync('attrib', [isLocked ? '+R' : '-R', config])
+    : chmodSync(join(f.home, '.hermes'), isLocked ? 0o555 : 0o755)
+  lock(true)
+  let output
+  try { output = f.run(f.request('connect', { progress: moved })) } finally { lock(false) }
+  assert.equal(readFileSync(config, 'utf8'), atA, 'the failed move left the config as it was')
+  assert.ok(output.result.problems.length > 0, 'the failed move is named')
+  return fn({ f, config, foreign, atA, moved, count })
+})
+
+const lockSkip = { skip: process.getuid?.() === 0 ? 'root ignores the read-only folder this test needs' : false }
+
+test('a move that cannot write the Hermes config keeps its old data folder for Hermes', lockSkip, () => failedHermesMove(({ f, moved }) => {
+  const record = JSON.parse(readFileSync(f.control, 'utf8'))
+  assert.equal(record.connectedProgress, moved)
+  assert.equal(record.hermesProgress, f.progress)
+}))
+
+test('a retry after a failed Hermes move replaces the old hooks instead of adding a second set', lockSkip, () => failedHermesMove(({ f, config, foreign, atA, moved, count }) => {
+  f.run(f.request('connect', { progress: moved }))
+  const after = readFileSync(config, 'utf8')
+  assert.equal(count(after, 'data-a'), 0, 'no hook names the old data folder')
+  assert.equal(count(after, 'data-b'), count(atA, 'data-a'), 'one set of hooks names the new data folder')
+  for (const line of foreign) assert.ok(after.includes(line), `the person's hook stays: ${line}`)
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).hermesProgress, undefined)
+}))
+
+test('a removal after a failed Hermes move takes out the old hooks and keeps the foreign one', lockSkip, () => failedHermesMove(({ f, config, foreign, moved, count }) => {
+  f.run(f.request('remove', { progress: moved }))
+  const after = readFileSync(config, 'utf8')
+  assert.equal(count(after, 'data-a'), 0, 'no hook names the old data folder')
+  assert.equal(count(after, 'data-b'), 0, 'no hook names the new data folder')
+  for (const line of foreign) assert.ok(after.includes(line), `the person's hook stays: ${line}`)
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).hermesProgress, undefined)
 }))
 
 test('a config that cannot be parsed is named when its hook cannot be taken out', () => withBothHooks('muse', ({ f, run }) => {
@@ -596,10 +665,11 @@ test("a Hermes config saved with wrapped lines still counts as another data fold
   assert.equal(output.result.done.length, 0)
 }))
 
+// Keep the legacy plain-scalar fixture tied to the reporter actually installed on this OS.
 const plainHermes = root => `model: anthropic/claude-sonnet
 hooks:
   post_llm_call:
-  - command: sh '${root.replaceAll('\\', '/')}/progress-report.sh' hermes turn
+  - command: ${process.platform === 'win32' ? `powershell -NoProfile -ExecutionPolicy Bypass -File "${join(root, 'progress-report.ps1')}" hermes turn` : `sh '${root.replaceAll('\\', '/')}/progress-report.sh' hermes turn`}
 `
 
 test("a Hermes config re-saved in plain style still counts as another data folder's", () => fixture(async f => {
@@ -746,6 +816,140 @@ test('a YAML command with combined apostrophe quoting or non-JSON escapes keeps 
     assert.deepEqual(snapshot(f.home), before)
     assert.deepEqual(output.result.problems.map(problem => problem.args), [['Hermes Agent']])
     assert.deepEqual(output.result.done, [])
+  })
+})
+
+for (const mode of ['connect', 'auto', 'remove']) test(`Hermes legacy ${mode} preserves foreign exact-basename hooks`, () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const original = 'model: synthetic\nhooks:\n  post_tool_call:\n    - {command: "node ./tools/progress-hook.mjs --hook-version 1 --hook-event post_tool_call --plan-event --agent hermes --progress-file ./synthetic-progress.md", matcher: external, timeout: 5}\n  post_llm_call:\n    - {command: "sh ./tools/progress-report.sh hermes turn", matcher: external, timeout: 5}\n  on_session_start:\n    - {command: "node ./tools/keep-this.mjs", timeout: 5}\n'
+  writeFileSync(config, original)
+  f.run(f.request(mode))
+  const after = readFileSync(config, 'utf8')
+  for (const line of original.split('\n').filter(line => line.includes('command:'))) assert.ok(after.includes(line), `${mode} removed a foreign event/command`)
+  if (mode === 'remove') assert.equal(after, original, 'No prior install means there is no managed hook to remove')
+}))
+
+test('Hermes legacy removal refuses ambiguous copies of its managed plan hook', () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  f.run(f.request('connect'))
+  const installed = readFileSync(config, 'utf8')
+  const item = installed.match(/^    - \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+), matcher: todo\}$/m)
+  assert.ok(item)
+  const ambiguous = installed.replace(item[0], `${item[0]}\n${item[0]}`)
+  writeFileSync(config, ambiguous)
+  const output = f.run(f.request('remove'))
+  assert.equal(readFileSync(config, 'utf8'), ambiguous)
+  assert.ok(output.result.problems.some(one => one.message === 'connectRemoveFailed'))
+  assert.ok(existsSync(join(dirname(f.progress), 'progress-hook.mjs')), 'Refused removal retains the worker still referenced by the config')
+}))
+
+for (const kind of ['complete', 'plan-only', 'foreign']) test(`Hermes legacy doctor classifies ${kind} hooks without rewriting them`, () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  f.run(f.request('connect'))
+  const installed = readFileSync(config, 'utf8')
+  if (kind === 'plan-only') {
+    const item = installed.match(/^    - \{command: ("(?:\\.|[^"\\])*"), timeout: (\d+), matcher: todo\}$/m)
+    assert.ok(item)
+    writeFileSync(config, `hooks:\n  post_tool_call:\n${item[0]}\n`)
+  } else if (kind === 'foreign') writeFileSync(config, 'hooks:\n  post_tool_call:\n    - {command: "node ./tools/progress-hook.mjs --hook-version 1 --hook-event post_tool_call --plan-event --agent hermes --progress-file ./synthetic-progress.md", matcher: external, timeout: 5}\n')
+  const before = readFileSync(config, 'utf8')
+  const checked = spawnSync(process.execPath, [f.script, '--codex-doctor', '--agent', 'hermes', '--home', f.home, '--hermes-dir', join(f.home, '.hermes'), '--json'], {
+    encoding: 'utf8', windowsHide: true, timeout: 10000,
+    env: { ...process.env, HERMES_HOME: join(f.home, '.hermes') },
+  })
+  assert.equal(checked.status, 0, checked.stderr)
+  const result = JSON.parse(checked.stdout)
+  assert.equal(result.reportHook, kind === 'foreign' ? 'none' : 'connect')
+  if (kind !== 'foreign') assert.equal(result.problem, undefined)
+  assert.equal(readFileSync(config, 'utf8'), before, 'Doctor only observes the config')
+}))
+
+for (const kind of ['config', 'explicit', 'precedence', 'baked']) test(`Hermes legacy doctor respects ${kind} progress without a recorded path`, () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const progress = join(f.home, 'legacy chosen data', 'progress.md')
+  f.run(f.request('connect', { progress }))
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  delete state.connectedProgress
+  const beforeControl = `${JSON.stringify(state, null, 2)}\n`
+  writeFileSync(f.control, beforeControl)
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const before = readFileSync(config, 'utf8')
+  const env = { ...process.env, HERMES_HOME: join(f.home, '.hermes'), CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: '' }
+  if (kind === 'config') env.CLAUDE_CONFIG_DIR = dirname(progress)
+  if (kind === 'explicit' || kind === 'precedence') env.CLAUDE_PROGRESS_FILE = progress
+  if (kind === 'precedence') env.CLAUDE_CONFIG_DIR = join(f.home, 'other config')
+  const runner = kind === 'baked' ? join(dirname(progress), 'agent-board.mjs') : f.script
+  const checked = spawnSync(process.execPath, [runner, '--codex-doctor', '--agent', 'hermes', '--home', f.home, '--hermes-dir', join(f.home, '.hermes'), '--json'], {
+    env, encoding: 'utf8', windowsHide: true, timeout: 10000,
+  })
+  assert.equal(checked.status, 0, checked.stderr)
+  assert.equal(JSON.parse(checked.stdout).reportHook, 'connect')
+  assert.equal(readFileSync(config, 'utf8'), before)
+  assert.equal(readFileSync(f.control, 'utf8'), beforeControl, 'Doctor does not migrate the old record')
+}))
+
+test('Hermes legacy removal restores a config that originally had no hooks section', async () => {
+  for (const original of ['model:\n  default: synthetic\n', 'model: synthetic\n# Synthetic setting stays\n', 'model:\r\n  default: synthetic\r\n']) await fixture(async f => {
+    mkdirSync(join(f.home, '.hermes'))
+    const config = join(f.home, '.hermes', 'config.yaml')
+    writeFileSync(config, original)
+    f.run(f.request('connect'))
+    f.run(f.request('remove'))
+    assert.equal(readFileSync(config, 'utf8'), original)
+  })
+})
+
+for (const mode of ['remove', 'connect']) test(`Hermes legacy ${mode} finds its plan hook written under another Node`, () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const original = 'model: synthetic\n'
+  writeFileSync(config, original)
+  f.run(f.request('connect'))
+  const installed = readFileSync(config, 'utf8')
+  // The same install, as an earlier connect under another Node executable wrote it.
+  const otherNode = installed.replace(/(command: "\\")[^"\\]*(\\" \\"--input-type=commonjs\\")/, '$1/synthetic/other-node/bin/node$2')
+  assert.notEqual(otherNode, installed)
+  writeFileSync(config, otherNode)
+  f.run(f.request(mode))
+  const after = readFileSync(config, 'utf8')
+  if (mode === 'remove') assert.equal(after, original, 'Removal takes out the plan hook another Node wrote')
+  else assert.equal(after, installed, 'A connect replaces the old plan hook instead of adding a second one')
+}))
+
+// Windows folder names cannot hold a double quote.
+test('Hermes legacy removal keeps the reporter hooks of a folder whose path differs by a hook-version-like segment', { skip: process.platform === 'win32' ? 'folder names with double quotes are POSIX only' : false }, () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const ours = join(f.home, 'data "--hook-version" "1" x', 'progress.md')
+  const other = join(f.home, 'data "--hook-version" "2" x', 'progress.md')
+  f.run(f.request('connect', { progress: other }))
+  // The other install is not a recorded earlier path of this one.
+  const state = JSON.parse(readFileSync(f.control, 'utf8'))
+  delete state.connectedProgress
+  writeFileSync(f.control, `${JSON.stringify(state, null, 2)}\n`)
+  const before = readFileSync(config, 'utf8')
+  f.run(f.request('remove', { progress: ours }))
+  assert.equal(readFileSync(config, 'utf8'), before)
+}))
+
+test('Hermes legacy connect and removal keep the blank lines a |+ block scalar owns', async () => {
+  for (const [original, expected] of [
+    ['description: |+\n  keep\n\nhooks: {}\n', 'description: |+\n  keep\n\n'],
+    ['description: |+\n  keep\n\n', 'description: |+\n  keep\n\n'],
+    ['notes:\n  text: >+\n    keep\n\nhooks: {}\n', 'notes:\n  text: >+\n    keep\n\n'],
+    // Text inside the block that looks like a header does not decide.
+    ['description: |+\n  example: |-\n\nhooks: {}\n', 'description: |+\n  example: |-\n\n'],
+  ]) await fixture(async f => {
+    mkdirSync(join(f.home, '.hermes'))
+    const config = join(f.home, '.hermes', 'config.yaml')
+    writeFileSync(config, original)
+    f.run(f.request('connect'))
+    assert.ok(readFileSync(config, 'utf8').startsWith(expected), 'The connect keeps the block and its blank lines')
+    f.run(f.request('remove'))
+    assert.equal(readFileSync(config, 'utf8'), expected)
   })
 })
 

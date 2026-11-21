@@ -103,7 +103,6 @@ export const reportCommand = (script: string, agent: string, event: 'prompt' | '
 // A hook command this plugin wrote: it runs the reporter script by its path, so a person's
 // own `my-progress-report.sh` is not taken for ours.
 const OURS = /(?:^|[\\/'"\s])progress-report\.(?:sh|ps1)(?:\\?['"])?(?:\s|$)/
-const HERMES_OURS = new RegExp(`${OURS.source}|[\\\\/]progress-hook\\.mjs[\\s\\S]*--hook-version[\\s\\S]*--hook-event[\\s\\S]*post_tool_call[\\s\\S]*--plan-event[\\s\\S]*--agent[\\s\\S]*hermes[\\s\\S]*--progress-file`)
 
 // Whether a config already runs our reporter, whatever else taking our hooks out would tidy.
 export const hasOurHook = (text: string): boolean => OURS.test(text)
@@ -228,7 +227,7 @@ export const withoutSection = (text: string): string => {
 // installed (its folder under the home directory); `edit` turns the file's text into the
 // new text, or null when the file cannot be read as JSON and is left alone.
 // `node` and `progress` build Antigravity's commands; only a connect that writes them passes them.
-export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; opencodeHome?: string; board?: string; node?: string; antigravityNode?: string; progress?: string; s?: Strings }
+export type ConnectContext = { home: string; sep: string; isWindows: boolean; script: string; inbox: string; codexHome: string; grokHome: string; hermesHome: string; openclawHome: string; opencodeHome?: string; board?: string; node?: string; antigravityNode?: string; progress?: string; previousProgress?: string; s?: Strings }
 
 export type AgentHook = {
   agent: string
@@ -312,6 +311,23 @@ const indentOf = (line: string): number => line.length - line.trimStart().length
 const isContent = (line: string): boolean => line.trim() !== '' && !line.trimStart().startsWith('#')
 const isHermesItem = (line: string): boolean => /^-(?:\s|$)/.test(line.trimStart())
 
+// A block scalar that keeps its final line breaks (`|+`, `>+`) owns the blank lines after its
+// text: they are part of the person's setting, not a separator ours may add or take away.
+const BLOCK_SCALAR = /(?:^[ \t]*-|:)(?:[ \t]+[!&]\S*)*[ \t]+[|>]([1-9+-]{0,2})[ \t]*(?:#.*)?\r?$/
+// Inside a block, a line that looks like a header (`example: |-`) is only text, so the outermost
+// header above decides.
+const isKeptBlankAt = (lines: readonly string[], at: number): boolean => {
+  let inner = Infinity
+  let chomping: string | undefined
+  for (let index = at - 1; index >= 0 && inner > 0; index -= 1) {
+    const line = lines[index] ?? ''
+    if (!isContent(line) || indentOf(line) >= inner) continue
+    chomping = BLOCK_SCALAR.exec(line)?.[1] ?? chomping
+    inner = indentOf(line)
+  }
+  return chomping?.includes('+') === true
+}
+
 // Whether the key on line `at` has anything under it (YAML lets a list sit at the key's own
 // indent).
 const hasChildren = (lines: string[], at: number): boolean => {
@@ -340,8 +356,6 @@ const hermesItems = (lines: readonly string[], owns: RegExp = OURS): Array<[numb
 
   return items
 }
-
-export const hasOurHermesHook = (text: string): boolean => hermesItems(text.split('\n'), HERMES_OURS).length > 0
 
 const stripHermesHooks = (text: string, isKeepingTop: boolean, owns: RegExp = OURS): string => {
   const lines = text.split('\n')
@@ -392,7 +406,10 @@ const addHermesHooks = (base: string, events: HermesEvents, isCrLf: boolean): st
   const at = lines.findIndex(line => /^hooks\s*:/.test(line))
   if (at === -1) {
     const added = ['hooks:', ...events.flatMap(([event, command, matcher]) => [`  ${event}:`, `    ${item(command, matcher)}`])].join(`${eol}\n`)
-    return base.trim() === '' ? `${added}${eol}\n` : `${base.replace(/(?:\r?\n)+$/, '')}${eol}\n${eol}\n${added}${eol}\n`
+    if (base.trim() === '') return `${added}${eol}\n`
+    // After a `|+` block at the end, its blank lines stay as they are and no separator is added.
+    if (isKeptBlankAt(base.split('\n'), base.split('\n').length)) return `${base.endsWith('\n') ? base : `${base}${eol}\n`}${added}${eol}\n`
+    return `${base.replace(/(?:\r?\n)+$/, '')}${eol}\n${eol}\n${added}${eol}\n`
   }
   if (!TOP_HOOKS.test(lines[at] ?? '')) return null
   let end = lines.findIndex((line, index) => index > at && isContent(line) && indentOf(line) === 0)
@@ -508,7 +525,7 @@ type HermesSetupEdit = { text: string; hasOwned: boolean; isComplete: boolean; r
 
 // Only the top-level hooks map and the recorded event/command pair can identify a setup entry.
 // Ambiguous copies are left alone rather than claiming both.
-export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string>, isRemoving: boolean): HermesSetupEdit | null => {
+export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string | readonly string[]>, isRemoving: boolean, keyOf: (command: string) => string = command => command): HermesSetupEdit | null => {
   const lines = text.split('\n')
   const tops = lines.flatMap((line, at) => /^(?:hooks|"hooks"|'hooks')\s*:/.test(line) ? [at] : [])
   const top = tops[0]
@@ -551,7 +568,8 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
         if (parsed?.isSimple !== true) return null
         const { command } = parsed
         const item = parts.join('\n')
-        if (command !== previous) {
+        const isPrevious = (typeof previous === 'string' ? [previous] : previous ?? []).some(one => keyOf(one) === keyOf(command))
+        if (!isPrevious) {
           // An entry that already runs this release's command is the board's own (an earlier
           // release wrote the same bytes), even when no install record names it: adopt it
           // instead of refusing the whole file.
@@ -578,7 +596,12 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
       if (!isRemoving && recorded.has(event) && !owned.has(event) && unrecognized.has(event)) refused.add(event)
     }
     if (isRemoving && owned.size > 0 && /^hooks\s*:\s*$/.test(lines[top] ?? '') &&
-        !lines.slice(top + 1, end).some((line, at) => isContent(line) && !drop.has(top + 1 + at))) drop.add(top)
+        !lines.slice(top + 1, end).some((line, at) => isContent(line) && !drop.has(top + 1 + at))) {
+      drop.add(top)
+      // Adding a new top-level map separates it with one blank line; remove that separator too,
+      // unless a `|+` block above owns it.
+      if (top > 0 && (lines[top - 1] ?? '').trim() === '' && !isKeptBlankAt(lines, top - 1)) drop.add(top - 1)
+    }
   }
   const hasOwned = owned.size > 0
   const isComplete = [...recorded.keys()].every(event => owned.has(event))
@@ -589,6 +612,20 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
   const kept = lines.filter((_, at) => !drop.has(at)).join('\n')
   const next = isRemoving ? kept : addHermesHooks(kept, events, text.includes('\r\n'))
   return next === null ? null : { text: next, hasOwned, isComplete, refused: [...refused] }
+}
+
+const hermesEvents = (ctx: ConnectContext): HermesEvents => {
+  const folder = ctx.script.replace(/[\\/][^\\/]*$/, '')
+  const progress = ctx.progress ?? [folder, 'progress.md'].join(ctx.sep)
+  const plan = planEvents.hermes!
+  const command = hookCommandArgs(ctx.node ?? 'node', ctx.home, 'hermes', [folder, HOOK_WORKER].join(ctx.sep), progress, plan.event)
+    .map(word => JSON.stringify(ctx.isWindows ? word.replace(/\\/g, '/') : word)).join(' ')
+  return [
+    ['post_llm_call', reportCommand(ctx.script, 'hermes', 'turn', ctx.isWindows)],
+    ['on_session_finalize', reportCommand(ctx.script, 'hermes', 'end', ctx.isWindows)],
+    ['pre_llm_call', reportCommand(ctx.script, 'hermes', 'prompt', ctx.isWindows)],
+    ...(ctx.board === undefined ? [] : [[plan.event, command, plan.matcher] as [string, string, string]]),
+  ]
 }
 
 export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
@@ -672,18 +709,33 @@ export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
       dir: ctx.hermesHome,
       file: [ctx.hermesHome, 'config.yaml'].join(ctx.sep),
       edit: (text, remove) => {
-        if (remove) return withoutHermesHooks(text, HERMES_OURS)
-        const folder = ctx.script.replace(/[\\/][^\\/]*$/, '')
-        const progress = ctx.progress ?? [folder, 'progress.md'].join(ctx.sep)
-        const plan = planEvents.hermes!
-        const command = hookCommandArgs(ctx.node ?? 'node', ctx.home, 'hermes', [folder, HOOK_WORKER].join(ctx.sep), progress, plan.event)
-          .map(word => JSON.stringify(ctx.isWindows ? word.replace(/\\/g, '/') : word)).join(' ')
-        return withHermesHooks(text, [
-          ['post_llm_call', turn('hermes')],
-          ['on_session_finalize', end('hermes')],
-          ['pre_llm_call', prompt('hermes')],
-          ...(ctx.board === undefined ? [] : [[plan.event, command, plan.matcher] as [string, string, string]]),
-        ], HERMES_OURS)
+        const origins = [ctx]
+        // Only the connection's recorded old path qualifies for a data-folder migration.
+        if (ctx.previousProgress !== undefined) {
+          const folder = ctx.previousProgress.replace(/[\\/][^\\/]*$/, '')
+          origins.push({ ...ctx, script: [folder, `progress-report.${ctx.isWindows ? 'ps1' : 'sh'}`].join(ctx.sep), progress: ctx.previousProgress })
+        }
+        const recorded = new Map<string, string[]>()
+        for (const origin of origins) for (const [event, command] of hermesEvents(origin)) {
+          // Older POSIX reporters omitted the shell failure guard; their exact path still matches.
+          recorded.set(event, [...(recorded.get(event) ?? []), command, command.replace(/ \|\| true$/, '')])
+        }
+        // The plan hook names the Node that ran the connect, and its bootstrap and hook version
+        // change with releases. Our worker, event, agent and progress file still mark it as ours,
+        // so a connect or removal under another Node finds the hook an earlier one wrote.
+        // Only a command whose words have the plan hook's shape is read this way; a reporter
+        // command is compared whole.
+        const keyOf = (command: string): string => {
+          const quoted = command.match(/"(?:\\.|[^"\\])*"/g) ?? []
+          if (quoted.join(' ') !== command) return command
+          let words: string[]
+          try { words = quoted.map(word => JSON.parse(word) as string) } catch { return command }
+          const isPlan = words[1] === '--input-type=commonjs' && words[2] === '-e' &&
+            /^eval\(Buffer\.from\('[A-Za-z0-9+/]*={0,2}','base64'\)\.toString\('utf8'\)\)$/.test(words[3] ?? '') &&
+            words[5] === '--hook-version' && /^\d+$/.test(words[6] ?? '')
+          return isPlan ? JSON.stringify(words.map((word, at) => at === 0 || at === 3 || at === 6 ? '' : word)) : command
+        }
+        return editHermesSetup(text, hermesEvents(ctx), recorded, remove, keyOf)?.text ?? null
       },
     },
     {
