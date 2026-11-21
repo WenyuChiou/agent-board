@@ -10,6 +10,8 @@
     "bin/agent-board.mjs",
     "scripts/setup-agent.mjs",
     "scripts/setup-discovery.mjs",
+    "scripts/setup-command.mjs",
+    "scripts/setup-command.d.mts",
     "scripts/setup-codex.mjs",
     "scripts/bundle-text.mjs",
     "hooks/board-script.ts",
