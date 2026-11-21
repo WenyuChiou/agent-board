@@ -1,4 +1,4 @@
-import { expireMailboxes, MAILBOX_CAP, mailboxId } from './hook-messages'
+import { expireMailboxes, MAILBOX_CAP, mailboxId, shownWake } from './hook-messages'
 import { FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageId, messageText, OPEN_CAP, pruneMessages, ROUTE_LINES, shownMessage, textHash } from './messaging'
 import type { Connection, MessageState } from './messaging'
 import { addressKey } from './receiver'
@@ -9,6 +9,8 @@ import { sha256 } from './sha256'
 
 // The name a hook gives its mailbox claim, so it can hand back a claim it stopped waiting for (#990).
 export const isClaimRef = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{12}$/.test(value)
+// A turn number an Antigravity hook counted for its conversation (#1396).
+export const isTurnNumber = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) > 0
 export const parseMessageStore = (text: string, now: number): MessageState => {
   let saved: MessageState & { version: unknown }
   try { saved = JSON.parse(text) as MessageState & { version: unknown } } catch { throw new Error('INVALID_MESSAGE_STORE') }
@@ -21,12 +23,12 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
   for (const one of messages) {
     messageId(one.id)
     if (one.framingNonce !== undefined && (typeof one.framingNonce !== 'string' || !/^[0-9a-f]{32}$/.test(one.framingNonce)) || one.awaitsAck !== undefined && typeof one.awaitsAck !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
-    if (one.attempted !== undefined && !(Number.isFinite(one.attempted) && one.attempted > 0)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.attempted !== undefined && !(Number.isFinite(one.attempted) && one.attempted > 0) || one.woke !== undefined && !(Number.isFinite(one.woke) && one.woke > 0) || one.wakeAfter !== undefined && !isTurnNumber(one.wakeAfter)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean' || one.awaitsStart !== undefined && one.awaitsStart !== true) throw new Error('INVALID_MESSAGE_STORE')
     if (one.leftAt !== undefined && !Number.isFinite(one.leftAt)) throw new Error('INVALID_MESSAGE_STORE')
-    if (one.line !== undefined && !ROUTE_LINES.includes(one.line)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.line !== undefined && !ROUTE_LINES.includes(one.line) || one.wake !== undefined && one.wake !== 'sent' && one.wake !== 'failed') throw new Error('INVALID_MESSAGE_STORE')
     if (one.surface !== undefined && (typeof one.surface !== 'string' || one.surface === '' || /[\r\n]/.test(one.surface))) throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
     messageId(one.turn)
@@ -46,6 +48,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
       if (!one || !isMailboxTarget(one.id) || one.id !== mailboxId(messageId(one.agent), messageId(one.session)) || one.scope !== 'mailbox' || one.turn !== 'session' || !Number.isFinite(one.expires)) throw new Error('INVALID_MESSAGE_STORE')
       messageText(one.surface, 100)
       if (one.folderDigest !== undefined && (typeof one.folderDigest !== 'string' || !/^[0-9a-f]{64}$/.test(one.folderDigest)) || one.mcpOwner !== undefined && (typeof one.mcpOwner !== 'string' || !/^[1-9][0-9]*:[^\r\n\0]{1,100}$/.test(one.mcpOwner)) || one.mcpLeaseUntil !== undefined && !Number.isFinite(one.mcpLeaseUntil) || one.contested !== undefined && typeof one.contested !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
+      if (one.busySeq !== undefined && !isTurnNumber(one.busySeq)) throw new Error('INVALID_MESSAGE_STORE')
     }
     if (new Set(saved.mailboxes.map(one => one.id)).size !== saved.mailboxes.length) throw new Error('INVALID_MESSAGE_STORE')
   }
@@ -54,8 +57,13 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
 
 // The answers waiting for a session's next turn, in the shape the page's model reads: no connection (only the
 // running page has those), the mailboxes still open at `now`, and each message as anyone but its receiver sees it.
-export const shownMessages = (state: Pick<MessageState, 'messages' | 'mailboxes'>) =>
-  state.messages.map(one => ({ ...shownMessage(one), ...(isMailboxSurfaceLost(one, state.mailboxes) ? { isSurfaceLost: true as const } : {}) }))
+// isSidecarOn: whether the Antigravity sidecar polls now, which only the page's server knows.
+export const shownMessages = (state: Pick<MessageState, 'messages' | 'mailboxes'>, isSidecarOn?: boolean) =>
+  state.messages.map(one => {
+    const { wake: _wake, ...shown } = shownMessage(one)
+    const wake = shownWake(one, isSidecarOn)
+    return { ...shown, ...(wake === undefined ? {} : { wake }), ...(isMailboxSurfaceLost(one, state.mailboxes) ? { isSurfaceLost: true as const } : {}) }
+  })
 export const queuedMessagingOf = (text: string, now: number) => {
   const state = expireMailboxes(parseMessageStore(text, now), now)
   return { connections: [] as Connection[], mailboxes: state.mailboxes ?? [], messages: shownMessages(state) }

@@ -59,7 +59,7 @@ npx @wenyuchiou/agent-board@next
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` (board page) | Not yet |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page | Not yet |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | Held for the session when its card offers it. Desktop app: checked in a live run; IDE: no run of its own, and it is treated like the app when its hook reports it as the app's surface; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | With its sidecar switched on in Antigravity's Automations page, the board starts a new turn for it; otherwise held for the session when its card offers it. Desktop app: the hold checked in a live run, the new turn not yet; IDE: no run of its own, and it is treated like the app when its hook reports it as the app's surface; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page | Not tested yet |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page | Sent when it is free. No run of its own; its plugin reports it as the terminal, so it is treated the same |
 

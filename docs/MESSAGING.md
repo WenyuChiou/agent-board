@@ -176,7 +176,7 @@ or calls a vendor API directly:
 | Grok Build (`grok`) | Planned (`#1404`) | Pending vendor terms review, receiver wiring, and dated live record (separate from `--allow-resume`). |
 | Hermes Agent (`hermes`) | Planned (`#233`) | Pending vendor terms review, receiver wiring, and dated live record. |
 
-## Antigravity sidecar (#1396, setup half)
+## Antigravity sidecar (#1396)
 
 Antigravity's desktop app runs a sidecar kept in `~/.gemini/config/sidecars/agent-board/` (`sidecar.json`
 and `sidecar.mjs`) only after the person switches it on in the app's Automations page. Setup writes
@@ -184,14 +184,13 @@ those two files only on the person's yes (the `--antigravity-sidecar` flag, or t
 defaults to no) and says that Google's terms may not cover it; it never switches the sidecar on, and an
 agent must not. `remove` takes both files away. The agy TUI runs no sidecars, and a closed app stops them.
 The sidecar touches no Antigravity sign-in, port or token: it uses only Antigravity's own `agentapi`,
-whose path the app gives it, and it never sees a message's text. The board half (the 10-second wait after
-a turn ends, the receipts, the card) is #1396 PR B; until it lands, a board answers the sidecar's poll
-with an error and the sidecar does nothing.
+whose path the app gives it, and it never sees a message's text. What the board does with it is under
+"The board's half" below.
 
 The contract, as the sidecar speaks it. It finds the board the way the hooks do, from `server.lock` and
 `server.owner` in the messages folder; with no board it only checks those files every 30 s. While a board
-answers it polls every 2 s. **Each poll is the board's sign that the sidecar is alive**; the board decides
-in PR B how old a poll may be.
+answers it polls every 2 s. **Each poll is the board's sign that the sidecar is alive**; the board counts it as
+on for 34 s after its last poll (below).
 
 | Call | Body | Answer |
 | --- | --- | --- |
@@ -204,7 +203,7 @@ For each wake the sidecar asks `wake-attempt` once and goes on only on `{"ok":tr
 (that is the English line; the sidecar sends the line in the setup language; one argument list, no shell, a 60 s limit). Exit 0 reports `sent`; anything else reports `failed` with a
 short code. The turn-start hook then hands the queued message over as it does for any hook mailbox.
 
-What each side may rely on (PR B writes the board's half to this):
+What each side may rely on:
 
 - A wake's `id` and `nonce` match a message id, `[A-Za-z0-9][A-Za-z0-9_-]{0,127}`. One that does not is printed
   as `INVALID_WAKE`; the sidecar asks nothing about it and runs nothing.
@@ -231,6 +230,37 @@ What each side may rely on (PR B writes the board's half to this):
 - Where the connector already manages Antigravity's hooks, setup still writes the two sidecar files, on the same
   yes, under a record of their own (`install-antigravity-sidecar.json`); it takes over none of the connector's
   hooks, and `remove` takes the sidecar files out.
+
+### The board's half
+
+- **Route.** While the sidecar is on, the desktop app's idle route is `now` (`hooks/receivers/sidecar-antigravity.ts`);
+  otherwise the hook mailbox's `nextTurn` route stands, as it always does for agy TUI. The sidecar counts as on for 34 s
+  after its last poll: one 30 s wait after a poll that got no answer, plus two 2 s polls (`SIDECAR_ALIVE_MS`), so one
+  lost answer does not take Send away and a sidecar that stopped is no longer offered within about half a minute.
+- **Which message.** `wake-poll` returns only a message the board sent on that route, still queued and never woken,
+  for a mailbox on `IDE`, and only when it is the message the next turn's hook would take: a peer message or a claim in
+  doubt ahead of it means no wake. The turn's state comes from Antigravity's own hooks, which number its turns, never
+  from progress rows or from any clock (a model may report waiting before its turn ends, and a hook's time is the time
+  its handler ran, not the time of the event). Each conversation has a turn order file in the messages folder, named by
+  its mailbox id: the turn-start hook adds one to `started` and sends that number with its take, and the `Stop` hook sets
+  `stopped` to the number of the turn it ends. Each writes the file under the file's own lock, before any board call;
+  the board only reads it, and keeps the highest number a take sent. A wake is due only when the turn that started last,
+  by the file and by every take the board saw, has had its `Stop`, 10 s after that `Stop`, and once per `Stop`. So a
+  failed take, a failed file write, a waiting report, a repeated event or a clock set back starts no wake into a running
+  turn. No file, or one that does not read, holds every wake; no file is written until a board has made the folder.
+- **Not covered.** Between the board's yes and the sidecar's `send-message` call the person may start a turn; a `Stop`
+  hook that starts after the next turn's start reads that turn's number and ends it while it runs (only a turn number
+  in the `Stop` input, or the app waiting for its `Stop` hook, closes that); a turn whose turn-start hook never ran
+  leaves no mark. What the app does with `send-message` into a running turn, and whether it waits for its `Stop` hook,
+  are the live run's to record. Turn order files are kept, one small file per conversation.
+- **Attempt.** The board saves the start (`woke`, a field of its own; OpenCode's `attempted` rules never read it) before
+  it answers `{"ok":true}`. The `nonce` is worked out from the message, so the board keeps none. The hook mailbox hands the
+  message over in the turn the wake starts; a hook that hands its claim back puts the message back in the queue at once,
+  for the next turn, and never to a second wake.
+- **Report.** The first report stays. Until the hook hands the message over, the card reads that Antigravity was woken,
+  could not be woken, is being woken with nothing confirmed yet (a start with no report), or that the sidecar is not on
+  (a message sent for a wake whose sidecar has stopped).
+- **Live run.** `docs/validation/2026-11-17-antigravity-wake-live.md` is pending, so the route's rows read Implemented.
 
 ## Local storage
 
@@ -509,9 +539,11 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Host | Surface | Tier | Primitive | Status | Live run | Receiver | Idle | Working | Ended |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Antigravity | 2.0 Desktop App | 3 | Unknown | Verified | [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | none · no live note |
+| Antigravity | 2.0 Desktop App | 1 | Unknown | Implemented | Not tested | [hooks/receivers/sidecar-antigravity.ts](../hooks/receivers/sidecar-antigravity.ts) | now · [docs/validation/2026-11-17-antigravity-wake-live.md](../docs/validation/2026-11-17-antigravity-wake-live.md) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | none · no live note |
 | Antigravity | agy TUI | 3 | Unknown | Verified | [docs/validation/2026-11-12-antigravity-tui-mailbox-live.md](../docs/validation/2026-11-12-antigravity-tui-mailbox-live.md) | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-12-antigravity-tui-mailbox-live.md](../docs/validation/2026-11-12-antigravity-tui-mailbox-live.md) | nextTurn · no live note | none · no live note |
 | Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
 | Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | none · no live note |
+| Antigravity | IDE | 1 | Unknown | Implemented | Not tested | [hooks/receivers/sidecar-antigravity.ts](../hooks/receivers/sidecar-antigravity.ts) | now · [docs/validation/2026-11-17-antigravity-wake-live.md](../docs/validation/2026-11-17-antigravity-wake-live.md) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | none · no live note |
 | Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | stepEnd · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | none · no live note |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
