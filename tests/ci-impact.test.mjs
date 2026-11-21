@@ -563,19 +563,40 @@ test('the budgeted slow files go to different parts, and the parts together run 
   }
 })
 
-test('in seven Windows board parts each part starts from its self-parted share, and none is expected to take over 400 s (#1733)', async () => {
-  const { partFiles, selfPartedTests, BOARD_FILE_BUDGETS_MS } = await import('../scripts/ci-impact.mjs')
+test('in seven Windows board parts each part starts from its self-parted share, and none is expected to take over 440 s (#1733, #1757)', async () => {
+  const { partFiles, selfPartedTests, BOARD_FILE_BUDGETS_MS, BOARD_SELF_PARTED_SHARES_MS } = await import('../scripts/ci-impact.mjs')
   // The board set main's run 44651103054 planned on 5419f63b, where Windows Node 22 part 1/7 took 483.2 s of its 480 s.
   const files = ['1317-repro', 'accepted-disconnect', 'answer-guidance', 'antigravity-ack', 'antigravity-sidecar', 'approvals', 'background-resume', 'board-dock', 'board-entry', 'board-json', 'board-status', 'board-storage', 'board-surfaces', 'board', 'checkbox-identity', 'classifier-exit-proof', 'codex-done-lifecycle', 'codex-fallback', 'codex-host', 'codex-local', 'codex-project-move', 'codex-resume-guidance', 'connect-worker', 'deepseek-receiver', 'delivery-states', 'folder-identity', 'folder-watchers', 'hook-declarations', 'host-upgrade', 'legacy-connect', 'local-agent-manifest', 'local-lock', 'mcp-tools', 'merge-check', 'messaging-matrix', 'opencode-receiver', 'page-look', 'page-regressions', 'page-state', 'page-titles', 'pane-queued', 'parity', 'path-journeys', 'performance-budgets', 'plugin-tests', 'preflight-lock-policy', 'prompt-hooks', 'question-clarity', 'queued-count', 'readme-codex-trust', 'report-tail', 'report-validation', 'row-keys', 'row-states-surfaces', 'runtime-folder', 'serve-opener', 'serve-watch', 'session-liveness', 'settings-agents', 'settings-symlink', 'setup-board-command', 'setup-guidance', 'setup-readme', 'setup-remove', 'setup-sidecar', 'setup-terminal', 'tidy', 'view-index-mutation', 'ws-stdio'].map(name => 'tests/' + name + '.test.mjs')
-  // What codex-local, board, opencode-receiver and legacy-connect took together in each part, from nine Windows runs
-  // (44615703631 to 44697238483) and legacy-connect's 21 whole runs (#1741); and a file's slowest Windows time, read
-  // back from its budget (that time x 1.3 / 0.7), else 5 s.
-  const shares = [262, 255, 268, 268, 260, 252, 271]
+  // What codex-local, board, opencode-receiver and legacy-connect take together in each part, as the split counts it
+  // (measured again on main 9313b838, #1757); and a file's slowest Windows time, read back from its budget (that time
+  // x 1.3 / 0.7), else 5 s.
+  const shares = BOARD_SELF_PARTED_SHARES_MS[7].map(ms => ms / 1000)
   const slowest = path => BOARD_FILE_BUDGETS_MS[path] !== undefined ? BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3 / 1000 : 5
   const parts = Array.from({ length: 7 }, (_, i) => partFiles(files, (i + 1) + '/7'))
   const expected = parts.map((part, i) => Math.round(shares[i] + part.filter(path => !selfPartedTests.includes(path)).reduce((sum, path) => sum + slowest(path), 0)))
-  // 400 s leaves a part 20% for a slow runner under its 480 s budget.
-  assert.ok(expected.every(seconds => seconds <= 400), 'expected seconds per part: ' + expected.join(' '))
+  // The shares grew from 1836 s in all to 2018 s (#1757), so no split of seven parts keeps the 20% this test once
+  // left: 440 s leaves about 8% under the 480 s budget. More room needs an eighth part, a change to the workflow.
+  assert.ok(expected.every(seconds => seconds <= 440), 'expected seconds per part: ' + expected.join(' '))
+  assert.deepEqual(parts.flat().filter(path => !selfPartedTests.includes(path)).sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
+})
+
+test('with the setup files #1356 added at their measured weights, no Windows board part of main 9313b838 is expected over 440 s on either Node version (#1757)', async () => {
+  const { partFiles, selfPartedTests, BOARD_FILE_BUDGETS_MS } = await import('../scripts/ci-impact.mjs')
+  // The board set main's run 44881995497 planned on 9313b838, where Windows part 6/7 took 491.5 s (Node 24) and 498.7 s
+  // (Node 22) of its 480 s.
+  const files = ['1317-repro', 'accepted-disconnect', 'answer-guidance', 'antigravity-ack', 'antigravity-sidecar', 'approvals', 'background-resume', 'board-dock', 'board-entry', 'board-json', 'board-status', 'board-storage', 'board-surfaces', 'board', 'checkbox-identity', 'classifier-exit-proof', 'codex-done-lifecycle', 'codex-fallback', 'codex-host', 'codex-local', 'codex-may-be-closed', 'codex-process', 'codex-project-move', 'codex-resume-guidance', 'connect-worker', 'deepseek-receiver', 'delivery-states', 'folder-identity', 'folder-watchers', 'hook-declarations', 'host-upgrade', 'legacy-connect', 'local-agent-manifest', 'local-lock', 'mcp-tools', 'merge-check', 'messaging-matrix', 'opencode-receiver', 'page-look', 'page-regressions', 'page-state', 'page-titles', 'pane-queued', 'parity', 'path-journeys', 'performance-budgets', 'plugin-tests', 'preflight-lock-policy', 'prompt-hooks', 'question-clarity', 'queued-count', 'readme-codex-trust', 'report-tail', 'report-validation', 'row-keys', 'row-states-surfaces', 'runtime-folder', 'serve-opener', 'serve-watch', 'session-liveness', 'settings-agents', 'settings-symlink', 'setup-board-command', 'setup-command-launcher-context', 'setup-command-preview', 'setup-command-stop-context', 'setup-command-trust-context', 'setup-command', 'setup-guidance-followup', 'setup-guidance', 'setup-new-agent-trust', 'setup-readme', 'setup-remove', 'setup-repair-guidance', 'setup-repair-trust', 'setup-sidecar', 'setup-terminal', 'tidy', 'view-index-mutation', 'ws-stdio'].map(name => 'tests/' + name + '.test.mjs')
+  // The new files' Windows times (setup-repair-guidance from that run, the rest local Windows times x 1.42), a budgeted
+  // file's slowest time read back from its budget, else 4.2 s; and what the self-parted files took in each part of that
+  // run on each Node version: the part's total less its other files (#1757).
+  const measured = { 'setup-repair-guidance': 29.9, 'setup-repair-trust': 29.5, 'setup-guidance-followup': 13.8, 'setup-command-trust-context': 13.5, 'setup-new-agent-trust': 12.5, 'setup-command-preview': 11.8, 'setup-command-stop-context': 10.9, 'setup-command-launcher-context': 6.1, 'setup-command': 0.2 }
+  const seconds = path => measured[path.slice(6, -9)] ?? (BOARD_FILE_BUDGETS_MS[path] !== undefined ? BOARD_FILE_BUDGETS_MS[path] * 0.7 / 1.3 / 1000 : 4.2)
+  const shares = { 24: [183, 220, 288, 193, 201, 320, 231], 22: [267, 314, 305, 344, 161, 327, 260] }
+  const parts = Array.from({ length: 7 }, (_, i) => partFiles(files, (i + 1) + '/7'))
+  for (const node of [24, 22]) {
+    const expected = parts.map((part, i) => Math.round(shares[node][i] + part.filter(path => !selfPartedTests.includes(path)).reduce((sum, path) => sum + seconds(path), 0)))
+    // 440 s leaves a part about 8% under its 480 s budget for a slower runner.
+    assert.ok(expected.every(total => total <= 440), 'Node ' + node + ', expected seconds per part: ' + expected.join(' '))
+  }
   assert.deepEqual(parts.flat().filter(path => !selfPartedTests.includes(path)).sort(), files.filter(path => !selfPartedTests.includes(path)).sort())
 })
 
