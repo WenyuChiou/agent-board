@@ -232,6 +232,10 @@ test('the board job starts and stops the sampler on Windows only, each step can 
       assert.match(step, /^ +timeout-minutes: 1\r?$/m, `${name}: cannot hold the job`)
     }
     assert.equal(steps.filter(step => step.includes('ci-sampler.ps1')).length, 2, `${name}: two sampler steps`)
+    // Each sampler step gets a minute of its own on Windows, so the two never take time the job's tests had (#1249).
+    const limit = jobs[name].match(/^ {4}timeout-minutes: \$\{\{ matrix\.os == 'windows-latest' && (\d+) \|\| (\d+) \}\}\r?$/m)
+    assert.ok(limit, `${name}: a Windows limit of its own`)
+    assert.equal(Number(limit[1]), Number(limit[2]) + 2, `${name}: one more minute for each sampler step`)
   }
   assert.equal(text.match(/windows-sampler/g).length, 2 * withSampler.length, 'the record is not uploaded or used elsewhere')
 })

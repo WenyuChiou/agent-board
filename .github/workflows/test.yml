@@ -145,8 +145,8 @@ jobs:
         include: ${{ fromJSON(needs.impact.outputs.board_matrix) }}
     runs-on: ${{ matrix.os }}
     # Split board and messaging, the Windows board set in seven serial parts and the Ubuntu set in two, so each job keeps the ten-minute budget.
-    # A Windows board job has one minute more for the sampler's two steps, so they never take time its tests had (#1249).
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 11 || 10 }}
+    # A Windows board job has two minutes more, one for each of the sampler's two steps, so they never take time its tests had (#1249).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 12 || 10 }}
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
       # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
