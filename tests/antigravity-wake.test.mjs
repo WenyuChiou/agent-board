@@ -584,6 +584,24 @@ test('the board script takes the turn number the hook worker handed it and does 
   }
 })
 
+test('the app\'s idle route says a message sent just as the person starts a turn may join that turn, in en, zh-TW and zh-CN', () => {
+  const file = `## Synthetic\n<!-- auto session=abcdef01 agent=antigravity resume=${APP} state=waiting updated=${new Date(T - 20_000).toISOString()} -->\n### App card\n- [?] Pick one?\n<!-- /auto session=abcdef01 -->\n`
+  const mailboxes = [{ id: mailboxId('antigravity', APP), agent: 'antigravity', session: APP, surface: IDE, turn: 'session', scope: 'mailbox', expires: T + 60_000, origin: 'local' }]
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const view = buildView(parseProgress(file), [], null, T, 0, {}, s)
+    const card = sidecar => serveModel(view, [], s, new Set(), false, { connections: [], mailboxes, messages: [], sidecar }, false, { now: T, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }, RECEIVER_ROUTES).asks[0]
+    assert.equal(typeof s.agyMayJoin, 'string')
+    // The owner accepted this window on 2026-11-18 (plan-0.25.1, M5b) on the condition that the card says so plainly.
+    const idle = card(true)
+    assert.equal(idle.line, 'now')
+    assert.ok(idle.lineText.endsWith(` ${s.agyMayJoin}`), idle.lineText)
+    // A message that waits for the next turn joins no running turn, so its line does not say it.
+    const next = card(false)
+    assert.equal(next.line, 'nextTurn')
+    assert.ok(!next.lineText.includes(s.agyMayJoin), next.lineText)
+  }
+})
+
 test('the card says woken, wake failed, waking or sidecar not on in en, zh-TW and zh-CN', async () => {
   const file = `## Synthetic\n<!-- auto session=abcdef01 agent=antigravity resume=${APP} state=waiting updated=${new Date(T - 20_000).toISOString()} -->\n### App card\n- [?] Pick one?\n<!-- /auto session=abcdef01 -->\n`
   const target = mailboxId('antigravity', APP)
