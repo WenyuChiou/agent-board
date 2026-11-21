@@ -4,9 +4,9 @@ Date: 2026-11-21. Verdict: **cause found and fix shown live.** A report the sand
 
 ## Versions
 
-- agy (Antigravity CLI) 1.5.10, default model, Windows 11 build 10.0.26300.
+- agy (Antigravity CLI) 1.5.10 for the `--print` run and 1.5.13 for the TUI run, default model, Windows 11 build 10.0.26300.
 - Node v24.14.0.
-- The kept test home of `docs/validation/PARITY-CHECKLIST.md`, with agent-board installed from the branch of #1384 (`setup --agent antigravity --apply`).
+- The kept test home of `docs/validation/PARITY-CHECKLIST.md`, with agent-board installed from the branch of #1384 (`setup --agent antigravity --apply`): at 402f1657 for the `--print` run, at 4ee28f78 for the TUI run.
 
 ## Cause
 
@@ -28,8 +28,18 @@ A probe script, run by the model as its own terminal command, tried a file creat
 3. The report printed `"saved": true` and the note that the report reaches the board at the conversation's next step.
 4. After the run, `progress.md` held the block with both steps, its state `waiting`. `agent-board --json` listed the question in `needs`. The spool folder was empty.
 
+## Live run in the interactive TUI
+
+On 4ee28f78's build, where a saved report comes back only through a hook of its own conversation:
+
+1. The same two sandbox keys in the kept home's agy settings (a copy kept, put back afterwards).
+2. `agy -i "<prompt>"` started the TUI with a one-line synthetic prompt as its first message, asking the model to run the board report once with a plan titled "Synthetic TUI 1384", one done step and one `[?]` step. Nothing was typed into the TUI.
+3. The model ran the command in the sandbox; it printed `"saved": true` and the note.
+4. When the turn ended, the conversation's own hook brought the report in: `progress.md` held the block with both steps, its state `waiting`; `agent-board --json` listed the question in `needs`; the spool folder was empty; the hook error log had no new line.
+5. The TUI's footer showed `auto` as its approval mode.
+
 ## Not shown
 
-- The interactive TUI and the Antigravity desktop app with the sandbox on; `--print` runs the same hooks and terminal tool.
+- The Antigravity desktop app with the sandbox on.
 - macOS and Linux sandboxes: the CI tests use a read-only folder instead.
 - `auto` mode itself, which neither account offers.
