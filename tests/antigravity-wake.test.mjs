@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 
@@ -413,7 +414,7 @@ test('a woken message whose turn\'s claim is handed back goes back to the queue 
 const HOOKS = `
 import { registerHooks } from 'node:module'
 import { existsSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 registerHooks({ resolve(specifier, context, next) {
   try { return next(specifier, context) } catch (error) {
     if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
@@ -481,6 +482,103 @@ test('two hooks of one conversation under the lock get increasing turn numbers',
     assert.ok(stoppedAt >= before && stoppedAt <= Date.now(), String(stoppedAt))
     // The file is named by the mailbox id, so no session id is in a path a person sees.
     assert.ok(readdirSync(messages).every(name => !name.includes(APP)), readdirSync(messages).join(' '))
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+})
+
+// The hook worker (hooks/hook-safety.ts) with a stand-in board script, which writes down the turn mark the worker handed
+// it in AGY_SEEN and, with AGY_SLOW set, never ends, like a board script the worker stops at its deadline.
+const standIn = version => `globalThis.AGENT_BOARD = {"hookVersion":${version},}
+import { writeFileSync } from 'node:fs'
+writeFileSync(process.env.AGY_SEEN, JSON.stringify(process.env.AGENT_BOARD_TURN_MARK ?? null))
+if (process.env.AGY_SLOW) setInterval(() => {}, 1000)
+`
+
+test('the hook worker marks an Antigravity turn before the board script runs, so a board script stopped at its deadline still leaves the mark', async () => {
+  const { hookWorker, HOOK_VERSION } = await import('../hooks/hook-safety.ts')
+  const { defaultMessagesDirectory } = await import('../scripts/runtime-folder.ts')
+  const home = mkdtempSync(join(tmpdir(), 'agy-worker-'))
+  const env = { ...process.env }
+  delete env.XDG_RUNTIME_DIR
+  delete env.AGENT_BOARD_TURN_MARK
+  const root = join(home, '.agent-board'), progress = join(root, 'progress.md'), script = join(root, 'agent-board.mjs'), worker = join(root, 'agent-board-hook.mjs'), seen = join(home, 'seen.json')
+  const messages = defaultMessagesDirectory(progress, home, env, process.platform)
+  const file = join(messages, `${mailboxId('antigravity', APP)}.turns.json`)
+  const hook = (event, extra = {}, deadline) => {
+    rmSync(seen, { force: true })
+    const args = ['--hook-version', String(HOOK_VERSION), '--hook-event', event, '--agent-status', '--agent', 'antigravity', '--state', event === 'Stop' ? 'waiting' : 'working', '--event', event, '--progress-file', progress]
+    const result = spawnSync(process.execPath, [worker, ...args, ...(deadline === undefined ? [] : ['--hook-deadline', String(deadline)])], {
+      env: { ...env, AGY_SEEN: seen, ...extra }, input: JSON.stringify({ conversationId: APP, hookEventName: event }), encoding: 'utf8', windowsHide: true, timeout: 10000,
+    })
+    assert.equal(result.status, 0, result.stderr)
+    return existsSync(seen) ? JSON.parse(readFileSync(seen, 'utf8')) : undefined
+  }
+  try {
+    mkdirSync(root, { recursive: true })
+    writeFileSync(script, standIn(HOOK_VERSION))
+    writeFileSync(worker, hookWorker(home, script, 'const isBoardRequest = () => false', root))
+    // A queued event's replay is held, as a live worker's claim holds it, so no replay runs the stand-in again.
+    const named = process.platform === 'win32' ? resolve(progress).toLowerCase() : resolve(progress)
+    writeFileSync(join(root, `hook-recovery-${createHash('sha256').update(named).digest('hex')}.json`), JSON.stringify({ version: 1, pid: process.pid, token: createHash('sha256').update(root).digest('hex').slice(0, 32), created: Date.now() }))
+    // No board has made the messages folder: the worker writes nothing, makes no folder, and hands on no mark, not
+    // even one its own parent set.
+    assert.equal(hook('PreInvocation', { AGENT_BOARD_TURN_MARK: JSON.stringify({ file, mark: 'start', count: 9 }) }), null)
+    assert.equal(existsSync(messages), false)
+    mkdirSync(messages, { recursive: true })
+    // A board script that never ends is stopped at the worker's deadline and its event is queued; the turn's mark is there.
+    hook('PreInvocation', { AGY_SLOW: '1' }, Date.now() + 1500)
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { started: 1, stopped: 0, stoppedAt: 0 })
+    assert.equal(readdirSync(join(root, 'pending')).filter(name => name.endsWith('.json')).length, 1)
+    // A healthy board script is told which file the worker wrote, which mark and the number it holds.
+    const before = Date.now()
+    assert.deepEqual(JSON.parse(hook('Stop')), { file, mark: 'stop', count: 1 })
+    const { stopped, stoppedAt } = JSON.parse(readFileSync(file, 'utf8'))
+    assert.equal(stopped, 1)
+    assert.ok(stoppedAt >= before && stoppedAt <= Date.now(), String(stoppedAt))
+    assert.deepEqual(JSON.parse(hook('PreInvocation')), { file, mark: 'start', count: 2 })
+    // A lock another process holds is waited for only briefly; the worker then leaves the lock and the mark to the
+    // board script, which can wait longer and take over a dead owner's lock.
+    const lock = `${file}.lock`, held = JSON.stringify({ version: 1, pid: process.pid, started: Math.round(performance.timeOrigin), token: 'a'.repeat(32) })
+    writeFileSync(lock, held)
+    assert.equal(hook('Stop'), null)
+    assert.equal(readFileSync(lock, 'utf8'), held)
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).stopped, 1)
+    rmSync(lock)
+    // Nothing is left beside the order file: no lock and no temporary file.
+    assert.deepEqual(readdirSync(messages), [basename(file)])
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+})
+
+test('the board script takes the turn number the hook worker handed it and does not mark the turn again', async () => {
+  const { defaultMessagesDirectory } = await import('../scripts/runtime-folder.ts')
+  const home = mkdtempSync(join(tmpdir(), 'agy-handed-'))
+  const env = { ...process.env }
+  delete env.XDG_RUNTIME_DIR
+  const root = join(home, '.agent-board'), progress = join(root, 'progress.md')
+  const messages = defaultMessagesDirectory(progress, home, env, process.platform)
+  const file = join(messages, `${mailboxId('antigravity', APP)}.turns.json`)
+  const hook = (name, event, handed) => new Promise((done, fail) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', HOOKS], {
+      env: { ...env, AGY_REPO: new URL('../', import.meta.url).href, AGY_HOME: home, AGY_NAME: name, AGY_EVENT: event, AGY_COUNT: '1', AGY_PEERS: name, AGY_SESSION: APP, AGENT_BOARD_TURN_MARK: handed },
+      stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
+    })
+    let errors = ''
+    child.stderr.on('data', chunk => { errors += chunk })
+    child.on('error', fail)
+    child.on('exit', code => code === 0 ? done(JSON.parse(readFileSync(join(home, `seen-${name}.json`), 'utf8'))) : fail(new Error(`${name} exited ${code}: ${errors}`)))
+  })
+  try {
+    mkdirSync(messages, { recursive: true })
+    // The worker already counted turn 3 here.
+    writeFileSync(file, JSON.stringify({ started: 3, stopped: 2, stoppedAt: T }))
+    assert.deepEqual(await hook('a', 'PreInvocation', JSON.stringify({ file, mark: 'start', count: 3 })), [3])
+    // A number for another file or for the other mark is not taken: the board script marks the turn itself.
+    assert.deepEqual(await hook('b', 'PreInvocation', JSON.stringify({ file: `${file}.other`, mark: 'start', count: 3 })), [4])
+    assert.deepEqual(await hook('c', 'PreInvocation', JSON.stringify({ file, mark: 'stop', count: 4 })), [5])
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { started: 5, stopped: 2, stoppedAt: T })
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
   }
