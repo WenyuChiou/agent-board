@@ -745,6 +745,7 @@ export const EN: Strings = {
   reporterFailed: (reason: string): string => `The report could not be saved (${reason}); check the progress file and retry.`,
   reporterInvalidStep: (step: string): string => `Cannot read the step "${step}". Write it as "- [ ] step".`,
   reporterLockDenied: 'Can\'t create files next to progress.md (permission denied); check the folder permissions and retry.',
+  reportSaved: 'This sandbox cannot write the board folder, so the report is saved and reaches the board at the next step of this conversation. Nothing to do.',
   tailRepairFailed: 'The incomplete end could not be safely repaired; nothing changed. Check the progress file before retrying.',
   fileProgress: 'your progress file',
   fileQuestions: 'the question list',

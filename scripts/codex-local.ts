@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, closeSync, constants, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, readlinkSync, readSync, realpathSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
@@ -83,6 +83,20 @@ export const removeCodexTrustEntries = (text: string, keys: string[]): { text: s
 }
 
 const hash = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex')
+// agy's terminal sandbox lets the model write its temporary folder but not the board's (#1384). A report it refuses
+// waits here, one folder per progress.md, until an Antigravity hook, which runs outside the sandbox, brings it in.
+// One folder per account: on a shared /tmp another account could otherwise leave reports for this board.
+const spoolRoot = (): string => join(tmpdir(), process.platform === 'win32' ? 'agent-board-reports' : `agent-board-reports-${process.getuid?.() ?? 'user'}`)
+const reportSpool = (progress: string): string => join(spoolRoot(), hash(resolve(progress)).slice(0, 16))
+// Only a plain folder that this account owns and no other can write is read or written.
+const isOwnSpool = (folder: string): boolean => {
+  try {
+    const info = lstatSync(folder)
+    return info.isDirectory() && !info.isSymbolicLink() && (process.platform === 'win32' || info.uid === process.getuid?.() && (info.mode & 0o077) === 0)
+  } catch { return false }
+}
+const SPOOL_LIMIT = 64
+const SPOOL_MAX_AGE = 24 * 60 * 60 * 1000
 // A file is plain when its bytes survive a read as UTF-8 and a write back. One that does not (a lone FF, Big5) would
 // come back as EF BF BD, so setup refuses it instead of rewriting it (#1607).
 export const isPlain = (bytes: Buffer): boolean => Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes)
@@ -1385,6 +1399,47 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
       queuedFile = file
     }
+    // A write the sandbox refused, not a busy lock: a lock is reported as denied when no file is there to hold it.
+    const isDenied = (error: unknown): boolean => !isBusy(error)
+      && (error instanceof Error && error.message === 'LOCK_DENIED' || ['EACCES', 'EPERM', 'EROFS'].includes(String((error as { code?: unknown } | null)?.code)))
+    // Each saved report runs as the report it was, with its own session and time, before this hook's own event, so
+    // the event lands last. One the board cannot take yet stays for the next hook; one it refuses is dropped.
+    const drainReportSpool = async (): Promise<void> => {
+      const folder = reportSpool(progress)
+      if (!isOwnSpool(spoolRoot()) || !isOwnSpool(folder)) return
+      let names: string[]
+      try { names = readdirSync(folder).filter(name => name.endsWith('.json')).sort() } catch { return }
+      const until = Math.min(hookDeadline - 1500, Date.now() + 900)
+      for (const name of names) {
+        if (Date.now() >= until) return
+        const file = join(folder, name)
+        let saved: Json
+        try {
+          const info = lstatSync(file)
+          if (!info.isFile() || info.size > 2 * 1024 * 1024) throw new Error('PENDING_FILE_UNUSABLE')
+          saved = object(JSON.parse(readFileSync(file, 'utf8')))
+        } catch (error) {
+          if ((error as { code?: string }).code === 'ENOENT') continue
+          saved = {}
+        }
+        const at = saved.at
+        const isValid = saved.version === 1 && saved.agent === 'antigravity' && typeof saved.session === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(saved.session)
+          && typeof saved.progress === 'string' && typeof saved.root === 'string' && typeof at === 'number' && Number.isSafeInteger(at) && at <= Date.now() && Date.now() - at <= SPOOL_MAX_AGE
+          && typeof saved.raw === 'object' && saved.raw !== null && !Array.isArray(saved.raw)
+        // Another board's report keeps its file for that board's hooks.
+        if (isValid && (resolve(saved.progress as string) !== progress || resolve(saved.root as string) !== root)) continue
+        if (isValid) {
+          try {
+            await runCodexLocal(['--codex-report', '--agent', 'antigravity', '--session', saved.session as string, '--progress-file', progress, '--home', home, '--data-dir', root,
+              '--hook-started', String(at), '--hook-deadline', String(until)], boardPath, s, saved.raw as Json)
+          } catch (error) {
+            if (isBusy(error) || isDenied(error) || error instanceof Error && error.message === 'HOOK_TIMEOUT') return
+          }
+        }
+        try { unlinkSync(file) } catch {}
+      }
+    }
+    if (mode === '--agent-status' && agent === 'antigravity' && planInput === undefined) await drainReportSpool()
     let delay = 50
     let processed = 0
     let report: CodexReport | undefined
@@ -1461,6 +1516,19 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         }, { waitMs: value !== undefined && mode !== '--codex-report' && queuedFile === undefined ? 0 : Math.max(0, deadline - performance.now()) })
         break
       } catch (error) {
+        // An Antigravity report bound to its conversation, refused by agy's sandbox: saved where the sandbox lets it
+        // write, for the conversation's next hook to bring in (#1384).
+        if (mode === '--codex-report' && agent === 'antigravity' && planInput === undefined && flag('--session') !== undefined && current !== undefined && isDenied(error)) {
+          const folder = reportSpool(progress)
+          try {
+            mkdirSync(folder, { recursive: true, mode: 0o700 })
+            if (!isOwnSpool(spoolRoot()) || !isOwnSpool(folder)) throw error
+            if (readdirSync(folder).filter(name => name.endsWith('.json')).length >= SPOOL_LIMIT) throw error
+            atomic(join(folder, `${String(started).padStart(15, '0')}-${randomUUID()}.json`), `${JSON.stringify({ version: 1, agent, session: current.session, progress, root, at: started, raw })}\n`)
+          } catch { throw error }
+          output({ session: current.session, saved: true, progress, note: s.reportSaved })
+          return true
+        }
         if (!isBusy(error) && !(error instanceof Error && error.message === 'HOOK_TIMEOUT')) throw error
         // Save before a bounded wait: Windows lock recovery and timer scheduling
         // can consume the remaining budget, after which the write guard must close.

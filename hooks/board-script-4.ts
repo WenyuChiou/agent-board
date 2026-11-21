@@ -8082,7 +8082,7 @@ export const LINES = [
 "  const file = serveFile();",
 "  if (process.platform === \"win32\" && !runtimeUnprotected && !existsSync12(file)) {",
 "    const runtime = process.env.XDG_RUNTIME_DIR;",
-"    const legacy = [runtime ? join25(runtime, basename9(file)) : \"\", join25(tmpdir(), basename9(file))];",
+"    const legacy = [runtime ? join25(runtime, basename9(file)) : \"\", join25(tmpdir2(), basename9(file))];",
 "    for (const previous of new Set(legacy.filter((value) => value !== \"\" && value !== file))) {",
 "      if (!existsSync12(file))",
 "        migratePrivateRuntimeFile(previous, file, (text) => parseRunning(text) !== null);",

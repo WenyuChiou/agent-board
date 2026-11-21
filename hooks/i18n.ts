@@ -783,6 +783,7 @@ export const ZH_TW = {
   reporterFailed: (reason: string): string => `進度回報未能儲存（${reason}），請檢查進度檔後再試。`,
   reporterInvalidStep: (step: string): string => `無法讀取步驟「${step}」，請寫成「- [ ] 步驟」這種格式。`,
   reporterLockDenied: '無法在 progress.md 旁建立檔案（權限遭拒），請檢查資料夾權限後再試。',
+  reportSaved: '這個沙箱無法寫入看板資料夾，所以回報已先存起來，會在這段對話的下一步送到看板，不用做任何事。',
   tailRepairFailed: '無法安全修復不完整的結尾，沒有改任何東西。請檢查進度檔後再重新回報。',
   fileProgress: '你的進度檔',
   fileQuestions: '問題清單',
