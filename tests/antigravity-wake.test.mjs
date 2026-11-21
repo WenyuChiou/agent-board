@@ -389,6 +389,37 @@ test('an order file whose lock is there holds the wake', () => using(w => {
   assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 2000), { ok: true })
 }))
 
+// The two windows the owner accepted on 2026-11-18 (docs/dev/plan-0.25.1.md, M5b), pinned as the board meets them.
+test('a turn whose start hook never ran is woken into, the first window the owner accepted on 2026-11-18, while a turn its hook marked is held', () => using(w => {
+  w.ready(APP); w.ready(APP_2)
+  w.poll(T)
+  w.send(APP, 'm-marked', T)
+  w.send(APP_2, 'm-unmarked', T)
+  // Both people start a turn whose take never reaches the board. In APP the hook wrote the turn's number, which holds the
+  // wake; in APP_2 the hook never ran, so nothing on disk or on the board says a turn runs, and the wake goes in.
+  assert.equal(w.enroll(APP, IDE, T + 500, undefined, { isTakeLost: true }), null)
+  assert.deepEqual(w.poll(T + 1000).wakes.map(one => one.id), ['m-unmarked'])
+}))
+
+test('a turn the person starts after the board\'s yes to a wake takes the message once, the second window the owner accepted on 2026-11-18, and the next wake waits for that turn\'s Stop', () => using(w => {
+  w.ready(APP)
+  w.poll(T)
+  w.send(APP, 'm-yes', T)
+  const [wake] = w.poll(T + 1000).wakes
+  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), { ok: true })
+  // The person starts a turn before the sidecar's send-message lands. The board has said yes and cannot take it back: the
+  // turn's hook hands the message to the person's turn, and the sidecar's send goes into that turn.
+  const handed = w.enroll(APP, IDE, T + 1300)
+  assert.equal(handed.id, 'm-yes')
+  w.hub.act('mailbox-accept', { agent: 'antigravity', session: APP, id: handed.id, nonce: handed.nonce }, T + 1400)
+  w.hub.act('wake-report', { id: wake.id, nonce: wake.nonce, status: 'sent' }, T + 1540)
+  // The message went in once, and one sent during that turn waits for its Stop.
+  w.send(APP, 'm-next', T + 2000)
+  assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
+  w.stop(APP, T + 60_000)
+  assert.deepEqual(w.poll(T + 60_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-next'])
+}))
+
 test('a peer message queued before the board message starts no wake while the next turn would take the peer message', () => using(w => {
   w.ready(APP)
   w.poll(T)
