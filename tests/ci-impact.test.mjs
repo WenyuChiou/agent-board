@@ -685,6 +685,40 @@ test('the heaviest Windows board part, on a runner 1.6 times slower than the tab
   assert.ok(heaviest * 1.6 <= BOARD_PART_BUDGET_MS, 'Windows board part ' + (loads.indexOf(heaviest) + 1) + ' of ' + total + ' is predicted to take ' + seconds(heaviest) + ' s by the table, ' + seconds(heaviest * 1.6) + ' s on a runner 1.6 times slower, over its ' + seconds(BOARD_PART_BUDGET_MS) + ' s budget: add a part or make tests faster. The parts are predicted at ' + loads.map(seconds).join(' ') + ' s.')
 })
 
+// Synthetic job logs in the form GitHub Actions prints them: the step's environment, then Node 24's spec lines.
+const jobLog = (files, { isSerial = false, lines = [] } = {}) => [
+  '  CI_TEST_FILES: ' + JSON.stringify(files),
+  '  CI_TEST_PART: 1/2',
+  ...(isSerial ? ['  CI_TEST_SERIAL: 1'] : []),
+  '##[endgroup]',
+  ...lines,
+].join('\n')
+
+test('the time table counts a repeated title the same way for every title, constructor and __proto__ included (#1762)', async () => {
+  const { readJob } = await import('../scripts/ci-test-times.mjs')
+  const file = 'tests/board.test.mjs'
+  const text = jobLog([file], { isSerial: true, lines: ['✔ constructor (1.5ms)', '✔ __proto__ (2ms)', '✔ constructor (2.5ms)', 'ℹ duration_ms 9'] })
+  const items = readJob(text, { name: 'synthetic', partFiles: files => files, selfPartedTests: [file], readSource: () => '' })
+  assert.deepEqual(Object.entries(items.tests[file]), [['constructor', 1.5], ['__proto__', 2], ['constructor #2', 2.5]])
+})
+
+test('in a run of several files, only a test whose title is in a self-parted file\'s source is timed for that file (#1762)', async () => {
+  const { readJob } = await import('../scripts/ci-test-times.mjs')
+  const sources = {
+    'tests/messaging.test.mjs': "import { test } from 'node:test'\ntest('a message reaches its reader', () => {})\n",
+    'tests/exchange.test.mjs': "import { test } from 'node:test'\ntest('an exchange keeps its order', () => {})\n",
+  }
+  const text = jobLog(Object.keys(sources), { lines: ['✔ a message reaches its reader (3ms)', '✔ an exchange keeps its order (4ms)', 'ℹ duration_ms 20'] })
+  const items = readJob(text, { name: 'synthetic', partFiles: files => files, selfPartedTests: ['tests/messaging.test.mjs'], readSource: file => sources[file] })
+  assert.deepEqual({ ...items.tests['tests/messaging.test.mjs'] }, { 'a message reaches its reader': 3 })
+})
+
+test('a log of a run of several files cut off before its summary is refused, so no table is written from it (#1762)', async () => {
+  const { readJob } = await import('../scripts/ci-test-times.mjs')
+  const text = jobLog(['tests/messaging.test.mjs'], { lines: ['✔ a message reaches its reader (3ms)'] })
+  assert.throws(() => readJob(text, { name: 'cut', partFiles: files => files, selfPartedTests: ['tests/messaging.test.mjs'], readSource: () => "test('a message reaches its reader')" }), /cut: 0 complete test runs in the log/)
+})
+
 test('every Windows and Ubuntu board part runs a share of legacy-connect, so no part holds the whole file beside its share of codex-local (#1741)', async () => {
   const { partFiles, selfPartedTests } = await import('../scripts/ci-impact.mjs')
   // Whole, legacy-connect took 101-179 s on Windows; the part that held it ran 483.2-505.0 s of its 480 s on main's

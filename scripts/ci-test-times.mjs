@@ -68,7 +68,8 @@ export const parseJob = (text, name = '') => {
   return { part, files, isSerial: plain.some(line => /^\s*CI_TEST_SERIAL: 1\s*$/.test(line)) }
 }
 
-const squash = text => text.toLowerCase().replace(/[^\p{L}\p{N}]+/g, '')
+// The u flag makes \p{L} and \p{N} the Unicode letters and digits; without it they are the characters p, {, L, N and }.
+const squash = text => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
 
 // The items of one job log: the total of each file and the time of each top-level test of a self-parted file. A serial run has
 // one Node run for each file, in partFiles order. Any other run has one Node run for all its files, so a test belongs to the
@@ -76,10 +77,11 @@ const squash = text => text.toLowerCase().replace(/[^\p{L}\p{N}]+/g, '')
 export const readJob = (text, { name, partFiles, selfPartedTests, readSource }) => {
   const job = parseJob(text, name)
   const runs = parseRuns(text)
-  const items = { files: {}, tests: {} }
+  // A Map and objects with no prototype, so a test named `constructor` or `__proto__` is counted and kept like any other.
+  const items = { files: Object.create(null), tests: Object.create(null) }
   const add = (title, ms, seen) => {
-    seen[title] = (seen[title] ?? 0) + 1
-    return { key: seen[title] === 1 ? title : title + ' #' + seen[title], ms }
+    seen.set(title, (seen.get(title) ?? 0) + 1)
+    return { key: seen.get(title) === 1 ? title : title + ' #' + seen.get(title), ms }
   }
   if (job.isSerial) {
     const filesOfRun = partFiles(job.files, job.part)
@@ -87,8 +89,8 @@ export const readJob = (text, { name, partFiles, selfPartedTests, readSource }) 
     filesOfRun.forEach((file, i) => {
       const run = runs[i]
       if (!selfPartedTests.includes(file)) { items.files[file] = run.wallMs ?? run.totalMs; return }
-      const seen = {}
-      items.tests[file] = {}
+      const seen = new Map()
+      items.tests[file] = Object.create(null)
       for (const test of run.tests) {
         const { key, ms } = add(test.title, test.ms, seen)
         if (!test.isSkipped) items.tests[file][key] = ms
@@ -96,14 +98,16 @@ export const readJob = (text, { name, partFiles, selfPartedTests, readSource }) 
     })
     return items
   }
+  // A log cut off before the run's summary holds no complete run: refuse it, so the table is never written without its tests.
+  if (runs.length !== 1) throw new Error(name + ': ' + runs.length + ' complete test runs in the log, 1 expected for a run of all its files')
   const owners = Object.fromEntries(selfPartedTests.filter(file => job.files.includes(file)).map(file => [file, squash(readSource(file))]))
-  const seenOf = {}
+  const seenOf = new Map()
   for (const run of runs) for (const test of run.tests) {
     const file = Object.keys(owners).find(path => owners[path].includes(squash(test.title)))
     if (!file) continue
-    seenOf[file] ??= {}
-    items.tests[file] ??= {}
-    const { key, ms } = add(test.title, test.ms, seenOf[file])
+    if (!seenOf.has(file)) seenOf.set(file, new Map())
+    items.tests[file] ??= Object.create(null)
+    const { key, ms } = add(test.title, test.ms, seenOf.get(file))
     if (!test.isSkipped) items.tests[file][key] = ms
   }
   return items
@@ -113,12 +117,12 @@ const sorted = object => Object.fromEntries(Object.keys(object).sort().map(key =
 
 // The table of the smallest time of every item over the jobs. A self-parted file's total is the sum of its tests.
 export const buildTable = jobItems => {
-  const files = {}
-  const tests = {}
+  const files = Object.create(null)
+  const tests = Object.create(null)
   for (const items of jobItems) {
     for (const [file, ms] of Object.entries(items.files)) files[file] = Math.min(files[file] ?? Infinity, ms)
     for (const [file, own] of Object.entries(items.tests)) for (const [key, ms] of Object.entries(own)) {
-      tests[file] ??= {}
+      tests[file] ??= Object.create(null)
       tests[file][key] = Math.min(tests[file][key] ?? Infinity, ms)
     }
   }
