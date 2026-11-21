@@ -86,26 +86,38 @@ export const removeCodexTrustEntries = (text: string, keys: string[]): { text: s
 
 const hash = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex')
 // A report agy's terminal sandbox refuses is printed as one marked line, which agy keeps with the command's output in the
-// conversation's transcript, for the conversation's next hook to bring in (#1384): the conversation, the report's time,
-// the size and digest of its JSON, and the JSON compressed. The whole line is at most 4096 bytes and is read whole.
+// conversation's transcript, for the conversation's next hook to bring in (#1384): the conversation, the board it was
+// for, the report's time, the size and digest of its JSON, and the JSON compressed. The whole line is at most 4096 bytes
+// and is read whole; the JSON is at most what the report command reads from its input.
 const MARK_LIMIT = 4096
+const MARK_INPUT_LIMIT = 1024 * 1024
 const MARK_MAX_AGE = 24 * 60 * 60 * 1000
-const MARK_LINE = /^AGENT_BOARD_REPORT_V1 ([a-zA-Z0-9][a-zA-Z0-9_-]{5,127}) (\d{1,15}) (\d{1,6}) ([0-9a-f]{16}) ([A-Za-z0-9_-]+)$/
-const markLine = (session: string, at: number, raw: Json): string | undefined => {
+const MARK_LINE = /^AGENT_BOARD_REPORT_V1 ([a-zA-Z0-9][a-zA-Z0-9_-]{5,127}) ([0-9a-f]{16}) (\d{1,15}) (\d{1,7}) ([0-9a-f]{16}) ([A-Za-z0-9_-]+)$/
+const boardOf = (progress: string): string => hash(`board:${progress}`).slice(0, 16)
+const markLine = (session: string, progress: string, at: number, raw: Json): string | undefined => {
   const text = Buffer.from(JSON.stringify(raw))
-  const line = `${MARK_PREFIX}${session} ${at} ${text.length} ${hash(text).slice(0, 16)} ${deflateRawSync(text).toString('base64url')}`
-  return Buffer.byteLength(line) <= MARK_LIMIT ? line : undefined
+  const line = `${MARK_PREFIX}${session} ${boardOf(progress)} ${at} ${text.length} ${hash(text).slice(0, 16)} ${deflateRawSync(text).toString('base64url')}`
+  return text.length <= MARK_INPUT_LIMIT && Buffer.byteLength(line) <= MARK_LIMIT ? line : undefined
 }
-const readMark = (line: string): { session: string; at: number; raw: Json } | undefined => {
+const readMark = (line: string): { session: string; board: string; at: number; raw: Json } | undefined => {
   const match = line.length <= MARK_LIMIT ? MARK_LINE.exec(line) : null
   if (match === null) return undefined
   try {
-    const size = Number(match[3])
-    const text = inflateRawSync(Buffer.from(match[5]!, 'base64url'), { maxOutputLength: Math.max(1, size) })
-    if (text.length !== size || hash(text).slice(0, 16) !== match[4]) return undefined
+    const size = Number(match[4])
+    if (size > MARK_INPUT_LIMIT) return undefined
+    const text = inflateRawSync(Buffer.from(match[6]!, 'base64url'), { maxOutputLength: Math.max(1, size) })
+    if (text.length !== size || hash(text).slice(0, 16) !== match[5]) return undefined
     const raw: unknown = JSON.parse(text.toString('utf8'))
-    return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? { session: match[1]!, at: Number(match[2]), raw: raw as Json } : undefined
+    return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? { session: match[1]!, board: match[2]!, at: Number(match[3]), raw: raw as Json } : undefined
   } catch { return undefined }
+}
+// The plan a report applies. A mirrored plan keeps the block's own title, unless it is still the generic or fallback one
+// a lifecycle event wrote. A refused Antigravity report is checked with the same plan its replay applies (#1384).
+const isGenericTitleOf = (agent: string, title: string): boolean => Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(title) || title.startsWith(`${one.localAgentTask(agent)} · `))
+const reportPlan = (payload: Json, previous: CodexReport | null, agent: string): Json => typeof payload.planTitle !== 'string' ? payload : {
+  state: payload.state, steps: payload.steps,
+  title: previous !== null && !isGenericTitleOf(agent, previous.title) && previous.titleSource !== 'fallback' ? previous.title : payload.planTitle,
+  ...(typeof payload.planProject === 'string' ? { project: previous?.project ?? payload.planProject } : {}),
 }
 // A file is plain when its bytes survive a read as UTF-8 and a write back. One that does not (a lone FF, Big5) would
 // come back as EF BF BD, so setup refuses it instead of rewriting it (#1607).
@@ -1175,6 +1187,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     let isFirstSessionEvent = false
     let reportCut = 0
     let reportDropped = 0
+    // Set once this call's own report or event is on the board: a refusal after that is no reason to keep it (#1384).
+    let isBoardWritten = false
     const apply = (entry: Pending, isRawReplay = false): CodexReport => {
       const { mode, agent, session, now, at, status, event, folder = '', folderDigest, folderCanonicalDigest, isBoardPrompt, isDelivery = false, payload, run } = entry
       const displayAt = Date.parse(now)
@@ -1214,13 +1228,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const text = bytes.toString('utf8')
       const previous = original === null || mode === '--codex-report' || isRun ? original : boardConfirmedReport(text, original, owner)
       const clock = previous === null ? now : new Date(Math.max(displayAt, Date.parse(previous.updated))).toISOString()
-      const isGenericTitle = (title: string): boolean => Object.values(STRINGS).some(one => [one.codexTask, one.localAgentTask(agent)].includes(title) || title.startsWith(`${one.localAgentTask(agent)} · `))
-      // A mirrored plan keeps the block's own title, unless it is still the generic or fallback one a lifecycle event wrote.
-      const given = typeof payload.planTitle !== 'string' ? payload : {
-        state: payload.state, steps: payload.steps,
-        title: previous !== null && !isGenericTitle(previous.title) && previous.titleSource !== 'fallback' ? previous.title : payload.planTitle,
-        ...(typeof payload.planProject === 'string' ? { project: previous?.project ?? payload.planProject } : {}),
-      }
+      const isGenericTitle = (title: string): boolean => isGenericTitleOf(agent, title)
+      const given = reportPlan(payload, previous, agent)
       // A reply that ends on a question waits for the person, even after the agent reported its own steps done.
       const state = isBoardPrompt && previous ? previous.state : status === 'working' ? 'working' : previous?.state === 'done' && !(typeof payload.question === 'string' && payload.question.trim() !== '') ? 'done' : status
       const placeholder = localAgentLifecycleStep(state, s)
@@ -1374,6 +1383,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         }
         throw error
       }
+      if (entry === current) isBoardWritten = true
       // Once progress.md holds the event the session record follows it even past the
       // deadline: a record left behind would make the next Stop fail as a stale turn.
       atomic(recordFile, `${JSON.stringify(report, null, 2)}\n`, undefined, true)
@@ -1429,16 +1439,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const isDenied = (error: unknown): boolean => !isBusy(error)
       && (error instanceof Error && error.message === 'LOCK_DENIED' || ['EACCES', 'EPERM', 'EROFS'].includes(String((error as { code?: unknown } | null)?.code)))
     // An Antigravity report bound to its conversation that the board refused, or could not take in time, is printed as
-    // one marked line for the conversation's next hook (#1384). The plan is checked first, so one the board would refuse
-    // fails now instead of being dropped unseen at that hook. A report too large for one line is not printed.
+    // one marked line for the conversation's next hook (#1384). The plan is checked first, as its replay applies it, so
+    // one the board would refuse fails now instead of being dropped unseen at that hook. A report too large for one line
+    // is not printed, and one the board already holds is not kept: its refusal is the answer.
     const markReport = (error: unknown): boolean => {
-      if (mode !== '--codex-report' || agent !== 'antigravity' || planInput !== undefined || flag('--session') === undefined || current === undefined) return false
+      if (mode !== '--codex-report' || agent !== 'antigravity' || planInput !== undefined || flag('--session') === undefined || current === undefined || isBoardWritten) return false
       if (!isDenied(error) && !isBusy(error) && !(error instanceof Error && error.message === 'HOOK_TIMEOUT')) return false
       let original: CodexReport | null = null
       try { original = JSON.parse(readLocal(join(root, 'sessions', `${hash(`antigravity:${current.session}`)}.json`)) ?? 'null') as CodexReport | null } catch {}
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
-      codexReport(original, current.session, current.payload, new Date(started).toISOString(), s)
-      const line = markLine(current.session, started, raw)
+      codexReport(original, current.session, reportPlan(current.payload, original, agent), new Date(started).toISOString(), s)
+      const line = markLine(current.session, progress, started, raw)
       if (line === undefined) throw new Error('REPORT_TOO_LARGE')
       process.stdout.write(`${line}\n`)
       output({ session: current.session, kept: true, progress, note: s.reportKept })
@@ -1450,7 +1461,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // dropped. Where the read ended is kept, so the next hook reads only what came after.
     const bringMarkedReport = async (conversation: string): Promise<void> => {
       const path = raw.transcriptPath
-      const offsetFile = join(root, 'antigravity-reports', `${hash(`antigravity:${conversation}`)}.json`)
+      // The data folder can serve more than one board: each board reads the conversation's lines from where it last ended.
+      const board = boardOf(progress)
+      const offsetFile = join(root, 'antigravity-reports', `${hash(`antigravity:${conversation}:${board}`)}.json`)
       let from: number | undefined
       try {
         const kept = object(JSON.parse(readLocal(offsetFile) ?? '{}'))
@@ -1460,7 +1473,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (read === null) return
       if (read.stray > 0) logPendingDrop(home, { agent, event: current?.event }, 'MARK_OUTSIDE_OUTPUT')
       const now = Date.now()
-      const mark = read.lines.map(readMark).filter(one => one !== undefined && one.session === conversation && one.at <= now && now - one.at <= MARK_MAX_AGE).at(-1)
+      const mark = read.lines.map(readMark).filter(one => one !== undefined && one.session === conversation && one.board === board && one.at <= now && now - one.at <= MARK_MAX_AGE).at(-1)
       if (mark !== undefined) {
         try {
           await runCodexLocal(['--codex-report', '--agent', 'antigravity', '--session', conversation, '--progress-file', progress, '--home', home, '--data-dir', root,

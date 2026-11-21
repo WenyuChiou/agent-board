@@ -15803,10 +15803,11 @@ const denyFolder1384 = async (folder, action) => {
   chmodSync(folder, 0o555)
   try { return await action() } finally { chmodSync(folder, 0o755) }
 }
-// A marked line written by hand, in the format the board prints.
-const markOf1384 = (session, at, raw) => {
+// A marked line written by hand, in the format the board prints, for the board at `progress`.
+const boardOf1384 = progress => createHash('sha256').update(`board:${resolve(progress)}`).digest('hex').slice(0, 16)
+const markOf1384 = (session, at, raw, progress) => {
   const text = Buffer.from(JSON.stringify(raw))
-  return `AGENT_BOARD_REPORT_V1 ${session} ${at} ${text.length} ${createHash('sha256').update(text).digest('hex').slice(0, 16)} ${deflateRawSync(text).toString('base64url')}`
+  return `AGENT_BOARD_REPORT_V1 ${session} ${boardOf1384(progress)} ${at} ${text.length} ${createHash('sha256').update(text).digest('hex').slice(0, 16)} ${deflateRawSync(text).toString('base64url')}`
 }
 const marksIn1384 = stdout => stdout.split(/\r?\n/).filter(line => line.startsWith('AGENT_BOARD_REPORT_V1 '))
 const agy1384 = f => {
@@ -15831,17 +15832,18 @@ const agy1384 = f => {
   const text = () => readFileSync(progress, 'utf8')
   const recordFile = join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${conv}`).digest('hex')}.json`)
   const record = () => JSON.parse(readFileSync(recordFile, 'utf8'))
-  const offsetFile = join(f.root, 'antigravity-reports', `${createHash('sha256').update(`antigravity:${conv}`).digest('hex')}.json`)
+  const offsetFile = join(f.root, 'antigravity-reports', `${createHash('sha256').update(`antigravity:${conv}:${boardOf1384(progress)}`).digest('hex')}.json`)
   // A report the sandbox refuses: its output, which agy keeps, and its time.
   const refused = async input => denyFolder1384(folder, () => {
     const result = report(input)
     assert.equal(result.status, 0, result.stderr)
     const [line] = marksIn1384(result.stdout)
     assert.ok(line, result.stdout)
-    return { stdout: result.stdout, line, at: Number(line.split(' ')[2]) }
+    return { stdout: result.stdout, line, at: Number(line.split(' ')[3]) }
   })
+  const mark = (session, at, raw, board = progress) => markOf1384(session, at, raw, board)
   assert.equal(hook('working', 'PreInvocation').status, 0)
-  return { conv, other, folder, progress, transcript, transcriptOf, entry, output, hookArgs, hook, report, plan, text, record, recordFile, offsetFile, refused }
+  return { conv, other, folder, progress, transcript, transcriptOf, entry, output, hookArgs, hook, report, plan, text, record, recordFile, offsetFile, refused, mark }
 }
 
 test('a refused Antigravity report prints one marked line and writes nothing (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -15850,7 +15852,7 @@ test('a refused Antigravity report prints one marked line and writes nothing (#1
   const { stdout, line, at } = await a.refused(a.plan('Synthetic refused'))
   assert.equal(marksIn1384(stdout).length, 1)
   assert.ok(Buffer.byteLength(line) <= 4096)
-  assert.match(line, new RegExp(`^AGENT_BOARD_REPORT_V1 ${a.conv} \\d+ \\d+ [0-9a-f]{16} [A-Za-z0-9_-]+$`))
+  assert.match(line, new RegExp(`^AGENT_BOARD_REPORT_V1 ${a.conv} ${boardOf1384(a.progress)} \\d+ \\d+ [0-9a-f]{16} [A-Za-z0-9_-]+$`))
   assert.ok(at <= Date.now() && Date.now() - at < 60000)
   const answer = JSON.parse(stdout.slice(stdout.indexOf('{')))
   assert.equal(answer.kept, true)
@@ -15860,18 +15862,15 @@ test('a refused Antigravity report prints one marked line and writes nothing (#1
   assert.equal(existsSync(join(f.root, 'antigravity-reports')), false)
 }))
 
-test('a write refused after the lock still prints the marked line (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+test('a record write refused after the board took the plan fails and prints no marked line (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
   const a = agy1384(f)
-  // The board folder takes the lock; the session record's folder refuses the write that follows.
-  const result = await denyFolder1384(join(f.root, 'sessions'), () => a.report(a.plan('Synthetic after the lock')))
-  assert.equal(result.status, 0, result.stderr)
-  const [line] = marksIn1384(result.stdout)
-  assert.ok(line, result.stdout)
+  // The board folder takes the lock and the plan; the session record's folder refuses the write that follows.
+  const result = await denyFolder1384(join(f.root, 'sessions'), () => a.report(a.plan('Synthetic after the board')))
+  assert.notEqual(result.status, 0)
+  assert.deepEqual(marksIn1384(result.stdout), [])
+  assert.doesNotMatch(result.stdout, /"kept"/)
   assert.equal(existsSync(`${a.progress}.agent-board-lock`), false)
-  a.output(result.stdout)
-  assert.equal(a.hook().status, 0)
-  assert.match(a.text(), /Synthetic after the lock step/)
-  assert.equal(a.record().reportedAt, Number(line.split(' ')[2]))
+  assert.match(a.text(), /Synthetic after the board step/)
 }))
 
 test('only a refused, bound Antigravity report prints a marked line (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -15942,7 +15941,7 @@ test('a marked line naming another conversation is ignored (#1384)', { skip: noD
   const own = await a.refused(a.plan('Synthetic own'))
   a.output(own.stdout)
   // Last in the transcript, so it would win if its conversation were not checked.
-  a.output(markOf1384(a.other, Date.now() - 1000, a.plan('Synthetic other conversation')))
+  a.output(a.mark(a.other, Date.now() - 1000, a.plan('Synthetic other conversation')))
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic own step/)
   assert.doesNotMatch(a.text(), /Synthetic other conversation/)
@@ -15954,7 +15953,7 @@ test('marked text outside a command output is ignored (#1384)', { skip: noDeny13
   const inside = await a.refused(a.plan('Synthetic inside'))
   a.output(inside.stdout)
   // Each later and valid, so each would win if it counted.
-  const outside = n => markOf1384(a.conv, Date.now() - 1000 + n, a.plan(`Synthetic outside ${n}`))
+  const outside = n => a.mark(a.conv, Date.now() - 1000 + n, a.plan(`Synthetic outside ${n}`))
   a.entry('MODEL', 'PLANNER_RESPONSE', `The board said:\n${outside(1)}`)
   a.entry('USER', 'USER_INPUT', outside(2))
   a.entry('MODEL', 'GENERIC', `${outside(3)}\nCommand exited with code 0.`)
@@ -16010,7 +16009,7 @@ test('two hooks reading one marked line apply it once (#1384)', { skip: noDeny13
 
 test('a marked line the board refuses is dropped without failing the hook (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
   const a = agy1384(f)
-  a.output(markOf1384(a.conv, Date.now() - 1000, { title: 'Synthetic refused by the board', state: 'working', steps: 'not a list' }))
+  a.output(a.mark(a.conv, Date.now() - 1000, { title: 'Synthetic refused by the board', state: 'working', steps: 'not a list' }))
   const hooked = a.hook('waiting', 'Stop')
   assert.equal(hooked.status, 0, hooked.stderr)
   assert.doesNotMatch(a.text(), /Synthetic refused by the board/)
@@ -16072,7 +16071,7 @@ test('a cut marked line is refused and an oversized report prints none (#1384)',
   const [prefix, payload] = [cut.line.slice(0, cut.line.lastIndexOf(' ') + 1), cut.line.slice(cut.line.lastIndexOf(' ') + 1)]
   a.output(`${prefix}${payload.slice(0, 8)}${payload.slice(-8)}`)
   const fields = cut.line.split(' ')
-  a.output([...fields.slice(0, 4), '0'.repeat(16), fields[5]].join(' '))
+  a.output([...fields.slice(0, 5), '0'.repeat(16), fields[6]].join(' '))
   assert.equal(a.hook().status, 0)
   assert.doesNotMatch(a.text(), /Synthetic cut step/)
   // A report whose line would pass 4096 bytes is not printed.
@@ -16101,4 +16100,47 @@ test('the exit code in the transcript does not decide the replay (#1384)', { ski
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic code zero step/)
   assert.equal(a.record().reportedAt, passed.at)
+}))
+
+test('a large report that compresses into one line is brought in (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  // A field the board does not show takes the JSON past six digits of bytes; it compresses to far under 4096.
+  const { stdout, line, at } = await a.refused({ ...a.plan('Synthetic large report'), note: 'a'.repeat(1000000) })
+  assert.ok(Number(line.split(' ')[4]) > 999999)
+  a.output(stdout)
+  assert.equal(a.hook().status, 0)
+  assert.match(a.text(), /Synthetic large report step/)
+  assert.equal(a.record().reportedAt, at)
+}))
+
+test('a refused report is checked as its replay applies it (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  // A mirrored plan takes its title from `planTitle` while the row has the title a lifecycle event gave it.
+  const input = { title: 'Synthetic own title', planTitle: '', state: 'working', steps: ['- [~] Synthetic mirrored step'] }
+  await denyFolder1384(a.folder, () => {
+    const refused = a.report(input)
+    assert.notEqual(refused.status, 0)
+    assert.deepEqual(marksIn1384(refused.stdout), [])
+  })
+  // The board, once it can be written, refuses the same plan.
+  assert.notEqual(a.report(input).status, 0)
+  assert.doesNotMatch(a.text(), /Synthetic mirrored step/)
+}))
+
+test('a marked line for another board is not applied (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  const own = await a.refused(a.plan('Synthetic own board'))
+  a.output(own.stdout)
+  // The conversation's hook on another board neither takes the line nor moves this board's read past it.
+  const otherProgress = join(f.home, 'other-board', 'progress.md')
+  f.save(otherProgress, '## Synthetic other board\n')
+  const onOther = f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PostInvocation', '--progress-file', otherProgress], { conversationId: a.conv, transcriptPath: a.transcript })
+  assert.equal(onOther.status, 0, onOther.stderr)
+  assert.doesNotMatch(readFileSync(otherProgress, 'utf8'), /Synthetic own board step/)
+  // Last in the transcript, so it would win if its board were not checked.
+  a.output(a.mark(a.conv, Date.now() - 1000, a.plan('Synthetic for the other board'), otherProgress))
+  assert.equal(a.hook().status, 0)
+  assert.match(a.text(), /Synthetic own board step/)
+  assert.doesNotMatch(a.text(), /Synthetic for the other board/)
+  assert.equal(a.record().reportedAt, own.at)
 }))
