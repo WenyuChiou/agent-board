@@ -74,6 +74,9 @@ test('ci impact selects isolated runtime groups from known paths', () => {
     ['tests/review-queue-post.test.mjs', ['tooling']],
     ['scripts/pr-check-rerun.mjs', ['tooling']],
     ['tests/pr-check-rerun.test.mjs', ['tooling']],
+    ['scripts/windows-runner-sampler.mjs', ['tooling']],
+    ['scripts/windows-runner-sampler.ps1', ['tooling']],
+    ['tests/windows-runner-sampler.test.mjs', ['tooling']],
   ]
   for (const [path, expected] of cases) assertOnly(makePlan([path], options()), expected)
 })
@@ -1096,5 +1099,187 @@ test('the browser tool install stops at its first success, tries three times and
     assert.match(down.out, /slept 40\n::error::browser tool install failed three times\n$/)
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('boardFileBudgetWarnings flags board files over 80% of their budget and ignores exact 80%, non-board, and invalid paths', async () => {
+  const {
+    BOARD_FILE_BUDGETS_MS,
+    BOARD_FILE_BUDGET_DEFAULT_MS,
+    BOARD_FILE_WARNING_RATIO,
+    boardFileBudgetWarnings,
+  } = await import('../scripts/ci-impact.mjs')
+  assert.equal(BOARD_FILE_WARNING_RATIO, 0.8)
+
+  assert.deepEqual(boardFileBudgetWarnings(null), [])
+  assert.deepEqual(boardFileBudgetWarnings({ files: null }), [])
+
+  for (const [path, budget] of [
+    ...Object.entries(BOARD_FILE_BUDGETS_MS),
+    ['tests/ws-stdio.test.mjs', BOARD_FILE_BUDGET_DEFAULT_MS],
+  ]) {
+    const thresholdMs = budget * 0.8
+    assert.deepEqual(boardFileBudgetWarnings({ files: [{ path, ms: thresholdMs }] }), [], path)
+    const over = boardFileBudgetWarnings({ files: [{ path, ms: thresholdMs + 1 }] })
+    assert.equal(over.length, 1, path)
+    assert.equal(over[0].path, path)
+    assert.equal(over[0].budgetMs, budget)
+    assert.equal(over[0].thresholdMs, thresholdMs)
+    assert.match(over[0].message, /over 80% of its \d+(?:\.\d+)?s budget/)
+  }
+
+  const ignored = boardFileBudgetWarnings({
+    files: [
+      { path: 'tests/messaging.test.mjs', ms: 999_000 },
+      { path: 'tests/e2e/l3c-message-store-ownership.test.mjs', ms: 999_000 },
+      { path: 'tests/board.test.mjs', ms: null },
+      { path: 'tests/a\n::error::b.test.mjs', ms: 999_000 },
+    ],
+  })
+  assert.deepEqual(ignored, [])
+})
+
+test('ci-impact check, summary, and failed serial run emit ::warning:: and step summary lines when a test file passes 80% of its budget', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'ab-budget-warn-'))
+  const timings = join(dir, 'timings.json')
+  const summary = join(dir, 'summary.md')
+  const script = fileURLToPath(new URL('../scripts/ci-impact.mjs', import.meta.url))
+  const serialSaved = process.env.CI_TEST_SERIAL
+  const timingsSaved = process.env.CI_TEST_TIMINGS
+  const summarySaved = process.env.GITHUB_STEP_SUMMARY
+  try {
+    // At 75% (150 s of 200 s): check emits no 80% warning on pull_request or push.
+    await writeFile(timings, JSON.stringify({ version: 1, part: '1/7', serial: true, totalMs: 200_000, files: [{ path: 'tests/board.test.mjs', ms: 150_000 }] }))
+    await writeFile(summary, '')
+    const under = spawnSync(process.execPath, [script, 'check'], {
+      encoding: 'utf8',
+      env: { ...process.env, CI_TEST_TIMINGS: timings, GITHUB_EVENT_NAME: 'pull_request', GITHUB_STEP_SUMMARY: summary },
+      timeout: 10_000,
+    })
+    assert.equal(under.status, 1)
+    assert.doesNotMatch(under.stdout, /^::warning::/m)
+    assert.equal(await readFile(summary, 'utf8'), '')
+
+    // At 85% (170 s of 200 s): check emits ::warning:: and appends summary line for both push and pull_request.
+    await writeFile(timings, JSON.stringify({ version: 1, part: '2/7', serial: true, totalMs: 250_000, files: [{ path: 'tests/board.test.mjs', ms: 170_000 }] }))
+    for (const [event, expectedStatus] of [['push', 0], ['pull_request', 1]]) {
+      await writeFile(summary, '')
+      const checked = spawnSync(process.execPath, [script, 'check'], {
+        encoding: 'utf8',
+        env: { ...process.env, CI_TEST_TIMINGS: timings, GITHUB_EVENT_NAME: event, GITHUB_STEP_SUMMARY: summary },
+        timeout: 10_000,
+      })
+      assert.equal(checked.status, expectedStatus, checked.stdout + checked.stderr)
+      assert.match(checked.stdout, /^::warning::tests\/board\.test\.mjs took 170s \(85%\), over 80% of its 200s budget \(160s\)$/m)
+      assert.match(await readFile(summary, 'utf8'), /^- Warning: tests\/board\.test\.mjs took 170s \(85%\), over 80% of its 200s budget \(160s\)$/m)
+    }
+
+    // summary subcommand: keeps empty-files output unchanged and appends 80% warning when present.
+    await writeFile(timings, JSON.stringify({ version: 1, part: '1/2', serial: false, totalMs: 120_000, files: [] }))
+    await writeFile(summary, '')
+    const plainSummary = spawnSync(process.execPath, [script, 'summary', '600'], {
+      encoding: 'utf8',
+      env: { ...process.env, CI_TEST_TIMINGS: timings, GITHUB_STEP_SUMMARY: summary },
+      timeout: 10_000,
+    })
+    assert.equal(plainSummary.status, 0)
+    assert.doesNotMatch(plainSummary.stdout, /^::warning::/m)
+    assert.equal(await readFile(summary, 'utf8'), '- part 1/2: tests ran 120s, 20% of the 600s job limit\n')
+
+    await writeFile(timings, JSON.stringify({ version: 1, part: '2/7', serial: true, totalMs: 250_000, files: [{ path: 'tests/board.test.mjs', ms: 170_000 }] }))
+    await writeFile(summary, '')
+    const warnSummary = spawnSync(process.execPath, [script, 'summary', '600'], {
+      encoding: 'utf8',
+      env: { ...process.env, CI_TEST_TIMINGS: timings, GITHUB_STEP_SUMMARY: summary },
+      timeout: 10_000,
+    })
+    assert.equal(warnSummary.status, 0)
+    assert.match(warnSummary.stdout, /^::warning::tests\/board\.test\.mjs took 170s \(85%\), over 80% of its 200s budget \(160s\)$/m)
+    assert.match(await readFile(summary, 'utf8'), /^- part 2\/7: tests ran 250s, 42% of the 600s job limit\n- Warning: tests\/board\.test\.mjs took 170s \(85%\), over 80% of its 200s budget \(160s\)\n$/)
+
+    // Failed serial run (where `check` is skipped in workflow): emits 80% warning before throwing.
+    await writeFile(summary, '')
+    process.env.CI_TEST_SERIAL = '1'
+    process.env.CI_TEST_TIMINGS = timings
+    process.env.GITHUB_STEP_SUMMARY = summary
+    let tick = 0
+    const fakeNow = () => {
+      const value = tick
+      tick += 50_000
+      return value
+    }
+    assert.throws(
+      () => runTestFiles(['tests/ws-stdio.test.mjs'], '1/1', () => ({ status: 1 }), 'win32', fakeNow),
+      /selected tests failed: 1/,
+    )
+    assert.match(await readFile(summary, 'utf8'), /^- Warning: tests\/ws-stdio\.test\.mjs took 50s \(83%\), over 80% of its 60s budget \(48s\)$/m)
+  } finally {
+    if (serialSaved === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serialSaved
+    if (timingsSaved === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timingsSaved
+    if (summarySaved === undefined) delete process.env.GITHUB_STEP_SUMMARY
+    else process.env.GITHUB_STEP_SUMMARY = summarySaved
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('every Windows test job in test.yml starts, stops, and uploads the Windows runner sampler with unique artifact names', async () => {
+  const text = await workflow()
+  const windowsJobs = {
+    board: { testStep: '- name: Board script tests', needNode: true, needPart: true },
+    messaging: { testStep: '- name: Synthetic exchange and mock owner tests', needNode: true, needPart: true },
+    tooling: { testStep: '- name: PR check tests', needNode: true, needPart: false },
+    npm: { testStep: '- name: npm package tests', needNode: true, needPart: false },
+    plugin: { testStep: '- name: Pane and hook tests', needNode: false, needPart: false },
+    installers: { testStep: '- name: Windows installer', needNode: false, needPart: false },
+    remote: { testStep: '- name: Windows reporter', needNode: false, needPart: false },
+    journeys: { testStep: '- name: Selected user journeys', needNode: true, needPart: true },
+    browser: { testStep: '- name: Confirmed product journeys in Chromium', needNode: false, needPart: false },
+  }
+  const seenSamplerJobs = []
+  for (const [job, meta] of Object.entries(windowsJobs)) {
+    const block = text.split('\n  ' + job + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
+    assert.ok(block, job)
+    const startAt = block.indexOf('- name: Start Windows runner sampler')
+    const checkoutAt = block.indexOf('uses: actions/checkout@')
+    const testAt = block.indexOf(meta.testStep)
+    const stopAt = block.indexOf('- name: Stop Windows runner sampler')
+    const uploadAt = block.indexOf('- name: Upload Windows runner sampler record')
+    assert.ok(checkoutAt > 0 && startAt > checkoutAt, `${job}: sampler must start after checkout`)
+    assert.ok(testAt > startAt, `${job}: sampler must start before ${meta.testStep}`)
+    assert.ok(stopAt > testAt, `${job}: sampler must stop after tests`)
+    assert.ok(uploadAt > stopAt, `${job}: artifact upload must follow stop`)
+
+    const startSlice = block.slice(startAt, testAt)
+    assert.ok(startSlice.includes('id: sampler'), `${job}: start missing id: sampler`)
+    assert.ok(startSlice.includes("if: runner.os == 'Windows'"), `${job}: start missing Windows guard`)
+    assert.ok(startSlice.includes('continue-on-error: true'), `${job}: start missing continue-on-error`)
+    assert.ok(startSlice.includes('shell: powershell'), `${job}: start missing shell: powershell`)
+    assert.ok(startSlice.includes('scripts/windows-runner-sampler.ps1 -Action start'), `${job}: start missing script`)
+    const jobMatch = startSlice.match(/SAMPLER_JOB:\s*(.+)/)
+    assert.ok(jobMatch, `${job}: missing SAMPLER_JOB`)
+    const samplerJob = jobMatch[1].trim()
+    seenSamplerJobs.push(samplerJob)
+    if (meta.needNode) assert.ok(samplerJob.includes('${{ matrix.node }}'), `${job}: SAMPLER_JOB missing matrix.node`)
+    if (meta.needPart) assert.ok(samplerJob.includes('${{ matrix.part }}'), `${job}: SAMPLER_JOB missing matrix.part`)
+
+    const stopSlice = block.slice(stopAt, uploadAt)
+    assert.ok(stopSlice.includes("if: always() && runner.os == 'Windows' && steps.sampler.outputs.dir != ''"), `${job}: stop guard`)
+    assert.ok(stopSlice.includes('continue-on-error: true'), `${job}: stop continue-on-error`)
+    assert.ok(stopSlice.includes('scripts/windows-runner-sampler.ps1 -Action stop'), `${job}: stop missing script`)
+
+    const uploadSlice = block.slice(uploadAt)
+    assert.ok(uploadSlice.includes("if: always() && runner.os == 'Windows' && steps.sampler.outputs.artifact != ''"), `${job}: upload guard`)
+    assert.ok(uploadSlice.includes('continue-on-error: true'), `${job}: upload continue-on-error`)
+    assert.ok(uploadSlice.includes('uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'), `${job}: upload pinned SHA`)
+    assert.ok(uploadSlice.includes('retention-days: 7'), `${job}: upload retention-days`)
+  }
+  assert.equal(new Set(seenSamplerJobs).size, Object.keys(windowsJobs).length)
+
+  for (const linuxOnly of ['impact', 'generated', 'ci-validation']) {
+    const block = text.split('\n  ' + linuxOnly + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0] ?? ''
+    assert.equal(block.includes('windows-runner-sampler.ps1'), false, linuxOnly)
   }
 })
