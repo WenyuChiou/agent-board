@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
 import { chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
@@ -14441,6 +14441,509 @@ test('a refused Antigravity report is not saved in a TEMP folder that another ac
     assert.equal(result.stdout, '')
     assert.deepEqual(readdirSync(spool), [])
   } finally { chmodSync(folder, 0o755) }
+  chmodSync(spool, 0o700)
+  chmodSync(folder, 0o555)
+  try {
+    const result = f.command(['--codex-report', '--agent', 'antigravity', '--session', 'synthetic-shared-temp-1384', '--progress-file', progress], {
+      title: 'Synthetic plan', state: 'working', steps: ['- [~] Synthetic step'],
+    }, { TEMP: temp, TMP: temp, TMPDIR: temp })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(JSON.parse(result.stdout).saved, true)
+  } finally { chmodSync(folder, 0o755) }
+}))
+
+// The rest of the #1384 cases: the spool of reports agy's sandbox refused.
+const isWin1384 = process.platform === 'win32'
+const noModes1384 = (isWin1384 || process.getuid?.() === 0) && 'POSIX modes, not as root'
+const noDeny1384 = process.getuid?.() === 0 && 'not as root'
+const denyBoard1384 = async (folder, action) => {
+  if (isWin1384) return withDeniedCreation(folder, action)
+  chmodSync(folder, 0o555)
+  try { return await action() } finally { chmodSync(folder, 0o755) }
+}
+const agy1384 = (f, { codex = false } = {}) => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  if (codex) assert.equal(f.install('--apply').status, 0)
+  const conv = 'synthetic-agy-conv-1384a', other = 'synthetic-agy-conv-1384b'
+  const folder = join(f.home, 'sandboxed-board'), progress = join(folder, 'progress.md')
+  const temp = join(f.home, 'tmp')
+  mkdirSync(temp, { recursive: true })
+  const envOf = t => ({ TEMP: t, TMP: t, TMPDIR: t })
+  const env = envOf(temp)
+  f.save(progress, '## Synthetic sandboxed board\n')
+  const baseOf = t => join(t, isWin1384 ? 'agent-board-reports' : `agent-board-reports-${process.getuid()}`)
+  const spoolOf = t => join(baseOf(t), createHash('sha256').update(resolve(progress)).digest('hex').slice(0, 16))
+  const base = baseOf(temp), spool = spoolOf(temp)
+  const hook = (state, event, id = conv, extra = [], e = env) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event, '--progress-file', progress, ...extra], { conversationId: id }, e)
+  const report = (input, id = conv, extra = [], e = env) => f.command(['--codex-report', '--agent', 'antigravity', '--session', id, '--progress-file', progress, ...extra], input, e)
+  const plan = (title, steps = [`- [~] ${title} step`], state = 'working') => ({ title, state, steps })
+  const names = (dir = spool) => existsSync(dir) ? readdirSync(dir).sort() : []
+  const text = () => readFileSync(progress, 'utf8')
+  const blocks = () => text().match(/<!-- auto [\s\S]*?<!-- \/auto[^>]*-->/g) ?? []
+  // A saved file written by hand, as a refused report would have left it.
+  const put = (over = {}, { name, raw, dir = spool } = {}) => {
+    mkdirSync(dir, { recursive: true })
+    if (!isWin1384) { chmodSync(dirname(dir), 0o700); chmodSync(dir, 0o700) }
+    const at = over.at ?? Date.now() - 5000
+    const body = raw ?? `${JSON.stringify({ version: 1, agent: 'antigravity', session: conv, progress: resolve(progress), root: resolve(f.root), at, raw: plan('Synthetic saved plan'), ...over })}\n`
+    const file = join(dir, name ?? `${String(at).padStart(15, '0')}-${randomUUID()}.json`)
+    writeFileSync(file, body)
+    return file
+  }
+  assert.equal(hook('working', 'PreInvocation').status, 0)
+  return { conv, other, folder, progress, temp, env, envOf, base, baseOf, spool, spoolOf, hook, report, plan, names, text, blocks, put }
+}
+
+// A denied report bound to the conversation is saved: the contrast that makes a guard test fail where no spool exists.
+const contrast1384 = async (a, title = 'Synthetic contrast') => {
+  await denyBoard1384(a.folder, () => {
+    const result = a.report(a.plan(title))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(JSON.parse(result.stdout).saved, true)
+  })
+  assert.ok(a.names().length >= 1)
+}
+
+test('a refused Antigravity report with a valid plan makes its spool folder and is saved there (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  const before = a.text()
+  assert.equal(existsSync(a.base), false)
+  await denyBoard1384(a.folder, () => {
+    const result = a.report(a.plan('Synthetic first'))
+    assert.equal(result.status, 0, result.stderr)
+    const answer = JSON.parse(result.stdout)
+    assert.equal(answer.saved, true)
+    assert.equal(typeof answer.session, 'string')
+    assert.equal(answer.note, EN.reportSaved)
+  })
+  assert.equal(a.text(), before)
+  assert.equal(a.names().length, 1)
+  assert.match(a.names()[0], /\.json$/)
+  if (!isWin1384) assert.equal(statSync(a.base).mode & 0o077, 0)
+}))
+
+test('a second refused Antigravity report is saved beside the first (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  await denyBoard1384(a.folder, () => {
+    assert.equal(JSON.parse(a.report(a.plan('Synthetic first')).stdout).saved, true)
+    const [first] = a.names()
+    const bytes = readFileSync(join(a.spool, first))
+    const second = a.report(a.plan('Synthetic second'))
+    assert.equal(second.status, 0, second.stderr)
+    assert.equal(JSON.parse(second.stdout).saved, true)
+    assert.equal(a.names().length, 2)
+    assert.ok(a.names().includes(first))
+    assert.deepEqual(readFileSync(join(a.spool, first)), bytes)
+  })
+}))
+
+test('a refused Antigravity report with a plan the board would refuse is not saved and gives the plan\'s error (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  const inputs = [
+    a.plan('Synthetic bad step', ['not a step']),
+    a.plan('Synthetic done with open steps', ['- [~] Still open'], 'done'),
+    a.plan('Synthetic bad state', ['- [~] Step'], 'bogus'),
+    a.plan('Synthetic no steps', []),
+  ]
+  const direct = inputs.map(input => {
+    const result = a.report(input)
+    assert.notEqual(result.status, 0, JSON.stringify(input))
+    return result.stderr
+  })
+  const before = a.text()
+  await denyBoard1384(a.folder, () => {
+    inputs.forEach((input, index) => {
+      const result = a.report(input)
+      assert.notEqual(result.status, 0, JSON.stringify(input))
+      assert.doesNotMatch(result.stdout, /saved/)
+      assert.equal(result.stderr, direct[index])
+    })
+  })
+  assert.deepEqual(a.names(), [])
+  assert.equal(a.text(), before)
+  await contrast1384(a)
+}))
+
+test('a refused Antigravity report is not saved when the spool is full (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  for (let index = 0; index < 63; index++) a.put({}, { name: `${String(index).padStart(15, '0')}-full.json` })
+  await denyBoard1384(a.folder, () => {
+    const last = a.report(a.plan('Synthetic last place'))
+    assert.equal(last.status, 0, last.stderr)
+    assert.equal(JSON.parse(last.stdout).saved, true)
+    assert.equal(a.names().length, 64)
+    const before = a.names()
+    const result = a.report(a.plan('Synthetic overflow'))
+    assert.notEqual(result.status, 0)
+    assert.doesNotMatch(result.stdout, /saved/)
+    assert.deepEqual(a.names(), before)
+  })
+}))
+
+test('a refused Antigravity report with no writable TEMP fails as before (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  await denyBoard1384(a.folder, () => denyBoard1384(a.temp, () => {
+    const result = a.report(a.plan('Synthetic no temp'))
+    assert.notEqual(result.status, 0)
+    assert.doesNotMatch(result.stdout, /saved/)
+    assert.match(result.stderr, /Can't create files next to progress\.md/)
+  }))
+  assert.deepEqual(a.names(), [])
+  await contrast1384(a)
+}))
+
+test('a write refused after the board write is not saved as a sandbox refusal (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  await denyBoard1384(join(f.root, 'sessions'), () => {
+    const result = a.report(a.plan('Synthetic late refusal'))
+    assert.notEqual(result.status, 0)
+    assert.doesNotMatch(result.stdout, /saved/)
+  })
+  assert.deepEqual(a.names(), [])
+  await contrast1384(a)
+}))
+
+test('a busy lock does not send an Antigravity report to the spool (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  const lock = `${a.progress}.agent-board-lock`
+  f.save(lock, 'held by another process')
+  try {
+    const result = a.report(a.plan('Synthetic busy'), a.conv, ['--hook-deadline', String(Date.now() + 1500)])
+    assert.notEqual(result.status, 0)
+    assert.doesNotMatch(result.stdout, /saved/)
+  } finally { unlinkSync(lock) }
+  assert.deepEqual(a.names(), [])
+  await contrast1384(a)
+}))
+
+test('only an Antigravity report bound to its conversation is saved on a refusal (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f, { codex: true })
+  await denyBoard1384(a.folder, () => {
+    const codex = f.command(['--codex-report', '--progress-file', a.progress], a.plan('Synthetic codex'), a.env)
+    assert.notEqual(codex.status, 0)
+    assert.doesNotMatch(codex.stdout, /saved/)
+    const unbound = f.command(['--codex-report', '--agent', 'antigravity', '--progress-file', a.progress], a.plan('Synthetic unbound'), a.env)
+    assert.notEqual(unbound.status, 0)
+    assert.doesNotMatch(unbound.stdout, /saved/)
+  })
+  assert.deepEqual(a.names(), [])
+  await contrast1384(a)
+}))
+
+test('a plan call into a denied folder is never saved to the spool (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f, { codex: true })
+  await denyBoard1384(a.folder, () => {
+    for (const extra of [[], ['--agent', 'antigravity']]) {
+      const result = f.command(['--plan-event', ...extra, '--progress-file', a.progress, '--lang', 'en'], planCall(a.other, 'update_plan', [{ step: 'Synthetic denied step', status: 'in_progress' }]), a.env)
+      assert.equal(result.status, 0, result.stderr)
+      assert.equal(result.stdout, '')
+    }
+  })
+  assert.deepEqual(a.names(), [])
+  await contrast1384(a, 'Synthetic bound')
+}))
+
+test('a direct Antigravity report with nothing saved leaves no spool behind (#1384)', () => fixture(async f => {
+  const a = agy1384(f)
+  const result = a.report(a.plan('Synthetic direct'))
+  assert.equal(result.status, 0, result.stderr)
+  assert.doesNotMatch(result.stdout, /saved/)
+  assert.match(a.text(), /Synthetic direct step/)
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.equal(existsSync(a.base), false)
+  await contrast1384(a)
+  assert.equal(existsSync(a.base), true)
+}))
+
+test('a saved report is brought in only by a hook of its own conversation (#1384)', () => fixture(f => {
+  const a = agy1384(f)
+  a.put()
+  const second = a.hook('working', 'PreInvocation', a.other)
+  assert.equal(second.status, 0, second.stderr)
+  assert.equal(a.names().length, 1)
+  assert.doesNotMatch(a.text(), /Synthetic saved plan step/)
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.deepEqual(a.names(), [])
+  const withPlan = a.blocks().filter(block => block.includes('Synthetic saved plan step'))
+  assert.equal(withPlan.length, 1)
+  assert.match(withPlan[0], /agent=antigravity/)
+  assert.ok(a.blocks().length >= 2)
+}))
+
+test('a saved report whose replay hits a file system error is kept for the next hook (#1384)', () => fixture(async f => {
+  const a = agy1384(f)
+  const sessions = join(f.root, 'sessions'), moved = join(f.root, 'sessions-moved')
+  renameSync(sessions, moved)
+  writeFileSync(sessions, 'not a folder')
+  try {
+    const baseline = a.hook('working', 'PostInvocation')
+    const file = a.put()
+    const result = a.hook('working', 'PostInvocation')
+    assert.equal(result.status, baseline.status, result.stderr)
+    assert.deepEqual(a.names(), [basename(file)])
+  } finally {
+    unlinkSync(sessions)
+    renameSync(moved, sessions)
+  }
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.deepEqual(a.names(), [])
+  assert.match(a.text(), /Synthetic saved plan step/)
+}))
+
+test('saved reports of one conversation run oldest first (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  await denyBoard1384(a.folder, () => {
+    assert.equal(JSON.parse(a.report(a.plan('Synthetic earlier')).stdout).saved, true)
+    assert.equal(JSON.parse(a.report(a.plan('Synthetic later')).stdout).saved, true)
+  })
+  assert.equal(a.names().length, 2)
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.match(a.text(), /Synthetic later step/)
+  assert.doesNotMatch(a.text(), /Synthetic earlier step/)
+  assert.deepEqual(a.names(), [])
+}))
+
+test('the hook\'s own event lands after the saved report it brought in (#1384)', () => fixture(f => {
+  const a = agy1384(f)
+  a.put()
+  const result = a.hook('waiting', 'Stop')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(a.names(), [])
+  const block = a.blocks().find(one => one.includes('Synthetic saved plan step'))
+  assert.ok(block, a.text())
+  assert.match(block, /state=waiting/)
+}))
+
+test('a saved report that cannot be read as one is dropped and the hook still lands (#1384)', () => fixture(f => {
+  const a = agy1384(f)
+  a.put({}, { raw: '{broken' })
+  a.put({ version: 2 })
+  a.put({ agent: 'codex' })
+  a.put({ session: 'x' })
+  a.put({ pad: 'x'.repeat(2 * 1024 * 1024 + 10) })
+  let target
+  if (!isWin1384) {
+    target = join(f.home, 'outside-target.json')
+    writeFileSync(target, `${JSON.stringify({ version: 1, agent: 'antigravity', session: a.conv, progress: resolve(a.progress), root: resolve(f.root), at: Date.now() - 5000, raw: a.plan('Synthetic saved plan') })}\n`)
+    symlinkSync(target, join(a.spool, 'zz-link.json'))
+  }
+  assert.ok(a.names().length >= 5)
+  const result = a.hook('waiting', 'Stop')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(a.names(), [])
+  assert.doesNotMatch(a.text(), /Synthetic saved plan/)
+  assert.match(a.text(), /state=waiting/)
+  if (target) assert.ok(existsSync(target))
+}))
+
+test('a saved report that cannot be read for a moment is kept for the next hook (#1384)', { skip: noModes1384 }, () => fixture(f => {
+  const a = agy1384(f)
+  const file = a.put()
+  chmodSync(file, 0o000)
+  try {
+    const result = a.hook('waiting', 'Stop')
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(a.text(), /state=waiting/)
+    assert.deepEqual(a.names(), [basename(file)])
+  } finally { chmodSync(file, 0o600) }
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.deepEqual(a.names(), [])
+  assert.match(a.text(), /Synthetic saved plan step/)
+}))
+
+test('a saved report older than a day is dropped (#1384)', () => fixture(f => {
+  const a = agy1384(f)
+  a.put({ at: Date.now() - 25 * 60 * 60 * 1000 })
+  a.put({ at: Date.now() + 60 * 60 * 1000 })
+  const result = a.hook('working', 'PostInvocation')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(a.names(), [])
+  assert.doesNotMatch(a.text(), /Synthetic saved plan/)
+}))
+
+test('a saved report for another board waits for that board\'s hooks (#1384)', () => fixture(async f => {
+  const a = agy1384(f)
+  const files = [a.put({ progress: join(f.home, 'other-board', 'progress.md') }), a.put({ root: join(f.home, 'other-root') })]
+  const bytes = files.map(file => readFileSync(file))
+  a.put({}, { name: 'own-valid.json' })
+  const result = a.hook('working', 'PostInvocation')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(a.names(), files.map(file => basename(file)).sort())
+  files.forEach((file, index) => assert.deepEqual(readFileSync(file), bytes[index]))
+  assert.match(a.text(), /Synthetic saved plan step/)
+}))
+
+test('a saved report does not overwrite a newer report that landed directly (#1384)', () => fixture(f => {
+  const a = agy1384(f)
+  a.put({ at: Date.now() - 5000, raw: a.plan('Synthetic stale saved') })
+  const direct = a.report(a.plan('Synthetic newer direct'))
+  assert.equal(direct.status, 0, direct.stderr)
+  const result = a.hook('working', 'PostInvocation')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(a.names(), [])
+  assert.match(a.text(), /Synthetic newer direct step/)
+  assert.doesNotMatch(a.text(), /Synthetic stale saved step/)
+}))
+
+test('a saved report the board refuses at replay is dropped without failing the hook (#1384)', () => fixture(f => {
+  const a = agy1384(f)
+  a.put({ raw: a.plan('Synthetic refused', ['not a step']) })
+  const result = a.hook('waiting', 'Stop')
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(a.names(), [])
+  assert.doesNotMatch(a.text(), /not a step/)
+  assert.match(a.text(), /state=waiting/)
+}))
+
+test('two hooks draining one saved report apply it once (#1384)', () => fixture(f => {
+  const a = agy1384(f)
+  const file = a.put()
+  const claimed = `${file}.claim-${Date.now()}-${randomUUID()}`
+  renameSync(file, claimed)
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.deepEqual(a.names(), [basename(claimed)])
+  assert.doesNotMatch(a.text(), /Synthetic saved plan/)
+  const old = `${file}.claim-${Date.now() - 120000}-${randomUUID()}`
+  renameSync(claimed, old)
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.deepEqual(a.names(), [])
+  assert.match(a.text(), /Synthetic saved plan step/)
+}))
+
+test('a busy board keeps the saved report for the next hook (#1384)', () => fixture(f => {
+  const a = agy1384(f)
+  const file = a.put()
+  const lock = `${a.progress}.agent-board-lock`
+  f.save(lock, 'held by another process')
+  try {
+    const result = a.hook('working', 'PostInvocation', a.conv, ['--hook-deadline', String(Date.now() + 3000)])
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual(a.names(), [basename(file)])
+  } finally { unlinkSync(lock) }
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.deepEqual(a.names(), [])
+}))
+
+test('a denied board keeps the saved report for the next hook (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  await denyBoard1384(a.folder, () => {
+    const baseline = a.hook('working', 'PostInvocation')
+    const file = a.put()
+    const bytes = readFileSync(file)
+    const result = a.hook('working', 'PostInvocation')
+    assert.equal(result.status, baseline.status, result.stderr)
+    assert.deepEqual(a.names(), [basename(file)])
+    assert.deepEqual(readFileSync(file), bytes)
+  })
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.deepEqual(a.names(), [])
+  assert.match(a.text(), /Synthetic saved plan step/)
+}))
+
+test('a drain near the hook deadline stops and leaves the rest saved (#1384)', () => fixture(async f => {
+  const a = agy1384(f)
+  const files = [0, 1, 2].map(index => a.put({ at: Date.now() - 5000 + index }))
+  const before = a.names()
+  const result = a.hook('working', 'PostInvocation', a.conv, ['--hook-deadline', String(Date.now() + 1500)])
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(a.names(), before)
+  assert.equal(before.length, files.length)
+  assert.doesNotMatch(a.text(), /Synthetic saved plan/)
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.deepEqual(a.names(), [])
+  assert.match(a.text(), /Synthetic saved plan step/)
+}))
+
+test('only an Antigravity status hook drains the spool (#1384)', () => fixture(async f => {
+  const a = agy1384(f, { codex: true })
+  const file = a.put()
+  const bytes = readFileSync(file)
+  const codex = f.event('UserPromptSubmit', 'turn-1', {}, a.env)
+  assert.equal(codex.status, 0, codex.stderr)
+  const planned = f.command(['--plan-event', '--agent', 'antigravity', '--progress-file', a.progress, '--lang', 'en'], planCall(a.conv, 'update_plan', [{ step: 'Synthetic other step', status: 'in_progress' }]), a.env)
+  assert.equal(planned.stdout, '')
+  assert.deepEqual(a.names(), [basename(file)])
+  assert.deepEqual(readFileSync(file), bytes)
+  assert.doesNotMatch(a.text(), /Synthetic saved plan/)
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.deepEqual(a.names(), [])
+  assert.match(a.text(), /Synthetic saved plan step/)
+}))
+
+test('a hook does not read a spool another account could write (#1384)', { skip: noModes1384 }, () => fixture(f => {
+  const a = agy1384(f)
+  // A root that is a link.
+  const temp2 = join(f.home, 'tmp2'), real = join(f.home, 'real-spool')
+  mkdirSync(temp2, { recursive: true })
+  mkdirSync(real, { recursive: true })
+  symlinkSync(real, a.baseOf(temp2))
+  const linked = a.put({}, { dir: join(real, basename(a.spoolOf(temp2))) })
+  // A folder another account could write.
+  const temp3 = join(f.home, 'tmp3')
+  mkdirSync(temp3, { recursive: true })
+  const open = a.put({}, { dir: a.spoolOf(temp3) })
+  chmodSync(a.spoolOf(temp3), 0o775)
+  const cases = [[a.envOf(temp2), linked], [a.envOf(temp3), open]]
+  for (const [e, file] of cases) {
+    const bytes = readFileSync(file)
+    const result = a.hook('waiting', 'Stop', a.conv, [], e)
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual(readFileSync(file), bytes)
+    assert.match(a.text(), /state=waiting/)
+    assert.doesNotMatch(a.text(), /Synthetic saved plan/)
+  }
+  const temp4 = join(f.home, 'tmp4')
+  mkdirSync(temp4, { recursive: true })
+  const fine = a.put({}, { dir: a.spoolOf(temp4) })
+  assert.equal(a.hook('working', 'PostInvocation', a.conv, [], a.envOf(temp4)).status, 0)
+  assert.equal(existsSync(fine), false)
+  assert.match(a.text(), /Synthetic saved plan step/)
+}))
+
+test('a drain ignores files that are not saved reports (#1384)', () => fixture(f => {
+  const a = agy1384(f)
+  const files = [a.put({}, { name: 'a-valid.json.tmp' }), a.put({}, { name: 'notes.txt' }), a.put({}, { name: 'b-valid.json.bak' })]
+  const bytes = files.map(file => readFileSync(file))
+  const own = a.put({}, { name: 'c-valid.json' })
+  const result = a.hook('working', 'PostInvocation')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(existsSync(own), false)
+  assert.deepEqual(a.names(), files.map(file => basename(file)).sort())
+  files.forEach((file, index) => assert.deepEqual(readFileSync(file), bytes[index]))
+  assert.match(a.text(), /Synthetic saved plan step/)
+}))
+
+test('the spool on a shared POSIX temp folder is one per account (#1384)', { skip: noModes1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  await denyBoard1384(a.folder, () => {
+    const result = a.report(a.plan('Synthetic shared temp'))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(JSON.parse(result.stdout).saved, true)
+  })
+  assert.ok(basename(a.base).endsWith(`-${process.getuid()}`))
+  assert.equal(statSync(a.base).mode & 0o777, 0o700)
+  assert.equal(statSync(a.spool).mode & 0o777, 0o700)
+}))
+
+test('a Windows TEMP outside the account\'s profile holds no spool (#1384)', { skip: !isWin1384 && 'Windows only' }, () => fixture(async f => {
+  const a = agy1384(f)
+  const outside = mkdtempSync(join(tmpdir(), 'agy-outside-1384-'))
+  try {
+    const e = a.envOf(outside)
+    await denyBoard1384(a.folder, () => {
+      const result = a.report(a.plan('Synthetic outside temp'), a.conv, [], e)
+      assert.notEqual(result.status, 0)
+      assert.doesNotMatch(result.stdout, /saved/)
+    })
+    assert.deepEqual(readdirSync(outside), [])
+    const file = a.put({}, { dir: a.spoolOf(outside) })
+    const bytes = readFileSync(file)
+    const result = a.hook('waiting', 'Stop', a.conv, [], e)
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual(readFileSync(file), bytes)
+    assert.doesNotMatch(a.text(), /Synthetic saved plan/)
+  } finally { rmSync(outside, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
+  await contrast1384(a)
 }))
 
 test('setup writes the plan hook as a matcher group for Codex and Gemini, and remove leaves a person\'s own groups', () => fixture(async f => {
