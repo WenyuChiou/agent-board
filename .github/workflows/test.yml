@@ -163,6 +163,12 @@ jobs:
           persist-credentials: false
           # The whole history with its tags, for the released files table below.
           fetch-depth: 0
+      # Records what the machine did during a runner freeze: a 250 ms ticker that notes any gap over 1 s (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -190,6 +196,21 @@ jobs:
       # the job.
       - name: Board time budgets
         run: node scripts/ci-impact.mjs check
+      # The sampler's record: one line per gap, and a summary here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
+      - name: Keep Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sampler-board-node${{ matrix.node }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-sampler/gaps.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
   messaging:
     needs: impact
@@ -221,6 +242,12 @@ jobs:
           persist-credentials: false
           # The whole history with its tags, for the released files table below.
           fetch-depth: 0
+      # Records what the machine did during a runner freeze: a 250 ms ticker that notes any gap over 1 s (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -245,6 +272,21 @@ jobs:
       - name: Exchange step time
         if: always() && steps.exchange.conclusion != 'skipped'
         run: node scripts/ci-impact.mjs summary 600
+      # The sampler's record: one line per gap, and a summary here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
+      - name: Keep Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sampler-messaging-node${{ matrix.node }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-sampler/gaps.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
   tooling:
     needs: impact
@@ -270,6 +312,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the machine did during a runner freeze: a 250 ms ticker that notes any gap over 1 s (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -277,6 +325,21 @@ jobs:
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.tooling_tests }}
         run: node scripts/ci-impact.mjs run
+      # The sampler's record: one line per gap, and a summary here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
+      - name: Keep Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sampler-tooling-node${{ matrix.node }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-sampler/gaps.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
   # The npm package in a job of its own: what `npm pack` would publish, the version in step
   # with plugin.json, and the launcher (setup, help, the installed board script) in a scratch home.
@@ -305,6 +368,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the machine did during a runner freeze: a 250 ms ticker that notes any gap over 1 s (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -312,6 +381,21 @@ jobs:
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.npm_tests }}
         run: node scripts/ci-impact.mjs run
+      # The sampler's record: one line per gap, and a summary here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
+      - name: Keep Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sampler-npm-node${{ matrix.node }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-sampler/gaps.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
   plugin:
     needs: impact
@@ -337,6 +421,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the machine did during a runner freeze: a 250 ms ticker that notes any gap over 1 s (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -354,6 +444,21 @@ jobs:
 
       - name: Pane and hook tests
         run: node scripts/plugin-tests.mjs
+      # The sampler's record: one line per gap, and a summary here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
+      - name: Keep Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sampler-plugin-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-sampler/gaps.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
 
   installers:
@@ -380,6 +485,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the machine did during a runner freeze: a 250 ms ticker that notes any gap over 1 s (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 22
@@ -389,6 +500,21 @@ jobs:
       - name: Windows installer
         if: runner.os == 'Windows'
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1
+      # The sampler's record: one line per gap, and a summary here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
+      - name: Keep Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sampler-installers-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-sampler/gaps.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
   remote:
     name: remote reporter (${{ matrix.os }})
@@ -414,12 +540,33 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the machine did during a runner freeze: a 250 ms ticker that notes any gap over 1 s (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - name: Unix reporter
         if: runner.os != 'Windows'
         run: python3 -B scripts/remote-reporter/test_pipeline.py
       - name: Windows reporter
         if: runner.os == 'Windows'
         run: python -B scripts/remote-reporter/test_pipeline.py
+      # The sampler's record: one line per gap, and a summary here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
+      - name: Keep Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sampler-remote-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-sampler/gaps.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
   journeys:
     needs: impact
@@ -448,6 +595,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the machine did during a runner freeze: a 250 ms ticker that notes any gap over 1 s (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -471,6 +624,21 @@ jobs:
           CI_TEST_PART: ${{ matrix.part }}
           CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}
         run: node scripts/ci-impact.mjs run
+      # The sampler's record: one line per gap, and a summary here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
+      - name: Keep Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sampler-journeys-node${{ matrix.node }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-sampler/gaps.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
   browser:
     needs: impact
@@ -496,6 +664,12 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the machine did during a runner freeze: a 250 ms ticker that notes any gap over 1 s (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -532,6 +706,21 @@ jobs:
           path: ${{ runner.temp }}/agent-board-browser-artifacts/
           if-no-files-found: warn
           retention-days: 7
+      # The sampler's record: one line per gap, and a summary here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
+      - name: Keep Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-sampler-browser-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-sampler/gaps.jsonl
+          if-no-files-found: ignore
+          retention-days: 14
 
   generated:
     name: generated files

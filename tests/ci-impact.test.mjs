@@ -65,6 +65,8 @@ test('ci impact selects isolated runtime groups from known paths', () => {
     ['scripts/code-rules.mjs', ['tooling']],
     ['scripts/code-rules.json', ['tooling']],
     ['tests/code-rules.test.mjs', ['tooling']],
+    ['scripts/ci-sampler.ps1', ['tooling']],
+    ['tests/ci-sampler.test.mjs', ['tooling']],
     ['tests/pr-check.test.mjs', ['tooling']],
     ['tests/preflight.test.mjs', ['tooling']],
     ['tests/fail-first.test.mjs', ['tooling']],

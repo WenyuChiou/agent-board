@@ -118,3 +118,7 @@ this signal does not claim a soak ran or silently start one.
 
 Native hooks, real receiver/model ACKs and per-host UI/CLI acceptance remain
 separate evidence. Selected synthetic CI cannot establish those capabilities.
+
+## Windows runner sampler
+
+Every Windows test job runs `scripts/ci-sampler.ps1` in the background (#1249). It wakes every 250 ms, and when a wake-up comes more than a second late it writes one line to `gaps.jsonl`: how long the gap was, the ten processes that gained the most CPU since the last look (`top`), the CPU gained by all processes (`totalCpuMs`), free memory and the disk queue. The job log ends with a one-line summary, and when there was a gap, `gaps.jsonl` is uploaded as the artifact `windows-sampler-<job>-<index>-<attempt>` (kept 14 days; a rerun keeps its own). To read a gap: a low `totalCpuMs` next to a large `gapMs` means no process ran, so the VM was paused; one process with a high `cpuMs` means that process took the machine.
