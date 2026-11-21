@@ -2808,6 +2808,17 @@ const pollingProxy = async (board, mode, onClaim, onStarting, isStarted = () => 
   }
 }
 
+test('the polling proxy answers with connection: close, so a client keeps no idle socket to it (#1507)', () => fixture(async board => {
+  // A kept-alive socket arms an undici timer in the client; under a later test's mocked clearTimeout it fired after its
+  // parser was gone (Node 22's undici 6, #1507). With no idle socket there is no such timer.
+  const proxy = await pollingProxy(board, 'pass')
+  try {
+    const response = await fetch(new URL('/api/messages/poll', proxy.address), { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    await response.text()
+    assert.equal(response.headers.get('connection'), 'close')
+  } finally { await proxy.close() }
+}))
+
 test('a temporary poll failure preserves a verified connection and delivers a queued message once', async () => {
   for (const mode of ['before-claim', 'network', 'timeout']) await fixture(async (board, dir) => {
     transportRow(dir, 'fixture', 'recovery')
