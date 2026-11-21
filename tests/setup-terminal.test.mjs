@@ -97,11 +97,13 @@ test('setup\'s next steps name no way for OpenCode, not /board, when the /board 
     const result = f.invoke(['--agent', 'opencode,cursor', '--lang', lang], 'yes\n')
     succeeded(result)
     const words = bootstrap[index], next = result.stdout.split(words.next)[1] ?? ''
-    // OpenCode, whose /board is gone, and Cursor, which has no command, are named only in their own setup steps and
-    // where a new session opens.
-    assert.ok(next.includes(words.thenBoardIn.replace('{agents}', 'Claude Code')), `${lang}: ${result.stdout}`)
-    const open = words.open.replace('{agents}', ['OpenCode', 'Cursor', 'Claude Code'].join(lang === 'en' ? ', ' : '、'))
-    for (const line of next.split('\n').filter(line => /OpenCode|Cursor/.test(line))) assert.ok([open, words.opencode, words.cursorWindows].some(step => line.includes(step)), `${lang}: ${result.stdout}`)
+    // OpenCode and Cursor were both set up before and only OpenCode changes, so this run repairs OpenCode (#1278): its next
+    // steps name OpenCode alone, and no other agent's first-time step, Claude Code's included. OpenCode, whose /board is
+    // gone, is named only in its own setup step and where a new session opens.
+    const open = words.openOne.replace('{agents}', 'OpenCode')
+    assert.ok(next.includes(open), `${lang}: ${result.stdout}`)
+    assert.doesNotMatch(next, /Cursor|Claude Code/, `${lang}: ${result.stdout}`)
+    for (const line of next.split('\n').filter(line => /OpenCode/.test(line))) assert.ok([open, words.opencode].some(step => line.includes(step)), `${lang}: ${result.stdout}`)
     assert.doesNotMatch(next, /\/board(?!-)/, `${lang}: ${result.stdout}`)
     assert.equal(existsSync(join(commands, 'board.md')), false)
     assert.equal(existsSync(join(commands, 'agent-board.md')), false)
@@ -403,7 +405,7 @@ test('a failed Codex trust part keeps Hermes trust and the Claude plugin install
   f.env.AGENT_BOARD_TEST_CODEX_FAIL = '1'
   const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'])
   succeeded(result)
-  assert.match(result.stdout, /Approve the board's hooks in Codex: failed\. Run: .*--codex-trust.*--codex-bin.*--apply/)
+  assert.match(result.stdout, /Approve the board's hooks in Codex: failed\. Run: .*--codex-trust --apply --codex-bin /)
   assert.match(result.stdout, /Approve the board's hooks in Hermes Agent: done\./)
   assert.equal(existsSync(join(f.env.HERMES_HOME, 'shell-hooks-allowlist.json')), true)
   assert.deepEqual(claudeCalls(f), pluginCommands)

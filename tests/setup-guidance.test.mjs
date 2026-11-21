@@ -66,19 +66,12 @@ test('npm setup groups shared files, accurate counts, commands and sessions in e
     assert.ok(applied.includes(`${bootstrap[index].shared}: ${bootstrap[index].appliedCreate.replace('{count}', common.size)}`), applied)
     for (const output of [text, applied]) {
       assert.equal(output.split(start).length - 1, 1, output)
-      const data = join(root, 'data')
-      const quoted = process.platform === 'win32' ? `'${data.replaceAll("'", "''")}'` : `'${data.replaceAll("'", "'\\''")}'`
-      const location = /^[\w./:@=-]+$/.test(data) ? data : quoted
-      const board = `npx @wenyuchiou/agent-board --data-dir ${location}`
-      // The fixture passes --home for its scratch home, which is the default home on
-      // Linux (HOME) but not on Windows (homedir reads USERPROFILE): the trust command
-      // names the home only when it differs from the default (#1303).
-      const homeQuoted = process.platform === 'win32' ? `'${env.HOME.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'` : `'${env.HOME.replaceAll("'", "'\\''")}'`
-      const homeLocation = /^[\w./:@=-]+$/.test(env.HOME) ? env.HOME : homeQuoted
-      const homePart = process.platform === 'win32' ? ` --home ${homeLocation}` : ''
-      assert.ok(output.includes(`${board}${homePart} --codex-trust --codex-bin `))
-      assert.ok(output.includes(`${board} --hermes-trust`))
-      assert.ok(output.includes(bootstrap[index].board.replace('{command}', 'npx @wenyuchiou/agent-board')))
+      const quote = value => /^[\w./:@=-]+$/.test(value) ? value : process.platform === 'win32'
+        ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
+      const board = `npx @wenyuchiou/agent-board --home ${quote(env.HOME)} --data-dir ${quote(join(root, 'data'))} --progress-file ${quote(env.CLAUDE_PROGRESS_FILE)} --lang ${lang}`
+      assert.ok(output.includes(`${board} --agent codex --codex-trust --codex-bin `))
+      assert.ok(output.includes(`${board} --agent hermes --hermes-trust`))
+      assert.ok(output.includes(bootstrap[index].board.replace('{command}', board)))
       assert.doesNotMatch(output, /& '/)
       assert.ok(!output.includes(process.execPath), output)
     }

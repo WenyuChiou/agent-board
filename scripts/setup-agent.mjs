@@ -7,6 +7,7 @@ import { isatty } from 'node:tty'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, isBoardPluginDisabled as isPluginDisabled, retiredAgents, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
+import { installCommand, installContext } from './setup-command.mjs'
 
 const args = process.argv.slice(2)
 const isRemove = args.includes('--remove')
@@ -69,11 +70,12 @@ const summaries = [
     "connector": "managed by the Claude Code plugin connector; keeps its board at {progress}",
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
-    "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command}{dir}{home} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works).",
+    "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command}, then run it again with --apply (in the Codex CLI, /hooks also works).",
     "codexTrustHeld": "Codex: the board's hooks are still trusted.",
-    "codexTrustNeeded": "Codex: the board's hooks for {events} are not trusted. Approve them: preview with {command}{dir}{home} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works).",
-    "codexMissing": "Codex: setup could not find Codex; run where.exe codex in PowerShell or command -v codex in bash, then pass its full path to --codex-bin.",
-    "hermes": "Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command} --hermes-trust, then run it again with --apply.",
+    "codexTrustNeeded": "Codex: the board's hooks for {events} are not trusted. Approve them: preview with {command}, then run it again with --apply (in the Codex CLI, /hooks also works).",
+    "codexMissing": "Codex: setup could not find Codex. Find it with where.exe codex on Windows or command -v codex elsewhere, then replace {codex} in this preview command: {command}",
+    "codexPath": "<full path to codex>",
+    "hermes": "Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command}, then run it again with --apply.",
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin.",
     "openclaw": "OpenClaw: restart OpenClaw to load its generated agent-board plugin.",
     "deepseek": "DeepSeek: close and reopen DeepSeek Harness (dsh) so it loads the agent-board plugin setup wrote.",
@@ -140,11 +142,12 @@ const summaries = [
     "connector": "由 Claude Code 外掛的連接器管理；保留看板 {progress}",
     "next": "接下來：",
     "apply": "套用這些變更：{command}",
-    "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command}{dir}{home} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
+    "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
     "codexTrustHeld": "Codex：看板的 hooks 仍然受信任。",
-    "codexTrustNeeded": "Codex：看板在 {events} 的 hooks 尚未受信任。請核准它們：先執行 {command}{dir}{home} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
-    "codexMissing": "Codex：setup 找不到 Codex；請在 PowerShell 執行 where.exe codex 或在 bash 執行 command -v codex，再用 --codex-bin 傳入完整路徑。",
-    "hermes": "Hermes Agent：Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} --hermes-trust 預覽，再加上 --apply 重新執行同一命令。",
+    "codexTrustNeeded": "Codex：看板在 {events} 的 hooks 尚未受信任。請核准它們：先執行 {command} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
+    "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系統用 command -v codex 找到它，再替換這個預覽指令中的 {codex}：{command}",
+    "codexPath": "<Codex 的完整路徑>",
+    "hermes": "Hermes Agent：Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} 預覽，再加上 --apply 重新執行同一命令。",
     "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛。",
     "openclaw": "OpenClaw：重新啟動 OpenClaw，載入 setup 產生的 agent-board 外掛。",
     "deepseek": "DeepSeek：關掉 DeepSeek Harness（dsh）再重新打開，讓它載入 setup 產生的 agent-board 外掛。",
@@ -211,11 +214,12 @@ const summaries = [
     "connector": "由 Claude Code 插件的连接器管理；保留看板 {progress}",
     "next": "接下来：",
     "apply": "应用这些更改：{command}",
-    "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command}{dir}{home} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
+    "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
     "codexTrustHeld": "Codex：看板的 hooks 仍然受信任。",
-    "codexTrustNeeded": "Codex：看板在 {events} 的 hooks 尚未受信任。请批准它们：先运行 {command}{dir}{home} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
-    "codexMissing": "Codex：setup 找不到 Codex；请在 PowerShell 运行 where.exe codex 或在 bash 运行 command -v codex，再用 --codex-bin 传入完整路径。",
-    "hermes": "Hermes Agent：Hermes 会问一次是否信任看板的 hooks，请回答 y。在无法询问的聊天渠道中，先运行 {command} --hermes-trust 预览，再加上 --apply 重新运行同一命令。",
+    "codexTrustNeeded": "Codex：看板在 {events} 的 hooks 尚未受信任。请批准它们：先运行 {command} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
+    "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系统用 command -v codex 找到它，再替换这个预览命令中的 {codex}：{command}",
+    "codexPath": "<Codex 的完整路径>",
+    "hermes": "Hermes Agent：Hermes 会问一次是否信任看板的 hooks，请回答 y。在无法询问的聊天渠道中，先运行 {command} 预览，再加上 --apply 重新运行同一命令。",
     "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件。",
     "openclaw": "OpenClaw：重新启动 OpenClaw，加载 setup 生成的 agent-board 插件。",
     "deepseek": "DeepSeek：关掉 DeepSeek Harness（dsh）再重新打开，让它加载 setup 生成的 agent-board 插件。",
@@ -264,19 +268,22 @@ const noAgentWords = [
     "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
     "home": "Setup found no agent on this computer. It looked for their folders in {home}. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
     "unknown": "agent-board: --agent named an agent setup does not know. Name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
-    "retired": "agent-board: Gemini CLI is retired, so setup no longer sets it up. Google's CLI is Antigravity CLI now: run setup with --agent antigravity."
+    "retired": "agent-board: Gemini CLI is retired, so setup no longer sets it up. Google's CLI is Antigravity CLI now: run setup with --agent antigravity.",
+    "claude": "Claude Code connects through its plugin. Run claude plugin marketplace add WenyuChiou/agent-board, then claude plugin install agent-board@agent-board."
   },
   {
     "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
     "home": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
     "unknown": "agent-board：--agent 寫了 setup 不認得的 agent 名稱。指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "retired": "agent-board：Gemini CLI 已退役，setup 不再設定它。Google 現在的 CLI 是 Antigravity CLI：請用 --agent antigravity 執行 setup。"
+    "retired": "agent-board：Gemini CLI 已退役，setup 不再設定它。Google 現在的 CLI 是 Antigravity CLI：請用 --agent antigravity 執行 setup。",
+    "claude": "Claude Code 透過外掛接上看板。執行 claude plugin marketplace add WenyuChiou/agent-board，再執行 claude plugin install agent-board@agent-board。"
   },
   {
     "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
     "home": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
     "unknown": "agent-board：--agent 写了 setup 不认识的 agent 名称。指定一个：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
-    "retired": "agent-board：Gemini CLI 已退役，setup 不再设置它。Google 现在的 CLI 是 Antigravity CLI：请用 --agent antigravity 运行 setup。"
+    "retired": "agent-board：Gemini CLI 已退役，setup 不再设置它。Google 现在的 CLI 是 Antigravity CLI：请用 --agent antigravity 运行 setup。",
+    "claude": "Claude Code 通过插件接上看板。运行 claude plugin marketplace add WenyuChiou/agent-board，再运行 claude plugin install agent-board@agent-board。"
   }
 ]
 const noAgentText = (key, values) => message(...noAgentWords.map(table => table[key].replace(/\{(\w+)\}/g, (text, name) => String(values[name] ?? text))))
@@ -429,13 +436,17 @@ const main = () => {
   // The curly double quotes (U+201C, U+201D) are literal inside single quotes, so doubling them would change the path.
   const quote = value => /^[\w./:@=,-]+$/.test(value) ? value : process.platform === 'win32'
     ? `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'` : `'${value.replaceAll("'", "'\\''")}'`
-  // A home other than the account's own stays in the printed trust command: without it the
-  // command approves the default home instead of the one setup read back from (#1303).
-  const codexHome = homeAt >= 0 && resolve(home) !== resolve(homedir()) ? ` --home ${quote(home)}` : ''
   const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
+  const context = installContext(args)
   const setupCommand = extra => {
-    const baseCommon = common.filter(arg => !extra.includes(arg))
-    return [command || nodeCommand(fileURLToPath(import.meta.url)), ...baseCommon.map(quote), ...extra.map(quote)].join(' ')
+    const at = extra.indexOf('--agent')
+    return installCommand({ ...context, program: command || nodeCommand(fileURLToPath(import.meta.url)) }, {
+      target: 'setup', mode: extra.includes('--remove') ? '--remove' : undefined,
+      agent: at < 0 ? undefined : extra[at + 1], apply: extra.includes('--apply'),
+      extra: [...(args.includes('--antigravity-sidecar') ? ['--antigravity-sidecar'] : []), ...extra],
+      // The Codex the person named stays the one the copied command uses (#1356).
+      codexBin: flag('--codex-bin'),
+    }, quote).text
   }
   const enablePluginStep = () => words('enablePlugin', { command: 'claude plugin enable agent-board@agent-board --scope user' })
   if (isRemove && selector === 'auto' && !selected.length) {
@@ -449,6 +460,7 @@ const main = () => {
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : hasClaude ? `Claude Code: ${words('claude')}\n\n${words('next')}\n${claudeNext.map((step, i) => `${i + 1}. ${step}`).join('\n')}` : noAgent}\n`)
     return
   }
+  if (!isRemove && selected.some(agent => agent === 'claude' || agent === 'claude-code')) fail('INVALID_TARGETS', noAgentText('claude', {}))
   if ((!selected.length && selector !== 'auto') || selected.some(agent => !(isRemove ? removable : targets).includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
   const apply = args.includes('--apply')
   const isShowingApplied = apply
@@ -618,37 +630,43 @@ const main = () => {
     }
   }
   const steps = []
+  const boardStep = (plan, agent, extra, codexBin) => installCommand({
+    ...context,
+    program: command ? command.replace(/\s+(?:setup|remove)\s*$/, '') : nodeCommand(plan.script ?? join(plan.data, 'agent-board.mjs')),
+    dataDir: dirname(resolve(plan.script ?? join(plan.data, 'agent-board.mjs'))) !== resolve(homedir(), '.agent-board') ? dirname(resolve(plan.script ?? join(plan.data, 'agent-board.mjs'))) : undefined,
+  }, {
+    target: 'board', mode: extra.find(arg => /^--(?:codex|hermes)-(?:trust|doctor)$/.test(arg)),
+    agent, apply: extra.includes('--apply'), extra,
+    codexBin: codexBin ?? flag('--codex-bin') ?? (extra.includes('--codex-bin') ? extra[extra.indexOf('--codex-bin') + 1] : undefined),
+  }, quote)
   const boardRun = (plan, agent, extra) => {
-    const own = []
-    for (let i = 0; i < common.length; i++) {
-      if (common[i] === '--agent') i++
-      else own.push(common[i])
-    }
-    return spawnSync(process.execPath, [plan.script ?? join(plan.data, 'agent-board.mjs'), ...own, '--agent', agent, ...extra], { encoding: 'utf8', windowsHide: true })
+    const built = boardStep(plan, agent, extra)
+    if (!built.isRunnable) throw new Error('NON_RUNNABLE_INSTALL_COMMAND')
+    return spawnSync(process.execPath, [plan.script ?? join(plan.data, 'agent-board.mjs'), ...built.argv], { encoding: 'utf8', windowsHide: true })
   }
   const isTrusted = (plan, agent, codex) => {
     const doctor = boardRun(plan, agent, ['--codex-doctor', '--json', ...(codex ? ['--codex-bin', codex] : [])])
     try { return doctor.status === 0 && JSON.parse(doctor.stdout).hooksTrusted === true } catch { return false }
   }
   const boardPlan = available.length ? results[selected.indexOf(available[0])] : null
-  const boardFile = boardPlan ? boardPlan.script ?? join(boardPlan.data, 'agent-board.mjs') : ''
-  // The package launcher cannot discover a custom install from the account's default locations.
-  const boardDirectory = boardFile ? dirname(resolve(boardFile)) : ''
-  const boardCommand = boardFile ? command
-    ? [command.replace(/\s+(?:setup|remove)\s*$/, ''), ...(boardDirectory !== resolve(homedir(), '.agent-board') ? ['--data-dir', quote(boardDirectory)] : [])].join(' ')
-    : nodeCommand(boardFile) : ''
+  const boardCommand = boardPlan ? boardStep(boardPlan, undefined, []).text : ''
+  const changedAgents = available.filter(agent => plans[selected.indexOf(agent)].changes.length > 0)
+  const hasChanges = changedAgents.length > 0
+  const isRepair = hasChanges && changedAgents.every(agent => touched.includes(agent))
+  const isPluginInstallNeeded = isPluginNeeded && !isRepair
   if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
     const approvals = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
       const plan = plans[selected.indexOf(agent)]
+      if (isRepair && !changedAgents.includes(agent)) return false
       return plan.managedBy !== 'connector' && (plan.changes.length || !isTrusted(plan, agent, agent === 'codex' ? codex : undefined))
     })
-    // Only what a yes would do: no skipped agent and no agent whose own files are already current.
+    // Keep file work and explicit host approvals separate: current files can still need trust.
     const will = [
       ...(sharedChanges.length ? [sharedLine] : []),
       ...agentLines.filter((line, i) => !plans[i].conflicts.length && changesFor(plans[i], false).length).map(line => line.split('\n')[0]),
       ...approvals.map(agent => words('trustPart', { host: names[agent] })),
-      ...(isPluginNeeded ? [words('installPlugin')] : []),
+      ...(isPluginInstallNeeded ? [words('installPlugin')] : []),
     ]
     const report = (part, isDone, next) => process.stdout.write(`${words(isDone ? 'partDone' : 'partFailed', { part, command: next })}\n`)
     // The sidecar is a second, separate question that defaults to no. A yes only writes its files (the person
@@ -692,6 +710,8 @@ const main = () => {
         const plan = plans[i]
         // A skipped agent's preview line already names its files and the command to apply it.
         if (plan.conflicts.length) continue
+        // A repair reports only the agents it repairs; any other run reports every agent, as #1698 needs.
+        if (isRepair && !changedAgents.includes(agent) && !approvals.includes(agent)) continue
         // With nothing to apply, an agent setup writes for is done only while the board script every way runs is there
         // after the applies; else the line says to run setup for it again, which writes the script back. An agent the
         // connector manages has no file of setup's to look at (#1698).
@@ -702,10 +722,16 @@ const main = () => {
       }
       for (const agent of approvals) {
         const extra = [`--${agent}-trust`, ...(agent === 'codex' && codex ? ['--codex-bin', codex] : []), '--apply', '--json']
-        const next = [boardCommand, ...common.map(quote), ...extra.filter(word => word !== '--json').map(quote), ...(agent === 'codex' && !codex ? ['--codex-bin <path-to-codex>'] : [])].join(' ')
-        // Hooks whose files were not written cannot be approved; say so instead of leaving the part out.
-        if (!completed.includes(agent)) {
+        const retry = boardStep(plans[selected.indexOf(agent)], agent, extra.filter(word => word !== '--json'), agent === 'codex' ? codex || { placeholder: words('codexPath') } : undefined)
+        const next = retry.text
+        // A failed file apply cannot proceed to trust; keep that promised part visible as failed.
+        if (!completed.includes(agent) || !retry.isRunnable) {
           report(words('trustPart', { host: names[agent] }), false, next)
+          continue
+        }
+        // A repair may restore the exact hooks the host already trusts; a yes need not trust them twice.
+        if (isRepair && isTrusted(plans[selected.indexOf(agent)], agent, agent === 'codex' ? codex : undefined)) {
+          report(words('trustPart', { host: names[agent] }), true, next)
           continue
         }
         const result = boardRun(plans[selected.indexOf(agent)], agent, extra)
@@ -713,7 +739,7 @@ const main = () => {
       }
       let hasInstalledPlugin = hasPlugin(claudeDirectory)
       let isPluginReady = !!claude && hasInstalledPlugin && !isPluginDisabled(claudeDirectory)
-      if (isPluginNeeded) {
+      if (isPluginInstallNeeded) {
         let known = null
         try { known = JSON.parse(readFileSync(join(claudeDirectory, 'plugins', 'known_marketplaces.json'), 'utf8').replace(/^\uFEFF/, '')) } catch {}
         // A marketplace Claude Code already knows would make "marketplace add" fail; only the install is left.
@@ -757,8 +783,8 @@ const main = () => {
       // One retry command for every agent that was skipped, here as in the run without a terminal.
       const skippedAgents = selected.filter((agent, i) => plans[i].conflicts.length)
       if (skippedAgents.length) next.push(words('retry', { command: setupCommand(['--agent', skippedAgents.join(','), '--apply']) }))
-      if (hasInstalledPlugin && isPluginDisabled(claudeDirectory)) next.push(enablePluginStep())
-      if (isPluginReady) {
+      if (!isRepair && hasInstalledPlugin && isPluginDisabled(claudeDirectory)) next.push(enablePluginStep())
+      if (!isRepair && isPluginReady) {
         sessions.push('Claude Code')
         ways.set('Claude Code', 'slash')
       }
@@ -804,23 +830,21 @@ const main = () => {
     const skippedAgents = selected.filter((agent, i) => plans[i].conflicts.length)
     if (skippedAgents.length) steps.push(words('retry', { command: setupCommand(['--remove', '--agent', skippedAgents.join(','), '--apply']) }))
   } else {
-    const hasChanges = available.some(agent => plans[selected.indexOf(agent)].changes.length > 0)
-    if (!apply && hasChanges) steps.push(words('apply', { command: setupCommand(['--agent', available.join(','), '--apply']) }))
+    if (!apply && hasChanges) steps.push(words('apply', { command: setupCommand(['--agent', changedAgents.join(','), '--apply']) }))
     const sessionAgents = []
     for (const agent of available) {
       const plan = results[selected.indexOf(agent)]
       if (plan.managedBy === 'connector') continue
+      const hasAgentChanges = changedAgents.includes(agent)
+      if (isRepair && !hasAgentChanges) continue
       // Narrower than detection: this path goes to --codex-bin, which cannot start a .bat or .com.
-      // An explicit --codex-bin names the Codex the read-back asked, as the asking flow does.
       const codex = agent === 'codex' ? flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
-      // An explicit --codex-dir names the Codex home the trust command must approve: without it
-      // the command previews the inherited home instead (#1303).
-      const codexDir = agent === 'codex' ? flag('--codex-dir') : undefined
       // A repeat run of an unchanged install asks Codex or Hermes itself whether the board's hooks are trusted,
       // and leaves out the trust step only on its yes; no answer or any other answer keeps it (#808).
-      if (['codex', 'hermes'].includes(agent) && !plan.changes.length && isTrusted(plan, agent, agent === 'codex' ? codex : undefined)) continue
+      const hasTrustedHooks = ['codex', 'hermes'].includes(agent) && (!hasAgentChanges || isRepair) && isTrusted(plan, agent, agent === 'codex' ? codex : undefined)
+      if (!hasAgentChanges && hasTrustedHooks) continue
       if (agent === 'codex' && !codex) {
-        steps.push(words('codexMissing'))
+        if (!hasTrustedHooks) steps.push(words('codexMissing', { command: boardStep(plan, agent, ['--codex-trust'], { placeholder: words('codexPath') }).text, codex: quote(words('codexPath')) }))
         continue
       }
       if (agent !== 'codex' && plan.capabilities.lifecycle === 'adapter-pending') {
@@ -832,15 +856,15 @@ const main = () => {
         if (untrusted !== undefined && untrusted.length === 0) {
           // The upgrade kept the trust the read-back just confirmed: no trust step.
         } else if (untrusted !== undefined && untrusted.length > 0) {
-          steps.push(words('codexTrustNeeded', { command: boardCommand, codex: codex ? quote(codex) : '', dir: codexDir ? ` --codex-dir ${quote(codexDir)}` : '', home: codexHome, events: untrusted.map(event => event[0].toUpperCase() + event.slice(1)).join(', ') }))
+          steps.push(words('codexTrustNeeded', { command: boardStep(plan, agent, ['--codex-trust'], codex).text, events: untrusted.map(event => event[0].toUpperCase() + event.slice(1)).join(', ') }))
         } else {
-          steps.push(words('codex', { command: boardCommand, codex: codex ? quote(codex) : '', dir: codexDir ? ` --codex-dir ${quote(codexDir)}` : '', home: codexHome }))
+          steps.push(words('codex', { command: boardStep(plan, agent, ['--codex-trust'], codex).text }))
         }
       }
-      if (agent === 'hermes') {
-        steps.push(words('hermes', { command: boardCommand }))
+      if (agent === 'hermes' && !hasTrustedHooks) {
+        steps.push(words('hermes', { command: boardStep(plan, agent, ['--hermes-trust']).text }))
       }
-      if (hasChanges) {
+      if (hasAgentChanges) {
         if (['opencode', 'openclaw', 'deepseek'].includes(agent)) {
           steps.push(words(agent, { command: boardCommand, codex: codex ? quote(codex) : '' }))
         }
@@ -848,13 +872,13 @@ const main = () => {
         sessionAgents.push(names[agent])
       }
     }
-    if (isPluginInstalled && !hasDisabledPlugin && hasChanges) sessionAgents.push('Claude Code')
+    if (!isRepair && isPluginInstalled && !hasDisabledPlugin && hasChanges) sessionAgents.push('Claude Code')
     if (sessionAgents.length) steps.push(words(sessionAgents.length === 1 ? 'startOne' : 'start', { agents: sessionAgents.join(message(', ', '、', '、')) }))
     // One retry command for every agent that was skipped.
     const skippedAgents = selected.filter((agent, i) => plans[i].conflicts.length)
     if (skippedAgents.length) steps.push(words('retry', { command: setupCommand(['--agent', skippedAgents.join(','), '--apply']) }))
-    if (hasDisabledPlugin) steps.push(enablePluginStep())
-    else if (hasClaude && !isPluginInstalled) steps.push(words('plugin'))
+    if (!isRepair && hasDisabledPlugin) steps.push(enablePluginStep())
+    else if (!isRepair && hasClaude && !isPluginInstalled) steps.push(words('plugin'))
     if (available.length && hasChanges) {
       steps.push(words('board', { command: boardCommand }))
     }

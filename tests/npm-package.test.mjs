@@ -433,7 +433,7 @@ test("with no independent install, the Claude plugin's board script beside its p
   }
 }))
 
-test('--data-dir picks the board script in that folder and is not passed on', () => fixture(f => {
+test('--data-dir selects the explicit installation and preserves its root for the board', () => fixture(f => {
   const pkg = packed(f)
   const data = join(f.home, 'chosen data')
   const script = join(data, 'agent-board.mjs')
@@ -441,7 +441,7 @@ test('--data-dir picks the board script in that folder and is not passed on', ()
   save(boardPath(f), 'throw new Error("wrong board")\n')
   const result = f.run(pkg, ['--chat', '--data-dir', data, '--all'])
   success(result)
-  assert.deepEqual(JSON.parse(result.stdout), { argv1: resolve(script), args: ['--chat', '--all'] })
+  assert.deepEqual(JSON.parse(result.stdout), { argv1: resolve(script), args: ['--chat', '--all', '--data-dir', data] })
   assert.equal(result.stderr, '')
   for (const args of [['--data-dir'], ['--data-dir', '--chat']]) {
     const invalid = f.run(pkg, args)
@@ -456,7 +456,10 @@ test('--data-dir picks the board script in that folder and is not passed on', ()
   const args = ['--progress-file', join(dirname(explicit), 'progress.md'), '--chat']
   const preferred = f.run(pkg, [...args, '--data-dir', data])
   success(preferred)
-  assert.deepEqual(JSON.parse(preferred.stdout), { argv1: resolve(explicit), args })
+  assert.deepEqual(JSON.parse(preferred.stdout), { argv1: resolve(script), args: [...args, '--data-dir', data] })
+  const progressOnly = f.run(pkg, args)
+  success(progressOnly)
+  assert.deepEqual(JSON.parse(progressOnly.stdout), { argv1: resolve(explicit), args })
 }))
 
 test('an unknown word prints the usage hint and exits 2', () => fixture(f => {
