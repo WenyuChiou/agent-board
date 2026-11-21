@@ -41,14 +41,14 @@ const TOKEN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
 // reads neither for a wake, the board at e8025827 read both. That board also took the Stop by a call (`mailbox-idle`, with
 // the hook's time) and refuses a take's `seq`; this one refuses the call, so both answer UNKNOWN_FIELD and go on, as the
 // hook does for `seq`.
-const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T - 20_000 }, written = { ...reports }) => {
+const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T - 20_000 }, written = { ...reports }, onTurns = () => {}) => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-wake-'))
   const messages = join(dir, 'messages')
   const hub = createMessaging(messages, false, {
     routes: RECEIVER_ROUTES,
     stateOfSession: (_agent, session) => reports[session] === undefined ? 'working' : 'idle',
     writtenOfSession: (_agent, session) => written[session],
-    turnsOfSession: (agent, session) => readTurnOrder(messages, agent, session),
+    turnsOfSession: (agent, session) => { onTurns(agent, session); return readTurnOrder(messages, agent, session) },
   })
   // A row is written again at each hook event and report, never back in time, and keeps whole seconds.
   const write = (session, now) => { written[session] = Math.max(written[session] ?? 0, Math.floor(now / 1000) * 1000) }
@@ -388,6 +388,25 @@ test('an order file whose lock is there holds the wake', () => using(w => {
   rmSync(lock)
   assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 2000), { ok: true })
 }))
+
+test('a wake-attempt reads the order file while it holds the file\'s lock, so a turn start writes before that read or waits until the board has answered', async () => {
+  const reads = []
+  let lock
+  const w = world(undefined, undefined, () => { if (lock !== undefined) reads.push(existsSync(lock)) })
+  try {
+    w.ready(APP)
+    w.poll(T)
+    w.send(APP, 'm-under', T)
+    const [wake] = w.poll(T + 1000).wakes
+    lock = `${w.order(APP)}.lock`
+    assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), { ok: true })
+    // Every read the attempt made was under the lock, which is gone again once it answers, with the start saved.
+    assert.ok(reads.length > 0)
+    assert.deepEqual(reads.filter(isHeld => !isHeld), [])
+    assert.equal(existsSync(lock), false)
+    assert.equal(w.saved('m-under').woke, T + 1000)
+  } finally { w.close() }
+})
 
 // The two windows the owner accepted on 2026-11-18 (docs/dev/plan-0.25.1.md, M5b), pinned as the board meets them.
 test('a turn whose start hook never ran is woken into, the first window the owner accepted on 2026-11-18, while a turn its hook marked is held', () => using(w => {
