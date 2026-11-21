@@ -93,15 +93,14 @@ const MARK_LIMIT = 4096
 const MARK_INPUT_LIMIT = 1024 * 1024
 const MARK_MAX_AGE = 24 * 60 * 60 * 1000
 const MARK_LINE = /^AGENT_BOARD_REPORT_V1 ([a-zA-Z0-9][a-zA-Z0-9_-]{5,127}) ([0-9a-f]{16}) (\d{1,15}) (\d{1,7}) ([0-9a-f]{16}) ([A-Za-z0-9_-]+)$/
-// A board is named by its folder's real path and its file's name, the path its writes go to: two spellings of one folder
-// (letter case on Windows, a link, a short name) name one board, and a linked file is a board of its own, as a direct
-// report writes there. A folder that is not there names no board, so no line is printed or read for it (#1384).
-const boardOf = (progress: string): string | undefined => {
-  const path = resolve(progress)
-  let folder: string
-  try { folder = realpathSync.native(dirname(path)) } catch { return undefined }
-  const named = join(folder, basename(path))
-  return hash(`board:${process.platform === 'win32' ? named.toLowerCase() : named}`).slice(0, 16)
+// Only the board Antigravity's setup recorded keeps a refused report, named by that exact path: the hook's own command
+// gives it to the hook and to the report command it hands the model, so both name it alike with no lookup of the path
+// that could answer two ways. Another spelling, a board setup did not record, or a folder that is not there names
+// none, so no line is printed or read for it (#1384).
+const boardOf = (progress: string, recorded: unknown): string | undefined => {
+  if (typeof recorded !== 'string' || resolve(recorded) !== progress) return undefined
+  try { if (!statSync(dirname(progress)).isDirectory()) return undefined } catch { return undefined }
+  return hash(`board:${progress}`).slice(0, 16)
 }
 // The time of the last report each board took for a conversation: one conversation can report to two boards that share
 // a data folder, and a report one board took is no reason to skip the other board's (#1384). A time older than any line
@@ -1227,9 +1226,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
       // A marked report no newer than a report that already reached the board for its conversation is not applied: one
       // with the same time is that report, read again (#1384).
-      const board = boardOf(progress)
+      const board = boardOf(progress, loaded.progress)
       const reportedHere = board === undefined ? undefined : original?.reportedAt?.[board]
       if (isMarkedReport && entry === current && typeof reportedHere === 'number' && sourceAt <= reportedHere) return original
+      // A marked report over a day old by a clock read after the record is refused too: a newer report's time is dropped
+      // only once it is a day old, and by then this line is older still. It is dropped as an over-age line is.
+      if (isMarkedReport && entry === current && Date.now() - sourceAt > MARK_MAX_AGE) throw new Error('MARK_TOO_OLD')
       // Direct events can arrive out of order too, before they ever enter the pending queue.
       if (mode !== '--codex-report' && original !== null && sourceAt < (original.appliedAt ?? Date.parse(original.updated))) {
         const signal = cleanSignal(run)
@@ -1468,7 +1470,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (mode !== '--codex-report' || agent !== 'antigravity' || planInput !== undefined || flag('--session') === undefined || current === undefined || isBoardWritten) return false
       if (!isDenied(error) && !isBusy(error) && !(error instanceof Error && error.message === 'HOOK_TIMEOUT')) return false
       // A board folder that is not there names no board the hook would name the same way: the refusal stands.
-      const board = boardOf(progress)
+      const board = boardOf(progress, loaded.progress)
       if (board === undefined) return false
       let original: CodexReport | null = null
       try { original = JSON.parse(readLocal(join(root, 'sessions', `${hash(`antigravity:${current.session}`)}.json`)) ?? 'null') as CodexReport | null } catch {}
@@ -1487,7 +1489,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const bringMarkedReport = async (conversation: string): Promise<void> => {
       const path = raw.transcriptPath
       // The data folder can serve more than one board: each board reads the conversation's lines from where it last ended.
-      const board = boardOf(progress)
+      const board = boardOf(progress, loaded.progress)
       // A board folder that is not there yet names no board: the lines wait, unread, for a hook after it is made.
       if (board === undefined) return
       const offsetFile = join(root, 'antigravity-reports', `${hash(`antigravity:${conversation}:${board}`)}.json`)
