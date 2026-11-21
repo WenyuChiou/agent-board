@@ -453,11 +453,29 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       }
       if (action === 'wake-poll' || action === 'wake-attempt' || action === 'wake-report') {
         const turnsOf = gate?.turnsOfSession
-        const next = wakeAction(state, action, body, now, (agent, session) => {
+        const decide = (isLockHeld: boolean) => wakeAction(state, action, body, now, (agent, session) => {
           const turns = turnsOf?.(agent, session)
-          return turns === undefined || isTurnOrderLocked(root, agent, session) ? undefined : turns
+          return turns === undefined || (!isLockHeld && isTurnOrderLocked(root, agent, session)) ? undefined : turns
         })
         if (action === 'wake-poll') sidecarSeen = now
+        // An attempt reads the order file under the file's own lock and saves its start before it lets go, so a turn
+        // start writes either before that read, which holds the wake, or after the board's yes (round 4, codex_481). A
+        // lock it cannot take in 100 ms, a hook's or one a dead hook left, holds the wake.
+        const one = action === 'wake-attempt' && typeof body.id === 'string' ? state.messages.find(message => message.id === body.id) : undefined
+        const box = one === undefined ? undefined : state.mailboxes?.find(mailbox => mailbox.id === one.target && mailbox.agent === 'antigravity')
+        if (box !== undefined) {
+          try {
+            return withLocalLock(`${turnOrderFile(root, box.agent, box.session)}.lock`, () => {
+              const next = decide(true)
+              if (next.state !== state) save(next.state, now)
+              return next.result
+            }, { waitMs: 100 })
+          } catch (error) {
+            if ((error as Error).message === 'LOCK_BUSY' || (error as Error).message === 'LOCK_DENIED') return { ok: false, code: 'NOT_HELD' }
+            throw error
+          }
+        }
+        const next = decide(false)
         if (next.state !== state) save(next.state, now)
         return next.result
       }
@@ -732,8 +750,9 @@ export const markTurnOrder = (directory: string, agent: string, session: string,
   }, { waitMs })
 }
 // The order file's lock is there while a hook writes a turn's number, or after a hook died holding it, so the file may be
-// a turn behind: a wake waits until the lock is gone (round 4, codex_481). It is looked at after the file is read, so a
-// write that held the lock at either moment holds the wake. One that cannot be looked at holds it too.
+// a turn behind: a poll hands out no wake until the lock is gone (round 4, codex_481). It is looked at after the file is
+// read, so a write that held the lock at either moment holds the wake; one that cannot be looked at holds it too. An
+// attempt takes the lock itself instead.
 export const isTurnOrderLocked = (directory: string, agent: string, session: string): boolean => {
   try {
     lstatSync(`${turnOrderFile(directory, agent, session)}.lock`)
