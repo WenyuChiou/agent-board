@@ -1063,11 +1063,11 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   assert.ok(text.includes(`plugin_os: \${{ ${onPr} && steps.plan.outputs.plugin_os || '["ubuntu-latest","windows-latest"]' }}`))
   assert.match(text, /plugin_os:'\["ubuntu-latest","windows-latest"\]'/)
   // The board job and the journeys take the same pairs, with the Windows sets in serial parts so each
-  // keeps ten minutes: the board in seven (#1059, #1718), the journeys in three (#910, #1722). The Ubuntu board set runs in two
+  // keeps ten minutes: the board in ten (#1059, #1718, #1762), the journeys in three (#910, #1722). The Ubuntu board set runs in two
   // parts, since its job lasts as long as codex-local alone (#1130).
   const parts = (node, n, os = 'windows-latest') => Array.from({ length: n }, (_, i) => `{"os":"${os}","node":${node},"part":"${i + 1}/${n}"}`).join(',')
   const ubuntu = '{"os":"ubuntu-latest","node":22,"part":"1/1"}', ubuntu24 = '{"os":"ubuntu-latest","node":24,"part":"1/1"}'
-  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 7)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 7)},${parts(24, 7)}]' }}`))
+  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 10)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 10)},${parts(24, 10)}]' }}`))
   assert.ok(text.includes(`journeys_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 3)}]' || '[${ubuntu},${ubuntu24},${parts(22, 3)},${parts(24, 3)}]' }}`))
   // The local exchange job runs in two parts on Ubuntu and three on Windows: with the Codex delivery tests the whole
   // Ubuntu run took 92-94% of ten minutes and each Windows part of two up to 67% on main (#1445).

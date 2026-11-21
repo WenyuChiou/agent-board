@@ -48,10 +48,11 @@ does `installers_os`. Pushes to main, the weekly run, a manual run and a release
 run Node 22 and 24 on both systems and plugin on both. Browser checks use
 Node 24/Chromium on both systems. Plugin checks keep the pinned offline Claude
 runner. Legacy installers and the Python reporter run without installing Claude.
-Board and messaging have separate ten-minute jobs. On Windows the board set runs in seven parts
+Board and messaging have separate ten-minute jobs. On Windows the board set runs in ten parts
 and the journeys in three (#1059: Windows runners vary 1.5-1.9x between jobs of one commit, and
 four parts left `tests/codex-local.test.mjs` too close to its budget; #1718: part 5 of six ran
-past its 480 s with every test passing; #1722: journeys part 2 of two ran up to 545 s of its ten
+past its 480 s with every test passing; #1762: a part of seven ran over its 480 s in 4 of 11 runs, on runners
+up to 1.6x slower; #1722: journeys part 2 of two ran up to 545 s of its ten
 minutes and was once cancelled at the limit; `tests/e2e/l3c-message-store-ownership.test.mjs`
 took up to 294.4 s of such a part and now runs in a part of its own). Each Windows part runs its
 files one at a time (`CI_TEST_SERIAL`), and the other Windows jobs run at most two files at once. When
