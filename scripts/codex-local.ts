@@ -93,7 +93,25 @@ const MARK_LIMIT = 4096
 const MARK_INPUT_LIMIT = 1024 * 1024
 const MARK_MAX_AGE = 24 * 60 * 60 * 1000
 const MARK_LINE = /^AGENT_BOARD_REPORT_V1 ([a-zA-Z0-9][a-zA-Z0-9_-]{5,127}) ([0-9a-f]{16}) (\d{1,15}) (\d{1,7}) ([0-9a-f]{16}) ([A-Za-z0-9_-]+)$/
-const boardOf = (progress: string): string => hash(`board:${progress}`).slice(0, 16)
+// A board is named by its file's own path, so two spellings of one file (letter case on Windows, a link) name one board.
+// A file not written yet is named by its folder's own path.
+const boardOf = (progress: string): string => {
+  let path = resolve(progress)
+  try { path = realpathSync.native(path) } catch {
+    try { path = join(realpathSync.native(dirname(path)), basename(path)) } catch {}
+  }
+  return hash(`board:${process.platform === 'win32' ? path.toLowerCase() : path}`).slice(0, 16)
+}
+// The time of the last report each board took for a conversation: one conversation can report to two boards that share
+// a data folder, and a report one board took is no reason to skip the other board's (#1384). The newest 16 are kept.
+const reportedOn = (kept: unknown, board: string, at: number): Record<string, number> => {
+  const times = typeof kept === 'object' && kept !== null && !Array.isArray(kept)
+    ? Object.entries(kept).filter((one): one is [string, number] => /^[0-9a-f]{16}$/.test(one[0]) && typeof one[1] === 'number' && Number.isFinite(one[1]))
+    : []
+  const merged = new Map(times)
+  merged.set(board, Math.max(at, merged.get(board) ?? 0))
+  return Object.fromEntries([...merged].sort((a, b) => b[1] - a[1]).slice(0, 16))
+}
 const markLine = (session: string, progress: string, at: number, raw: Json): string | undefined => {
   const text = Buffer.from(JSON.stringify(raw))
   const line = `${MARK_PREFIX}${session} ${boardOf(progress)} ${at} ${text.length} ${hash(text).slice(0, 16)} ${deflateRawSync(text).toString('base64url')}`
@@ -1197,7 +1215,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
-      const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number; pushed?: string[]; reportedAt?: number }
+      const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number; pushed?: string[]; reportedAt?: Record<string, number> }
       // Raw recovery can start a fresh session within its allowed clock skew.
       // An existing session's clock must not move past the next real hook.
       const isSkewedBootstrap = isRawReplay && original === null
@@ -1207,7 +1225,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
       // A marked report no newer than a report that already reached the board for its conversation is not applied: one
       // with the same time is that report, read again (#1384).
-      if (isMarkedReport && entry === current && typeof original?.reportedAt === 'number' && sourceAt <= original.reportedAt) return original
+      const reportedHere = original?.reportedAt?.[boardOf(progress)]
+      if (isMarkedReport && entry === current && typeof reportedHere === 'number' && sourceAt <= reportedHere) return original
       // Direct events can arrive out of order too, before they ever enter the pending queue.
       if (mode !== '--codex-report' && original !== null && sourceAt < (original.appliedAt ?? Date.parse(original.updated))) {
         const signal = cleanSignal(run)
@@ -1299,7 +1318,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? { folder: name, folderDigest, folderCanonicalDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
-      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(agent === 'antigravity' && mode === '--codex-report' ? { reportedAt: Math.max(sourceAt, original?.reportedAt ?? 0) } : original?.reportedAt === undefined ? {} : { reportedAt: original.reportedAt }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(agent === 'antigravity' && mode === '--codex-report' ? { reportedAt: reportedOn(original?.reportedAt, boardOf(progress), sourceAt) } : original?.reportedAt === undefined ? {} : { reportedAt: original.reportedAt }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
       if (entry === current) {
         reportCut = cut
@@ -1456,8 +1475,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       return true
     }
     // The conversation's next hook, which runs outside the sandbox, brings the last marked line of its own transcript in
-    // as the report it was, with its own time (#1384). The session record's `reportedAt` keeps it from being applied twice
-    // or over a newer report. A board that cannot take it yet leaves it for the next hook; a report the board refuses is
+    // as the report it was, with its own time (#1384). The session record's `reportedAt` for this board keeps it from being
+    // applied twice or over a newer report. A board that cannot take it yet leaves it for the next hook; a report the board refuses is
     // dropped. Where the read ended is kept, so the next hook reads only what came after.
     const bringMarkedReport = async (conversation: string): Promise<void> => {
       const path = raw.transcriptPath

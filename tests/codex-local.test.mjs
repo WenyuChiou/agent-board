@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createRequire, registerHooks } from 'node:module'
-import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync, linkSync, lstatSync, lutimesSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, readlinkSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { availableParallelism, constants, setPriority, tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join, resolve } from 'node:path'
 import { beforeEach, test as nodeTest } from 'node:test'
@@ -15804,7 +15804,13 @@ const denyFolder1384 = async (folder, action) => {
   try { return await action() } finally { chmodSync(folder, 0o755) }
 }
 // A marked line written by hand, in the format the board prints, for the board at `progress`.
-const boardOf1384 = progress => createHash('sha256').update(`board:${resolve(progress)}`).digest('hex').slice(0, 16)
+const boardOf1384 = progress => {
+  let path = resolve(progress)
+  try { path = realpathSync.native(path) } catch {
+    try { path = join(realpathSync.native(dirname(path)), basename(path)) } catch {}
+  }
+  return createHash('sha256').update(`board:${process.platform === 'win32' ? path.toLowerCase() : path}`).digest('hex').slice(0, 16)
+}
 const markOf1384 = (session, at, raw, progress) => {
   const text = Buffer.from(JSON.stringify(raw))
   return `AGENT_BOARD_REPORT_V1 ${session} ${boardOf1384(progress)} ${at} ${text.length} ${createHash('sha256').update(text).digest('hex').slice(0, 16)} ${deflateRawSync(text).toString('base64url')}`
@@ -15842,8 +15848,10 @@ const agy1384 = f => {
     return { stdout: result.stdout, line, at: Number(line.split(' ')[3]) }
   })
   const mark = (session, at, raw, board = progress) => markOf1384(session, at, raw, board)
+  // The time of the last report this board took for the conversation.
+  const reportedAt = (board = progress) => record().reportedAt?.[boardOf1384(board)]
   assert.equal(hook('working', 'PreInvocation').status, 0)
-  return { conv, other, folder, progress, transcript, transcriptOf, entry, output, hookArgs, hook, report, plan, text, record, recordFile, offsetFile, refused, mark }
+  return { conv, other, folder, progress, transcript, transcriptOf, entry, output, hookArgs, hook, report, plan, text, record, recordFile, offsetFile, refused, mark, reportedAt }
 }
 
 test('a refused Antigravity report prints one marked line and writes nothing (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -15908,7 +15916,7 @@ test('the hook applies the marked line from its transcript with the report\'s ow
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /### Synthetic kept/)
   assert.match(a.text(), /Synthetic kept step/)
-  assert.equal(a.record().reportedAt, at)
+  assert.equal(a.reportedAt(), at)
   // Where the read ended is kept: at the end of the transcript.
   assert.equal(JSON.parse(readFileSync(a.offsetFile, 'utf8')).offset, statSync(a.transcript).size)
 }))
@@ -15922,7 +15930,7 @@ test('of two marked lines the hook applies the last (#1384)', { skip: noDeny1384
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic second step/)
   assert.doesNotMatch(a.text(), /Synthetic first step/)
-  assert.equal(a.record().reportedAt, second.at)
+  assert.equal(a.reportedAt(), second.at)
 }))
 
 test('a marked line older than a direct report is not applied (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -15931,13 +15939,13 @@ test('a marked line older than a direct report is not applied (#1384)', { skip: 
   // The agent reports again where the board can be written.
   const direct = a.report(a.plan('Synthetic direct'))
   assert.equal(direct.status, 0, direct.stderr)
-  const reportedAt = a.record().reportedAt
+  const reportedAt = a.reportedAt()
   assert.ok(reportedAt > old.at)
   a.output(old.stdout)
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic direct step/)
   assert.doesNotMatch(a.text(), /Synthetic older step/)
-  assert.equal(a.record().reportedAt, reportedAt)
+  assert.equal(a.reportedAt(), reportedAt)
 }))
 
 test('a marked line naming another conversation is ignored (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -15949,7 +15957,7 @@ test('a marked line naming another conversation is ignored (#1384)', { skip: noD
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic own step/)
   assert.doesNotMatch(a.text(), /Synthetic other conversation/)
-  assert.equal(a.record().reportedAt, own.at)
+  assert.equal(a.reportedAt(), own.at)
 }))
 
 test('marked text outside a command output is ignored (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -15965,7 +15973,7 @@ test('marked text outside a command output is ignored (#1384)', { skip: noDeny13
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic inside step/)
   assert.doesNotMatch(a.text(), /Synthetic outside/)
-  assert.equal(a.record().reportedAt, inside.at)
+  assert.equal(a.reportedAt(), inside.at)
   assert.match(readFileSync(join(f.home, '.agent-board', 'hook-errors.log'), 'utf8'), /MARK_OUTSIDE_OUTPUT/)
 }))
 
@@ -15981,7 +15989,7 @@ test('a busy board leaves the marked line for the next hook (#1384)', { skip: no
   unlinkSync(lock)
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic busy step/)
-  assert.equal(a.record().reportedAt, at)
+  assert.equal(a.reportedAt(), at)
 }))
 
 test('two hooks reading one marked line apply it once (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -16008,7 +16016,7 @@ test('two hooks reading one marked line apply it once (#1384)', { skip: noDeny13
     for (const child of children) if (child.exitCode === null) child.kill()
   }
   assert.equal(a.text().match(/Synthetic once step/g)?.length, 1)
-  assert.equal(a.record().reportedAt, at)
+  assert.equal(a.reportedAt(), at)
 }))
 
 test('a marked line the board refuses is dropped without failing the hook (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -16024,7 +16032,7 @@ test('a marked line the board refuses is dropped without failing the hook (#1384
   a.output(stdout)
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic after the dropped one step/)
-  assert.equal(a.record().reportedAt, at)
+  assert.equal(a.reportedAt(), at)
 }))
 
 test('a transcript that is missing, short or another session\'s applies nothing (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -16047,7 +16055,7 @@ test('a transcript that is missing, short or another session\'s applies nothing 
   writeFileSync(a.transcript, whole)
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic waiting line step/)
-  assert.equal(a.record().reportedAt, at)
+  assert.equal(a.reportedAt(), at)
 }))
 
 test('a marked line already applied is not applied twice (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -16059,7 +16067,7 @@ test('a marked line already applied is not applied twice (#1384)', { skip: noDen
   // A later plan that reached the board with an earlier time leaves `reportedAt` at the applied line's.
   const later = a.report(a.plan('Synthetic later plan'), ['--hook-started', String(at - 1)])
   assert.equal(later.status, 0, later.stderr)
-  assert.equal(a.record().reportedAt, at)
+  assert.equal(a.reportedAt(), at)
   assert.match(a.text(), /Synthetic later plan step/)
   // Where the last read ended is lost, so the next hook reads the line again.
   unlinkSync(a.offsetFile)
@@ -16103,7 +16111,7 @@ test('the exit code in the transcript does not decide the replay (#1384)', { ski
   a.output(passed.stdout, 0)
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic code zero step/)
-  assert.equal(a.record().reportedAt, passed.at)
+  assert.equal(a.reportedAt(), passed.at)
 }))
 
 test('a large report that compresses into one line is brought in (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -16114,7 +16122,7 @@ test('a large report that compresses into one line is brought in (#1384)', { ski
   a.output(stdout)
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic large report step/)
-  assert.equal(a.record().reportedAt, at)
+  assert.equal(a.reportedAt(), at)
 }))
 
 test('a refused report is checked as its replay applies it (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -16136,7 +16144,7 @@ test('a refused report is checked as its replay applies it (#1384)', { skip: noD
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /### Synthetic row title/)
   assert.match(a.text(), /Synthetic mirrored step/)
-  assert.equal(a.record().reportedAt, at)
+  assert.equal(a.reportedAt(), at)
 }))
 
 test('a marked line for another board is not applied (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -16154,5 +16162,56 @@ test('a marked line for another board is not applied (#1384)', { skip: noDeny138
   assert.equal(a.hook().status, 0)
   assert.match(a.text(), /Synthetic own board step/)
   assert.doesNotMatch(a.text(), /Synthetic for the other board/)
-  assert.equal(a.record().reportedAt, own.at)
+  assert.equal(a.reportedAt(), own.at)
+}))
+
+test('a report another board took does not keep this board\'s marked line out (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  const kept = await a.refused(a.plan('Synthetic for this board'))
+  a.output(kept.stdout)
+  // Later, the same conversation reports straight to another board that shares the data folder.
+  const otherProgress = join(f.home, 'other-board', 'progress.md')
+  f.save(otherProgress, '## Synthetic other board\n')
+  const direct = f.command(['--codex-report', '--agent', 'antigravity', '--session', a.conv, '--progress-file', otherProgress], a.plan('Synthetic on the other board'))
+  assert.equal(direct.status, 0, direct.stderr)
+  assert.ok(a.reportedAt(otherProgress) > kept.at)
+  assert.equal(a.hook().status, 0)
+  assert.match(a.text(), /Synthetic for this board step/)
+  assert.equal(a.reportedAt(), kept.at)
+  assert.match(readFileSync(otherProgress, 'utf8'), /Synthetic on the other board step/)
+}))
+
+test('a marked line is read by its board however its path is spelled (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  // Windows reads a path in any letter case; elsewhere a link to the board folder spells it another way.
+  let spelled = a.progress.toUpperCase()
+  if (process.platform !== 'win32') {
+    const link = join(f.home, 'board-link')
+    symlinkSync(a.folder, link, 'dir')
+    spelled = join(link, 'progress.md')
+  }
+  const result = await denyFolder1384(a.folder, () => f.command(['--codex-report', '--agent', 'antigravity', '--session', a.conv, '--progress-file', spelled], a.plan('Synthetic spelled')))
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(marksIn1384(result.stdout).length, 1)
+  a.output(result.stdout)
+  assert.equal(a.hook().status, 0)
+  assert.match(a.text(), /Synthetic spelled step/)
+  assert.equal(a.reportedAt(), Number(marksIn1384(result.stdout)[0].split(' ')[3]))
+  // A board whose file is not written yet is named by its folder's own path.
+  const freshFolder = join(f.home, 'fresh-board'), fresh = join(freshFolder, 'progress.md')
+  mkdirSync(freshFolder)
+  let freshSpelled = fresh.toUpperCase()
+  if (process.platform !== 'win32') {
+    const link = join(f.home, 'fresh-link')
+    symlinkSync(freshFolder, link, 'dir')
+    freshSpelled = join(link, 'progress.md')
+  }
+  const refusedFresh = await denyFolder1384(freshFolder, () => f.command(['--codex-report', '--agent', 'antigravity', '--session', a.conv, '--progress-file', freshSpelled], a.plan('Synthetic fresh board')))
+  assert.equal(refusedFresh.status, 0, refusedFresh.stderr)
+  assert.equal(marksIn1384(refusedFresh.stdout).length, 1)
+  assert.equal(existsSync(fresh), false)
+  a.output(refusedFresh.stdout)
+  const hooked = f.command(['--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', 'PostInvocation', '--progress-file', fresh], { conversationId: a.conv, transcriptPath: a.transcript })
+  assert.equal(hooked.status, 0, hooked.stderr)
+  assert.match(readFileSync(fresh, 'utf8'), /Synthetic fresh board step/)
 }))
