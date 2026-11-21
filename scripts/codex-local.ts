@@ -93,28 +93,30 @@ const MARK_LIMIT = 4096
 const MARK_INPUT_LIMIT = 1024 * 1024
 const MARK_MAX_AGE = 24 * 60 * 60 * 1000
 const MARK_LINE = /^AGENT_BOARD_REPORT_V1 ([a-zA-Z0-9][a-zA-Z0-9_-]{5,127}) ([0-9a-f]{16}) (\d{1,15}) (\d{1,7}) ([0-9a-f]{16}) ([A-Za-z0-9_-]+)$/
-// A board is named by its file's own path, so two spellings of one file (letter case on Windows, a link) name one board.
-// A file not written yet is named by its folder's own path.
-const boardOf = (progress: string): string => {
-  let path = resolve(progress)
-  try { path = realpathSync.native(path) } catch {
-    try { path = join(realpathSync.native(dirname(path)), basename(path)) } catch {}
-  }
-  return hash(`board:${process.platform === 'win32' ? path.toLowerCase() : path}`).slice(0, 16)
+// A board is named by its folder's real path and its file's name, the path its writes go to: two spellings of one folder
+// (letter case on Windows, a link, a short name) name one board, and a linked file is a board of its own, as a direct
+// report writes there. A folder that is not there names no board, so no line is printed or read for it (#1384).
+const boardOf = (progress: string): string | undefined => {
+  const path = resolve(progress)
+  let folder: string
+  try { folder = realpathSync.native(dirname(path)) } catch { return undefined }
+  const named = join(folder, basename(path))
+  return hash(`board:${process.platform === 'win32' ? named.toLowerCase() : named}`).slice(0, 16)
 }
 // The time of the last report each board took for a conversation: one conversation can report to two boards that share
-// a data folder, and a report one board took is no reason to skip the other board's (#1384). The newest 16 are kept.
-const reportedOn = (kept: unknown, board: string, at: number): Record<string, number> => {
+// a data folder, and a report one board took is no reason to skip the other board's (#1384). A time older than any line
+// the hook still applies (`MARK_MAX_AGE`) can stop none, so it is dropped.
+const reportedOn = (kept: unknown, board: string, at: number, now: number): Record<string, number> => {
   const times = typeof kept === 'object' && kept !== null && !Array.isArray(kept)
-    ? Object.entries(kept).filter((one): one is [string, number] => /^[0-9a-f]{16}$/.test(one[0]) && typeof one[1] === 'number' && Number.isFinite(one[1]))
+    ? Object.entries(kept).filter((one): one is [string, number] => /^[0-9a-f]{16}$/.test(one[0]) && typeof one[1] === 'number' && Number.isFinite(one[1]) && now - one[1] <= MARK_MAX_AGE)
     : []
   const merged = new Map(times)
   merged.set(board, Math.max(at, merged.get(board) ?? 0))
-  return Object.fromEntries([...merged].sort((a, b) => b[1] - a[1]).slice(0, 16))
+  return Object.fromEntries(merged)
 }
-const markLine = (session: string, progress: string, at: number, raw: Json): string | undefined => {
+const markLine = (session: string, board: string, at: number, raw: Json): string | undefined => {
   const text = Buffer.from(JSON.stringify(raw))
-  const line = `${MARK_PREFIX}${session} ${boardOf(progress)} ${at} ${text.length} ${hash(text).slice(0, 16)} ${deflateRawSync(text).toString('base64url')}`
+  const line = `${MARK_PREFIX}${session} ${board} ${at} ${text.length} ${hash(text).slice(0, 16)} ${deflateRawSync(text).toString('base64url')}`
   return text.length <= MARK_INPUT_LIMIT && Buffer.byteLength(line) <= MARK_LIMIT ? line : undefined
 }
 const readMark = (line: string): { session: string; board: string; at: number; raw: Json } | undefined => {
@@ -1225,7 +1227,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
       // A marked report no newer than a report that already reached the board for its conversation is not applied: one
       // with the same time is that report, read again (#1384).
-      const reportedHere = original?.reportedAt?.[boardOf(progress)]
+      const board = boardOf(progress)
+      const reportedHere = board === undefined ? undefined : original?.reportedAt?.[board]
       if (isMarkedReport && entry === current && typeof reportedHere === 'number' && sourceAt <= reportedHere) return original
       // Direct events can arrive out of order too, before they ever enter the pending queue.
       if (mode !== '--codex-report' && original !== null && sourceAt < (original.appliedAt ?? Date.parse(original.updated))) {
@@ -1318,7 +1321,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? { folder: name, folderDigest, folderCanonicalDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
-      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(agent === 'antigravity' && mode === '--codex-report' ? { reportedAt: reportedOn(original?.reportedAt, boardOf(progress), sourceAt) } : original?.reportedAt === undefined ? {} : { reportedAt: original.reportedAt }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(agent === 'antigravity' && mode === '--codex-report' && board !== undefined ? { reportedAt: reportedOn(original?.reportedAt, board, sourceAt, observedAt) } : original?.reportedAt === undefined ? {} : { reportedAt: original.reportedAt }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
       if (entry === current) {
         reportCut = cut
@@ -1464,11 +1467,14 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const markReport = (error: unknown): boolean => {
       if (mode !== '--codex-report' || agent !== 'antigravity' || planInput !== undefined || flag('--session') === undefined || current === undefined || isBoardWritten) return false
       if (!isDenied(error) && !isBusy(error) && !(error instanceof Error && error.message === 'HOOK_TIMEOUT')) return false
+      // A board folder that is not there names no board the hook would name the same way: the refusal stands.
+      const board = boardOf(progress)
+      if (board === undefined) return false
       let original: CodexReport | null = null
       try { original = JSON.parse(readLocal(join(root, 'sessions', `${hash(`antigravity:${current.session}`)}.json`)) ?? 'null') as CodexReport | null } catch {}
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
       codexReport(original, current.session, reportPlan(current.payload, original, agent), new Date(started).toISOString(), s)
-      const line = markLine(current.session, progress, started, raw)
+      const line = markLine(current.session, board, started, raw)
       if (line === undefined) throw new Error('REPORT_TOO_LARGE')
       process.stdout.write(`${line}\n`)
       output({ session: current.session, kept: true, progress, note: s.reportKept })
@@ -1482,6 +1488,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const path = raw.transcriptPath
       // The data folder can serve more than one board: each board reads the conversation's lines from where it last ended.
       const board = boardOf(progress)
+      // A board folder that is not there yet names no board: the lines wait, unread, for a hook after it is made.
+      if (board === undefined) return
       const offsetFile = join(root, 'antigravity-reports', `${hash(`antigravity:${conversation}:${board}`)}.json`)
       let from: number | undefined
       try {
@@ -1492,7 +1500,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (read === null) return
       if (read.stray > 0) logPendingDrop(home, { agent, event: current?.event }, 'MARK_OUTSIDE_OUTPUT')
       const now = Date.now()
-      const mark = read.lines.map(readMark).filter(one => one !== undefined && one.session === conversation && one.board === board && one.at <= now && now - one.at <= MARK_MAX_AGE).at(-1)
+      const marks = read.lines.map(readMark).filter((one): one is NonNullable<ReturnType<typeof readMark>> => one !== undefined && one.session === conversation && one.at <= now && now - one.at <= MARK_MAX_AGE)
+      const mark = marks.filter(one => one.board === board).at(-1)
+      // Lines for this conversation that name only another board are logged, so a board named two ways shows up.
+      if (mark === undefined && marks.length > 0) logPendingDrop(home, { agent, event: current?.event }, 'MARK_OTHER_BOARD')
       if (mark !== undefined) {
         try {
           await runCodexLocal(['--codex-report', '--agent', 'antigravity', '--session', conversation, '--progress-file', progress, '--home', home, '--data-dir', root,
