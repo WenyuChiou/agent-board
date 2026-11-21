@@ -1,16 +1,18 @@
 # A background sampler for the Windows CI jobs (#1249).
 #
-# Some Windows runs lose about ten seconds at once in unrelated in-memory tests. This records
-# whether the whole VM was paused or another process took the machine: it wakes every 250 ms, and
-# when a wake-up comes more than a second late it writes down the busy CPU time the system counted
-# over the gap, the processes that gained the most CPU, the free memory and the disk queue.
+# Some Windows runs lose about ten seconds at once in unrelated in-memory tests. This records what
+# the machine did then, and gives no verdict on it: it wakes every 250 ms, and when a wake-up comes
+# more than a second late it writes one line with the gap on the monotonic clock and on the wall
+# clock, the busy and idle CPU time the system counted over the same gap, the cores, how long its
+# own reads took, and as hints the processes that gained the most CPU, free memory and disk queue.
 #
-#   ci-sampler.ps1 start <dir>   start it detached, return at once
+#   ci-sampler.ps1 start <dir>   start the loop in the background and return at once
 #   ci-sampler.ps1 run <dir> [-TickMs 250] [-GapMs 1000] [-SnapshotMs 2000]   the loop itself
-#   ci-sampler.ps1 stop <dir>    stop it and print a one-line summary
+#   ci-sampler.ps1 stop <dir>    ask the loop to stop and wait up to 3 s (it never ends it), then
+#                                print a summary and at most 20 gap lines
 #
-# Files in <dir>: gaps.jsonl (one line per gap), alive.json (counters, at the first tick and every
-# 10 s), sampler.pid (its process id and start time), stop.
+# Files in <dir>: gaps.jsonl (one line per gap), alive.json (the counts, at the first tick, every
+# 10 s and on the way out), stop.
 param(
   [Parameter(Position = 0)][string]$Mode = '',
   [Parameter(Position = 1)][string]$Dir = '',
@@ -39,8 +41,7 @@ function Get-CpuSnapshot {
 }
 
 # The ten processes that gained the most CPU between two snapshots, and the sum over those still
-# running at the second one. A process that ran and exited in between is in neither: the system's
-# own busy time below counts it.
+# running at the second one. A process that ran and exited in between is in neither.
 function Get-CpuGain($before, $after) {
   $rows = @()
   $total = 0
@@ -59,13 +60,8 @@ function Get-CpuGain($before, $after) {
 
 # UTF-8 without a byte order mark, which Windows PowerShell 5.1's -Encoding utf8 would add.
 $noBom = New-Object System.Text.UTF8Encoding $false
-
-function Write-Alive($ticks, $gaps, $maxGap) {
-  try {
-    $line = [ordered]@{ at = [DateTime]::UtcNow.ToString('o'); ticks = $ticks; gaps = $gaps; maxGapMs = $maxGap } | ConvertTo-Json -Compress
-    [System.IO.File]::WriteAllText((Join-Path $Dir 'alive.json'), $line + "`n", $noBom)
-  } catch { }
-}
+$aliveFile = Join-Path $Dir 'alive.json'
+$gapFile = Join-Path $Dir 'gaps.jsonl'
 
 if ($Mode -eq 'start') {
   New-Item -ItemType Directory -Force -Path $Dir | Out-Null
@@ -77,10 +73,6 @@ if ($Mode -eq 'start') {
   $child = Start-Process -FilePath $exe -WindowStyle Hidden -PassThru -ArgumentList @(
     '-NoProfile', '-File', "`"$PSCommandPath`"", 'run', "`"$dirFull`"",
     '-TickMs', $TickMs, '-GapMs', $GapMs, '-SnapshotMs', $SnapshotMs)
-  # The start time goes with the id, so stop never ends another process that later got the same id.
-  $startTicks = 0
-  try { $startTicks = $child.StartTime.ToUniversalTime().Ticks } catch { }
-  Set-Content -LiteralPath (Join-Path $dirFull 'sampler.pid') -Value "$($child.Id) $startTicks" -Encoding ascii
   Write-Output "sampler started (pid $($child.Id)), recording to $dirFull"
   exit 0
 }
@@ -89,10 +81,10 @@ if ($Mode -eq 'run') {
   New-Item -ItemType Directory -Force -Path $Dir | Out-Null
   # .NET file calls resolve a relative path against the process folder, not PowerShell's.
   $Dir = (Resolve-Path -LiteralPath $Dir).Path
-  $stopFile = Join-Path $Dir 'stop'
+  $aliveFile = Join-Path $Dir 'alive.json'
   $gapFile = Join-Path $Dir 'gaps.jsonl'
-  # The system's CPU time over all cores. A process that exits still counts in it, and a paused VM
-  # adds no busy time, since no clock tick reaches the guest to charge one.
+  $stopFile = Join-Path $Dir 'stop'
+  # The system's CPU time summed over all cores. If it cannot be read, the two fields stay null.
   $hasSystemTimes = $false
   try {
     Add-Type -Namespace AgentBoardSampler -Name Native -ErrorAction Stop -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern bool GetSystemTimes(out long idle, out long kernel, out long user);'
@@ -105,125 +97,133 @@ if ($Mode -eq 'run') {
     # Kernel time includes idle time; the values are in 100 ns units.
     return @{ busy = ($kernel + $user - $idle) / 10000; idle = $idle / 10000 }
   }
+  $state = [ordered]@{ ticks = 0; gaps = 0; saved = 0; gapMs = $GapMs; maxGapMs = 0; ended = $false }
+  function Write-Alive {
+    try { [System.IO.File]::WriteAllText($aliveFile, ($state | ConvertTo-Json -Compress) + "`n", $noBom) } catch { }
+  }
   $cores = [Environment]::ProcessorCount
   $clock = [System.Diagnostics.Stopwatch]::StartNew()
   $snapshot = Get-CpuSnapshot
   $snapshotAt = $clock.ElapsedMilliseconds
-  $system = Get-SystemTimes
-  $last = $clock.ElapsedMilliseconds
+  # The three readings a gap is measured between, taken together at each end.
+  $last = $clock.ElapsedMilliseconds; $lastWall = [DateTime]::UtcNow; $system = Get-SystemTimes
   $aliveAt = $last
-  $ticks = 0; $gaps = 0; $maxGap = 0
   while (-not (Test-Path -LiteralPath $stopFile)) {
     Start-Sleep -Milliseconds $TickMs
-    $now = $clock.ElapsedMilliseconds
-    $systemNow = Get-SystemTimes
+    $now = $clock.ElapsedMilliseconds; $wallNow = [DateTime]::UtcNow; $systemNow = Get-SystemTimes
     $elapsed = $now - $last
     $isGap = $elapsed -gt $GapMs
-    $ticks++
+    $state.ticks++
     try {
       if ($isGap) {
-        $gaps++
-        if ($elapsed -gt $maxGap) { $maxGap = $elapsed }
-        # Take the snapshot first: whatever it costs is cheaper than reading it a second later.
-        $fresh = Get-CpuSnapshot
-        $gain = Get-CpuGain $snapshot $fresh
+        $state.gaps++
+        if ($elapsed -gt $state.maxGapMs) { $state.maxGapMs = [int]$elapsed }
         $busyMs = $null; $idleMs = $null
         if ($null -ne $system -and $null -ne $systemNow) {
           $busyMs = [int]($systemNow.busy - $system.busy)
           $idleMs = [int]($systemNow.idle - $system.idle)
         }
+        $fresh = Get-CpuSnapshot
+        $gain = Get-CpuGain $snapshot $fresh
         $freeMb = $null
         try { $freeMb = [int]((Get-CimInstance Win32_OperatingSystem -Property FreePhysicalMemory).FreePhysicalMemory / 1024) } catch { }
         $queue = $null
         try { $queue = [math]::Round((Get-Counter '\PhysicalDisk(_Total)\Current Disk Queue Length' -MaxSamples 1 -ErrorAction Stop).CounterSamples[0].CookedValue, 2) } catch { }
         $record = [ordered]@{
-          at = [DateTime]::UtcNow.ToString('o')
+          at = $wallNow.ToString('o')
           gapMs = [int]$elapsed
+          wallMs = [int]($wallNow - $lastWall).TotalMilliseconds
           systemBusyMs = $busyMs
           systemIdleMs = $idleMs
           cores = $cores
-          sinceSnapshotMs = [int]($clock.ElapsedMilliseconds - $snapshotAt)
+          readMs = [int]($clock.ElapsedMilliseconds - $now)
+          sinceSnapshotMs = [int]($now - $snapshotAt)
           top = $gain.top
           totalCpuMs = $gain.total
           freeMemoryMB = $freeMb
           diskQueue = $queue
         }
-        [System.IO.File]::AppendAllText($gapFile, ($record | ConvertTo-Json -Compress -Depth 4) + "`n", $noBom)
         $snapshot = $fresh
         $snapshotAt = $clock.ElapsedMilliseconds
+        [System.IO.File]::AppendAllText($gapFile, ($record | ConvertTo-Json -Compress -Depth 4) + "`n", $noBom)
+        $state.saved++
       } elseif (($now - $snapshotAt) -ge $SnapshotMs) {
         $snapshot = Get-CpuSnapshot
         if ($SnapshotDelayMs -gt 0) { Start-Sleep -Milliseconds $SnapshotDelayMs }
         $snapshotAt = $clock.ElapsedMilliseconds
       }
-      if ($ticks -eq 1 -or ($now - $aliveAt) -ge 10000) {
-        Write-Alive $ticks $gaps $maxGap
-        $aliveAt = $now
-      }
     } catch { }
+    if ($state.ticks -eq 1 -or ($now - $aliveAt) -ge 10000) {
+      Write-Alive
+      $aliveAt = $now
+    }
     if ($isGap) {
-      # After a gap the next wake-up is timed from here, so the sampler's own reads after it (the
-      # first Get-Counter can take over a second) never count as the next gap.
-      $last = $clock.ElapsedMilliseconds
-      $system = Get-SystemTimes
+      # After a gap the next one is measured from here, so this tick's own reads (the first
+      # Get-Counter can take over a second) are never counted as part of a gap.
+      $last = $clock.ElapsedMilliseconds; $lastWall = [DateTime]::UtcNow; $system = Get-SystemTimes
     } else {
-      # After any other tick it is timed from this wake-up, so a pause during the periodic snapshot
-      # counts in the next gap.
-      $last = $now
-      $system = $systemNow
+      # After any other tick it is measured from this wake-up, so a pause during the periodic
+      # snapshot counts in the next gap.
+      $last = $now; $lastWall = $wallNow; $system = $systemNow
     }
   }
-  Write-Alive $ticks $gaps $maxGap
+  $state.ended = $true
+  Write-Alive
   exit 0
 }
 
 # stop
-$pidFile = Join-Path $Dir 'sampler.pid'
+function Read-Alive {
+  try { return (Get-Content -LiteralPath $aliveFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop) } catch { return $null }
+}
+if (-not (Test-Path -LiteralPath $Dir -PathType Container)) {
+  Write-Output 'windows sampler: no record (the sampler did not start)'
+  exit 0
+}
+$alive = $null
 try {
-  New-Item -ItemType Directory -Force -Path $Dir | Out-Null
   Set-Content -LiteralPath (Join-Path $Dir 'stop') -Value 'stop' -Encoding ascii
-  if (Test-Path -LiteralPath $pidFile) {
-    $fields = @((Get-Content -LiteralPath $pidFile -Raw).Trim() -split '\s+')
-    if ($fields.Count -eq 2) {
-      $samplerId = [int]$fields[0]
-      $startTicks = [long]$fields[1]
-      $proc = Get-Process -Id $samplerId -ErrorAction SilentlyContinue
-      # Only the process that start began: one that later got the same id is left alone.
-      $isSampler = $false
-      if ($proc -and $startTicks -gt 0) { try { $isSampler = $proc.StartTime.ToUniversalTime().Ticks -eq $startTicks } catch { } }
-      if ($isSampler -and -not $proc.WaitForExit(3000)) { Stop-Process -Id $samplerId -Force -ErrorAction SilentlyContinue }
-    }
+  # The loop writes alive.json with ended on its way out. It is never ended from here: whatever is
+  # left when the job finishes, the runner ends.
+  for ($waited = 0; $waited -lt 3000; $waited += 100) {
+    $alive = Read-Alive
+    if ($alive -and $alive.ended) { break }
+    Start-Sleep -Milliseconds 100
   }
 } catch { }
 
-$ticks = '?'
-try { $ticks = (Get-Content -LiteralPath (Join-Path $Dir 'alive.json') -Raw | ConvertFrom-Json).ticks } catch { }
 $records = @()
-try {
-  $records = @(Get-Content -LiteralPath (Join-Path $Dir 'gaps.jsonl') -ErrorAction Stop |
-    Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
-} catch { }
-$over = @($records | Where-Object { $_.gapMs -gt $GapMs })
-$summary = "windows sampler: $ticks ticks, $($over.Count) gaps over $GapMs ms"
-if ($over.Count -gt 0) {
-  $worst = $over | Sort-Object gapMs -Descending | Select-Object -First 1
-  $names = (@($worst.top) | Select-Object -First 3 | ForEach-Object { "$($_.name) $($_.cpuMs) ms" }) -join ', '
-  if (-not $names) { $names = 'none' }
-  $summary += "; largest $($worst.gapMs) ms at $($worst.at), top: $names"
-  if ($null -ne $worst.systemBusyMs) {
-    # Busy time is summed over all cores, so one core busy for the whole gap would be gapMs.
-    $summary += "; busy CPU over it $($worst.systemBusyMs) ms on $($worst.cores) cores"
-    if ($worst.systemBusyMs -lt ($worst.gapMs / 4)) {
-      $summary += ', under a quarter of one core: nothing ran, so the VM was likely paused'
-    }
-  } else {
-    # Without the system's own count, the processes still running are all there is, over the time
-    # since the last snapshot, which includes the gap.
-    $window = [math]::Max($worst.gapMs, $worst.sinceSnapshotMs)
-    if ($worst.totalCpuMs -lt ($window / 4)) {
-      $summary += '; the processes still running gained under a quarter of one core over it (the system CPU time could not be read)'
-    }
+$unreadable = 0
+if (Test-Path -LiteralPath $gapFile -PathType Leaf) {
+  # Each line is kept as written: PowerShell 7 would turn `at` into a local date when read.
+  $index = 0
+  foreach ($line in @(Get-Content -LiteralPath $gapFile -ErrorAction SilentlyContinue)) {
+    if (-not "$line".Trim()) { continue }
+    try { $records += [pscustomobject]@{ gap = ($line | ConvertFrom-Json -ErrorAction Stop); line = "$line"; index = $index++ } } catch { $unreadable++ }
   }
 }
+if ($alive) {
+  $summary = "windows sampler: $($alive.ticks) ticks, $($alive.gaps) gaps over $($alive.gapMs) ms"
+  if (-not $alive.ended) { $summary += ', the loop had not ended after 3 s' }
+  elseif ($alive.gaps -gt $alive.saved) { $summary += ", $($alive.gaps - $alive.saved) not saved (the record is incomplete)" }
+} else {
+  $summary = "windows sampler: ? ticks, $($records.Count + $unreadable) gaps over $GapMs ms, no readable alive.json"
+}
+if ($unreadable) { $summary += ", $unreadable unreadable lines in gaps.jsonl" }
 Write-Output $summary
+
+# The largest 20 gaps, in the order they were written. accounted = (busy + idle) / (gap x cores): the share of the
+# gap the system's CPU counters moved through. No rule reads it yet (#1249).
+$shown = @($records | Sort-Object { [int]$_.gap.gapMs } -Descending | Select-Object -First 20 | Sort-Object index)
+foreach ($r in $shown) {
+  $g = $r.gap
+  $accounted = 'unknown'
+  try {
+    if ($null -ne $g.systemBusyMs -and $null -ne $g.systemIdleMs -and [int]$g.gapMs -gt 0 -and [int]$g.cores -gt 0) {
+      $accounted = [math]::Round(([double]$g.systemBusyMs + [double]$g.systemIdleMs) / ([double]$g.gapMs * [double]$g.cores), 2)
+    }
+  } catch { }
+  Write-Output "gap $($g.gapMs) ms, accounted $($accounted): $($r.line)"
+}
+if ($records.Count -gt 20) { Write-Output "$($records.Count - 20) smaller gaps not shown" }
 exit 0
