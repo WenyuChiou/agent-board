@@ -15862,9 +15862,13 @@ test('a refused Antigravity report prints one marked line and writes nothing (#1
   assert.equal(existsSync(join(f.root, 'antigravity-reports')), false)
 }))
 
-test('a record write refused after the board took the plan fails and prints no marked line (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+test('a refusal keeps the report only until the board takes the plan (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
   const a = agy1384(f)
-  // The board folder takes the lock and the plan; the session record's folder refuses the write that follows.
+  // Refused before the board took the plan: kept.
+  const kept = await a.refused(a.plan('Synthetic before the board'))
+  assert.equal(JSON.parse(kept.stdout.slice(kept.stdout.indexOf('{'))).kept, true)
+  // The board folder takes the lock and the plan; the session record's folder refuses the write that follows, and
+  // that refusal is the answer.
   const result = await denyFolder1384(join(f.root, 'sessions'), () => a.report(a.plan('Synthetic after the board')))
   assert.notEqual(result.status, 0)
   assert.deepEqual(marksIn1384(result.stdout), [])
@@ -16125,6 +16129,14 @@ test('a refused report is checked as its replay applies it (#1384)', { skip: noD
   // The board, once it can be written, refuses the same plan.
   assert.notEqual(a.report(input).status, 0)
   assert.doesNotMatch(a.text(), /Synthetic mirrored step/)
+  // Once the row has a title of its own, the replay keeps that title, so the same plan is kept for the next hook.
+  assert.equal(a.report(a.plan('Synthetic row title')).status, 0)
+  const { stdout, at } = await a.refused(input)
+  a.output(stdout)
+  assert.equal(a.hook().status, 0)
+  assert.match(a.text(), /### Synthetic row title/)
+  assert.match(a.text(), /Synthetic mirrored step/)
+  assert.equal(a.record().reportedAt, at)
 }))
 
 test('a marked line for another board is not applied (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
