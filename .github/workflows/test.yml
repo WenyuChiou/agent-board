@@ -145,7 +145,8 @@ jobs:
         include: ${{ fromJSON(needs.impact.outputs.board_matrix) }}
     runs-on: ${{ matrix.os }}
     # Split board and messaging, the Windows board set in seven serial parts and the Ubuntu set in two, so each job keeps the ten-minute budget.
-    timeout-minutes: 10
+    # A Windows board job has two minutes more, one for each of the sampler's two steps, so they never take time its tests had (#1249).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 12 || 10 }}
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
       # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
@@ -163,6 +164,13 @@ jobs:
           persist-credentials: false
           # The whole history with its tags, for the released files table below.
           fetch-depth: 0
+      # Records what the runner did when it stalls for over a second: a 250 ms ticker (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -190,6 +198,13 @@ jobs:
       # the job.
       - name: Board time budgets
         run: node scripts/ci-impact.mjs check
+      # A summary and the largest gaps, here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
 
   messaging:
     needs: impact

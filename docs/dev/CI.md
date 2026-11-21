@@ -118,3 +118,7 @@ this signal does not claim a soak ran or silently start one.
 
 Native hooks, real receiver/model ACKs and per-host UI/CLI acceptance remain
 separate evidence. Selected synthetic CI cannot establish those capabilities.
+
+## Windows runner sampler
+
+The Windows board jobs run `scripts/ci-sampler.ps1` in the background (#1249). It wakes every 250 ms, and when a wake-up comes more than a second late it writes one line to `gaps.jsonl`: the gap on the monotonic clock (`gapMs`) and on the wall clock (`wallMs`), the busy and idle CPU time the system counted over the same gap, summed over all `cores` (`systemBusyMs`, `systemIdleMs`), how long its own reads took (`readMs`), and as hints the ten processes that gained the most CPU since the last look (`top`, `totalCpuMs`: processes still running only), free memory and the disk queue. Its two steps each have a one-minute limit and `continue-on-error`, so they cannot fail or hold a job, and a Windows board job has two minutes more (12), one for each, so they never take time its tests had. A free-memory read that fails is `null`, not 0. The stop step prints a summary and the 20 largest gaps to the job log, each with `accounted` = (busy + idle) / (gap × cores), the share of the gap the system's CPU counters moved through. Nothing is uploaded, and the sampler gives no verdict: what a paused VM looks like in these fields is not known yet, and a rule comes once real gap records from `main` have been read.
