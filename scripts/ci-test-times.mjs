@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-// Writes scripts/ci-test-times.json from the logs of GitHub Actions jobs (#1762). scripts/ci-impact.mjs reads that table to
+// Writes tests/ci-test-times.json from the logs of GitHub Actions jobs (#1762). scripts/ci-impact.mjs reads that table to
 // deal the tests of the self-parted files out to the parts by time, and to weigh each other file.
 //
 //   node scripts/ci-test-times.mjs <job log>...
@@ -14,7 +14,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 // own run once it is green. `--deal-from <module>` names another copy of scripts/ci-impact.mjs to read the files of each
 // part from, for logs of a run that used the earlier dealing of files to parts.
 
-export const TABLE_PATH = join(dirname(fileURLToPath(import.meta.url)), 'ci-test-times.json')
+export const TABLE_PATH = join(dirname(dirname(fileURLToPath(import.meta.url))), 'tests', 'ci-test-times.json')
 
 const unescapeTap = title => title.replace(/\\([\\#])/g, '$1')
 const MS = '(\\d+(?:\\.\\d+)?)'

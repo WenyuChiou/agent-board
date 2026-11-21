@@ -421,7 +421,7 @@ export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.
 // top-level test of a self-parted file, from a main run's job logs. `node scripts/ci-test-times.mjs <job logs>` writes it; see
 // that script for when to refresh it.
 const TIMES = (() => {
-  const path = join(dirname(fileURLToPath(import.meta.url)), 'ci-test-times.json')
+  const path = join(dirname(dirname(fileURLToPath(import.meta.url))), 'tests', 'ci-test-times.json')
   try {
     const table = JSON.parse(readFileSync(path, 'utf8'))
     if (!table || typeof table.files !== 'object' || typeof table.tests !== 'object') throw new Error('no files and tests')

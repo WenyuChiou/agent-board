@@ -526,8 +526,8 @@ test('the summary command writes the recorded run time and its share of the job 
   }
 })
 
-// The self-parted tests are dealt by the table of measured times (#1762): scripts/ci-test-times.json.
-const readTimes = async () => JSON.parse(await readFile(new URL('../scripts/ci-test-times.json', import.meta.url), 'utf8'))
+// The self-parted tests are dealt by the table of measured times (#1762): tests/ci-test-times.json.
+const readTimes = async () => JSON.parse(await readFile(new URL('./ci-test-times.json', import.meta.url), 'utf8'))
 // The tests of a self-parted file in the order the table keeps them, as the test file calls them: a key such as "title #2"
 // is the second call with "title".
 const callsOf = table => Object.fromEntries(Object.entries(table.tests).map(([file, own]) => [file, Object.keys(own).map(key => key.replace(/ #\d+$/, ''))]))
