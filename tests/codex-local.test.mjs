@@ -14379,6 +14379,70 @@ test('a plan call into a denied Windows folder exits 0, prints nothing and names
   })
 }))
 
+// agy's terminal sandbox refuses writes to the board folder but lets the model write its temporary folder (#1384).
+const sandboxedAgyReport = async (f, deny) => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const conversationId = 'synthetic-sandboxed-agy-1384'
+  const folder = join(f.home, 'sandboxed-board')
+  const progress = join(folder, 'progress.md')
+  const temp = join(f.home, 'tmp')
+  mkdirSync(temp, { recursive: true })
+  const env = { TEMP: temp, TMP: temp, TMPDIR: temp }
+  f.save(progress, '## Synthetic sandboxed board\n')
+  const hook = (state, event) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event, '--progress-file', progress], { conversationId }, env)
+  assert.equal(hook('working', 'PreInvocation').status, 0)
+  const before = readFileSync(progress, 'utf8')
+  const spool = join(temp, process.platform === 'win32' ? 'agent-board-reports' : `agent-board-reports-${process.getuid()}`)
+  const saved = () => existsSync(spool) ? readdirSync(spool).flatMap(one => readdirSync(join(spool, one))) : []
+  await deny(folder, () => {
+    const result = f.command(['--codex-report', '--agent', 'antigravity', '--session', conversationId, '--progress-file', progress], {
+      title: 'Synthetic sandboxed plan', state: 'working', steps: ['- [x] Synthetic sandboxed step', '- [?] Synthetic sandboxed question?'],
+    }, env)
+    assert.equal(result.status, 0, result.stderr)
+    const answer = JSON.parse(result.stdout)
+    assert.equal(answer.saved, true)
+    assert.equal(answer.note, EN.reportSaved)
+    assert.equal(readFileSync(progress, 'utf8'), before)
+  })
+  assert.equal(saved().length, 1)
+  assert.equal(hook('working', 'PostInvocation').status, 0)
+  const after = readFileSync(progress, 'utf8')
+  assert.match(after, /Synthetic sandboxed step/)
+  assert.match(after, /\[\?\] Synthetic sandboxed question\?/)
+  assert.deepEqual(saved(), [])
+}
+
+test('an Antigravity report the sandbox refuses on Windows is saved in TEMP, and the conversation\'s next hook brings it to the board (#1384)', { skip: process.platform !== 'win32' && 'Windows ACLs only' }, () => fixture(async f => {
+  await sandboxedAgyReport(f, withDeniedCreation)
+}))
+
+test('an Antigravity report refused by a read-only board folder is saved in TEMP, and the conversation\'s next hook brings it to the board (#1384)', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'POSIX modes, not as root' }, () => fixture(async f => {
+  await sandboxedAgyReport(f, async (folder, action) => {
+    chmodSync(folder, 0o555)
+    try { return await action() } finally { chmodSync(folder, 0o755) }
+  })
+}))
+
+test('a refused Antigravity report is not saved in a TEMP folder that another account could write (#1384)', { skip: (process.platform === 'win32' || process.getuid?.() === 0) && 'POSIX modes, not as root' }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const folder = join(f.home, 'sandboxed-board')
+  const progress = join(folder, 'progress.md')
+  const temp = join(f.home, 'tmp')
+  const spool = join(temp, `agent-board-reports-${process.getuid()}`)
+  mkdirSync(spool, { recursive: true })
+  chmodSync(spool, 0o777)
+  f.save(progress, '## Synthetic sandboxed board\n')
+  chmodSync(folder, 0o555)
+  try {
+    const result = f.command(['--codex-report', '--agent', 'antigravity', '--session', 'synthetic-shared-temp-1384', '--progress-file', progress], {
+      title: 'Synthetic plan', state: 'working', steps: ['- [~] Synthetic step'],
+    }, { TEMP: temp, TMP: temp, TMPDIR: temp })
+    assert.notEqual(result.status, 0)
+    assert.equal(result.stdout, '')
+    assert.deepEqual(readdirSync(spool), [])
+  } finally { chmodSync(folder, 0o755) }
+}))
+
 test('setup writes the plan hook as a matcher group for Codex and Gemini, and remove leaves a person\'s own groups', () => fixture(async f => {
   const mine = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo mine' }] }
   const geminiConfig = join(f.home, '.gemini', 'settings.json')
