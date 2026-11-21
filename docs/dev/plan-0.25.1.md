@@ -36,7 +36,7 @@ The owner's answers of 2026-11-18:
 
 | Question | Answer |
 |---|---|
-| Antigravity starts on a board message | In 0.25.1. After check C3, the two windows that cannot be closed are accepted with a test and honest card wording (owner, 2026-11-18); a third, a healthy hook's blind time, after #1612's round cap (owner, 2026-11-20) |
+| Antigravity starts on a board message | Not in 0.25.1. After check C3 the owner accepted three windows (two on 2026-11-18, a healthy hook's blind time on 2026-11-20) with a hard stop; #1612's extra review round found a wake into a running turn outside them, so the wake moves to 0.26.0 (owner's rule, 2026-11-20). The app keeps the next-turn route |
 | App and IDE rows | Two sittings: discovery on released 0.25.0, then a short rerun on the release build |
 | Codex starts at once | Not in 0.25.1. Check C1 failed, so Codex keeps the 10-minute route, the support table says so, and #1652 moves to 0.26.0 (owner, 2026-11-18). The remaining window of #1370 is accepted with a test and honest card wording |
 | Sessions listed at once (#1316) | In 0.25.1, and the date moves |
@@ -50,7 +50,7 @@ The owner's answers of 2026-11-18:
 
 **Nothing is cut for time.** If the work runs late, the date moves. An item leaves only when its check proves it needs a hook change, which R7 forbids here. That goes back to the owner with the measured reason (section 10).
 
-**Leaves for 0.26.0:** a Codex start at once (#1652); receivers for Cursor, Grok, Hermes and OpenClaw; Codex and OpenCode approval buttons (#1318 rest, #1320); the six row states (#1317 rest); the MCP route (#685, #722, #723); agent sending (#317); the phone (#866); notices that open a card (#1014, #548, #1023).
+**Leaves for 0.26.0:** a Codex start at once (#1652); the Antigravity wake (#1396, #1609, #1612); receivers for Cursor, Grok, Hermes and OpenClaw; Codex and OpenCode approval buttons (#1318 rest, #1320); the six row states (#1317 rest); the MCP route (#685, #722, #723); agent sending (#317); the phone (#866); notices that open a card (#1014, #548, #1023).
 
 ## 3. Milestones
 
@@ -123,12 +123,13 @@ Section 4 holds the design.
 
 ### M5b. Antigravity starts on a board message
 
+- **Moved to 0.26.0 on 2026-11-20, by the owner's hard stop below:** #1612's one extra review round (codex_618 on ca554d21) found a wake into a running turn outside the three accepted windows: a turn start whose record cannot be made can be read idle before its count is written. So #1612, #1396, #1609, #1750, #1751 and #1752 move to 0.26.0 with no further patch, and the app keeps the next-turn route in 0.25.1. Only #1384 stays here.
 - **Work:** finish #1612. One live run first settles whether `agentapi get-conversation-metadata` prints `num_steps`, whether it rises as soon as a turn starts, and how long the call takes. The hook worker writes the turn's mark first, so a slow hook no longer lets a wake into a running turn. A dismissed failed wake no longer holds the next message's wake (#1609). Fix the `agy` report that fails with permission denied, so its questions reach Needs you (#1384).
 - **Accepted by the owner on 2026-11-18, after check C3:** a turn-start hook that never ran, and the 0.25 to 0.54 s between the board's yes and `send-message` landing. Antigravity offers no "send only if idle" and no public run status, so neither window can be closed from the board. The card says plainly that a message sent while the person starts a turn may join that turn.
 - **Accepted by the owner on 2026-11-20, after #1612's round cap and design diagnosis 4 on #1396:** a third window, the time from a healthy turn-start hook's command to its start record (58 to 94 ms in C3's runs) plus the app's own delay before it launches the hook. #1612 gets one more push, a start record made before any lock (#1750, #1751, #1752), and one review round. If that round finds a wake into a running turn outside the three windows, the wake moves to 0.26.0 with no further patch. A review treats only these three windows as accepted.
-- **Done when:** a live record shows an idle start within 10 s and a running turn held.
-- **Covers:** the Antigravity desktop app and `agy`. **Test:** #1612's case table plus one row for each accepted window; a dismissed failed wake; an `agy` report case.
-- **Issues:** #1396, #1384, #1609. **R7:** no hook change; C3 found that none would close these windows.
+- **Done when:** #1384: an `agy` report's questions reach Needs you. The wake's live record (an idle start within 10 s and a running turn held) goes with it to 0.26.0.
+- **Covers:** the Antigravity desktop app and `agy`. **Test:** an `agy` report case. #1612's case table, one row for each accepted window, and the dismissed failed wake go with the wake to 0.26.0.
+- **Issues:** #1384. #1396 and #1609 moved to 0.26.0. **R7:** no hook change; C3 found that none would close these windows.
 
 ### M6. A dead page cannot lock the board
 
@@ -254,7 +255,7 @@ The READMEs use `@next`, so both tags must end on the version that is promoted. 
 | M3 | #1312, #1315 |
 | M4 | #1651 |
 | M5a | #1370, #1507, #1504, and in part #1613 |
-| M5b | #1384, #1396, #1609 |
+| M5b | #1384 (#1396 and #1609 moved to 0.26.0) |
 | M6 | #1587, #1596 |
 | M7 | #1092, #1296, #1589, #1643 |
 | M8 | #1650, and in part #1119 |
@@ -285,7 +286,7 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 |---|---|---|
 | 1 to 4 | M0 checks in parallel, sitting 1, the pull requests below; M1, M4 and M6 start | |
 | 5 to 7 | M1 finishes; M2, M5a, M5b and M7 start after their checks | **Day 7:** if M1 is not merged, lanes B and E stop and help lane A |
-| 8 to 14 | M2, then M3; M5a, M5b, M8a, M9, M10 | **Day 14:** M2, M4 and M6 merged and one live M5b run recorded, or the owner gets a new date that day |
+| 8 to 14 | M2, then M3; M5a, M5b, M8a, M9, M10 | **Day 14:** M2, M4 and M6 merged, or the owner gets a new date that day (the live M5b run moved to 0.26.0 with the wake) |
 | 15 to 20 | M3, M8b, M10 finish | **Day 20:** code freeze |
 | 21 to 25 | M11 on the release build, sitting 2, walks, candidate on `next`, promote | |
 
@@ -322,7 +323,7 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 | Lower the Codex wait back to 65 s | Reopens the hole #1608 closed |
 | Count a live `codex.exe` as the person's window | Check C1: the shared server has that name and outlives the window, so a turn could start in a closed window |
 | Hide the token on stdout only | The test passes while an agent can still act as the person |
-| Move the wake, #1316 and first install to 0.26.0 | The owner chose the fullest scope and accepted the later date |
+| Move the wake, #1316 and first install to 0.26.0 | The owner chose the fullest scope and accepted the later date. The wake moved later anyway, by M5b's hard stop |
 
 ## 12. Files to change
 
@@ -348,7 +349,7 @@ Every pull request that rebuilds the board bundle merges one at a time. `SECURIT
 
 | Version | Theme |
 |---|---|
-| 0.26.0 | Every hook change in one release, the first to arrive by itself: retiring Gemini CLI on upgrade (#1327), remaining receivers, desktop apps through the vendor's own door, Codex and OpenCode approvals, six states, notices that open a card, agent sending (#317), one MCP route (#685, #722, #723) |
+| 0.26.0 | Every hook change in one release, the first to arrive by itself: retiring Gemini CLI on upgrade (#1327), the Antigravity wake (#1396), remaining receivers, desktop apps through the vendor's own door, Codex and OpenCode approvals, six states, notices that open a card, agent sending (#317), one MCP route (#685, #722, #723) |
 | 0.27.0 | Agents use the board: hand-off; the cloud-bot bridge plan |
 | 0.28.0 | Away from the desk: the phone sends and answers; the server starts at login |
 | 0.29.0 | The first cloud bot reads what the person shared |
