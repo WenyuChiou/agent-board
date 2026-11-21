@@ -440,3 +440,155 @@ test('Windows runner sampler starts detached, stops cleanly, and captures real c
     }
   }
 })
+
+test('classifyGap handles busy pre-gap CPU before a VM pause and failed CPU counter reads', () => {
+  // 1500 ms busy work across 4 cores before a 2000 ms VM pause (Greptile P1 example).
+  const busyBeforePause = classifyGap({
+    gapMs: 2_000,
+    windowMs: 3_500,
+    totalCpuGainedMs: 4_000,
+    idleCpuGainedMs: 2_000,
+    freeMemoryMb: 8_000,
+    diskQueueLength: 0,
+    cpuSampleOk: true,
+    processCount: 40,
+    topProcesses: [{ pid: 101, name: 'node', cpuGainedMs: 4_000 }],
+  }, { cpuCount: 4 })
+  assert.equal(busyBeforePause.kind, 'vm-pause')
+  assert.equal(busyBeforePause.pausedShare, 1)
+
+  // Full 1500 ms x 4-core CPU saturation before a 2000 ms pause with 0 idle (Codex P2 example).
+  const fullBusyBeforePause = classifyGap({
+    gapMs: 2_000,
+    windowMs: 3_500,
+    totalCpuGainedMs: 6_000,
+    idleCpuGainedMs: 0,
+    freeMemoryMb: 8_000,
+    diskQueueLength: 0,
+    cpuSampleOk: true,
+    processCount: 40,
+    topProcesses: [{ pid: 101, name: 'node', cpuGainedMs: 6_000 }],
+  }, { cpuCount: 4 })
+  assert.equal(fullBusyBeforePause.kind, 'vm-pause')
+
+  // Busy pre-gap CPU does not mask real disk contention.
+  const busyBeforeDisk = classifyGap({
+    gapMs: 2_000,
+    windowMs: 3_500,
+    totalCpuGainedMs: 4_000,
+    idleCpuGainedMs: 10_000,
+    freeMemoryMb: 8_000,
+    diskQueueLength: 5,
+    cpuSampleOk: true,
+    processCount: 40,
+    topProcesses: [{ pid: 101, name: 'node', cpuGainedMs: 4_000 }],
+  }, { cpuCount: 4 })
+  assert.equal(busyBeforeDisk.kind, 'disk-contention')
+
+  // Failed CPU counter read must report inconclusive, never vm-pause.
+  const failedRead = classifyGap({
+    gapMs: 3_000,
+    windowMs: 3_500,
+    totalCpuGainedMs: null,
+    idleCpuGainedMs: null,
+    freeMemoryMb: 8_000,
+    diskQueueLength: 0,
+    cpuSampleOk: false,
+    processCount: 0,
+    topProcesses: [],
+  }, { cpuCount: 4 })
+  assert.equal(failedRead.kind, 'inconclusive')
+
+  const legacyFailedRead = classifyGap({
+    gapMs: 3_000,
+    windowMs: 3_500,
+    totalCpuGainedMs: 0,
+    idleCpuGainedMs: null,
+    freeMemoryMb: 8_000,
+    diskQueueLength: 0,
+    processCount: 0,
+    topProcesses: [],
+  }, { cpuCount: 4 })
+  assert.equal(legacyFailedRead.kind, 'inconclusive')
+
+  const summary = formatSummary({
+    version: 1,
+    job: 'board-node24-part-1/7',
+    cpuCount: 4,
+    errors: ['ReadCategory(Process): counter unavailable'],
+    gaps: [{
+      gapMs: 3_000,
+      windowMs: 3_500,
+      totalCpuGainedMs: null,
+      idleCpuGainedMs: null,
+      freeMemoryMb: 8_000,
+      diskQueueLength: 0,
+      cpuSampleOk: false,
+      processCount: 0,
+      topProcesses: [],
+    }],
+  })
+  assert.match(summary, /Counter errors: ReadCategory\(Process\): counter unavailable/)
+})
+
+test('Windows runner sampler detects stalls outside Sleep and marks failed counter reads inconclusive', async t => {
+  if (process.platform !== 'win32') {
+    t.skip('Windows-only live sampler test')
+    return
+  }
+  const root = await mkdtemp(join(tmpdir(), 'ab-win-sampler-r2-'))
+  const loopDir = join(root, 'loop-stall')
+  const failDir = join(root, 'counter-fail')
+  let failed = false
+  try {
+    const loopRes = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', samplerPs1,
+        '-Action', 'run', '-JobName', 'loop-stall-test', '-Dir', loopDir,
+        '-TickMs', '50', '-GapMs', '150', '-BaselineMs', '2000',
+        '-PreSleepDelayMs', '220', '-MaxTicks', '3', '-MaxDurationSec', '20',
+      ],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 25_000 },
+    )
+    assert.ifError(loopRes.error)
+    assert.equal(loopRes.status, 0, loopRes.stdout + '\n' + loopRes.stderr)
+    const loopRecord = await readSamplerRecord(loopDir)
+    assert.ok(loopRecord.totalGaps >= 1, JSON.stringify(loopRecord))
+    const loopGap = loopRecord.gaps.find(g => g.source === 'loop')
+    assert.ok(loopGap, `expected loop gap in ${JSON.stringify(loopRecord.gaps)}`)
+    assert.ok(loopGap.gapMs >= 150)
+
+    const failRes = spawnSync(
+      'powershell.exe',
+      [
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+        '-File', samplerPs1,
+        '-Action', 'run', '-JobName', 'counter-fail-test', '-Dir', failDir,
+        '-TickMs', '120', '-GapMs', '50', '-BaselineMs', '200',
+        '-MaxTicks', '2', '-MaxDurationSec', '20', '-SimulateCounterFailure',
+      ],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 25_000 },
+    )
+    assert.ifError(failRes.error)
+    assert.equal(failRes.status, 0, failRes.stdout + '\n' + failRes.stderr)
+    const failRecord = await readSamplerRecord(failDir)
+    assert.ok(Array.isArray(failRecord.errors) && failRecord.errors.length >= 1, JSON.stringify(failRecord))
+    assert.ok(failRecord.gaps.length >= 1)
+    assert.equal(failRecord.gaps[0].cpuSampleOk, false)
+    assert.equal(failRecord.gaps[0].totalCpuGainedMs, null)
+    const classified = classifyRecord(failRecord)
+    assert.equal(classified.status, 'inconclusive')
+    assert.match(formatSummary(failRecord, classified), /simulated counter failure/)
+  } catch (error) {
+    failed = true
+    throw error
+  } finally {
+    try {
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+    } catch (rmError) {
+      if (!failed) throw rmError
+    }
+  }
+})

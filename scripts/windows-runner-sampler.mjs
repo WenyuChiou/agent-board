@@ -48,25 +48,31 @@ export const classifyGap = (gap, { cpuCount = 4 } = {}) => {
   const totalCpuGainedMs = Math.max(0, Number(gap?.totalCpuGainedMs) || 0)
   const idleRaw = gap?.idleCpuGainedMs
   const hasIdle = typeof idleRaw === 'number' && Number.isFinite(idleRaw) && idleRaw >= 0
+  if (gap?.cpuSampleOk === false || gap?.totalCpuGainedMs === null || (gap?.processCount === 0 && totalCpuGainedMs === 0 && !hasIdle)) {
+    return { kind: 'inconclusive', pausedShare: null, reason: 'CPU counter read failed; cannot distinguish VM pause from CPU contention' }
+  }
   const cores = Math.max(1, Number(cpuCount) || 4)
   const topProcesses = Array.isArray(gap?.topProcesses) ? gap.topProcesses : gap?.topProcesses ? [gap.topProcesses] : []
   const topProcess = topProcesses[0] ?? null
   const share = hasIdle && gapMs > 0 ? Math.max(0, cores * windowMs - (totalCpuGainedMs + idleRaw)) / (cores * gapMs) : null
   const pausedShare = share === null ? null : Number(share.toFixed(3))
+  const preGapMs = Math.max(0, windowMs - gapMs)
+  const gapCpuLowerBoundMs = Math.max(0, totalCpuGainedMs - cores * preGapMs)
+  const diskBusy = typeof gap?.diskQueueLength === 'number' && gap.diskQueueLength >= 2
 
-  if (hasIdle && share >= 0.5 && totalCpuGainedMs < gapMs * 0.5) {
+  if (hasIdle && share >= 0.5 && gapCpuLowerBoundMs < gapMs * 0.5) {
     return { kind: 'vm-pause', pausedShare, reason: `missing ~${Math.round(share * 100)}% of expected ${cores}-core capacity (${totalCpuGainedMs} ms active, ${idleRaw} ms idle across ${windowMs} ms window)` }
   }
-  if (totalCpuGainedMs >= gapMs * 0.5 && topProcess) {
-    return { kind: 'cpu-contention', culprit: topProcess.name, culpritCpuMs: topProcess.cpuGainedMs, pausedShare, reason: `active CPU gained ${totalCpuGainedMs} ms during ${gapMs} ms gap (top: ${topProcess.name} ${topProcess.cpuGainedMs} ms)` }
+  if (topProcess && (gapCpuLowerBoundMs >= gapMs * 0.5 || (!diskBusy && totalCpuGainedMs >= gapMs * 0.5))) {
+    return { kind: 'cpu-contention', culprit: topProcess.name, culpritCpuMs: topProcess.cpuGainedMs, pausedShare, reason: `active CPU gained ${totalCpuGainedMs} ms across ${windowMs} ms window (top: ${topProcess.name} ${topProcess.cpuGainedMs} ms)` }
   }
-  if (typeof gap?.diskQueueLength === 'number' && gap.diskQueueLength >= 2) {
+  if (diskBusy) {
     return { kind: 'disk-contention', diskQueueLength: gap.diskQueueLength, pausedShare, reason: `disk queue length ${gap.diskQueueLength} during ${gapMs} ms gap` }
   }
   if (typeof gap?.freeMemoryMb === 'number' && gap.freeMemoryMb < 256) {
     return { kind: 'memory-pressure', freeMemoryMb: gap.freeMemoryMb, pausedShare, reason: `free memory dropped to ${gap.freeMemoryMb} MB during ${gapMs} ms gap` }
   }
-  if (!hasIdle && gapMs > 0 && totalCpuGainedMs < gapMs * 0.25) {
+  if (!hasIdle && gapMs > 0 && gapCpuLowerBoundMs < gapMs * 0.25 && totalCpuGainedMs < gapMs * 0.25) {
     return { kind: 'vm-pause', pausedShare: null, reason: `only ${totalCpuGainedMs} ms active CPU gained across ${gapMs} ms gap (idle counter unavailable)` }
   }
   return { kind: 'inconclusive', pausedShare, reason: `gap ${gapMs} ms (${totalCpuGainedMs} ms active CPU, diskQ=${gap?.diskQueueLength ?? 'n/a'}, freeMB=${gap?.freeMemoryMb ?? 'n/a'})` }
@@ -116,6 +122,9 @@ export const formatSummary = (record, classification = classifyRecord(record)) =
   ]
   if (classification.topCulprits.length) {
     lines.push(`- Top CPU consumers across gaps: ${classification.topCulprits.slice(0, 5).map(c => `\`${c.name}\` (${c.cpuGainedMs} ms)`).join(', ')}`)
+  }
+  if (Array.isArray(record?.errors) && record.errors.length) {
+    lines.push(`- Counter errors: ${record.errors.map(e => String(e).replace(/[\r\n]+/g, ' ')).join('; ')}`)
   }
   classification.gaps.forEach((g, i) => {
     const top = Array.isArray(g.topProcesses) && g.topProcesses[0] ? `, top=\`${g.topProcesses[0].name}\` (${g.topProcesses[0].cpuGainedMs} ms)` : ''

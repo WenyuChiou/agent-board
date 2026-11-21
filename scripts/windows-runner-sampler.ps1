@@ -7,7 +7,9 @@ param(
   [int]$BaselineMs = 2000,
   [int]$MaxDurationSec = 1800,
   [int]$MaxTicks = 0,
-  [int]$StopTimeoutMs = 5000
+  [int]$StopTimeoutMs = 5000,
+  [int]$PreSleepDelayMs = 0,
+  [switch]$SimulateCounterFailure
 )
 
 $ErrorActionPreference = 'Stop'
@@ -147,7 +149,8 @@ $null = New-Item -ItemType Directory -Path $Dir -Force
 $errors = [System.Collections.ArrayList]::new()
 $gaps = [System.Collections.ArrayList]::new()
 $procCat = $null; $diskCat = $null; $memCat = $null
-try { $procCat = New-Object System.Diagnostics.PerformanceCounterCategory('Process') } catch { $null = $errors.Add("Process: $($_.Exception.Message)") }
+if ($SimulateCounterFailure) { $null = $errors.Add('Process: simulated counter failure') }
+else { try { $procCat = New-Object System.Diagnostics.PerformanceCounterCategory('Process') } catch { $null = $errors.Add("Process: $($_.Exception.Message)") } }
 try { $diskCat = New-Object System.Diagnostics.PerformanceCounterCategory('PhysicalDisk') } catch { $null = $errors.Add("PhysicalDisk: $($_.Exception.Message)") }
 try { $memCat = New-Object System.Diagnostics.PerformanceCounterCategory('Memory') } catch { $null = $errors.Add("Memory: $($_.Exception.Message)") }
 
@@ -190,11 +193,11 @@ function Read-DiskQueue {
 }
 
 function Compute-Deltas($Before, $After) {
-  if (-not $After) { return [pscustomobject]@{ totalCpuGainedMs = 0; idleCpuGainedMs = $null; topProcesses = [object[]]@(); processCount = 0 } }
+  if (-not $Before -or -not $After) { return [pscustomobject]@{ cpuSampleOk = $false; totalCpuGainedMs = $null; idleCpuGainedMs = $null; topProcesses = [object[]]@(); processCount = 0 } }
   $idle = 0; $hasIdle = $false; $total = 0; $list = [System.Collections.ArrayList]::new()
   foreach ($k in $After.Keys) {
     $cur = $After[$k]
-    $prevCpu = if ($Before -and $Before.ContainsKey($k)) { $Before[$k].cpuMs } else { 0 }
+    $prevCpu = if ($Before.ContainsKey($k)) { $Before[$k].cpuMs } else { 0 }
     $delta = [int64]($cur.cpuMs - $prevCpu)
     if ($delta -lt 0) { $delta = [int64]0 }
     if ($cur.pid -eq 0 -or $cur.name -eq 'idle') { $idle += $delta; $hasIdle = $true }
@@ -202,7 +205,7 @@ function Compute-Deltas($Before, $After) {
   }
   $top = [object[]]@($list | Sort-Object -Property cpuGainedMs -Descending | Select-Object -First 25)
   $idleVal = if ($hasIdle) { [int64]$idle } else { $null }
-  return [pscustomobject]@{ totalCpuGainedMs = [int64]$total; idleCpuGainedMs = $idleVal; topProcesses = $top; processCount = $After.Count }
+  return [pscustomobject]@{ cpuSampleOk = $true; totalCpuGainedMs = [int64]$total; idleCpuGainedMs = $idleVal; topProcesses = $top; processCount = $After.Count }
 }
 
 function Add-GapSample([string]$Source, $StartWall, $EndWall, [int64]$GapDurationMs, [int64]$EndMono, $AfterSnap) {
@@ -214,7 +217,7 @@ function Add-GapSample([string]$Source, $StartWall, $EndWall, [int64]$GapDuratio
     gapMs = $GapDurationMs; wallGapMs = [int64][math]::Round(($EndWall - $StartWall).TotalMilliseconds)
     windowMs = [int64]($EndMono - $script:baselineAtMono); baselineAgeMs = [int64]($EndMono - $GapDurationMs - $script:baselineAtMono)
     freeMemoryBytes = $freeMem; freeMemoryMb = $freeMb; diskQueueLength = $diskQ
-    totalCpuGainedMs = $deltas.totalCpuGainedMs; idleCpuGainedMs = $deltas.idleCpuGainedMs
+    cpuSampleOk = $deltas.cpuSampleOk; totalCpuGainedMs = $deltas.totalCpuGainedMs; idleCpuGainedMs = $deltas.idleCpuGainedMs
     topProcesses = [object[]]@($deltas.topProcesses); processCount = $deltas.processCount
   }
   if ($gaps.Count -lt 500) {
@@ -231,27 +234,37 @@ $warmupMs = [int64]$warmupSw.ElapsedMilliseconds
 $tickCount = 0; $baselineCount = 0; $script:totalGaps = 0; $maxGapMs = 0
 $runSw = [Diagnostics.Stopwatch]::StartNew(); $tickSw = [Diagnostics.Stopwatch]::StartNew(); $baselineSw = [Diagnostics.Stopwatch]::StartNew()
 $script:baselineAtMono = $tickSw.ElapsedMilliseconds
+$lastTickMono = $tickSw.ElapsedMilliseconds; $lastTickWall = [DateTime]::UtcNow
 
 try {
   while (-not (Test-Path $stopFile) -and $runSw.Elapsed.TotalSeconds -lt $MaxDurationSec -and ($MaxTicks -le 0 -or $tickCount -lt $MaxTicks)) {
-    $beforeWall = [DateTime]::UtcNow; $beforeMono = $tickSw.ElapsedMilliseconds
+    if ($PreSleepDelayMs -gt 0 -and $tickCount -eq 1) { [Threading.Thread]::Sleep($PreSleepDelayMs) }
+    $preSleepMono = $tickSw.ElapsedMilliseconds; $preSleepWall = [DateTime]::UtcNow
+    $loopOverheadMs = [int64]($preSleepMono - $lastTickMono)
+    if ($loopOverheadMs -gt $GapMs) {
+      if ($loopOverheadMs -gt $maxGapMs) { $maxGapMs = $loopOverheadMs }
+      $afterSnap = Read-ProcessSnapshot
+      Add-GapSample 'loop' $lastTickWall $preSleepWall $loopOverheadMs $preSleepMono $afterSnap
+      if ($afterSnap) { $script:baseline = $afterSnap; $script:baselineAtMono = $tickSw.ElapsedMilliseconds; $baselineSw.Restart() }
+      $lastTickMono = $tickSw.ElapsedMilliseconds; $lastTickWall = [DateTime]::UtcNow
+    }
     [Threading.Thread]::Sleep($TickMs)
-    $afterMono = $tickSw.ElapsedMilliseconds; $afterWall = [DateTime]::UtcNow
-    $tickCount++; $monoGapMs = [int64]($afterMono - $beforeMono)
+    $afterMono = $tickSw.ElapsedMilliseconds; $afterWall = [DateTime]::UtcNow; $tickCount++
+    $monoGapMs = [int64]($afterMono - $lastTickMono)
     if ($monoGapMs -gt $maxGapMs) { $maxGapMs = $monoGapMs }
     if ($monoGapMs -gt $GapMs) {
       $afterSnap = Read-ProcessSnapshot
-      Add-GapSample 'sleep' $beforeWall $afterWall $monoGapMs $afterMono $afterSnap
+      Add-GapSample 'sleep' $lastTickWall $afterWall $monoGapMs $afterMono $afterSnap
       if ($afterSnap) { $script:baseline = $afterSnap; $script:baselineAtMono = $tickSw.ElapsedMilliseconds; $baselineSw.Restart() }
     } elseif ($baselineSw.ElapsedMilliseconds -ge $BaselineMs) {
-      $snapStartMono = $tickSw.ElapsedMilliseconds; $snapStartWall = [DateTime]::UtcNow
       $nextSnap = Read-ProcessSnapshot
       $snapEndMono = $tickSw.ElapsedMilliseconds; $snapEndWall = [DateTime]::UtcNow
-      $snapMs = [int64]($snapEndMono - $snapStartMono); $baselineCount++
+      $snapMs = [int64]($snapEndMono - $afterMono); $baselineCount++
       if ($snapMs -gt $maxGapMs) { $maxGapMs = $snapMs }
-      if ($snapMs -gt $GapMs) { Add-GapSample 'baseline' $snapStartWall $snapEndWall $snapMs $snapEndMono $nextSnap }
+      if ($snapMs -gt $GapMs) { Add-GapSample 'baseline' $afterWall $snapEndWall $snapMs $snapEndMono $nextSnap }
       if ($nextSnap) { $script:baseline = $nextSnap; $script:baselineAtMono = $tickSw.ElapsedMilliseconds; $baselineSw.Restart() }
     }
+    $lastTickMono = $tickSw.ElapsedMilliseconds; $lastTickWall = [DateTime]::UtcNow
   }
 } catch { if ($errors.Count -lt 20) { $null = $errors.Add("Sampler loop: $($_.Exception.Message)") } }
 finally {
