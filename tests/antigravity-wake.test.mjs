@@ -373,6 +373,22 @@ test('no order file holds the wake', () => using(w => {
   assert.equal(w.poll(T + 2000).wakes[0]?.id, 'm-file')
 }))
 
+test('an order file whose lock is there holds the wake', () => using(w => {
+  w.ready(APP)
+  w.poll(T)
+  w.send(APP, 'm-lock', T)
+  const [wake] = w.poll(T + 1000).wakes
+  assert.equal(wake?.id, 'm-lock')
+  // A hook is writing the next turn's number, or died holding the lock, so the file may be one turn behind: no wake
+  // until the lock is gone, at the poll and at the attempt alike.
+  const lock = `${w.order(APP)}.lock`
+  writeFileSync(lock, JSON.stringify({ version: 1, pid: process.pid, started: T, token: 'b'.repeat(32) }))
+  assert.deepEqual(w.poll(T + 1500), { wakes: [] })
+  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1500), { ok: false, code: 'NOT_HELD' })
+  rmSync(lock)
+  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 2000), { ok: true })
+}))
+
 test('a peer message queued before the board message starts no wake while the next turn would take the peer message', () => using(w => {
   w.ready(APP)
   w.poll(T)
