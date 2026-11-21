@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { delimiter, join } from 'node:path'
 import { test } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { bootstrap, locales, fixture, terminal, succeeded } from './helpers/setup-fixture.mjs'
 
 // Keep output/count contracts separate from terminal consent and failure flows (#1231).
@@ -68,7 +70,13 @@ test('npm setup groups shared files, accurate counts, commands and sessions in e
       const quoted = process.platform === 'win32' ? `'${data.replaceAll("'", "''")}'` : `'${data.replaceAll("'", "'\\''")}'`
       const location = /^[\w./:@=-]+$/.test(data) ? data : quoted
       const board = `npx @wenyuchiou/agent-board --data-dir ${location}`
-      assert.ok(output.includes(`${board} --codex-trust --codex-bin `))
+      // The fixture passes --home for its scratch home, which is the default home on
+      // Linux (HOME) but not on Windows (homedir reads USERPROFILE): the trust command
+      // names the home only when it differs from the default (#1303).
+      const homeQuoted = process.platform === 'win32' ? `'${env.HOME.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'` : `'${env.HOME.replaceAll("'", "'\\''")}'`
+      const homeLocation = /^[\w./:@=-]+$/.test(env.HOME) ? env.HOME : homeQuoted
+      const homePart = process.platform === 'win32' ? ` --home ${homeLocation}` : ''
+      assert.ok(output.includes(`${board}${homePart} --codex-trust --codex-bin `))
       assert.ok(output.includes(`${board} --hermes-trust`))
       assert.ok(output.includes(bootstrap[index].board.replace('{command}', 'npx @wenyuchiou/agent-board')))
       assert.doesNotMatch(output, /& '/)
@@ -226,5 +234,54 @@ test('a removal that changes one file says removed 1 setup file in the singular 
     const applied = setup('--agent', 'cursor', '--lang', 'en', '--remove', '--apply')
     assert.match(applied, /removed 1 setup file\b/)
     assert.doesNotMatch(applied, /1 setup files\b/)
+  })
+})
+
+test('a trust command names an explicit home and omits the default home (#1303)', () => {
+  fixture((setup, { env, root }) => {
+    const bin = join(root, 'synthetic bin')
+    mkdirSync(bin)
+    const codex = join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex')
+    writeFileSync(codex, 'synthetic', { mode: 0o755 })
+    const installer = fileURLToPath(new URL('../scripts/setup-agent.mjs', import.meta.url))
+    // An explicit home other than the account's own, with no CODEX_HOME to fall back on:
+    // the trust step must name it, or the command would approve the default home instead.
+    const elsewhere = join(root, 'elsewhere-home')
+    mkdirSync(elsewhere, { recursive: true })
+    const { CODEX_HOME: _codexHome, ...withoutCodexHome } = env
+    const named = spawnSync(process.execPath, [installer, '--home', elsewhere, '--agent', 'codex', '--codex-bin', codex, '--lang', 'en', '--data-dir', join(root, 'data'), '--progress-file', env.CLAUDE_PROGRESS_FILE], { env: withoutCodexHome, encoding: 'utf8', windowsHide: true })
+    assert.equal(named.status, 0, named.stderr)
+    assert.match(named.stdout, /--home .* --codex-trust --codex-bin/, `the trust command names the home\n${named.stdout}`)
+    assert.ok(named.stdout.includes(elsewhere), `the trust command names this home\n${named.stdout}`)
+    // Without --home the command stays as before: HOME is the scratch home, so it is the default.
+    const plain = spawnSync(process.execPath, [installer, '--agent', 'codex', '--codex-bin', codex, '--lang', 'en', '--data-dir', join(root, 'data'), '--progress-file', env.CLAUDE_PROGRESS_FILE], { env, encoding: 'utf8', windowsHide: true })
+    assert.equal(plain.status, 0, plain.stderr)
+    assert.doesNotMatch(plain.stdout, /--home /, `no --home for the default home\n${plain.stdout}`)
+    assert.match(plain.stdout, /--codex-trust --codex-bin/, `the trust step is still there\n${plain.stdout}`)
+  })
+})
+
+// A Codex directory whose name holds a curly apostrophe: PowerShell ends a single-quoted
+// string at the curly quotes too, so the printed trust command must double it (#1303).
+test('a trust command for a Codex directory with a curly apostrophe parses in PowerShell (#1303)', { skip: process.platform !== 'win32' && 'Windows only' }, () => {
+  fixture((setup, { env, root }) => {
+    const bin = join(root, 'synthetic bin')
+    mkdirSync(bin)
+    const codex = join(bin, 'codex.cmd')
+    writeFileSync(codex, 'synthetic', { mode: 0o755 })
+    const dir = join(root, 'Codex\u2019s Home')
+    mkdirSync(dir, { recursive: true })
+    const said = setup('--agent', 'codex', '--codex-dir', dir, '--codex-bin', codex, '--lang', 'en')
+    // The printed directory doubles the curly apostrophe, like the straight one.
+    const quoted = `'${dir.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'`
+    assert.ok(said.includes(`--codex-dir ${quoted} --codex-trust --codex-bin`), `the trust command doubles the curly apostrophe\n${said}`)
+    // And the printed command parses in PowerShell instead of ending the string at the apostrophe.
+    const command = /preview with (.+ --codex-trust --codex-bin .+?), then run it again/.exec(said)?.[1]
+    assert.ok(command, `the output carries the trust command\n${said}`)
+    const file = join(root, 'trust-command.txt')
+    writeFileSync(file, command)
+    const script = `$t = $null; $e = $null; [System.Management.Automation.Language.Parser]::ParseInput([System.IO.File]::ReadAllText('${file.replaceAll("'", "''")}'), [ref]$t, [ref]$e) | Out-Null; if ($e) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }`
+    const parsed = spawnSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { encoding: 'utf8', windowsHide: true })
+    assert.equal(parsed.status, 0, parsed.stdout + parsed.stderr)
   })
 })

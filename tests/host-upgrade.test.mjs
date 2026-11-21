@@ -11,18 +11,32 @@ import { spawnIsolated } from './e2e/lib/spawn.mjs'
 // the board group, whose CI job fetches the tags; the other host journeys are in tests/e2e/.
 after(cleanup)
 
-test('an upgrade from 0.24.0 in the same home keeps every listed agent\'s card and reports no change on a second apply', async t => {
-  const tag = 'agent-board--v0.24.0'
+// One extraction per release tag, shared by every test that upgrades from it: the old setup
+// runs from the extracted folder and writes into the fixture's own home, so the folder is
+// unchanged after a run and sharing it saves an extraction per test (#1303). The tag check
+// still runs for each test, so a missing tag skips that test.
+const sharedFolders = new Map()
+const sharedRelease = (t, tag, label) => {
   const available = spawnSync('git', ['-C', repoRoot, 'cat-file', '-e', `${tag}^{commit}`], { encoding: 'utf8', windowsHide: true })
   assert.ifError(available.error)
   if (available.status !== 0) {
     assert.ok(!process.env.CI, `${tag} is missing in CI; the board job fetches the whole history with its tags`)
-    return t.skip(`${tag} is missing locally; run git fetch --tags to run this journey`)
+    t.skip(`${tag} is missing locally; run git fetch --tags to run this journey`)
+    return null
   }
-  const oldFolder = tempFolder()
+  if (sharedFolders.has(tag)) return sharedFolders.get(tag)
+  const folder = tempFolder()
   const archive = spawnSync('git', ['-C', repoRoot, 'archive', '--format=tar', tag, 'scripts', 'hooks', 'bin', 'package.json'], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })
-  checked(archive, 'archive 0.24.0')
-  checked(spawnSync('tar', ['-x', '-f', '-'], { cwd: oldFolder, input: archive.stdout, encoding: 'utf8', windowsHide: true }), 'extract 0.24.0')
+  checked(archive, `archive ${label}`)
+  checked(spawnSync('tar', ['-x', '-f', '-'], { cwd: folder, input: archive.stdout, encoding: 'utf8', windowsHide: true }), `extract ${label}`)
+  sharedFolders.set(tag, folder)
+  return folder
+}
+
+test('an upgrade from 0.24.0 in the same home keeps every listed agent\'s card and reports no change on a second apply', async t => {
+  const tag = 'agent-board--v0.24.0'
+  const oldFolder = sharedRelease(t, tag, '0.24.0')
+  if (!oldFolder) return
   const f = fixture(Object.values(agents).filter(agent => agent.id).map(agent => agent.sign))
   await apply(f, setupOrder, oldFolder)
   for (const id of setupOrder) await report(f, id, 'waiting')
@@ -46,20 +60,7 @@ const newCommands = { opencode: '.config/opencode/commands/agent-board.md' }
 const skills = { codex: '.agents/skills/agent-board/SKILL.md', antigravity: '.gemini/config/skills/agent-board/SKILL.md' }
 const handKept = ['## Quarterly work', '### Prepare the quarterly report', '- [x] Collect the numbers', '- [ ] Write the summary', '- [?] Send it to Dana or to the whole team?']
 
-const oldRelease = (t, tag = OLD) => {
-  const available = spawnSync('git', ['-C', repoRoot, 'cat-file', '-e', `${tag}^{commit}`], { encoding: 'utf8', windowsHide: true })
-  assert.ifError(available.error)
-  if (available.status !== 0) {
-    assert.ok(!process.env.CI, `${tag} is missing in CI; the board job fetches the whole history with its tags`)
-    t.skip(`${tag} is missing locally; run git fetch --tags to run this journey`)
-    return null
-  }
-  const folder = tempFolder()
-  const archive = spawnSync('git', ['-C', repoRoot, 'archive', '--format=tar', tag, 'scripts', 'hooks', 'bin', 'package.json'], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })
-  checked(archive, `archive ${tag}`)
-  checked(spawnSync('tar', ['-x', '-f', '-'], { cwd: folder, input: archive.stdout, encoding: 'utf8', windowsHide: true }), `extract ${tag}`)
-  return folder
-}
+const oldRelease = (t, tag = OLD) => sharedRelease(t, tag, tag)
 
 // A home that 0.24.2's setup made for Codex, OpenCode and Antigravity (Claude Code gets
 // its /agent-board command from the plugin, so setup writes nothing for it), with one hand-kept task
@@ -214,20 +215,7 @@ test('an upgrade from 0.24.2 keeps an edited hook runner with the code and hook 
 })
 
 // The same extraction of a released tag, for a release other than 0.24.2.
-const taggedRelease = (t, tag, label) => {
-  const available = spawnSync('git', ['-C', repoRoot, 'cat-file', '-e', `${tag}^{commit}`], { encoding: 'utf8', windowsHide: true })
-  assert.ifError(available.error)
-  if (available.status !== 0) {
-    assert.ok(!process.env.CI, `${tag} is missing in CI; the board job fetches the whole history with its tags`)
-    t.skip(`${tag} is missing locally; run git fetch --tags to run this journey`)
-    return null
-  }
-  const folder = tempFolder()
-  const archive = spawnSync('git', ['-C', repoRoot, 'archive', '--format=tar', tag, 'scripts', 'hooks', 'bin', 'package.json'], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })
-  checked(archive, `archive ${label}`)
-  checked(spawnSync('tar', ['-x', '-f', '-'], { cwd: folder, input: archive.stdout, encoding: 'utf8', windowsHide: true }), `extract ${label}`)
-  return folder
-}
+const taggedRelease = (t, tag, label) => sharedRelease(t, tag, label)
 
 // What a host does with a hook line: runs its command in a shell, with the event on standard input.
 const fireHook = (f, command, payload, env) => new Promise((done, fail) => {
@@ -340,20 +328,7 @@ test('an edited plugin kept beside an updated hook runner still reports (#1302)'
 const OLD1588 = 'agent-board--v0.24.3'
 const hermesEvents1588 = ['on_session_start', 'pre_llm_call', 'post_llm_call', 'on_session_end', 'post_tool_call']
 
-const oldRelease1588 = t => {
-  const available = spawnSync('git', ['-C', repoRoot, 'cat-file', '-e', `${OLD1588}^{commit}`], { encoding: 'utf8', windowsHide: true })
-  assert.ifError(available.error)
-  if (available.status !== 0) {
-    assert.ok(!process.env.CI, `${OLD1588} is missing in CI; the board job fetches the whole history with its tags`)
-    t.skip(`${OLD1588} is missing locally; run git fetch --tags to run this journey`)
-    return null
-  }
-  const folder = tempFolder()
-  const archive = spawnSync('git', ['-C', repoRoot, 'archive', '--format=tar', OLD1588, 'scripts', 'hooks', 'bin', 'package.json'], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })
-  checked(archive, 'archive 0.24.3')
-  checked(spawnSync('tar', ['-x', '-f', '-'], { cwd: folder, input: archive.stdout, encoding: 'utf8', windowsHide: true }), 'extract 0.24.3')
-  return folder
-}
+const oldRelease1588 = t => sharedRelease(t, OLD1588, '0.24.3')
 
 test('an upgrade from 0.24.3 updates a Hermes config of an earlier release whose install record no longer names its hooks (#1588)', async t => {
   const old = oldRelease1588(t)
@@ -737,6 +712,8 @@ test('J11a: a 0.25.0 to this release upgrade that never had Codex trust keeps th
 const mockCodexEnv = f => {
   const homesFile = join(f.home, 'mock-codex-homes.json')
   writeFileSync(homesFile, '[]')
+  const methodsFile = join(f.home, 'mock-codex-methods.json')
+  writeFileSync(methodsFile, '[]')
   const script = `#!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
@@ -748,6 +725,9 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', line => {
   try {
     const msg = JSON.parse(line);
+    const methods = JSON.parse(fs.readFileSync(${JSON.stringify(methodsFile)}, 'utf8'));
+    methods.push(msg.method);
+    fs.writeFileSync(${JSON.stringify(methodsFile)}, JSON.stringify(methods));
     if (msg.method === 'initialize') {
       process.stdout.write(JSON.stringify({ id: msg.id, result: { capabilities: {} } }) + '\\n');
     } else if (msg.method === 'hooks/list') {
@@ -778,7 +758,7 @@ rl.on('line', line => {
   const executable = join(f.home, 'bin', 'codex-mock.js')
   mkdirSync(join(f.home, 'bin'), { recursive: true })
   writeFileSync(executable, script, { mode: 0o755 })
-  return { executable, homesFile }
+  return { executable, homesFile, methodsFile }
 }
 
 // A home the 0.25.0 tag's own setup made for Codex alone, in an explicit directory
@@ -797,6 +777,7 @@ const oldCodexHomeIn = async old => {
 const upgradeIn = (f, alt, mock) => run(f, [join(repoRoot, 'scripts', 'setup-agent.mjs'), '--home', f.home, '--codex-dir', alt, '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--lang', 'en', '--agent', 'codex', '--apply', '--codex-bin', mock.executable], { timeoutMs: 120000 })
 
 const readBackHomes = mock => JSON.parse(readFileSync(mock.homesFile, 'utf8'))
+const readBackMethods = mock => JSON.parse(readFileSync(mock.methodsFile, 'utf8'))
 const assertReadBackHome = (mock, alt) => {
   const homes = readBackHomes(mock)
   assert.ok(homes.length >= 1, 'the read-back asked Codex')
@@ -811,11 +792,19 @@ test('J11a: a 0.25.0 to this release upgrade in an explicit Codex directory asks
   copyFileSync(join(alt, 'hooks.json'), join(f.home, '.codex', 'hooks.json'))
   writeFileSync(join(alt, 'mock-codex-state.json'), JSON.stringify({ trusted: true }))
   writeFileSync(join(f.home, '.codex', 'mock-codex-state.json'), JSON.stringify({ trusted: false }))
+  // The selected profile holds a config the preview must not touch: the read-back is
+  // read-only, so it sends no approval write and the file's bytes are unchanged.
+  const config = join(alt, 'config.toml')
+  const configBytes = 'trust = "board"\n'
+  writeFileSync(config, configBytes)
   const output = checked(await upgradeIn(f, alt, mock), 'setup --apply')
   assert.ok(output.includes("Codex: the board's hooks are still trusted."), `the upgrade says trust held\n${output}`)
   assert.doesNotMatch(output, /--codex-trust/, `no trust command after an upgrade that kept trust\n${output}`)
   assert.equal(upgradeSteps(output), 1, 'one step: the upgrade command')
   assertReadBackHome(mock, alt)
+  assert.ok(readBackMethods(mock).includes('hooks/list'), 'the read-back asked Codex for its hooks')
+  assert.ok(!readBackMethods(mock).includes('config/batchWrite'), 'the preview sent no approval write')
+  assert.equal(readFileSync(config, 'utf8'), configBytes, 'the preview left the selected profile untouched')
 })
 
 test('J11a: a 0.25.0 to this release upgrade in an explicit Codex directory that loses trust names the directory in the trust command (#1303)', async t => {
