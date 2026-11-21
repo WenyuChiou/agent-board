@@ -741,6 +741,7 @@ export const ZH_CN: Strings = {
   reporterFailed: (reason: string): string => `进度报告未能保存（${reason}），请检查进度文件后重试。`,
   reporterInvalidStep: (step: string): string => `无法读取步骤“${step}”，请写成“- [ ] 步骤”这种格式。`,
   reporterLockDenied: '无法在 progress.md 旁创建文件（权限被拒绝），请检查文件夹权限后重试。',
+  reportKept: '这里无法写入看板，所以汇报已留在这段对话的输出里，会在对话的下一步送到看板，无需任何操作。',
   tailRepairFailed: '无法安全修复不完整的结尾，没有改动任何内容。请检查进度文件后重新报告。',
   fileProgress: '你的进度文件',
   fileQuestions: '问题清单',

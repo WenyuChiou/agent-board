@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
+import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { installCommand, installContext } from './setup-command.mjs'
 import { blockClaimOf, blockHostOf, boardConfirmedReport, claimText, cleanAntigravityIdentity, codexClaimOf, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, resolveAntigravityIdentity, seenClaimOf, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { AntigravityIdentity, CodexReport } from '../hooks/codex'
@@ -42,7 +43,7 @@ import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
 import { currentPart } from '../hooks/retention'
 import { lastQuestion } from '../hooks/digest'
-import { antigravityProcessClaim, ANTIGRAVITY_TRANSCRIPTS, resolveAntigravityTitle } from './antigravity-meta'
+import { antigravityMarkedLines, antigravityProcessClaim, ANTIGRAVITY_TRANSCRIPTS, MARK_PREFIX, resolveAntigravityTitle } from './antigravity-meta'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -84,6 +85,28 @@ export const removeCodexTrustEntries = (text: string, keys: string[]): { text: s
 }
 
 const hash = (text: string | Buffer): string => createHash('sha256').update(text).digest('hex')
+// A report agy's terminal sandbox refuses is printed as one marked line, which agy keeps with the command's output in the
+// conversation's transcript, for the conversation's next hook to bring in (#1384): the conversation, the report's time,
+// the size and digest of its JSON, and the JSON compressed. The whole line is at most 4096 bytes and is read whole.
+const MARK_LIMIT = 4096
+const MARK_MAX_AGE = 24 * 60 * 60 * 1000
+const MARK_LINE = /^AGENT_BOARD_REPORT_V1 ([a-zA-Z0-9][a-zA-Z0-9_-]{5,127}) (\d{1,15}) (\d{1,6}) ([0-9a-f]{16}) ([A-Za-z0-9_-]+)$/
+const markLine = (session: string, at: number, raw: Json): string | undefined => {
+  const text = Buffer.from(JSON.stringify(raw))
+  const line = `${MARK_PREFIX}${session} ${at} ${text.length} ${hash(text).slice(0, 16)} ${deflateRawSync(text).toString('base64url')}`
+  return Buffer.byteLength(line) <= MARK_LIMIT ? line : undefined
+}
+const readMark = (line: string): { session: string; at: number; raw: Json } | undefined => {
+  const match = line.length <= MARK_LIMIT ? MARK_LINE.exec(line) : null
+  if (match === null) return undefined
+  try {
+    const size = Number(match[3])
+    const text = inflateRawSync(Buffer.from(match[5]!, 'base64url'), { maxOutputLength: Math.max(1, size) })
+    if (text.length !== size || hash(text).slice(0, 16) !== match[4]) return undefined
+    const raw: unknown = JSON.parse(text.toString('utf8'))
+    return typeof raw === 'object' && raw !== null && !Array.isArray(raw) ? { session: match[1]!, at: Number(match[2]), raw: raw as Json } : undefined
+  } catch { return undefined }
+}
 // A file is plain when its bytes survive a read as UTF-8 and a write back. One that does not (a lone FF, Big5) would
 // come back as EF BF BD, so setup refuses it instead of rewriting it (#1607).
 export const isPlain = (bytes: Buffer): boolean => Buffer.from(bytes.toString('utf8'), 'utf8').equals(bytes)
@@ -950,6 +973,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
 
   if (mode === '--codex-event' || mode === '--codex-report' || mode === '--agent-status' || mode === '--recover-hooks') {
     const isRecovery = mode === '--recover-hooks'
+    // A report a hook brings in from a marked line of its conversation's transcript (#1384).
+    const isMarkedReport = mode === '--codex-report' && planInput !== undefined && args.includes('--marked-report')
     const ownerToken = isRecovery ? flag('--recovery-owner-token') : undefined
     const recoveryOwner = ownerToken === undefined ? undefined : {
       token: ownerToken,
@@ -1158,7 +1183,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
-      const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number; pushed?: string[] }
+      const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number; pushed?: string[]; reportedAt?: number }
       // Raw recovery can start a fresh session within its allowed clock skew.
       // An existing session's clock must not move past the next real hook.
       const isSkewedBootstrap = isRawReplay && original === null
@@ -1166,6 +1191,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         !isSkewedBootstrap && (sourceAt > observedAt || displayAt > observedAt))) throw new Error('INVALID_EVENT_TIME')
       if (entry === current && original === null) isFirstSessionEvent = true
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
+      // A marked report no newer than a report that already reached the board for its conversation is not applied: one
+      // with the same time is that report, read again (#1384).
+      if (isMarkedReport && entry === current && typeof original?.reportedAt === 'number' && sourceAt <= original.reportedAt) return original
       // Direct events can arrive out of order too, before they ever enter the pending queue.
       if (mode !== '--codex-report' && original !== null && sourceAt < (original.appliedAt ?? Date.parse(original.updated))) {
         const signal = cleanSignal(run)
@@ -1262,7 +1290,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? { folder: name, folderDigest, folderCanonicalDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
-      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(agent === 'antigravity' && mode === '--codex-report' ? { reportedAt: Math.max(sourceAt, original?.reportedAt ?? 0) } : original?.reportedAt === undefined ? {} : { reportedAt: original.reportedAt }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
       if (entry === current) {
         reportCut = cut
@@ -1397,6 +1425,60 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
       queuedFile = file
     }
+    // A board that refuses writes, for its lock or any file under it, as agy's terminal sandbox does (#1384).
+    const isDenied = (error: unknown): boolean => !isBusy(error)
+      && (error instanceof Error && error.message === 'LOCK_DENIED' || ['EACCES', 'EPERM', 'EROFS'].includes(String((error as { code?: unknown } | null)?.code)))
+    // An Antigravity report bound to its conversation that the board refused, or could not take in time, is printed as
+    // one marked line for the conversation's next hook (#1384). The plan is checked first, so one the board would refuse
+    // fails now instead of being dropped unseen at that hook. A report too large for one line is not printed.
+    const markReport = (error: unknown): boolean => {
+      if (mode !== '--codex-report' || agent !== 'antigravity' || planInput !== undefined || flag('--session') === undefined || current === undefined) return false
+      if (!isDenied(error) && !isBusy(error) && !(error instanceof Error && error.message === 'HOOK_TIMEOUT')) return false
+      let original: CodexReport | null = null
+      try { original = JSON.parse(readLocal(join(root, 'sessions', `${hash(`antigravity:${current.session}`)}.json`)) ?? 'null') as CodexReport | null } catch {}
+      if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
+      codexReport(original, current.session, current.payload, new Date(started).toISOString(), s)
+      const line = markLine(current.session, started, raw)
+      if (line === undefined) throw new Error('REPORT_TOO_LARGE')
+      process.stdout.write(`${line}\n`)
+      output({ session: current.session, kept: true, progress, note: s.reportKept })
+      return true
+    }
+    // The conversation's next hook, which runs outside the sandbox, brings the last marked line of its own transcript in
+    // as the report it was, with its own time (#1384). The session record's `reportedAt` keeps it from being applied twice
+    // or over a newer report. A board that cannot take it yet leaves it for the next hook; a report the board refuses is
+    // dropped. Where the read ended is kept, so the next hook reads only what came after.
+    const bringMarkedReport = async (conversation: string): Promise<void> => {
+      const path = raw.transcriptPath
+      const offsetFile = join(root, 'antigravity-reports', `${hash(`antigravity:${conversation}`)}.json`)
+      let from: number | undefined
+      try {
+        const kept = object(JSON.parse(readLocal(offsetFile) ?? '{}'))
+        if (kept.version === 1 && typeof path === 'string' && kept.file === resolve(path) && Number.isSafeInteger(kept.offset) && Number(kept.offset) >= 0) from = Number(kept.offset)
+      } catch {}
+      const read = antigravityMarkedLines(path, conversation, home, from)
+      if (read === null) return
+      if (read.stray > 0) logPendingDrop(home, { agent, event: current?.event }, 'MARK_OUTSIDE_OUTPUT')
+      const now = Date.now()
+      const mark = read.lines.map(readMark).filter(one => one !== undefined && one.session === conversation && one.at <= now && now - one.at <= MARK_MAX_AGE).at(-1)
+      if (mark !== undefined) {
+        try {
+          await runCodexLocal(['--codex-report', '--agent', 'antigravity', '--session', conversation, '--progress-file', progress, '--home', home, '--data-dir', root,
+            '--hook-started', String(mark.at), '--hook-deadline', String(Math.min(hookDeadline - 1500, Date.now() + 900)), '--marked-report'], boardPath, s, mark.raw)
+        } catch (error) {
+          const code = (error as { code?: unknown } | null)?.code
+          if (isBusy(error) || isDenied(error) || error instanceof Error && error.message === 'HOOK_TIMEOUT' || typeof code === 'string' && /^E[A-Z0-9]+$/.test(code)) return
+        }
+      }
+      // A conversation with no marked line keeps no file: each hook reads the transcript's last 256 KiB. Once one is
+      // read, where the read ended is kept and moved on.
+      if (read.lines.length === 0 && (from === undefined || read.end === from)) return
+      try {
+        mkdirSync(dirname(offsetFile), { recursive: true })
+        atomic(offsetFile, `${JSON.stringify({ version: 1, file: resolve(path as string), offset: read.end })}\n`, checkDeadline)
+      } catch {}
+    }
+    if (mode === '--agent-status' && agent === 'antigravity' && planInput === undefined && current !== undefined) await bringMarkedReport(current.session)
     let delay = 50
     let processed = 0
     let report: CodexReport | undefined
@@ -1473,6 +1555,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         }, { waitMs: value !== undefined && mode !== '--codex-report' && queuedFile === undefined ? 0 : Math.max(0, deadline - performance.now()) })
         break
       } catch (error) {
+        if (isDenied(error) && markReport(error)) return true
         if (!isBusy(error) && !(error instanceof Error && error.message === 'HOOK_TIMEOUT')) throw error
         // Save before a bounded wait: Windows lock recovery and timer scheduling
         // can consume the remaining budget, after which the write guard must close.
@@ -1482,6 +1565,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         }
         const left = deadline - performance.now()
         if (left <= 0) {
+          if (markReport(error)) return true
           if (mode === '--codex-report') throw error
           queue(error)
           break
