@@ -87,11 +87,15 @@ const hash = (text: string | Buffer): string => createHash('sha256').update(text
 // waits here, one folder per progress.md, until an Antigravity hook, which runs outside the sandbox, brings it in.
 // One folder per account: on a shared /tmp another account could otherwise leave reports for this board. Windows keeps
 // TEMP inside the account's profile, which only that account can open; a TEMP elsewhere may be shared, and a folder's
-// owner cannot be read here, so no spool is used then.
+// owner cannot be read here, so no spool is used then. The real paths are compared, so a TEMP that is a junction to a
+// folder outside the profile counts as outside.
 const spoolRoot = (): string | undefined => {
   const temp = resolve(tmpdir())
   if (process.platform !== 'win32') return join(temp, `agent-board-reports-${process.getuid?.() ?? 'user'}`)
-  return temp.toLowerCase().startsWith(`${resolve(homedir()).toLowerCase()}${sep}`) ? join(temp, 'agent-board-reports') : undefined
+  try {
+    const real = realpathSync.native(temp).toLowerCase(), profile = realpathSync.native(homedir()).toLowerCase()
+    return real.startsWith(`${profile}${sep}`) ? join(temp, 'agent-board-reports') : undefined
+  } catch { return undefined }
 }
 const reportSpool = (progress: string): string | undefined => {
   const base = spoolRoot()
@@ -1181,8 +1185,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         !isSkewedBootstrap && (sourceAt > observedAt || displayAt > observedAt))) throw new Error('INVALID_EVENT_TIME')
       if (entry === current && original === null) isFirstSessionEvent = true
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
-      // A saved report older than a report that already reached the board for its conversation is superseded (#1384).
-      if (isSavedReport && entry === current && typeof original?.reportedAt === 'number' && sourceAt < original.reportedAt) return original
+      // A saved report no newer than a report that already reached the board for its conversation is superseded (#1384):
+      // one with the same time is that report, run again after its claim was undone.
+      if (isSavedReport && entry === current && typeof original?.reportedAt === 'number' && sourceAt <= original.reportedAt) return original
       // Direct events can arrive out of order too, before they ever enter the pending queue.
       if (mode !== '--codex-report' && original !== null && sourceAt < (original.appliedAt ?? Date.parse(original.updated))) {
         const signal = cleanSignal(run)
@@ -1355,6 +1360,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const next = Buffer.from(putCodexBlock(repaired.bytes.toString('latin1'), {
         ...report, title: encoded(report.title), project: encoded(report.project), ...(report.context === undefined ? {} : { context: encoded(report.context) }), steps: report.steps.map(encoded),
       }, owner, mode === '--codex-report' && previous !== null && previous.project !== report.project, report.context === undefined ? undefined : encoded(s.contextNote(report.context)), encoded, claim, hostOnly), 'latin1')
+      // An Antigravity report's time reaches its record before the board does. A record write refused after the board
+      // write would otherwise leave the older time, and an older saved report would replace this one (#1384).
+      if (mode === '--codex-report' && agent === 'antigravity' && original !== null && typeof report.reportedAt === 'number' && report.reportedAt > (original.reportedAt ?? 0)) {
+        atomic(recordFile, `${JSON.stringify({ ...original, reportedAt: report.reportedAt }, null, 2)}\n`, checkDeadline, true)
+      }
       saveFullText()
       const aside = repaired.fragment === null ? null : saveReporterTail(progress, repaired.fragment)
       try { atomic(progress, next, checkDeadline) } catch (error) {
@@ -1416,6 +1426,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     }
     // The sandbox refused the lock's create: a lock is reported as denied only when no file is there to hold it.
     const isLockDenied = (error: unknown): boolean => error instanceof Error && error.message === 'LOCK_DENIED'
+    // On POSIX the lock file's own create fails as it is, with EACCES, EPERM or EROFS: that is the refusal too. A refusal
+    // of any other file, such as the session record after the board write, stays the board's own error.
+    const isLockRefused = (error: unknown): boolean => {
+      if (isLockDenied(error)) return true
+      const { code, path } = (error ?? {}) as { code?: unknown; path?: unknown }
+      return process.platform !== 'win32' && ['EACCES', 'EPERM', 'EROFS'].includes(String(code)) && typeof path === 'string' && resolve(path) === resolve(`${progress}.agent-board-lock`)
+    }
     // A board that refuses writes, for its lock or any file under it.
     const isDenied = (error: unknown): boolean => !isBusy(error)
       && (isLockDenied(error) || ['EACCES', 'EPERM', 'EROFS'].includes(String((error as { code?: unknown } | null)?.code)))
@@ -1429,7 +1446,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       } catch {}
       if (original?.agent && original.agent !== entry.agent) throw new Error('SESSION_CONFLICT')
       const given = entry.payload
-      codexReport(original, entry.session, typeof given.planTitle === 'string' ? { state: given.state, steps: given.steps, title: given.planTitle } : given, new Date().toISOString(), s)
+      // The same plan the board builds: a mirrored plan's project goes with it.
+      const input = typeof given.planTitle !== 'string' ? given : {
+        state: given.state, steps: given.steps, title: given.planTitle,
+        ...(typeof given.planProject === 'string' ? { project: original?.project ?? given.planProject } : {}),
+      }
+      codexReport(original, entry.session, input, new Date().toISOString(), s)
     }
     // Each saved report of this hook's conversation runs as the report it was, with its own time, before the hook's own
     // event, so the event lands last. One the board cannot take yet, or cannot be read for a moment, stays for the next hook;
@@ -1465,7 +1487,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           continue
         }
         // Another board's report keeps its file for that board's hooks. A report is brought in only by a hook of the
-        // conversation it names, which the hook knows from agy itself, so a turn cannot file a report as another one.
+        // conversation it names. It names one as any report does, by `--session`, which the board takes as given, so a
+        // sandboxed turn reaches no further through the spool than it could outside the sandbox.
         if (resolve(saved.progress as string) !== progress || resolve(saved.root as string) !== root || saved.session !== conversation) continue
         // Claimed by rename, so two hooks never run one saved report.
         const claimed = `${file}.claim-${Date.now()}-${randomUUID()}`
@@ -1563,7 +1586,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       } catch (error) {
         // An Antigravity report bound to its conversation, refused by agy's sandbox: saved where the sandbox lets it
         // write, for the conversation's next hook to bring in (#1384).
-        if (mode === '--codex-report' && agent === 'antigravity' && planInput === undefined && flag('--session') !== undefined && current !== undefined && isLockDenied(error)) {
+        if (mode === '--codex-report' && agent === 'antigravity' && planInput === undefined && flag('--session') !== undefined && current !== undefined && isLockRefused(error)) {
           const base = spoolRoot(), folder = reportSpool(progress)
           if (base === undefined || folder === undefined) throw error
           checkPlan(current)

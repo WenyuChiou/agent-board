@@ -14946,6 +14946,69 @@ test('a Windows TEMP outside the account\'s profile holds no spool (#1384)', { s
   await contrast1384(a)
 }))
 
+test('a refused Antigravity report whose mirrored project the board would refuse is not saved and gives the board\'s error (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  await denyBoard1384(a.folder, () => {
+    const result = a.report({ planTitle: 'Synthetic empty project', planProject: '', state: 'working', steps: ['- [~] Synthetic empty project step'] }, a.other)
+    assert.notEqual(result.status, 0)
+    assert.doesNotMatch(result.stdout, /saved/)
+  })
+  assert.deepEqual(a.names(), [])
+  await contrast1384(a)
+}))
+
+test('a refused Antigravity report is not saved when TEMP is a junction to a folder outside the profile (#1384)', { skip: !isWin1384 && 'Windows junctions' }, () => fixture(async f => {
+  const a = agy1384(f)
+  const outside = mkdtempSync(join(tmpdir(), 'agy-junction-1384-'))
+  const linked = join(f.home, 'linked-temp')
+  try {
+    symlinkSync(outside, linked, 'junction')
+    await denyBoard1384(a.folder, () => {
+      const result = a.report(a.plan('Synthetic junction temp'), a.conv, [], a.envOf(linked))
+      assert.notEqual(result.status, 0)
+      assert.doesNotMatch(result.stdout, /saved/)
+    })
+    assert.deepEqual(readdirSync(outside), [])
+  } finally {
+    try { rmdirSync(linked) } catch {}
+    rmSync(outside, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+  await contrast1384(a)
+}))
+
+test('a newer Antigravity report whose record write is refused does not reach the board, so an older saved report cannot replace it (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  await denyBoard1384(a.folder, () => {
+    const result = a.report(a.plan('Synthetic older saved'))
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(JSON.parse(result.stdout).saved, true)
+  })
+  await denyBoard1384(join(f.root, 'sessions'), () => {
+    const result = a.report(a.plan('Synthetic newer refused'))
+    assert.notEqual(result.status, 0)
+    assert.doesNotMatch(result.stdout, /saved/)
+  })
+  assert.doesNotMatch(a.text(), /Synthetic newer refused/)
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.match(a.text(), /Synthetic older saved/)
+  assert.deepEqual(a.names(), [])
+}))
+
+test('a saved report with the time of the report that last reached the board is not run again (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  const direct = a.report(a.plan('Synthetic direct report'))
+  assert.equal(direct.status, 0, direct.stderr)
+  const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`antigravity:${a.conv}`).digest('hex')}.json`), 'utf8'))
+  assert.equal(typeof record.reportedAt, 'number')
+  a.put({ at: record.reportedAt, raw: a.plan('Synthetic replayed report') })
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.doesNotMatch(a.text(), /Synthetic replayed report/)
+  assert.deepEqual(a.names(), [])
+  a.put({ at: record.reportedAt + 1, raw: a.plan('Synthetic newer saved report') })
+  assert.equal(a.hook('working', 'PostInvocation').status, 0)
+  assert.match(a.text(), /Synthetic newer saved report/)
+}))
+
 test('setup writes the plan hook as a matcher group for Codex and Gemini, and remove leaves a person\'s own groups', () => fixture(async f => {
   const mine = { matcher: 'shell', hooks: [{ type: 'command', command: 'echo mine' }] }
   const geminiConfig = join(f.home, '.gemini', 'settings.json')
