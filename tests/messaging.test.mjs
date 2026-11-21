@@ -2726,10 +2726,11 @@ test('a store rename refused for another reason is not retried, and the receiver
 // decides whether a message was durably claimed before the response was lost.
 const pollingProxy = async (board, mode, onClaim, onStarting, isStarted = () => true) => {
   const upstream = new URL(board.address)
-  let faults = 0, polls = 0, registrations = 0, startings = 0, offers = 0, handed = 0, active = 0, hasClaimed = false, startedBy = null
+  let faults = 0, polls = 0, registrations = 0, startings = 0, offers = 0, handed = 0, hasClaimed = false, startedBy = null
   const server = createServer(async (req, res) => {
-    active += 1
-    res.on('close', () => { active -= 1 })
+    // Every answer closes its connection: a client keeps no idle socket here, so no keep-alive timer of its own can fire
+    // after the test has ended (Node 22's undici 6 under a later test's mocked clearTimeout, #1507).
+    res.setHeader('connection', 'close')
     try {
       let body = ''
       for await (const chunk of req) body += chunk
@@ -2796,14 +2797,7 @@ const pollingProxy = async (board, mode, onClaim, onStarting, isStarted = () => 
   await new Promise(done => server.listen(0, '127.0.0.1', done))
   return {
     address: `http://127.0.0.1:${server.address().port}/?t=${upstream.searchParams.get('t')}`,
-    faults: () => faults, polls: () => polls, registrations: () => registrations, startings: () => startings, offers: () => offers, handed: () => handed, isIdle: () => active === 0,
-    // Waits for the clients' own keep-alive connections to end instead of cutting them: a cut one can leave a client's parser
-    // timer running after the test has ended.
-    // Bounded: past 6 s (a client keeps a connection 4 s after its last request) the rest are cut, as close() does.
-    closeGently: () => new Promise(done => {
-      const timer = setTimeout(() => server.closeAllConnections(), 6000)
-      server.close(() => { clearTimeout(timer); done() })
-    }),
+    faults: () => faults, polls: () => polls, registrations: () => registrations, startings: () => startings, offers: () => offers, handed: () => handed,
     close: () => new Promise(done => { server.close(done); server.closeAllConnections() }),
   }
 }
@@ -7320,8 +7314,7 @@ test('a Codex message that went back to the queue stays queued through a second 
 const m5aReceiver = async (board, daemon, mode = 'pass', onStarting) => {
   const proxy = await pollingProxy(board, mode, undefined, onStarting, () => codexStarts(daemon) > 0)
   const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs })
-  // The receiver's last receipts finish before the proxy drops its connections, so none is cut off after the test has ended.
-  return { proxy, close: async () => { await receiver.close(); await waitFor(() => proxy.isIdle()); await proxy.closeGently() } }
+  return { proxy, close: async () => { await receiver.close(); await proxy.close() } }
 }
 
 test('a Codex delivery whose starting receipt meets a busy board store asks again from inside the thread and then starts the message once (#1507)', () => codexFixture(async (board, dir) => {
