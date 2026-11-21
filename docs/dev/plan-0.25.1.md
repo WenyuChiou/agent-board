@@ -36,7 +36,7 @@ The owner's answers of 2026-11-18:
 
 | Question | Answer |
 |---|---|
-| Antigravity starts on a board message | In 0.25.1. After check C3, the two windows that cannot be closed are accepted with a test and honest card wording (owner, 2026-11-18) |
+| Antigravity starts on a board message | In 0.25.1. After check C3, the two windows that cannot be closed are accepted with a test and honest card wording (owner, 2026-11-18); a third, a healthy hook's blind time, after #1612's round cap (owner, 2026-11-20) |
 | App and IDE rows | Two sittings: discovery on released 0.25.0, then a short rerun on the release build |
 | Codex starts at once | Not in 0.25.1. Check C1 failed, so Codex keeps the 10-minute route, the support table says so, and #1652 moves to 0.26.0 (owner, 2026-11-18). The remaining window of #1370 is accepted with a test and honest card wording |
 | Sessions listed at once (#1316) | In 0.25.1, and the date moves |
@@ -124,7 +124,8 @@ Section 4 holds the design.
 ### M5b. Antigravity starts on a board message
 
 - **Work:** finish #1612. One live run first settles whether `agentapi get-conversation-metadata` prints `num_steps`, whether it rises as soon as a turn starts, and how long the call takes. The hook worker writes the turn's mark first, so a slow hook no longer lets a wake into a running turn. A dismissed failed wake no longer holds the next message's wake (#1609). Fix the `agy` report that fails with permission denied, so its questions reach Needs you (#1384).
-- **Accepted by the owner on 2026-11-18, after check C3:** a turn-start hook that never ran, and the 0.25 to 0.54 s between the board's yes and `send-message` landing. Antigravity offers no "send only if idle" and no public run status, so neither window can be closed from the board. The card says plainly that a message sent while the person starts a turn may join that turn. A review treats only these two windows as accepted.
+- **Accepted by the owner on 2026-11-18, after check C3:** a turn-start hook that never ran, and the 0.25 to 0.54 s between the board's yes and `send-message` landing. Antigravity offers no "send only if idle" and no public run status, so neither window can be closed from the board. The card says plainly that a message sent while the person starts a turn may join that turn.
+- **Accepted by the owner on 2026-11-20, after #1612's round cap and design diagnosis 4 on #1396:** a third window, the time from a healthy turn-start hook's command to its start record (58 to 94 ms in C3's runs) plus the app's own delay before it launches the hook. #1612 gets one more push, a start record made before any lock (#1750, #1751, #1752), and one review round. If that round finds a wake into a running turn outside the three windows, the wake moves to 0.26.0 with no further patch. A review treats only these three windows as accepted.
 - **Done when:** a live record shows an idle start within 10 s and a running turn held.
 - **Covers:** the Antigravity desktop app and `agy`. **Test:** #1612's case table plus one row for each accepted window; a dismissed failed wake; an `agy` report case.
 - **Issues:** #1396, #1384, #1609. **R7:** no hook change; C3 found that none would close these windows.
