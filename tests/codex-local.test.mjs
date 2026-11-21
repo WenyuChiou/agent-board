@@ -1763,7 +1763,7 @@ test('setup prints a plain summary with each agent and the next steps, and --jso
   const noCodex = setupAgent(f, '--lang', 'en', '--agent', 'codex')
   assert.equal(noCodex.status, 0, noCodex.stderr)
   assert.match(noCodex.stdout, /where\.exe codex.*command -v codex/)
-  assert.doesNotMatch(noCodex.stdout, /<full path to codex>/)
+  assert.match(noCodex.stdout, /--codex-trust --codex-bin ['"]<full path to codex>['"]/, 'missing Codex names the complete preview with an editable path')
   const bin = join(f.home, 'synthetic bin')
   mkdirSync(bin)
   const codex = join(bin, process.platform === 'win32' ? 'codex.cmd' : 'codex')
@@ -1782,6 +1782,7 @@ test('setup prints a plain summary with each agent and the next steps, and --jso
     assert.ok(codexStep, result.stdout)
     for (const text of ['--codex-trust', '--codex-bin', f.script, '/hooks']) assert.ok(codexStep.includes(text), codexStep)
     assert.ok(codexStep.includes(`--codex-bin '${codex}'`), codexStep)
+    assert.doesNotMatch(codexStep, /<full path to codex>/, 'a found executable replaces the placeholder')
     assert.match(result.stdout, /--apply/)
     assert.match(result.stdout, /agent-board/)
     assert.doesNotMatch(result.stdout, /--serve/)
@@ -8857,7 +8858,8 @@ test('multi-agent removal preserves the shared board for an agent skipped by a c
   const textPreview = setupAgent(f, '--remove', '--agent', 'codex,antigravity', '--lang', 'en')
   assert.equal(textPreview.status, 0, textPreview.stderr + textPreview.stdout)
   assert.match(textPreview.stdout, /Antigravity: skipped:/)
-  assert.match(textPreview.stdout, /Retry after fixing the conflicting files: .*--remove --agent antigravity --apply/)
+  // The retry step is built as every next step is (`installCommand`): the agent, then the mode, then --apply.
+  assert.match(textPreview.stdout, /Retry after fixing the conflicting files: .*--agent antigravity --remove --apply/)
   const removed = setupAgent(f, ...args, '--apply')
   assert.equal(removed.status, 0, removed.stderr + removed.stdout)
   const result = JSON.parse(removed.stdout)
@@ -13203,7 +13205,7 @@ test('automatic hook recovery applies a queued Antigravity Stop after the lock i
   }
 }))
 
-test('automatic hook recovery exhausts three locked attempts and leaves manual recovery possible', { timeout: 30000 }, () => fixture(async f => {
+test('automatic hook recovery gives up within its deadline while the lock is held and leaves manual recovery possible', { timeout: 30000 }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const recovery = automaticRecoveryFixture(f)
   const started = await fireCommand(f, recovery.hooks.PreInvocation[0].command, recovery.payload)
@@ -13217,7 +13219,11 @@ test('automatic hook recovery exhausts three locked attempts and leaves manual r
     await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the installed Stop hook must launch recovery for its queued metadata')
     recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
     await waitForAutomaticRecovery(() => !isReporterAlive(recoveryPid), 'the bounded automatic helper must exit while the synthetic lock remains held')
-    assert.equal(readFileSync(recovery.attemptsFile, 'utf8'), '1\n1\n1\n')
+    // The helper has one 8 s deadline from the job's creation, gives each attempt up to 2 s and starts none with
+    // less than 0.4 s left (hooks/hook-recovery.ts). On a slow runner, attempts that each meet the held lock can
+    // spend it in two (#1745). The promise is at most three, at least one, and then the manual-recovery log line.
+    const attempts = readFileSync(recovery.attemptsFile, 'utf8')
+    assert.match(attempts, /^(?:1\n){1,3}$/, `attempts made: ${JSON.stringify(attempts)}`)
     assert.match(hookLog(f), /antigravity HOOK_RECOVERY_NEEDED\r?\n$/)
     assert.equal(existsSync(recovery.lease), false)
     assert.equal(pendingFiles(f).length, 1)

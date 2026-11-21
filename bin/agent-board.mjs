@@ -234,8 +234,8 @@ const connectorProgress = (() => {
   } catch { return undefined }
 })()
 const candidates = [
-  ...(flag('--progress-file') ? [beside(flag('--progress-file'))] : []),
   ...(dataDir ? [join(resolve(dataDir), 'agent-board.mjs')] : [
+    ...(flag('--progress-file') ? [beside(flag('--progress-file'))] : []),
     ...(process.env.CLAUDE_PROGRESS_FILE ? [beside(process.env.CLAUDE_PROGRESS_FILE)] : []),
     ...(connectorProgress ? [beside(connectorProgress)] : []),
     join(home, '.agent-board', 'agent-board.mjs'),
@@ -311,4 +311,5 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
 // A separate process preserves argv[1], which the installed page server identifies.
 const env = dataDir ? { ...process.env } : process.env
 if (dataDir) delete env.CLAUDE_PROGRESS_FILE
-run(installed, passArgs, { env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v } })
+// An explicit install root selects both the program and its records; progress may belong to another board.
+run(installed, [...passArgs, ...(dataDir ? ['--data-dir', dataDir] : [])], { env: { ...env, AGENT_BOARD_PACKAGE_VERSION: v } })
