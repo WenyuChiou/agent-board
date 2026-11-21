@@ -20,7 +20,7 @@ Each moment has a number. The simulated user measures all eight on the release b
 | # | The moment | Today, 0.25.0 | The bar for 0.25.1 |
 |---|---|---|---|
 | 1 | A new version arrives | The person finds out alone and types the commands: 5 of 11 steps in the 11-10 walk | From 0.25.1 on, with npm, they open the board as usual and one line says it updated: **0 steps**, or **1 confirm** when something must be asked. A person with only the Claude Code plugin is told on the board and does **2 steps**: update the plugin, start a new session |
-| 2 | A reply on the board starts the AI | Codex CLI about 10 minutes; Antigravity app only on its next turn; Claude Code CLI acknowledged in about 15 s; OpenCode accepted in 0.9 s | The turn starts with no step in that AI's window, within **10 s** on Claude Code CLI and the Antigravity app, **2 s** on OpenCode, and after **about 10 minutes** on Codex CLI, which the board says (check C1) |
+| 2 | A reply on the board starts the AI | Codex CLI about 10 minutes; Antigravity app only on its next turn; Claude Code CLI acknowledged in about 15 s; OpenCode accepted in 0.9 s | The turn starts with no step in that AI's window, within **10 s** on Claude Code CLI, **2 s** on OpenCode, and after **about 10 minutes** on Codex CLI, which the board says (check C1). The Antigravity app takes it on its next turn, as in 0.25.0: its wake moved to 0.26.0 (M5b) |
 | 3 | Sessions already open are there | A Codex session that has not reported since the board started is missing | Within **10 s** of opening, Codex sessions from Codex's own records of the last 24 hours are listed. A hook event shows on the page within **2 s** |
 | 4 | The board opens, or says why not | A dead page process can hold the message store and refuse the board (#1587); a failed open can reach the model as no output (#1596) | After a dead page the board opens within **10 s** with no step. If it cannot, it says why and names **one** action |
 | 5 | A card leaves when its window closes | The card stays in Needs you (#1092) | Gone within **60 s** for Claude Code and for a Codex session with a process record. Any other card says the window may be closed |
@@ -223,7 +223,7 @@ Lines 1 to 4 are the gates of `docs/RELEASING.md`. Line 4's set is the must-ship
 3. The L1 to L3 journey tests and the upgrade journeys pass.
 4. Every must-ship issue is closed.
 5. **Steps (#1313).** J11a at most 3 (4 for Codex only if C4 failed); the plugin walk at most 3; J11b 0 and 1, and at most 2 through the plugin; first install at most 3 on Windows with Codex only and 6 on Linux with four agents.
-6. **Seconds (N3).** A live record per receiving host at or under moment 2's ceiling, and Codex sessions listed within moment 3's 10 s. Every stand-in route test asserts a budget. A value over its ceiling fails.
+6. **Seconds (N3).** A live record per receiving host at or under moment 2's ceiling (the Antigravity app has no ceiling in 0.25.1, since its wake moved to 0.26.0), and Codex sessions listed within moment 3's 10 s. Every stand-in route test asserts a budget. A value over its ceiling fails.
 7. **Sittings (N4).** No `needs owner` cell is left after sitting 2. A cell held by a vendor's usage limit stays open until the owner accepts it by hand on the issue.
 8. **F10 (#1651).** Runs 2 and 3b repeated: no decision, and the real board still answers. Claude Code with its own Bash sandbox on is run as well.
 9. **Hook declarations (N5).** A test compares the complete generated hook declarations with 0.25.0's, under identical synthetic system, path and Node contexts: events, matchers, timeouts, groups, additions and removals.
@@ -371,7 +371,7 @@ The owner took the proposed answer on all six, 2026-11-18: 「都按照预设吧
 | 5 | macOS has no process lookup here, so board approvals fall back to Claude Code's own prompt there. Accept this for 0.25.1? | Accepted, and the release notes say so |
 | 6 | Claude Code does not update a third-party plugin by itself, so a person with only the plugin does 2 steps each release. Accept this bar for 0.25.1? | Accepted. If C5 finds the person can turn on automatic updates, the notes say how |
 
-A later decision, 2026-11-19: 「按照你的建議」 ([#1327](https://github.com/WenyuChiou/agent-board/issues/1327#issuecomment-7024987371)).
+A later decision, 2026-11-19: the owner accepted the recommendation to move Gemini CLI retirement to 0.26.0 ([#1327](https://github.com/WenyuChiou/agent-board/issues/1327#issuecomment-7024987371)).
 
 | # | Question | Decision |
 |---|---|---|
