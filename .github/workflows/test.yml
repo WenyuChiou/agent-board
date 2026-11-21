@@ -168,6 +168,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -201,10 +202,12 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
       - name: Keep Windows runner sampler record
         if: always() && runner.os == 'Windows'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sampler-board-node${{ matrix.node }}-${{ strategy.job-index }}-${{ github.run_attempt }}
@@ -247,6 +250,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -277,10 +281,12 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
       - name: Keep Windows runner sampler record
         if: always() && runner.os == 'Windows'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sampler-messaging-node${{ matrix.node }}-${{ strategy.job-index }}-${{ github.run_attempt }}
@@ -317,6 +323,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -330,10 +337,12 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
       - name: Keep Windows runner sampler record
         if: always() && runner.os == 'Windows'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sampler-tooling-node${{ matrix.node }}-${{ strategy.job-index }}-${{ github.run_attempt }}
@@ -373,6 +382,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -386,10 +396,12 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
       - name: Keep Windows runner sampler record
         if: always() && runner.os == 'Windows'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sampler-npm-node${{ matrix.node }}-${{ strategy.job-index }}-${{ github.run_attempt }}
@@ -426,6 +438,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -449,10 +462,12 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
       - name: Keep Windows runner sampler record
         if: always() && runner.os == 'Windows'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sampler-plugin-${{ strategy.job-index }}-${{ github.run_attempt }}
@@ -490,6 +505,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
@@ -505,10 +521,12 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
       - name: Keep Windows runner sampler record
         if: always() && runner.os == 'Windows'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sampler-installers-${{ strategy.job-index }}-${{ github.run_attempt }}
@@ -545,6 +563,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - name: Unix reporter
         if: runner.os != 'Windows'
@@ -557,10 +576,12 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
       - name: Keep Windows runner sampler record
         if: always() && runner.os == 'Windows'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sampler-remote-${{ strategy.job-index }}-${{ github.run_attempt }}
@@ -600,6 +621,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -629,10 +651,12 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
       - name: Keep Windows runner sampler record
         if: always() && runner.os == 'Windows'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sampler-journeys-node${{ matrix.node }}-${{ strategy.job-index }}-${{ github.run_attempt }}
@@ -669,6 +693,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -711,10 +736,12 @@ jobs:
         if: always() && runner.os == 'Windows'
         shell: pwsh
         continue-on-error: true
+        timeout-minutes: 1
         run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
       - name: Keep Windows runner sampler record
         if: always() && runner.os == 'Windows'
         continue-on-error: true
+        timeout-minutes: 1
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: windows-sampler-browser-${{ strategy.job-index }}-${{ github.run_attempt }}
