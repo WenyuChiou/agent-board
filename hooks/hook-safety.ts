@@ -193,8 +193,10 @@ ${hookRecoverySource(home, script, dataRoot)}
 // starts, so a board script that is slow, or stopped at the deadline and queued, still leaves the mark that keeps a wake
 // out of the running turn. Same file, lock file and rules as the board script's own mark, with shorter waits: the board
 // script takes the number only for the file it would write itself, and marks the turn on its own when this wrote nothing.
+// A turn start first makes its record, with no lock, so a start whose locked write fails or waits still holds a wake; a
+// Stop removes the records made before it began, once it has written its number (design A, #1612).
 const turnMarks = { SessionStart: 'start', PreInvocation: 'start', Stop: 'stop' }
-const markTurn = payload => {
+const markTurn = (payload, began) => {
   const event = value('--event'), progress = value('--progress-file')
   const mark = agent === 'antigravity' && args.includes('--agent-status') && Object.hasOwn(turnMarks, event) ? turnMarks[event] : undefined
   const session = typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID
@@ -204,7 +206,8 @@ const markTurn = payload => {
   const isOwn = dir => { try { const found = fs.lstatSync(dir); return found.isDirectory() && (process.getuid === undefined || found.uid === process.getuid() && (found.mode & 0o077) === 0) } catch { return false } }
   const folder = process.platform === 'win32' ? (runtime ? path.join(runtime, 'agent-board') : path.join(boardHome, '.cache', 'agent-board')) : runtime && isOwn(runtime) ? runtime : path.join(boardHome, '.cache', 'agent-board')
   const root = path.resolve(folder, 'agent-board-' + hash(path.resolve(progress)).slice(0, 16) + '-messages')
-  const file = path.join(root, 'mailbox_' + hash('antigravity:' + session).slice(0, 24) + '.turns.json')
+  const id = 'mailbox_' + hash('antigravity:' + session).slice(0, 24), opened = id + '.turns.open.'
+  const file = path.join(root, id + '.turns.json')
   const lock = file + '.lock', temp = file + '.' + process.pid + '.tmp'
   const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
   let fd, identity
@@ -212,6 +215,7 @@ const markTurn = payload => {
     // Only a board makes this folder, private; one made here would not be.
     const found = fs.lstatSync(root)
     if (!found.isDirectory() || found.isSymbolicLink()) return undefined
+    if (mark === 'start') try { fs.writeFileSync(path.join(root, opened + Date.now() + '.' + process.pid), '', { mode: 0o600 }) } catch {}
     // The lock's text is the board's own (scripts/local-lock.ts), so a board can take over the lock of a worker that died.
     for (const until = Date.now() + 150; ;) {
       try { fd = fs.openSync(lock, 'wx', 0o600); break } catch (error) {
@@ -239,6 +243,9 @@ const markTurn = payload => {
         pause(wait)
       }
     }
+    if (mark === 'stop') try {
+      for (const name of fs.readdirSync(root)) if (name.startsWith(opened) && Number(name.slice(opened.length).split('.')[0]) < began) try { fs.unlinkSync(path.join(root, name)) } catch {}
+    } catch {}
     return { file, mark, count: next.started }
   } catch { return undefined }
   finally {
@@ -286,7 +293,7 @@ const run = async () => {
   let payload
   try { payload = isCut ? hermesPrefix(text) : JSON.parse(text.replace(/^\\uFEFF/, '')); if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error() }
   catch { return fail('INCOMPLETE_INPUT') }
-  const turn = markTurn(payload)
+  const turn = markTurn(payload, started)
   const internal = ['--hook-version', '--hook-event', '--hook-deadline', '--hook-started', '--home']
   const reporterArgs = args.filter((arg, index) => !internal.includes(arg) && !internal.includes(args[index - 1]))
   // A reporter run that failed passes its own log code as 'failure'; a saved copy is logged after it as REPORTER_QUEUED.

@@ -35,7 +35,7 @@ import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { antigravitySurface, deliverTurnEvent } from './hook-delivery'
-import { checkStoreFile, hookMailbox, markTurnOrder, readTurnOrder, workerTurnMark } from './board-messaging'
+import { checkStoreFile, hookMailbox, markTurnOrder, openTurnRecord, readTurnOrder, workerTurnMark } from './board-messaging'
 import { isTurnStart } from '../hooks/hook-messages'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
@@ -1401,11 +1401,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const marked = workerTurnMark(handed, messages, 'antigravity', current.session, turnMark)
       if (marked !== undefined) {
         if (turnMark === 'start') turnSeq = marked
-      } else try {
-        const count = markTurnOrder(messages, 'antigravity', current.session, turnMark, Date.now(), Math.max(0, Math.min(500, hookDeadline - Date.now() - 500)))
-        if (turnMark === 'start') turnSeq = count
-      } catch {
-        if (turnMark === 'start') turnSeq = (readTurnOrder(messages, 'antigravity', current.session)?.started ?? 0) + 1
+      } else {
+        // A start the worker did not mark may have no record either (design A, #1612), so this makes one too; a second
+        // record is harmless, since the turn's Stop removes both.
+        if (turnMark === 'start') try { openTurnRecord(messages, 'antigravity', current.session, Date.now()) } catch {}
+        try {
+          const count = markTurnOrder(messages, 'antigravity', current.session, turnMark, Date.now(), Math.max(0, Math.min(500, hookDeadline - Date.now() - 500)), started)
+          if (turnMark === 'start') turnSeq = count
+        } catch {
+          if (turnMark === 'start') turnSeq = (readTurnOrder(messages, 'antigravity', current.session)?.started ?? 0) + 1
+        }
       }
     }
     let delay = 50

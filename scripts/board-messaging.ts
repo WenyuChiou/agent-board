@@ -129,7 +129,8 @@ export const moveLockAside = (lock: string, recorded: string, claim: MessageStor
 
 // Only a host adapter can register a receiving session. Registrations and secrets die with
 // this server; message ids and receipts survive restart so uncertainty is never auto-retried.
-// turnsOfSession: an Antigravity conversation's turn order file, read fresh at each wake call; none holds every wake.
+// turnsOfSession: an Antigravity conversation's turn order file, read fresh at each wake call; none holds every wake, and so
+// does a turn start's record (isTurnOpen).
 export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined; turnsOfSession?: TurnsOfSession }
 
 const openMessaging = (directory: string, isDefault = false, gate?: MessageGate) => {
@@ -454,21 +455,33 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       if (action === 'wake-poll' || action === 'wake-attempt' || action === 'wake-report') {
         const turnsOf = gate?.turnsOfSession
         const decide = (isLockHeld: boolean) => wakeAction(state, action, body, now, (agent, session) => {
+          // A turn start's record holds the wake; it is looked for before the order file is read (design A, #1612).
+          if (isTurnOpen(root, agent, session)) return undefined
           const turns = turnsOf?.(agent, session)
-          return turns === undefined || (!isLockHeld && isTurnOrderLocked(root, agent, session)) ? undefined : turns
+          if (turns === undefined || isLockHeld || !isTurnOrderLocked(root, agent, session)) return turns
+          // A poll that finds the lock takes it, which takes over a dead hook's lock once it is 30 s old (local-lock), and
+          // reads the file again under it; a lock a live hook holds stays its own and holds the wake (#1751).
+          try { return withLocalLock(`${turnOrderFile(root, agent, session)}.lock`, () => turnsOf?.(agent, session), { waitMs: 0 }) } catch { return undefined }
         })
         if (action === 'wake-poll') sidecarSeen = now
         // An attempt reads the order file under the file's own lock and saves its start before it lets go, so a turn
         // start writes either before that read, which holds the wake, or after the board's yes (round 4, codex_481). A
-        // lock it cannot take in 100 ms, a hook's or one a dead hook left, holds the wake.
+        // lock it cannot take in 100 ms, a hook's or one a dead hook left less than 30 s ago, holds the wake. A start's
+        // record needs no lock, so the attempt looks for one again once its start is saved: a start whose hook made its
+        // record by then undoes the start (design A, #1612), and one that makes it later comes after the board's yes.
+        // An undo that cannot be saved is the board's error, so the sidecar runs nothing and the saved start keeps the
+        // message to the next turn's take.
         const one = action === 'wake-attempt' && typeof body.id === 'string' ? state.messages.find(message => message.id === body.id) : undefined
         const box = one === undefined ? undefined : state.mailboxes?.find(mailbox => mailbox.id === one.target && mailbox.agent === 'antigravity')
         if (box !== undefined) {
           try {
             return withLocalLock(`${turnOrderFile(root, box.agent, box.session)}.lock`, () => {
-              const next = decide(true)
-              if (next.state !== state) save(next.state, now)
-              return next.result
+              const before = state, next = decide(true)
+              if (next.state === state) return next.result
+              save(next.state, now)
+              if (!isTurnOpen(root, box.agent, box.session)) return next.result
+              save(before, now)
+              return { ok: false, code: 'NOT_HELD' }
             }, { waitMs: 100 })
           } catch (error) {
             if ((error as Error).message === 'LOCK_BUSY' || (error as Error).message === 'LOCK_DENIED') return { ok: false, code: 'NOT_HELD' }
@@ -719,6 +732,31 @@ export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(di
 // named by its mailbox id, so its name holds no session id. Its hooks write it, each under the file's own lock and before
 // any board call; the running board only reads it.
 const turnOrderFile = (directory: string, agent: string, session: string): string => join(resolve(directory), `${mailboxId(agent, session)}.turns.json`)
+// A turn start's record (design A, #1612): an empty file the turn-start hook makes before anything else and with no lock,
+// named by when it was made and by the process that made it, so a start the order file does not show yet holds the
+// wake. The turn's Stop removes the records made before the Stop began, once it has written its number, so the next
+// turn's record stays. A folder that cannot be read holds the wake too.
+const turnRecords = (agent: string, session: string): string => `${mailboxId(agent, session)}.turns.open.`
+export const isTurnOpen = (directory: string, agent: string, session: string): boolean => {
+  try {
+    const prefix = turnRecords(agent, session)
+    return readdirSync(resolve(directory)).some(name => name.startsWith(prefix))
+  } catch { return true }
+}
+export const openTurnRecord = (directory: string, agent: string, session: string, now: number): void => {
+  const root = resolve(directory)
+  const folder = lstatSync(root)
+  if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING')
+  writeFileSync(join(root, `${turnRecords(agent, session)}${now}.${process.pid}`), '', { mode: 0o600 })
+}
+const closeTurnRecords = (root: string, agent: string, session: string, before: number): void => {
+  const prefix = turnRecords(agent, session)
+  try {
+    for (const name of readdirSync(root)) {
+      if (name.startsWith(prefix) && Number(name.slice(prefix.length).split('.')[0]) < before) try { unlinkSync(join(root, name)) } catch {}
+    }
+  } catch {}
+}
 const isCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
 // Undefined when there is no file, or it is not a plain file, or it does not read as one: the board then holds the wake.
 export const readTurnOrder = (directory: string, agent: string, session: string): TurnOrder | undefined => {
@@ -730,10 +768,10 @@ export const readTurnOrder = (directory: string, agent: string, session: string)
   } catch { return undefined }
 }
 // A turn-start hook adds one to `started` and gets the new number back; a Stop hook sets `stopped` to the number of the
-// turn it ends, and `stoppedAt` to now. A file that cannot be read starts again from nothing, which holds wakes until its
-// numbers pass the board's. Nothing is written where no board has made the folder, since a folder made here would not be
-// the private one a board makes.
-export const markTurnOrder = (directory: string, agent: string, session: string, mark: 'start' | 'stop', now: number, waitMs: number): number => {
+// turn it ends, and `stoppedAt` to now, then removes the start records made before `began`, when the Stop hook began. A
+// file that cannot be read starts again from nothing, which holds wakes until its numbers pass the board's. Nothing is
+// written where no board has made the folder, since a folder made here would not be the private one a board makes.
+export const markTurnOrder = (directory: string, agent: string, session: string, mark: 'start' | 'stop', now: number, waitMs: number, began = now): number => {
   const root = resolve(directory), file = turnOrderFile(root, agent, session)
   const folder = lstatSync(root)
   if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING')
@@ -746,13 +784,13 @@ export const markTurnOrder = (directory: string, agent: string, session: string,
       writeFileSync(temp, JSON.stringify(next), { flag: 'wx', mode: 0o600 })
       replaceFile(temp, file)
     } finally { try { unlinkSync(temp) } catch {} }
+    if (mark === 'stop') closeTurnRecords(root, agent, session, began)
     return next.started
   }, { waitMs })
 }
 // The order file's lock is there while a hook writes a turn's number, or after a hook died holding it, so the file may be
-// a turn behind: a poll hands out no wake until the lock is gone (round 4, codex_481). It is looked at after the file is
-// read, so a write that held the lock at either moment holds the wake; one that cannot be looked at holds it too. An
-// attempt takes the lock itself instead.
+// a turn behind: a poll that finds it after reading the file takes the lock and reads again (round 4, codex_481; #1751).
+// One that cannot be looked at holds the wake. An attempt takes the lock itself instead.
 export const isTurnOrderLocked = (directory: string, agent: string, session: string): boolean => {
   try {
     lstatSync(`${turnOrderFile(directory, agent, session)}.lock`)
