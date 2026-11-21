@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { registerHooks } from 'node:module'
+import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -55,10 +55,17 @@ const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T
   const order = session => join(messages, `${mailboxId('antigravity', session)}.turns.json`)
   const turns = session => existsSync(order(session)) ? JSON.parse(readFileSync(order(session), 'utf8')) : { started: 0, stopped: 0, stoppedAt: 0 }
   const setTurns = (session, change) => writeFileSync(order(session), JSON.stringify({ ...turns(session), ...change }))
-  // The turn-start hook: its order file write (unless it fails: the take still carries the number), its row write (unless
-  // the event repeats the row's last one, which is not written again), then its take (unless it never reaches the board),
-  // with the claim name a hook gives it when one is passed.
-  const enroll = (session, surface, now, ref, { isFileLost = false, isRowKept = false, isTakeLost = false } = {}) => {
+  // A turn start's record (design A, #1612): the hook makes it before anything else and with no lock, named by when it was
+  // made; the turn's Stop removes those made before the Stop began, once it has written its number.
+  const opened = session => `${mailboxId('antigravity', session)}.turns.open.`
+  const records = session => readdirSync(messages).filter(name => name.startsWith(opened(session)))
+  let made = 0
+  const openRecord = (session, now) => writeFileSync(join(messages, `${opened(session)}${now}.${made += 1}`), '')
+  // The turn-start hook: its start record (unless it cannot be made), its order file write (unless it fails: the take still
+  // carries the number), its row write (unless the event repeats the row's last one, which is not written again), then its
+  // take (unless it never reaches the board), with the claim name a hook gives it when one is passed.
+  const enroll = (session, surface, now, ref, { isOpenLost = false, isFileLost = false, isRowKept = false, isTakeLost = false } = {}) => {
+    if (!isOpenLost) openRecord(session, now)
     const seq = turns(session).started + 1
     if (!isFileLost) setTurns(session, { started: seq })
     if (!isRowKept) write(session, now)
@@ -73,10 +80,11 @@ const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T
   const stopCall = (session, at) => {
     try { hub.act('mailbox-idle', { agent: 'antigravity', session, at }, at) } catch (error) { if (error.message !== 'UNKNOWN_FIELD') throw error }
   }
-  // A turn's Stop hook at `at`: it ends the turn last started in the order file and writes its row as waiting; its call
-  // follows at once unless it is late (`stopCall` then sends it).
-  const stop = (session, at, isCallLate = false) => {
+  // A turn's Stop hook at `at`: it ends the turn last started in the order file, removes the start records made before it
+  // (unless it dies first) and writes its row as waiting; its call follows at once unless it is late (`stopCall` then sends it).
+  const stop = (session, at, isCallLate = false, { isOpenKept = false } = {}) => {
     setTurns(session, { stopped: turns(session).started, stoppedAt: at })
+    if (!isOpenKept) for (const name of records(session)) if (Number(name.slice(opened(session).length).split('.')[0]) < at) rmSync(join(messages, name))
     reports[session] = at
     write(session, at)
     if (!isCallLate) stopCall(session, at)
@@ -89,7 +97,7 @@ const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T
   const poll = now => hub.act('wake-poll', { agent: 'antigravity' }, now)
   const shown = (id, now) => hub.snapshot(now).messages.find(one => one.id === id)
   const saved = id => JSON.parse(readFileSync(join(dir, 'messages', 'messages.json'), 'utf8')).messages.find(one => one.id === id)
-  return { hub, reports, written, order, enroll, stop, stopCall, report, ready, send, poll, shown, saved, close: () => { hub.close(); rmSync(dir, { recursive: true, force: true }) } }
+  return { hub, reports, written, order, records, openRecord, enroll, stop, stopCall, report, ready, send, poll, shown, saved, close: () => { hub.close(); rmSync(dir, { recursive: true, force: true }) } }
 }
 const using = async fn => {
   const w = world()
@@ -408,7 +416,120 @@ test('a wake-attempt reads the order file while it holds the file\'s lock, so a 
   } finally { w.close() }
 })
 
-// The two windows the owner accepted on 2026-11-18 (docs/dev/plan-0.25.1.md, M5b), pinned as the board meets them.
+// Design A (design diagnosis 4 on #1396; the owner's choice of 2026-11-20): a turn start's hook makes a record first, with
+// no lock, so a start the order file does not show yet still holds the wake.
+test('a turn start whose order-file write and take both fail is held by its start record until its Stop, and one whose record cannot be made is held by its count', () => using(w => {
+  w.ready(APP); w.ready(APP_2)
+  w.poll(T)
+  w.send(APP, 'm-record', T)
+  w.send(APP_2, 'm-count', T)
+  const [wake] = w.poll(T + 1000).wakes
+  assert.equal(wake?.id, 'm-record')
+  // In APP only the record says a turn runs: the order file still reads the last turn's Stop, and no take came. In APP_2
+  // the record could not be made, and the order file holds the turn's number.
+  assert.equal(w.enroll(APP, IDE, T + 1200, undefined, { isFileLost: true, isTakeLost: true }), null)
+  assert.equal(w.enroll(APP_2, IDE, T + 1200, undefined, { isOpenLost: true, isTakeLost: true }), null)
+  assert.equal(w.records(APP).length, 1)
+  assert.deepEqual(w.records(APP_2), [])
+  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1300), { ok: false, code: 'NOT_HELD' })
+  assert.deepEqual(w.poll(T + 15_000), { wakes: [] })
+  // Each turn's Stop ends the hold: APP's removes its record.
+  w.stop(APP, T + 20_000); w.stop(APP_2, T + 20_000)
+  assert.deepEqual(w.records(APP), [])
+  const [first] = w.poll(T + 20_000 + WAKE_IDLE_MS).wakes
+  assert.equal(first?.id, 'm-record')
+  assert.deepEqual(w.hub.act('wake-attempt', { id: first.id, nonce: first.nonce }, T + 20_000 + WAKE_IDLE_MS), { ok: true })
+  assert.deepEqual(w.poll(T + 21_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-count'])
+}))
+
+test('a turn start whose record is made while a wake-attempt decides undoes the saved start, so the attempt is refused and the turn takes the message', () => {
+  let isStarting = false
+  const w = world(undefined, undefined, (_agent, session) => { if (isStarting) { isStarting = false; w.openRecord(session, T + 1000) } })
+  try {
+    w.ready(APP)
+    w.poll(T)
+    w.send(APP, 'm-undo', T)
+    const [wake] = w.poll(T + 1000).wakes
+    // The person starts a turn as the attempt reads the order file: the hook's record comes after the attempt first looked,
+    // and its order-file write waits for the attempt's lock.
+    isStarting = true
+    assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), { ok: false, code: 'NOT_HELD' })
+    assert.equal(isStarting, false)
+    assert.equal(w.saved('m-undo').woke, undefined)
+    assert.deepEqual(w.poll(T + 1100), { wakes: [] })
+    // The turn's hook goes on with its order-file write and its take, which hands the message over.
+    assert.equal(w.enroll(APP, IDE, T + 1200, undefined, { isOpenLost: true }).id, 'm-undo')
+  } finally { w.close() }
+})
+
+test('a Stop that wrote its number but died before removing its turn\'s record holds the wake until the next Stop', () => using(w => {
+  w.enroll(APP, IDE, T - 30_000)
+  w.stop(APP, T - 20_000, false, { isOpenKept: true })
+  w.poll(T)
+  assert.equal(w.send(APP, 'm-kept', T).line, 'now')
+  assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
+  // The next turn's take hands the message over. That turn's Stop removes both records, and a message sent after it
+  // goes in at once.
+  const handed = w.enroll(APP, IDE, T + 61_000)
+  assert.equal(handed.id, 'm-kept')
+  w.hub.act('mailbox-accept', { agent: 'antigravity', session: APP, id: handed.id, nonce: handed.nonce }, T + 61_500)
+  w.stop(APP, T + 62_000)
+  assert.deepEqual(w.records(APP), [])
+  w.send(APP, 'm-after', T + 62_000)
+  assert.deepEqual(w.poll(T + 62_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-after'])
+}))
+
+test('an order-file lock a dead hook left holds the wake while it is fresh, and the poll takes it over once 30 s old, so the wake goes in', () => using(w => {
+  w.ready(APP)
+  w.poll(T)
+  w.send(APP, 'm-dead', T)
+  // A Stop hook's worker wrote the order file and died before it removed its lock.
+  const lock = `${w.order(APP)}.lock`
+  const dead = spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid
+  writeFileSync(lock, JSON.stringify({ version: 1, pid: dead, started: Date.now(), token: 'c'.repeat(32) }))
+  assert.deepEqual(w.poll(T + 1000), { wakes: [] })
+  const old = (Date.now() - 31_000) / 1000
+  utimesSync(lock, old, old)
+  const [wake] = w.poll(T + 2000).wakes
+  assert.equal(wake?.id, 'm-dead')
+  assert.equal(existsSync(lock), false)
+  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 2000), { ok: true })
+}))
+
+test('a wake-attempt whose undo cannot be saved answers with an error, so the sidecar sends nothing, and the saved start keeps the message to the turn\'s take', () => {
+  const write = fs.writeFileSync
+  let isArmed = false, saves = 0
+  const w = world(undefined, undefined, (_agent, session) => {
+    if (!isArmed) return
+    isArmed = false
+    w.openRecord(session, T + 1000)
+    // The attempt's own save goes through; its undo finds the disk full.
+    fs.writeFileSync = (path, ...rest) => {
+      if (String(path).includes('messages.json.') && (saves += 1) === 2) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })
+      return write(path, ...rest)
+    }
+    syncBuiltinESMExports()
+  })
+  try {
+    w.ready(APP)
+    w.poll(T)
+    w.send(APP, 'm-full', T)
+    const [wake] = w.poll(T + 1000).wakes
+    isArmed = true
+    try {
+      assert.throws(() => w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), /ENOSPC/)
+    } finally { fs.writeFileSync = write; syncBuiltinESMExports() }
+    assert.equal(saves, 2)
+    // The sidecar runs nothing on an error. The start stays saved, so the card reads waking and no second wake is handed out.
+    assert.equal(w.saved('m-full').woke, T + 1000)
+    assert.equal(w.shown('m-full', T + 1000).wake, 'started')
+    assert.deepEqual(w.poll(T + 1100), { wakes: [] })
+    assert.equal(w.enroll(APP, IDE, T + 1200, undefined, { isOpenLost: true }).id, 'm-full')
+  } finally { w.close() }
+})
+
+// The windows the owner accepted (docs/dev/plan-0.25.1.md, M5b), two on 2026-11-18 and one on 2026-11-20, pinned as the board
+// meets them.
 test('a turn whose start hook never ran is woken into, the first window the owner accepted on 2026-11-18, while a turn its hook marked is held', () => using(w => {
   w.ready(APP); w.ready(APP_2)
   w.poll(T)
@@ -437,6 +558,20 @@ test('a turn the person starts after the board\'s yes to a wake takes the messag
   assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
   w.stop(APP, T + 60_000)
   assert.deepEqual(w.poll(T + 60_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-next'])
+}))
+
+test('a turn the person starts just before the board\'s yes, whose hook makes its start record only after the attempt\'s last look, takes the message once, the third window the owner accepted on 2026-11-20', () => using(w => {
+  w.ready(APP)
+  w.poll(T)
+  w.send(APP, 'm-blind', T)
+  const [wake] = w.poll(T + 1000).wakes
+  // The app has begun the person's turn and launched its hook, which has not made its record yet (58 to 94 ms in C3's
+  // runs, plus the app's own delay before it launches the hook): nothing on disk says a turn runs, and the board says yes.
+  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), { ok: true })
+  assert.equal(w.saved('m-blind').woke, T + 1000)
+  // The record lands after the attempt's last look, so the start stands; the turn's take hands the message over, once.
+  assert.equal(w.enroll(APP, IDE, T + 1090).id, 'm-blind')
+  assert.deepEqual(w.poll(T + 1100), { wakes: [] })
 }))
 
 test('a peer message queued before the board message starts no wake while the next turn would take the peer message', () => using(w => {
@@ -571,6 +706,8 @@ test('the hook worker marks an Antigravity turn before the board script runs, so
   const root = join(home, '.agent-board'), progress = join(root, 'progress.md'), script = join(root, 'agent-board.mjs'), worker = join(root, 'agent-board-hook.mjs'), seen = join(home, 'seen.json')
   const messages = defaultMessagesDirectory(progress, home, env, process.platform)
   const file = join(messages, `${mailboxId('antigravity', APP)}.turns.json`)
+  const opened = `${mailboxId('antigravity', APP)}.turns.open.`
+  const records = () => readdirSync(messages).filter(name => name.startsWith(opened)).sort()
   const hook = (event, extra = {}, deadline) => {
     rmSync(seen, { force: true })
     const args = ['--hook-version', String(HOOK_VERSION), '--hook-event', event, '--agent-status', '--agent', 'antigravity', '--state', event === 'Stop' ? 'waiting' : 'working', '--event', event, '--progress-file', progress]
@@ -595,6 +732,9 @@ test('the hook worker marks an Antigravity turn before the board script runs, so
     // A board script that never ends is stopped at the worker's deadline and its event is queued; the turn's mark is there.
     hook('PreInvocation', { AGY_SLOW: '1' }, Date.now() + 1500)
     assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { started: 1, stopped: 0, stoppedAt: 0 })
+    // The start's record is there too, named by when it was made and by the worker's process.
+    assert.equal(records().length, 1)
+    assert.match(records()[0].slice(opened.length), /^\d+\.\d+$/)
     assert.equal(readdirSync(join(root, 'pending')).filter(name => name.endsWith('.json')).length, 1)
     // A healthy board script is told which file the worker wrote, which mark and the number it holds.
     const before = Date.now()
@@ -602,17 +742,28 @@ test('the hook worker marks an Antigravity turn before the board script runs, so
     const { stopped, stoppedAt } = JSON.parse(readFileSync(file, 'utf8'))
     assert.equal(stopped, 1)
     assert.ok(stoppedAt >= before && stoppedAt <= Date.now(), String(stoppedAt))
+    assert.deepEqual(records(), [])
     assert.deepEqual(JSON.parse(hook('PreInvocation')), { file, mark: 'start', count: 2 })
     // A lock another process holds is waited for only briefly; the worker then leaves the lock and the mark to the
     // board script, which can wait longer and take over a dead owner's lock.
     const lock = `${file}.lock`, held = JSON.stringify({ version: 1, pid: process.pid, started: Math.round(performance.timeOrigin), token: 'a'.repeat(32) })
     writeFileSync(lock, held)
+    // A start's record is made before the lock, so it is there when the lock is not taken; a Stop that leaves its mark to
+    // the board script removes no record.
+    assert.equal(hook('PreInvocation'), null)
+    assert.equal(records().length, 2)
     assert.equal(hook('Stop'), null)
     assert.equal(readFileSync(lock, 'utf8'), held)
     assert.equal(JSON.parse(readFileSync(file, 'utf8')).stopped, 1)
+    assert.equal(records().length, 2)
     rmSync(lock)
-    // Nothing is left beside the order file: no lock and no temporary file.
-    assert.deepEqual(readdirSync(messages), [basename(file)])
+    // A Stop removes the records made before it began, both of this turn's, and keeps one made after it, a next turn's.
+    const later = `${opened}${Date.now() + 60_000}.1`
+    writeFileSync(join(messages, later), '')
+    assert.deepEqual(JSON.parse(hook('Stop')), { file, mark: 'stop', count: 2 })
+    assert.deepEqual(records(), [later])
+    // Nothing else is left beside the order file: no lock and no temporary file.
+    assert.deepEqual(readdirSync(messages).sort(), [basename(file), later].sort())
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
   }
@@ -626,6 +777,7 @@ test('the board script takes the turn number the hook worker handed it and does 
   const root = join(home, '.agent-board'), progress = join(root, 'progress.md')
   const messages = defaultMessagesDirectory(progress, home, env, process.platform)
   const file = join(messages, `${mailboxId('antigravity', APP)}.turns.json`)
+  const records = () => readdirSync(messages).filter(name => name.startsWith(`${mailboxId('antigravity', APP)}.turns.open.`))
   const hook = (name, event, handed) => new Promise((done, fail) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', HOOKS], {
       env: { ...env, AGY_REPO: new URL('../', import.meta.url).href, AGY_HOME: home, AGY_NAME: name, AGY_EVENT: event, AGY_COUNT: '1', AGY_PEERS: name, AGY_SESSION: APP, AGENT_BOARD_TURN_MARK: handed },
@@ -641,10 +793,17 @@ test('the board script takes the turn number the hook worker handed it and does 
     // The worker already counted turn 3 here.
     writeFileSync(file, JSON.stringify({ started: 3, stopped: 2, stoppedAt: T }))
     assert.deepEqual(await hook('a', 'PreInvocation', JSON.stringify({ file, mark: 'start', count: 3 })), [3])
+    // A worker that marked the turn made its record first, so the board script makes none.
+    assert.deepEqual(records(), [])
     // A number for another file or for the other mark is not taken: the board script marks the turn itself.
     assert.deepEqual(await hook('b', 'PreInvocation', JSON.stringify({ file: `${file}.other`, mark: 'start', count: 3 })), [4])
     assert.deepEqual(await hook('c', 'PreInvocation', JSON.stringify({ file, mark: 'stop', count: 4 })), [5])
     assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { started: 5, stopped: 2, stoppedAt: T })
+    // A start it marks itself it also makes a record for, in case the worker could not; a Stop it marks itself removes
+    // the records made before it began.
+    assert.equal(records().length, 2)
+    assert.deepEqual(await hook('d', 'Stop', 'null'), [5])
+    assert.deepEqual(records(), [])
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
   }
