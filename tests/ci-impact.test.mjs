@@ -65,6 +65,8 @@ test('ci impact selects isolated runtime groups from known paths', () => {
     ['scripts/code-rules.mjs', ['tooling']],
     ['scripts/code-rules.json', ['tooling']],
     ['tests/code-rules.test.mjs', ['tooling']],
+    ['scripts/ci-sampler.ps1', ['tooling']],
+    ['tests/ci-sampler.test.mjs', ['tooling']],
     ['tests/pr-check.test.mjs', ['tooling']],
     ['tests/preflight.test.mjs', ['tooling']],
     ['tests/fail-first.test.mjs', ['tooling']],
@@ -983,7 +985,9 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
     const matrix = group === 'board' || group === 'journeys' || group === 'messaging' ? `${group}_matrix` : 'node_matrix'
     assert.ok(block.includes(`include: \${{ fromJSON(needs.impact.outputs.${matrix}) }}`), group)
     if (group === 'board' || group === 'journeys' || group === 'messaging') {
-      assert.ok(block.includes('CI_TEST_PART: ${{ matrix.part }}') && block.includes('timeout-minutes: 10'), group)
+      // A Windows board job has two more minutes, one for each of the sampler's two steps (#1249).
+      const minutes = group === 'board' ? "timeout-minutes: ${{ matrix.os == 'windows-latest' && 12 || 10 }}" : 'timeout-minutes: 10'
+      assert.ok(block.includes('CI_TEST_PART: ${{ matrix.part }}') && block.includes(minutes), group)
     }
     if (group === 'board' || group === 'journeys') {
       assert.ok(block.includes("CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}"), group)
