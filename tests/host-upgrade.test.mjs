@@ -618,3 +618,220 @@ test('Codex 0.25.0 upgrade keeps every hook group in its original slot', async t
   const old = oldRelease(t, 'agent-board--v0.25.0')
   if (old) await codexHookSlots(old)
 })
+
+// J11a of #1303: the 0.25.0 to this release upgrade, with a Codex that answers hooks/list.
+// The step count is the commands the person types to finish the upgrade: the setup command
+// itself, plus the trust preview and the trust apply whenever the output lists the trust step.
+// A stand-in Codex that answers hooks/list from the hooks.json as it is when asked, with the
+// trust state from a file the test flips. It reads hooks.json on each call, so an upgrade that
+// rewrites the hooks does not stale its answers (the mock in codex-local.test.mjs reads them
+// once when it is made).
+const mockCodex = f => {
+  const hooksJson = join(f.home, '.codex', 'hooks.json')
+  const stateFile = join(f.home, 'mock-codex-state.json')
+  writeFileSync(stateFile, JSON.stringify({ trusted: true }))
+  const script = `#!/usr/bin/env node
+const fs = require('fs');
+const readline = require('readline');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', line => {
+  try {
+    const msg = JSON.parse(line);
+    if (msg.method === 'initialize') {
+      process.stdout.write(JSON.stringify({ id: msg.id, result: { capabilities: {} } }) + '\\n');
+    } else if (msg.method === 'hooks/list') {
+      const state = JSON.parse(fs.readFileSync(${JSON.stringify(stateFile)}, 'utf8'));
+      const manifest = JSON.parse(fs.readFileSync(${JSON.stringify(hooksJson)}, 'utf8'));
+      const expected = Object.entries(manifest.hooks).map(([event, list]) => ({
+        event: event[0].toLowerCase() + event.slice(1),
+        command: list[0].hooks[0].command,
+      }));
+      const hooks = expected.map((item, i) => ({
+        sourcePath: ${JSON.stringify(hooksJson)},
+        eventName: item.event,
+        command: item.command,
+        key: 'hook-' + i,
+        enabled: true,
+        currentHash: 'sha256:' + 'a'.repeat(64),
+        trustStatus: state.trusted ? 'trusted' : 'untrusted'
+      }));
+      process.stdout.write(JSON.stringify({ id: msg.id, result: { data: [{ hooks, errors: [] }] } }) + '\\n');
+    }
+  } catch {}
+});
+`
+  const executable = join(f.home, 'bin', 'codex-mock.js')
+  mkdirSync(join(f.home, 'bin'), { recursive: true })
+  writeFileSync(executable, script, { mode: 0o755 })
+  return { executable, stateFile }
+}
+
+// A home the 0.25.0 tag's own setup made for Codex alone.
+const oldCodexHome = async old => {
+  const f = fixture(['.codex'])
+  await apply(f, ['codex'], old)
+  return f
+}
+
+// The commands the person types to finish the upgrade: the setup command, plus the trust
+// preview and apply whenever the output lists the trust step.
+const upgradeSteps = output => 1 + (output.includes('--codex-trust') ? 2 : 0)
+const isolatedArgs = f => ['--home', f.home, '--codex-dir', join(f.home, '.codex'), '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes')]
+
+test('J11a: a 0.25.0 to this release upgrade that keeps Codex trust costs one step and names no trust command (#1303)', async t => {
+  const old = taggedRelease(t, 'agent-board--v0.25.0', '0.25.0')
+  if (!old) return
+  const f = await oldCodexHome(old)
+  const mock = mockCodex(f)
+  const output = await setup(f, ['--apply', '--codex-bin', mock.executable])
+  assert.ok(output.includes("Codex: the board's hooks are still trusted."), `the upgrade says trust held\n${output}`)
+  assert.doesNotMatch(output, /--codex-trust/, `no trust command after an upgrade that kept trust\n${output}`)
+  assert.equal(upgradeSteps(output), 1, 'one step: the upgrade command')
+})
+
+test('J11a: a 0.25.0 to this release upgrade that loses Codex trust names the lost hooks and costs three steps (#1303)', async t => {
+  const old = taggedRelease(t, 'agent-board--v0.25.0', '0.25.0')
+  if (!old) return
+  const f = await oldCodexHome(old)
+  const mock = mockCodex(f)
+  // The hooks were trusted before the upgrade: the trust preview on the 0.25.0 home says so.
+  const before = checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'codex', '--codex-trust', '--json', '--codex-bin', mock.executable], { timeoutMs: 60000 }), 'trust preview before the upgrade')
+  assert.equal(JSON.parse(before).changes, 0, 'the 0.25.0 hooks were trusted before the upgrade')
+  // The upgrade rewrites the board's hooks and Codex no longer trusts them.
+  writeFileSync(mock.stateFile, JSON.stringify({ trusted: false }))
+  const output = await setup(f, ['--apply', '--codex-bin', mock.executable])
+  assert.doesNotMatch(output, /still trusted/, `the upgrade does not claim trust held\n${output}`)
+  assert.ok(output.includes('UserPromptSubmit'), `the question names the lost hook\n${output}`)
+  assert.ok(output.includes('PostToolUse'), `the question names the new hook\n${output}`)
+  assert.match(output, /--codex-trust --codex-bin/, `the trust step is the question\n${output}`)
+  assert.equal(upgradeSteps(output), 3, 'three steps: the upgrade, the trust preview, the trust apply')
+})
+
+test('J11a: a 0.25.0 to this release upgrade with no Codex to ask keeps the trust step as the question (#1303)', async t => {
+  const old = taggedRelease(t, 'agent-board--v0.25.0', '0.25.0')
+  if (!old) return
+  const f = await oldCodexHome(old)
+  // This VM has a real Codex on PATH, so the upgrade runs with a PATH that has no codex on it.
+  const output = checked(await run(f, [join(repoRoot, 'scripts', 'setup-agent.mjs'), ...isolatedArgs(f), '--lang', 'en', '--apply'], { timeoutMs: 120000, env: { PATH: '/usr/bin:/bin' } }), 'setup --apply')
+  assert.doesNotMatch(output, /still trusted/, `unconfirmed trust is never claimed held\n${output}`)
+  assert.match(output, /Codex: setup could not find Codex/, `the question names the missing Codex\n${output}`)
+})
+
+test('J11a: a 0.25.0 to this release upgrade that never had Codex trust keeps the trust step (#1303)', async t => {
+  const old = taggedRelease(t, 'agent-board--v0.25.0', '0.25.0')
+  if (!old) return
+  const f = await oldCodexHome(old)
+  const mock = mockCodex(f)
+  writeFileSync(mock.stateFile, JSON.stringify({ trusted: false }))
+  const output = await setup(f, ['--apply', '--codex-bin', mock.executable])
+  assert.doesNotMatch(output, /still trusted/, `never-approved hooks are not claimed held\n${output}`)
+  assert.match(output, /--codex-trust --codex-bin/, `the first approval stays a step the person takes\n${output}`)
+  assert.equal(upgradeSteps(output), 3, 'three steps: the upgrade, the trust preview, the trust apply')
+})
+
+// J11a of #1303, round 2: the upgrade asks the Codex the person selected with --codex-dir,
+// not the inherited home. This mock answers from the home its environment names, and records
+// every home it was asked about, so a read-back for the wrong home is visible: the inherited
+// home holds the 0.25.0 hooks of another profile, while the selected directory holds this
+// release's hooks and the trust state the test flips.
+const mockCodexEnv = f => {
+  const homesFile = join(f.home, 'mock-codex-homes.json')
+  writeFileSync(homesFile, '[]')
+  const script = `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const readline = require('readline');
+const home = process.env.CODEX_HOME || ${JSON.stringify(join(f.home, '.codex'))};
+const hooksJson = path.join(home, 'hooks.json');
+const stateFile = path.join(home, 'mock-codex-state.json');
+const rl = readline.createInterface({ input: process.stdin });
+rl.on('line', line => {
+  try {
+    const msg = JSON.parse(line);
+    if (msg.method === 'initialize') {
+      process.stdout.write(JSON.stringify({ id: msg.id, result: { capabilities: {} } }) + '\\n');
+    } else if (msg.method === 'hooks/list') {
+      const homes = JSON.parse(fs.readFileSync(${JSON.stringify(homesFile)}, 'utf8'));
+      homes.push(process.env.CODEX_HOME ?? '(unset)');
+      fs.writeFileSync(${JSON.stringify(homesFile)}, JSON.stringify(homes));
+      let trusted = false;
+      try { trusted = JSON.parse(fs.readFileSync(stateFile, 'utf8')).trusted === true } catch {}
+      const manifest = JSON.parse(fs.readFileSync(hooksJson, 'utf8'));
+      const expected = Object.entries(manifest.hooks).map(([event, list]) => ({
+        event: event[0].toLowerCase() + event.slice(1),
+        command: list[0].hooks[0].command,
+      }));
+      const hooks = expected.map((item, i) => ({
+        sourcePath: hooksJson,
+        eventName: item.event,
+        command: item.command,
+        key: 'hook-' + i,
+        enabled: true,
+        currentHash: 'sha256:' + 'a'.repeat(64),
+        trustStatus: trusted ? 'trusted' : 'untrusted'
+      }));
+      process.stdout.write(JSON.stringify({ id: msg.id, result: { data: [{ hooks, errors: [] }] } }) + '\\n');
+    }
+  } catch {}
+});
+`
+  const executable = join(f.home, 'bin', 'codex-mock.js')
+  mkdirSync(join(f.home, 'bin'), { recursive: true })
+  writeFileSync(executable, script, { mode: 0o755 })
+  return { executable, homesFile }
+}
+
+// A home the 0.25.0 tag's own setup made for Codex alone, in an explicit directory
+// that is not the inherited Codex home (the fixture's CODEX_HOME is f.home/.codex).
+const oldCodexHomeIn = async old => {
+  const f = fixture(['.codex', '.codex-alt'])
+  const alt = join(f.home, '.codex-alt')
+  const out = checked(await run(f, [join(old, 'scripts', 'setup-agent.mjs'), '--home', f.home, '--codex-dir', alt, '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--lang', 'en', '--agent', 'codex', '--apply', '--json'], { timeoutMs: 120000 }), 'old setup --apply')
+  const plan = JSON.parse(out)
+  assert.deepEqual(plan.targets, ['codex'], 'the old setup targets Codex alone')
+  assert.equal(plan.applied, true, 'the old setup applied')
+  assert.ok(existsSync(f.script), 'the old setup wrote the board script')
+  return { f, alt }
+}
+
+const upgradeIn = (f, alt, mock) => run(f, [join(repoRoot, 'scripts', 'setup-agent.mjs'), '--home', f.home, '--codex-dir', alt, '--grok-dir', join(f.home, '.grok'), '--hermes-dir', join(f.home, '.hermes'), '--lang', 'en', '--agent', 'codex', '--apply', '--codex-bin', mock.executable], { timeoutMs: 120000 })
+
+const readBackHomes = mock => JSON.parse(readFileSync(mock.homesFile, 'utf8'))
+const assertReadBackHome = (mock, alt) => {
+  const homes = readBackHomes(mock)
+  assert.ok(homes.length >= 1, 'the read-back asked Codex')
+  for (const home of homes) assert.equal(resolve(home), resolve(alt), `the read-back asked the selected directory, not ${home}`)
+}
+
+test('J11a: a 0.25.0 to this release upgrade in an explicit Codex directory asks that directory, not the inherited home (#1303)', async t => {
+  const old = taggedRelease(t, 'agent-board--v0.25.0', '0.25.0')
+  if (!old) return
+  const { f, alt } = await oldCodexHomeIn(old)
+  const mock = mockCodexEnv(f)
+  copyFileSync(join(alt, 'hooks.json'), join(f.home, '.codex', 'hooks.json'))
+  writeFileSync(join(alt, 'mock-codex-state.json'), JSON.stringify({ trusted: true }))
+  writeFileSync(join(f.home, '.codex', 'mock-codex-state.json'), JSON.stringify({ trusted: false }))
+  const output = checked(await upgradeIn(f, alt, mock), 'setup --apply')
+  assert.ok(output.includes("Codex: the board's hooks are still trusted."), `the upgrade says trust held\n${output}`)
+  assert.doesNotMatch(output, /--codex-trust/, `no trust command after an upgrade that kept trust\n${output}`)
+  assert.equal(upgradeSteps(output), 1, 'one step: the upgrade command')
+  assertReadBackHome(mock, alt)
+})
+
+test('J11a: a 0.25.0 to this release upgrade in an explicit Codex directory that loses trust names the directory in the trust command (#1303)', async t => {
+  const old = taggedRelease(t, 'agent-board--v0.25.0', '0.25.0')
+  if (!old) return
+  const { f, alt } = await oldCodexHomeIn(old)
+  const mock = mockCodexEnv(f)
+  copyFileSync(join(alt, 'hooks.json'), join(f.home, '.codex', 'hooks.json'))
+  writeFileSync(join(alt, 'mock-codex-state.json'), JSON.stringify({ trusted: false }))
+  writeFileSync(join(f.home, '.codex', 'mock-codex-state.json'), JSON.stringify({ trusted: false }))
+  const output = checked(await upgradeIn(f, alt, mock), 'setup --apply')
+  assert.doesNotMatch(output, /still trusted/, `the upgrade does not claim trust held\n${output}`)
+  assert.ok(output.includes('UserPromptSubmit'), `the question names the lost hook\n${output}`)
+  assert.ok(output.includes('PostToolUse'), `the question names the new hook\n${output}`)
+  assert.match(output, /--codex-trust --codex-bin/, `the trust step is the question\n${output}`)
+  assert.ok(output.includes('--codex-dir') && (output.includes(`--codex-dir ${alt}`) || output.includes(`--codex-dir '${alt}'`)), `the trust command names the selected directory\n${output}`)
+  assert.equal(upgradeSteps(output), 3, 'three steps: the upgrade, the trust preview, the trust apply')
+  assertReadBackHome(mock, alt)
+})

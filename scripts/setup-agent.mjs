@@ -69,7 +69,9 @@ const summaries = [
     "connector": "managed by the Claude Code plugin connector; keeps its board at {progress}",
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
-    "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works).",
+    "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command}{dir} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works).",
+    "codexTrustHeld": "Codex: the board's hooks are still trusted.",
+    "codexTrustNeeded": "Codex: the board's hooks for {events} are not trusted. Approve them: preview with {command}{dir} --codex-trust --codex-bin {codex}, then run it again with --apply (in the Codex CLI, /hooks also works).",
     "codexMissing": "Codex: setup could not find Codex; run where.exe codex in PowerShell or command -v codex in bash, then pass its full path to --codex-bin.",
     "hermes": "Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command} --hermes-trust, then run it again with --apply.",
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin.",
@@ -138,7 +140,9 @@ const summaries = [
     "connector": "由 Claude Code 外掛的連接器管理；保留看板 {progress}",
     "next": "接下來：",
     "apply": "套用這些變更：{command}",
-    "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
+    "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command}{dir} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
+    "codexTrustHeld": "Codex：看板的 hooks 仍然受信任。",
+    "codexTrustNeeded": "Codex：看板在 {events} 的 hooks 尚未受信任。請核准它們：先執行 {command}{dir} --codex-trust --codex-bin {codex} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
     "codexMissing": "Codex：setup 找不到 Codex；請在 PowerShell 執行 where.exe codex 或在 bash 執行 command -v codex，再用 --codex-bin 傳入完整路徑。",
     "hermes": "Hermes Agent：Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} --hermes-trust 預覽，再加上 --apply 重新執行同一命令。",
     "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛。",
@@ -207,7 +211,9 @@ const summaries = [
     "connector": "由 Claude Code 插件的连接器管理；保留看板 {progress}",
     "next": "接下来：",
     "apply": "应用这些更改：{command}",
-    "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
+    "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command}{dir} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
+    "codexTrustHeld": "Codex：看板的 hooks 仍然受信任。",
+    "codexTrustNeeded": "Codex：看板在 {events} 的 hooks 尚未受信任。请批准它们：先运行 {command}{dir} --codex-trust --codex-bin {codex} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
     "codexMissing": "Codex：setup 找不到 Codex；请在 PowerShell 运行 where.exe codex 或在 bash 运行 command -v codex，再用 --codex-bin 传入完整路径。",
     "hermes": "Hermes Agent：Hermes 会问一次是否信任看板的 hooks，请回答 y。在无法询问的聊天渠道中，先运行 {command} --hermes-trust 预览，再加上 --apply 重新运行同一命令。",
     "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件。",
@@ -488,6 +494,26 @@ const main = () => {
     process.stdout.write(`${JSON.stringify({ targets: selected, plans: results, applied: apply && available.length > 0, ...(!isRemove && hasSidecar(results) ? { sidecarNotice: words('sidecarTerms') } : {}) }, null, 2)}\n`)
     return
   }
+  // After an apply that rewrote Codex hooks, ask Codex itself whether the board's hooks are
+  // still trusted (#1303): the upgrade kept them when only the runner changed, and lost them
+  // when a hook definition changed. The read-back is the trust preview without --apply, so it
+  // writes nothing. A first install has only creates, so it keeps the trust step as before.
+  // The asking flow already re-approves on its yes, so this runs only for a plain --apply.
+  const trustAfterApply = new Map()
+  if (apply && !isAsking && !isRemove) {
+    for (const [i, agent] of selected.entries()) {
+      if (agent !== 'codex' || results[i].conflicts.length) continue
+      if (!results[i].changes.some(change => change.action === 'update')) continue
+      const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
+      if (!codex) continue
+      const script = results[i].script ?? join(results[i].data, 'agent-board.mjs')
+      const read = spawnSync(process.execPath, [script, ...common, '--agent', 'codex', '--codex-trust', '--json', '--codex-bin', codex], { encoding: 'utf8', windowsHide: true })
+      try {
+        const observation = JSON.parse(read.stdout)
+        if (read.status === 0 && Array.isArray(observation.hooks)) trustAfterApply.set(agent, observation.hooks.filter(hook => hook.trust !== 'trusted').map(hook => hook.event))
+      } catch {}
+    }
+  }
   const shortPath = file => {
     const path = relative(resolve(home), file)
     return path === '' ? '~' : path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path) ? join('~', path) : file
@@ -561,6 +587,9 @@ const main = () => {
   // The sidecar's files are in this run's plan, by the flag or the question: say what they are and who switches them on.
   if (!isRemove && hasSidecar(results)) lines.push(words('sidecarTerms'))
   if (hasClaude && !isRemove) lines.push(`Claude Code: ${words('claude')}`)
+  // The upgrade kept Codex's trust, as the read-back above just confirmed: say so once, so the
+  // person does not run the trust command for nothing.
+  for (const untrusted of trustAfterApply.values()) if (untrusted.length === 0) lines.push(words('codexTrustHeld'))
   if (isRemove && results.length) {
     const progress = results[0]?.progress || join(data, 'progress.md')
     const progressDir = dirname(progress)
@@ -777,7 +806,11 @@ const main = () => {
       const plan = results[selected.indexOf(agent)]
       if (plan.managedBy === 'connector') continue
       // Narrower than detection: this path goes to --codex-bin, which cannot start a .bat or .com.
-      const codex = agent === 'codex' ? findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
+      // An explicit --codex-bin names the Codex the read-back asked, as the asking flow does.
+      const codex = agent === 'codex' ? flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
+      // An explicit --codex-dir names the Codex home the trust command must approve: without it
+      // the command previews the inherited home instead (#1303).
+      const codexDir = agent === 'codex' ? flag('--codex-dir') : undefined
       // A repeat run of an unchanged install asks Codex or Hermes itself whether the board's hooks are trusted,
       // and leaves out the trust step only on its yes; no answer or any other answer keeps it (#808).
       if (['codex', 'hermes'].includes(agent) && !plan.changes.length && isTrusted(plan, agent, agent === 'codex' ? codex : undefined)) continue
@@ -790,7 +823,14 @@ const main = () => {
         continue
       }
       if (agent === 'codex') {
-        steps.push(words('codex', { command: boardCommand, codex: codex ? quote(codex) : '' }))
+        const untrusted = trustAfterApply.get(agent)
+        if (untrusted !== undefined && untrusted.length === 0) {
+          // The upgrade kept the trust the read-back just confirmed: no trust step.
+        } else if (untrusted !== undefined && untrusted.length > 0) {
+          steps.push(words('codexTrustNeeded', { command: boardCommand, codex: codex ? quote(codex) : '', dir: codexDir ? ` --codex-dir ${quote(codexDir)}` : '', events: untrusted.map(event => event[0].toUpperCase() + event.slice(1)).join(', ') }))
+        } else {
+          steps.push(words('codex', { command: boardCommand, codex: codex ? quote(codex) : '', dir: codexDir ? ` --codex-dir ${quote(codexDir)}` : '' }))
+        }
       }
       if (agent === 'hermes') {
         steps.push(words('hermes', { command: boardCommand }))
