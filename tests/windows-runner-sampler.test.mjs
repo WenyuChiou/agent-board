@@ -22,7 +22,8 @@ const samplerPs1 = fileURLToPath(new URL('../scripts/windows-runner-sampler.ps1'
 test('sanitizeArtifactName turns job and matrix names into unique upload-artifact safe names', () => {
   assert.equal(sanitizeArtifactName('board-node24-part-1/7'), 'windows-sampler-board-node24-part-1-of-7')
   assert.equal(sanitizeArtifactName('Messaging: Node 22 (1/3)?'), 'windows-sampler-messaging-node-22-1-of-3')
-  assert.equal(sanitizeArtifactName('  ///  '), 'windows-sampler-of')
+  assert.equal(sanitizeArtifactName('  /  '), 'windows-sampler-of')
+  assert.equal(sanitizeArtifactName('  ///  '), 'windows-sampler-of-of-of')
   assert.equal(sanitizeArtifactName(''), 'windows-sampler-job')
   assert.equal(sanitizeArtifactName('x'.repeat(150)).length <= 100, true)
 
@@ -287,6 +288,7 @@ test('Windows runner sampler starts detached, stops cleanly, and captures real c
   await writeFile(githubSummary, '', 'utf8')
   let detachedPid = null
 
+  let failed = false
   try {
     // Part A: detached start returns fast without pipe hang, then stop flushes sampler.json and writes summary.
     const startedAt = Date.now()
@@ -424,10 +426,17 @@ test('Windows runner sampler starts detached, stops cleanly, and captures real c
       .filter(Boolean)
     assert.ok(ndjsonLines.length >= 1)
     assert.ok(JSON.parse(ndjsonLines[0]).gapMs >= 50)
+  } catch (error) {
+    failed = true
+    throw error
   } finally {
-    if (detachedPid !== null && existsSync(dirA) && !existsSync(join(dirA, 'sampler.json'))) {
+    if (detachedPid !== null) {
       try { process.kill(detachedPid) } catch {}
     }
-    await rm(root, { recursive: true, force: true })
+    try {
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+    } catch (rmError) {
+      if (!failed) throw rmError
+    }
   }
 })

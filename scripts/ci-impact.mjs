@@ -8,7 +8,7 @@ import { hasReceiverRecord } from './messaging-matrix.mjs'
 
 export const GROUPS = ['board', 'messaging', 'tooling', 'npm', 'plugin', 'installers', 'remote', 'journeys', 'browser', 'generated']
 const systems = ['ubuntu-latest', 'windows-latest']
-const toolingTests = ['pr-check', 'preflight', 'fail-first', 'changelog-fold', 'team-stats', 'review-queue', 'review-queue-post', 'pr-check-rerun', 'code-rules'].map(name => 'tests/' + name + '.test.mjs')
+const toolingTests = ['pr-check', 'preflight', 'fail-first', 'changelog-fold', 'team-stats', 'review-queue', 'review-queue-post', 'pr-check-rerun', 'code-rules', 'windows-runner-sampler'].map(name => 'tests/' + name + '.test.mjs')
 const messagingTests = ['tests/exchange.test.mjs', 'tests/messaging.test.mjs']
 const safePath = value => {
   if (typeof value !== 'string' || !value || /[\0\r\n\\:]/.test(value) || isAbsolute(value) || value.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('invalid repository path')
@@ -85,7 +85,7 @@ export const makePlan = (files, options = {}) => {
       known = true
     }
     if (path === 'bin/agent-board.mjs') { select('npm', path); known = true }
-    if (/^scripts\/(?:pr-check|preflight|fail-first|changelog-fold|team-stats|review-queue|review-queue-post|pr-check-rerun|code-rules)\.(?:mjs|json)$/.test(path)) { select('tooling', path); known = true }
+    if (/^scripts\/(?:pr-check|preflight|fail-first|changelog-fold|team-stats|review-queue|review-queue-post|pr-check-rerun|code-rules)\.(?:mjs|json)$/.test(path) || /^scripts\/windows-runner-sampler\.(?:mjs|ps1)$/.test(path)) { select('tooling', path); known = true }
     if (/^(?:scripts\/setup|tests\/setup\.check)\.(?:sh|ps1)$/.test(path)) {
       select('installers', path)
       installers.add(path.endsWith('.ps1') ? 'windows-latest' : 'ubuntu-latest')
@@ -194,6 +194,44 @@ export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 export const BOARD_PART_BUDGET_MS = 480_000
 
 const seconds = ms => (ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)
+
+export const BOARD_FILE_WARNING_RATIO = 0.8
+
+export const boardFileBudgetWarnings = (timings, { threshold = BOARD_FILE_WARNING_RATIO } = {}) => {
+  if (!timings || typeof timings !== 'object' || !Array.isArray(timings.files)) return []
+  const warnings = []
+  for (const file of timings.files) {
+    if (typeof file?.path !== 'string' || /[\0\r\n]/.test(file.path)) continue
+    if (groupForTest(file.path) !== 'board') continue
+    if (typeof file.ms !== 'number' || !Number.isFinite(file.ms) || file.ms < 0) continue
+    const budget = BOARD_FILE_BUDGETS_MS[file.path] ?? BOARD_FILE_BUDGET_DEFAULT_MS
+    const limit = budget * threshold
+    if (file.ms > limit) {
+      const percent = Math.round(file.ms / budget * 100)
+      warnings.push({
+        path: file.path,
+        ms: file.ms,
+        budgetMs: budget,
+        thresholdMs: limit,
+        percent,
+        message: `${file.path} took ${seconds(file.ms)}s (${percent}%), over ${Math.round(threshold * 100)}% of its ${seconds(budget)}s budget (${seconds(limit)}s)`,
+      })
+    }
+  }
+  return warnings
+}
+
+const emitBudgetWarnings = timings => {
+  for (const warning of boardFileBudgetWarnings(timings)) {
+    const clean = warning.message.replace(/[\r\n]+/g, ' ')
+    console.log('::warning::' + clean)
+    if (process.env.GITHUB_STEP_SUMMARY) {
+      try {
+        appendFileSync(process.env.GITHUB_STEP_SUMMARY, '- Warning: ' + clean + '\n')
+      } catch {}
+    }
+  }
+}
 
 export const checkBoardTimes = (timings, { isPullRequest = true } = {}) => {
   const errors = []
@@ -477,14 +515,14 @@ export const testRuns = (files, { isSerial = false, isWindows = false, part = ''
   return share.length ? [testArgs(share, { isSerial, isWindows })] : []
 }
 
-export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform) => {
+export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform, now = Date.now) => {
   if (!Array.isArray(files) || !files.length || files.some(path => !/^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/.test(path) || !existsSync(path))) throw new Error('selected tests are empty, invalid or missing')
   // A self-parted file reads its part from CI_TEST_PART, so the child gets the part this run was given,
   // not whatever part the environment holds.
   const env = { ...process.env, CI_TEST_PART: part }
   const isSerial = process.env.CI_TEST_SERIAL === '1'
   const isWindows = platform === 'win32'
-  const started = Date.now()
+  const started = now()
   // A serial run times one file at a time: the files already run one at a time there, so one Node run
   // per file costs one extra process start each and gives the time check a time per file. A parallel
   // run keeps its single run: timing one file at a time there would serialize the whole set.
@@ -495,21 +533,25 @@ export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn
   const timed = []
   const failures = []
   for (const args of runs) {
-    const fileStarted = Date.now()
+    const fileStarted = now()
     const result = spawn(process.execPath, args, { stdio: 'inherit', env })
     if (result.error) throw result.error
-    if (isSerial) timed.push({ path: args.at(-1), ms: Date.now() - fileStarted })
+    if (isSerial) timed.push({ path: args.at(-1), ms: now() - fileStarted })
     if (result.status !== 0) failures.push(result.status ?? result.signal)
   }
-  const totalMs = Date.now() - started
+  const totalMs = now() - started
+  const timingsRecord = { version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }
   if (process.env.CI_TEST_TIMINGS || process.env.CI === 'true') {
     try {
-      writeFileSync(timingsPath(), JSON.stringify({ version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }, null, 2) + '\n')
+      writeFileSync(timingsPath(), JSON.stringify(timingsRecord, null, 2) + '\n')
     } catch (error) {
       console.error('agent-board: could not record test timings: ' + error.message)
     }
   }
-  if (failures.length) throw new Error('selected tests failed: ' + failures.join(', '))
+  if (failures.length) {
+    if (isSerial) emitBudgetWarnings(timingsRecord)
+    throw new Error('selected tests failed: ' + failures.join(', '))
+  }
 }
 
 const main = async () => {
@@ -530,6 +572,7 @@ const main = async () => {
     console.log('board part ' + (timings.part || '1/1') + ': total ' + seconds(timings.totalMs) + 's of ' + seconds(BOARD_PART_BUDGET_MS) + 's budget' + (slowest.length ? '; slowest files: ' + slowest.map(file => file.path + ' ' + seconds(file.ms) + 's').join(', ') : '; per-file times are recorded on serial runs only'))
     for (const error of result.errors) console.log('time budget: ' + error)
     for (const warning of result.warnings) console.log('time budget (reported only): ' + warning)
+    emitBudgetWarnings(timings)
     if (!result.ok) process.exitCode = 1
     return
   }
@@ -548,6 +591,7 @@ const main = async () => {
       line = 'part ' + part + ': tests ran ' + seconds(totalMs) + 's, ' + Math.round(totalMs / limitMs * 100) + '% of the ' + seconds(limitMs) + 's job limit'
       console.log(line)
       if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, '- ' + line + '\n')
+      emitBudgetWarnings(timings)
     } catch (error) {
       console.log(error?.code === 'ENOENT' && line === null ? 'no test timings recorded; no summary line' : '::warning::no summary line: ' + String(error?.message ?? error).replace(/\s+/g, ' '))
     }

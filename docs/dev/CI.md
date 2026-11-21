@@ -75,8 +75,12 @@ per-file times, so the file check only applies to serial parts.
 
 Every job that runs tests on Windows first tries to turn off Windows
 Defender's real-time scanning (a failure there does not stop the job); the product's own antivirus
-handling stays covered by its simulated tests. No
-product dependency is added to the npm package.
+handling stays covered by its simulated tests. Each Windows test job also runs a background
+sampler (`scripts/windows-runner-sampler.ps1`) ticking every 250 ms; whenever a tick gap exceeds
+1 s, it records per-process CPU gained, free memory and disk queue length and uploads the record
+as a 7-day `windows-sampler-*` artifact (summarized with `node scripts/windows-runner-sampler.mjs summarize`).
+`scripts/ci-impact.mjs` also emits `::warning::` and step-summary warnings whenever a serial board
+test file passes 80% of its time budget. No product dependency is added to the npm package.
 
 The always-run affected checks and CI validation jobs record the plan and require
 literal success for every selected group. A skipped selected job fails validation.

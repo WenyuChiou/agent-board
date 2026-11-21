@@ -163,6 +163,14 @@ jobs:
           persist-credentials: false
           # The whole history with its tags, for the released files table below.
           fetch-depth: 0
+      - name: Start Windows runner sampler
+        id: sampler
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_JOB: board-node${{ matrix.node }}-part-${{ matrix.part }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action start -JobName $env:SAMPLER_JOB'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -190,6 +198,22 @@ jobs:
       # the job.
       - name: Board time budgets
         run: node scripts/ci-impact.mjs check
+      - name: Stop Windows runner sampler
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.dir != ''
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_DIR: ${{ steps.sampler.outputs.dir }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action stop -Dir $env:SAMPLER_DIR'
+      - name: Upload Windows runner sampler record
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.artifact != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.sampler.outputs.artifact }}
+          path: ${{ steps.sampler.outputs.dir }}
+          if-no-files-found: warn
+          retention-days: 7
 
   messaging:
     needs: impact
@@ -221,6 +245,14 @@ jobs:
           persist-credentials: false
           # The whole history with its tags, for the released files table below.
           fetch-depth: 0
+      - name: Start Windows runner sampler
+        id: sampler
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_JOB: messaging-node${{ matrix.node }}-part-${{ matrix.part }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action start -JobName $env:SAMPLER_JOB'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -245,6 +277,22 @@ jobs:
       - name: Exchange step time
         if: always() && steps.exchange.conclusion != 'skipped'
         run: node scripts/ci-impact.mjs summary 600
+      - name: Stop Windows runner sampler
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.dir != ''
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_DIR: ${{ steps.sampler.outputs.dir }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action stop -Dir $env:SAMPLER_DIR'
+      - name: Upload Windows runner sampler record
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.artifact != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.sampler.outputs.artifact }}
+          path: ${{ steps.sampler.outputs.dir }}
+          if-no-files-found: warn
+          retention-days: 7
 
   tooling:
     needs: impact
@@ -270,6 +318,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Start Windows runner sampler
+        id: sampler
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_JOB: tooling-node${{ matrix.node }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action start -JobName $env:SAMPLER_JOB'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -277,6 +333,22 @@ jobs:
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.tooling_tests }}
         run: node scripts/ci-impact.mjs run
+      - name: Stop Windows runner sampler
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.dir != ''
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_DIR: ${{ steps.sampler.outputs.dir }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action stop -Dir $env:SAMPLER_DIR'
+      - name: Upload Windows runner sampler record
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.artifact != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.sampler.outputs.artifact }}
+          path: ${{ steps.sampler.outputs.dir }}
+          if-no-files-found: warn
+          retention-days: 7
 
   # The npm package in a job of its own: what `npm pack` would publish, the version in step
   # with plugin.json, and the launcher (setup, help, the installed board script) in a scratch home.
@@ -305,6 +377,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Start Windows runner sampler
+        id: sampler
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_JOB: npm-node${{ matrix.node }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action start -JobName $env:SAMPLER_JOB'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -312,6 +392,22 @@ jobs:
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.npm_tests }}
         run: node scripts/ci-impact.mjs run
+      - name: Stop Windows runner sampler
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.dir != ''
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_DIR: ${{ steps.sampler.outputs.dir }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action stop -Dir $env:SAMPLER_DIR'
+      - name: Upload Windows runner sampler record
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.artifact != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.sampler.outputs.artifact }}
+          path: ${{ steps.sampler.outputs.dir }}
+          if-no-files-found: warn
+          retention-days: 7
 
   plugin:
     needs: impact
@@ -338,6 +434,15 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Start Windows runner sampler
+        id: sampler
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_JOB: plugin
+        run: '& scripts/windows-runner-sampler.ps1 -Action start -JobName $env:SAMPLER_JOB'
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -354,6 +459,22 @@ jobs:
 
       - name: Pane and hook tests
         run: node scripts/plugin-tests.mjs
+      - name: Stop Windows runner sampler
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.dir != ''
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_DIR: ${{ steps.sampler.outputs.dir }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action stop -Dir $env:SAMPLER_DIR'
+      - name: Upload Windows runner sampler record
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.artifact != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.sampler.outputs.artifact }}
+          path: ${{ steps.sampler.outputs.dir }}
+          if-no-files-found: warn
+          retention-days: 7
 
 
   installers:
@@ -380,6 +501,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Start Windows runner sampler
+        id: sampler
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_JOB: installers
+        run: '& scripts/windows-runner-sampler.ps1 -Action start -JobName $env:SAMPLER_JOB'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 22
@@ -389,6 +518,22 @@ jobs:
       - name: Windows installer
         if: runner.os == 'Windows'
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1
+      - name: Stop Windows runner sampler
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.dir != ''
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_DIR: ${{ steps.sampler.outputs.dir }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action stop -Dir $env:SAMPLER_DIR'
+      - name: Upload Windows runner sampler record
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.artifact != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.sampler.outputs.artifact }}
+          path: ${{ steps.sampler.outputs.dir }}
+          if-no-files-found: warn
+          retention-days: 7
 
   remote:
     name: remote reporter (${{ matrix.os }})
@@ -414,12 +559,36 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Start Windows runner sampler
+        id: sampler
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_JOB: remote
+        run: '& scripts/windows-runner-sampler.ps1 -Action start -JobName $env:SAMPLER_JOB'
       - name: Unix reporter
         if: runner.os != 'Windows'
         run: python3 -B scripts/remote-reporter/test_pipeline.py
       - name: Windows reporter
         if: runner.os == 'Windows'
         run: python -B scripts/remote-reporter/test_pipeline.py
+      - name: Stop Windows runner sampler
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.dir != ''
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_DIR: ${{ steps.sampler.outputs.dir }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action stop -Dir $env:SAMPLER_DIR'
+      - name: Upload Windows runner sampler record
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.artifact != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.sampler.outputs.artifact }}
+          path: ${{ steps.sampler.outputs.dir }}
+          if-no-files-found: warn
+          retention-days: 7
 
   journeys:
     needs: impact
@@ -448,6 +617,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Start Windows runner sampler
+        id: sampler
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_JOB: journeys-node${{ matrix.node }}-part-${{ matrix.part }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action start -JobName $env:SAMPLER_JOB'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -471,6 +648,22 @@ jobs:
           CI_TEST_PART: ${{ matrix.part }}
           CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}
         run: node scripts/ci-impact.mjs run
+      - name: Stop Windows runner sampler
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.dir != ''
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_DIR: ${{ steps.sampler.outputs.dir }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action stop -Dir $env:SAMPLER_DIR'
+      - name: Upload Windows runner sampler record
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.artifact != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.sampler.outputs.artifact }}
+          path: ${{ steps.sampler.outputs.dir }}
+          if-no-files-found: warn
+          retention-days: 7
 
   browser:
     needs: impact
@@ -496,6 +689,14 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Start Windows runner sampler
+        id: sampler
+        if: runner.os == 'Windows'
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_JOB: browser
+        run: '& scripts/windows-runner-sampler.ps1 -Action start -JobName $env:SAMPLER_JOB'
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -530,6 +731,22 @@ jobs:
         with:
           name: browser-journeys-${{ matrix.os }}
           path: ${{ runner.temp }}/agent-board-browser-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Stop Windows runner sampler
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.dir != ''
+        shell: powershell
+        continue-on-error: true
+        env:
+          SAMPLER_DIR: ${{ steps.sampler.outputs.dir }}
+        run: '& scripts/windows-runner-sampler.ps1 -Action stop -Dir $env:SAMPLER_DIR'
+      - name: Upload Windows runner sampler record
+        if: always() && runner.os == 'Windows' && steps.sampler.outputs.artifact != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.sampler.outputs.artifact }}
+          path: ${{ steps.sampler.outputs.dir }}
           if-no-files-found: warn
           retention-days: 7
 
