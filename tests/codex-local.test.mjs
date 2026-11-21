@@ -15850,8 +15850,8 @@ const agy1384 = f => {
     return { stdout: result.stdout, line, at: Number(line.split(' ')[3]) }
   })
   const mark = (session, at, raw, board = progress) => markOf1384(session, at, raw, board)
-  // The time of the last report this board took for the conversation.
-  const reportedAt = (board = progress) => record().reportedAt?.[boardOf1384(board)]
+  // The time of the conversation's last report, whatever board it went to.
+  const reportedAt = () => record().reportedAt
   assert.equal(hook('working', 'PreInvocation').status, 0)
   return { conv, other, folder, progress, transcript, transcriptOf, entry, output, hookArgs, hook, report, plan, text, record, recordFile, offsetFile, refused, mark, reportedAt, recordBoard }
 }
@@ -16167,20 +16167,22 @@ test('a marked line for another board is not applied (#1384)', { skip: noDeny138
   assert.equal(a.reportedAt(), own.at)
 }))
 
-test('a report another board took does not keep this board\'s marked line out (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+test('a newer report to another board keeps the kept line out and gives this board the newer plan (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
   const a = agy1384(f)
   const kept = await a.refused(a.plan('Synthetic for this board'))
   a.output(kept.stdout)
-  // Later, the same conversation reports straight to another board that shares the data folder. Setup did not record
-  // that board, so it keeps no time.
+  // Later, the same conversation reports straight to another board that shares the data folder. Its plan is the
+  // conversation's newest, so the kept line is older and this board shows the newer plan instead.
   const otherProgress = join(f.home, 'other-board', 'progress.md')
   f.save(otherProgress, '## Synthetic other board\n')
   const direct = f.command(['--codex-report', '--agent', 'antigravity', '--session', a.conv, '--progress-file', otherProgress], a.plan('Synthetic on the other board'))
   assert.equal(direct.status, 0, direct.stderr)
-  assert.equal(a.reportedAt(otherProgress), undefined)
+  const newer = a.reportedAt()
+  assert.ok(newer > kept.at)
   assert.equal(a.hook().status, 0)
-  assert.match(a.text(), /Synthetic for this board step/)
-  assert.equal(a.reportedAt(), kept.at)
+  assert.doesNotMatch(a.text(), /Synthetic for this board step/)
+  assert.match(a.text(), /Synthetic on the other board step/)
+  assert.equal(a.reportedAt(), newer)
   assert.match(readFileSync(otherProgress, 'utf8'), /Synthetic on the other board step/)
 }))
 
@@ -16253,7 +16255,7 @@ test('a marked line for a linked progress file lands where the link is (#1384)',
   // As a direct report through the link writes: the plan is at the link's path, and the target is unchanged.
   assert.match(readFileSync(link, 'utf8'), /Synthetic linked step/)
   assert.equal(readFileSync(target, 'utf8'), '## Synthetic target board\n')
-  assert.equal(a.reportedAt(link), Number(line.split(' ')[3]))
+  assert.equal(a.reportedAt(), Number(line.split(' ')[3]))
 }))
 
 test('a refused report given a linked file\'s target prints no marked line (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -16270,26 +16272,24 @@ test('a refused report given a linked file\'s target prints no marked line (#138
   assert.equal(marksIn1384(kept.stdout).length, 1)
 }))
 
-test('a board\'s report time is kept for a day, however many boards report after it (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+test('the conversation keeps one report time, its newest, whatever board each report went to (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
   const a = agy1384(f)
   const kept = await a.refused(a.plan('Synthetic kept'))
   assert.equal(a.report(a.plan('Synthetic newer')).status, 0)
-  assert.ok(a.reportedAt() > kept.at)
-  // Twenty boards reported after it, and one two days ago; then the conversation reports to this board again.
-  const now = Date.now(), fake = n => createHash('sha256').update(`synthetic board ${n}`).digest('hex').slice(0, 16)
-  const times = { ...a.record().reportedAt, [fake('old')]: now - 2 * 24 * 60 * 60 * 1000 }
-  for (let n = 0; n < 20; n++) times[fake(n)] = now + 60000 + n
-  writeFileSync(a.recordFile, `${JSON.stringify({ ...a.record(), reportedAt: times }, null, 2)}\n`)
-  assert.equal(a.report(a.plan('Synthetic newest')).status, 0)
-  const after = a.record().reportedAt, newest = after[boardOf1384(a.progress)]
-  assert.ok(newest > kept.at)
-  assert.equal(after[fake('old')], undefined)
-  for (let n = 0; n < 20; n++) assert.equal(after[fake(n)], now + 60000 + n)
-  // The kept line is older than the board's own last report, so the hook does not apply it.
+  const newer = a.reportedAt()
+  assert.equal(typeof newer, 'number')
+  assert.ok(newer > kept.at)
+  // A report to another board with an earlier time leaves the newest time as it is.
+  const otherProgress = join(f.home, 'other-board', 'progress.md')
+  f.save(otherProgress, '## Synthetic other board\n')
+  const earlier = f.command(['--codex-report', '--agent', 'antigravity', '--session', a.conv, '--progress-file', otherProgress, '--hook-started', String(kept.at + 1)], a.plan('Synthetic earlier elsewhere'))
+  assert.equal(earlier.status, 0, earlier.stderr)
+  assert.equal(a.reportedAt(), newer)
+  // The kept line is older than the conversation's last report, so the hook does not apply it.
   a.output(kept.stdout)
   assert.equal(a.hook().status, 0)
   assert.doesNotMatch(a.text(), /Synthetic kept step/)
-  assert.equal(a.reportedAt(), newest)
+  assert.equal(a.reportedAt(), newer)
 }))
 
 test('a kept line waits while its board folder is gone (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
@@ -16345,6 +16345,40 @@ test('a line kept before setup recorded another board is not applied there (#138
   assert.equal(hookOn1384(f, a, other).status, 0)
   assert.doesNotMatch(readFileSync(other, 'utf8'), /Synthetic before step/)
   assert.match(readFileSync(join(f.home, '.agent-board', 'hook-errors.log'), 'utf8'), /MARK_OTHER_BOARD/)
+}))
+
+test('a newer report through another name of the board\'s file keeps the older kept line out (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  // Other names of the recorded file: a hard link from another folder (first, while it still is one: a board write
+  // replaces the file at the name it was given), letter case (one file where names ignore case), and a linked folder (a
+  // junction on Windows).
+  const linked = join(f.home, 'board-link')
+  symlinkSync(a.folder, linked, process.platform === 'win32' ? 'junction' : 'dir')
+  const hard = join(f.home, 'hard-board', 'progress.md')
+  mkdirSync(dirname(hard))
+  linkSync(a.progress, hard)
+  for (const [n, name] of [hard, join(a.folder, 'PROGRESS.md'), join(linked, 'progress.md')].entries()) {
+    const kept = await a.refused(a.plan(`Synthetic kept ${n}`))
+    a.output(kept.stdout)
+    const direct = f.command(['--codex-report', '--agent', 'antigravity', '--session', a.conv, '--progress-file', name], a.plan(`Synthetic newer ${n}`))
+    assert.equal(direct.status, 0, direct.stderr)
+    const newer = a.reportedAt()
+    assert.ok(newer > kept.at, name)
+    assert.equal(a.hook().status, 0)
+    assert.doesNotMatch(a.text(), new RegExp(`Synthetic kept ${n} step`), name)
+    assert.match(readFileSync(name, 'utf8'), new RegExp(`Synthetic newer ${n} step`), name)
+    assert.equal(a.reportedAt(), newer)
+  }
+}))
+
+test('a session record with a time for each board, from an earlier build, reads as no time (#1384)', { skip: noDeny1384 }, () => fixture(async f => {
+  const a = agy1384(f)
+  const kept = await a.refused(a.plan('Synthetic after the map'))
+  writeFileSync(a.recordFile, `${JSON.stringify({ ...a.record(), reportedAt: { [boardOf1384(a.progress)]: kept.at + 60000 } }, null, 2)}\n`)
+  a.output(kept.stdout)
+  assert.equal(a.hook().status, 0)
+  assert.match(a.text(), /Synthetic after the map step/)
+  assert.equal(a.reportedAt(), kept.at)
 }))
 
 test('a marked line just under a day old is applied (#1384)', { skip: noDeny1384 }, () => fixture(async f => {

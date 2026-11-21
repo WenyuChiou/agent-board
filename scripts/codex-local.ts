@@ -102,17 +102,6 @@ const boardOf = (progress: string, recorded: unknown): string | undefined => {
   try { if (!statSync(dirname(progress)).isDirectory()) return undefined } catch { return undefined }
   return hash(`board:${progress}`).slice(0, 16)
 }
-// The time of the last report each board took for a conversation: one conversation can report to two boards that share
-// a data folder, and a report one board took is no reason to skip the other board's (#1384). A time older than any line
-// the hook still applies (`MARK_MAX_AGE`) can stop none, so it is dropped.
-const reportedOn = (kept: unknown, board: string, at: number, now: number): Record<string, number> => {
-  const times = typeof kept === 'object' && kept !== null && !Array.isArray(kept)
-    ? Object.entries(kept).filter((one): one is [string, number] => /^[0-9a-f]{16}$/.test(one[0]) && typeof one[1] === 'number' && Number.isFinite(one[1]) && now - one[1] <= MARK_MAX_AGE)
-    : []
-  const merged = new Map(times)
-  merged.set(board, Math.max(at, merged.get(board) ?? 0))
-  return Object.fromEntries(merged)
-}
 const markLine = (session: string, board: string, at: number, raw: Json): string | undefined => {
   const text = Buffer.from(JSON.stringify(raw))
   const line = `${MARK_PREFIX}${session} ${board} ${at} ${text.length} ${hash(text).slice(0, 16)} ${deflateRawSync(text).toString('base64url')}`
@@ -1216,7 +1205,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const owner = hash(`${agent}:${session}`)
       const recordFile = join(root, 'sessions', `${owner}.json`)
       const saved = readLocal(recordFile)
-      const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number; pushed?: string[]; reportedAt?: Record<string, number> }
+      const original = saved === null ? null : JSON.parse(saved) as CodexReport & { appliedAt?: number; pushed?: string[]; reportedAt?: unknown }
       // Raw recovery can start a fresh session within its allowed clock skew.
       // An existing session's clock must not move past the next real hook.
       const isSkewedBootstrap = isRawReplay && original === null
@@ -1224,13 +1213,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         !isSkewedBootstrap && (sourceAt > observedAt || displayAt > observedAt))) throw new Error('INVALID_EVENT_TIME')
       if (entry === current && original === null) isFirstSessionEvent = true
       if (original?.agent && original.agent !== agent) throw new Error('SESSION_CONFLICT')
-      // A marked report no newer than a report that already reached the board for its conversation is not applied: one
-      // with the same time is that report, read again (#1384).
-      const board = boardOf(progress, loaded.progress)
-      const reportedHere = board === undefined ? undefined : original?.reportedAt?.[board]
-      if (isMarkedReport && entry === current && typeof reportedHere === 'number' && sourceAt <= reportedHere) return original
-      // A marked report over a day old by a clock read after the record is refused too: a newer report's time is dropped
-      // only once it is a day old, and by then this line is older still. It is dropped as an over-age line is.
+      // A marked report no newer than the conversation's last report is not applied: one with the same time is that
+      // report, read again (#1384). The time is the conversation's, kept in this record, which every report of the
+      // conversation writes whatever name of its board's file it was given, so no name of the file gets a newer report past
+      // it. An earlier build kept a time for each board; that form reads as none.
+      const reportedAt = typeof original?.reportedAt === 'number' && Number.isFinite(original.reportedAt) ? original.reportedAt : undefined
+      if (isMarkedReport && entry === current && reportedAt !== undefined && sourceAt <= reportedAt) return original
+      // A marked report over a day old by a clock read after the record is refused too, as the hook refuses an older line.
       if (isMarkedReport && entry === current && Date.now() - sourceAt > MARK_MAX_AGE) throw new Error('MARK_TOO_OLD')
       // Direct events can arrive out of order too, before they ever enter the pending queue.
       if (mode !== '--codex-report' && original !== null && sourceAt < (original.appliedAt ?? Date.parse(original.updated))) {
@@ -1323,7 +1312,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         ? { folder: name, folderDigest, folderCanonicalDigest }
         : { folder: original?.folder, folderDigest: folderDigest ?? original?.folderDigest,
           folderCanonicalDigest: folderDigest === undefined ? original?.folderCanonicalDigest : folderCanonicalDigest }
-      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(agent === 'antigravity' && mode === '--codex-report' && board !== undefined ? { reportedAt: reportedOn(original?.reportedAt, board, sourceAt, observedAt) } : original?.reportedAt === undefined ? {} : { reportedAt: original.reportedAt }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
+      const full = { ...lifecycle, ...marked, ...directory, appliedAt: Math.max(sourceAt, original?.appliedAt ?? (original === null ? displayAt : Date.parse(original.updated))), ...(original?.pushed === undefined ? {} : { pushed: original.pushed }), ...(agent === 'antigravity' && mode === '--codex-report' ? { reportedAt: Math.max(sourceAt, reportedAt ?? 0) } : reportedAt === undefined ? {} : { reportedAt }), ...(isBoardPrompt && previous ? { state: previous.state, steps: previous.steps, ...(previous.approval === undefined ? {} : { approval: previous.approval }), ...(previous.asked === undefined ? {} : { asked: previous.asked }), ...(previous.askedOptions === undefined ? {} : { askedOptions: previous.askedOptions }) } : {}), agent, ...(event === undefined ? {} : { activity: [...priorActivity, { event, state: String(status), updated: clock }].slice(-16) }) }
       const { report, entries, cut } = limitReport(full)
       if (entry === current) {
         reportCut = cut
@@ -1483,8 +1472,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       return true
     }
     // The conversation's next hook, which runs outside the sandbox, brings the last marked line of its own transcript in
-    // as the report it was, with its own time (#1384). The session record's `reportedAt` for this board keeps it from being
-    // applied twice or over a newer report. A board that cannot take it yet leaves it for the next hook; a report the board refuses is
+    // as the report it was, with its own time (#1384). The conversation's `reportedAt` in its session record keeps it from
+    // being applied twice or over a newer report. A board that cannot take it yet leaves it for the next hook; a report the board refuses is
     // dropped. Where the read ended is kept, so the next hook reads only what came after.
     const bringMarkedReport = async (conversation: string): Promise<void> => {
       const path = raw.transcriptPath
