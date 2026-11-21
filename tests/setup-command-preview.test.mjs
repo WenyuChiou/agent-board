@@ -55,3 +55,22 @@ test('the printed found-Codex command keeps the explicit binary and language wit
     assert.equal(commands.calls().some(call => call.method === 'config/batchWrite'), false)
   })
 })
+
+test('a copied apply command from a preview keeps the explicit Codex binary (#1356)', () => fixture((setup, f) => {
+  const custom = join(f.root, 'custom Codex configuration')
+  syntheticCodex(f, custom)
+  const explicit = join(f.root, 'explicit host')
+  cpSync(join(f.root, 'synthetic bin'), explicit, { recursive: true })
+  const bin = join(explicit, process.platform === 'win32' ? 'codex.cmd' : 'codex')
+  // No Codex on PATH: only the binary the person named can reach the applied setup.
+  f.env.PATH = ''
+  const said = setup('--agent', 'codex', '--codex-dir', custom, '--codex-bin', bin, '--lang', 'en')
+  const command = commandIn(said, bootstrap[0].apply)
+  assert.equal((command.match(/--codex-bin/g) ?? []).length, 1, command)
+  assert.ok(command.includes('explicit host'), command)
+  const result = runPrinted(command, f)
+  assert.ifError(result.error)
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(commandIn(result.stdout, bootstrap[0].codex).includes('explicit host'), result.stdout)
+  assert.ok(!result.stdout.includes(bootstrap[0].codexPath), 'no placeholder for a binary already named')
+}))

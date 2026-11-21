@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { bootstrap, fixture, locales } from './helpers/setup-fixture.mjs'
-import { runPrinted, syntheticCodex } from './helpers/setup-command-fixture.mjs'
+import { commandIn, runPrinted, syntheticCodex } from './helpers/setup-command-fixture.mjs'
 
 const launcher = fileURLToPath(new URL('../bin/agent-board.mjs', import.meta.url))
 const quote = word => `'${word.replaceAll("'", process.platform === 'win32' ? "''" : "'\\''")}'`
@@ -48,4 +48,26 @@ test('the launcher forwards an explicit data root once to the selected installed
   assert.equal(argv.filter(word => word === '--data-dir').length, 1)
   assert.equal(argv[argv.indexOf('--data-dir') + 1], data)
   assert.equal(argv[argv.indexOf('--progress-file') + 1], f.env.CLAUDE_PROGRESS_FILE)
+}))
+
+test('a copied board command after the sidecar setup of a plugin-connected Antigravity runs the board beside progress (#1356)', () => fixture((unused, f) => {
+  // The plugin connected Antigravity: its board sits beside progress, and --data-dir only names where setup keeps its records.
+  const control = join(realpathSync(f.env.HOME), '.agent-board')
+  mkdirSync(control, { recursive: true })
+  mkdirSync(join(f.env.HOME, '.gemini', 'antigravity'), { recursive: true })
+  const record = { version: 1, revision: 1, disabled: false, owned: {}, notified: [], connectedProgress: f.env.CLAUDE_PROGRESS_FILE, setup: { agents: [{ agent: 'antigravity', label: 'Antigravity', hook: 'configured', board: 'none' }], problems: [], node: process.version } }
+  writeFileSync(join(control, 'legacy-connect.json'), JSON.stringify(record))
+  writeFileSync(join(f.root, 'agent-board.mjs'), 'process.stdout.write(JSON.stringify(process.argv.slice(2)))\n')
+  const said = f.launch('--agent', 'antigravity', '--antigravity-sidecar', '--lang', 'en', '--apply')
+  const printed = commandIn(said, bootstrap[0].board)
+  const prefix = 'npx @wenyuchiou/agent-board'
+  assert.ok(printed.startsWith(prefix), said)
+  assert.ok(!printed.includes(join(f.root, 'data')), printed)
+  const direct = `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(launcher)}`
+  const result = runPrinted(printed.replace(prefix, direct), f)
+  assert.ifError(result.error)
+  assert.equal(result.status, 0, result.stderr)
+  const argv = JSON.parse(result.stdout)
+  assert.equal(argv.filter(word => word === '--data-dir').length, 1)
+  assert.equal(argv[argv.indexOf('--data-dir') + 1], f.root)
 }))

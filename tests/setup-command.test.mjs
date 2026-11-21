@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { resolve } from 'node:path'
 import { test } from 'node:test'
 import { installCommand, installContext } from '../scripts/setup-command.mjs'
 
@@ -9,8 +10,11 @@ test('install commands retain only explicit context in a fixed order and emit de
   const args = [...options].reverse().flatMap(flag => [flag, flag + ' value'])
   const context = { program: 'node board.mjs', ...installContext([...args, '--apply', '--json', '--plain', '--agent', 'hermes', '--codex-trust', '--unknown', 'ignored']), dataDir: 'derived' }
   const built = installCommand(context, { target: 'board', mode: '--codex-doctor' }, quote)
-  assert.deepEqual(built.argv, [...options.flatMap(flag => [flag, flag + ' value']), '--codex-doctor'])
+  // A board runs from its script's folder, so that folder replaces an explicit --data-dir naming another (#1356).
+  assert.deepEqual(built.argv, [...options.flatMap(flag => [flag, flag === '--data-dir' ? 'derived' : flag + ' value']), '--codex-doctor'])
   assert.equal(built.argv.filter(word => word === '--data-dir').length, 1)
+  const same = installCommand({ program: 'board', ...installContext(['--data-dir', 'relative data']), dataDir: resolve('relative data') }, { target: 'board' }, quote)
+  assert.deepEqual(same.argv, ['--data-dir', 'relative data'], 'an explicit folder that is the script folder stays as typed')
   const derived = installCommand({ program: 'board', ...installContext(['--home', 'explicit home', '--lang', 'en']), dataDir: 'derived' }, { target: 'board' }, quote)
   assert.deepEqual(derived.argv, ['--home', 'explicit home', '--data-dir', 'derived', '--lang', 'en'])
   assert.deepEqual(installCommand({ program: 'board', ...installContext([]) }, { target: 'board' }, quote).argv, [])

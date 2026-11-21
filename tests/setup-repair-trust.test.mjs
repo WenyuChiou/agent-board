@@ -40,3 +40,19 @@ test('a terminal repair ends with only the repaired agent session steps in every
     for (const host of ['Cursor', 'OpenCode', 'Antigravity', 'Claude Code']) assert.ok(!next.includes(host), `unrepaired ${host} needs no session step`)
   }, ['codex'])
 })
+
+test('a preview that adds a new agent beside an untrusted Codex keeps the Codex trust step in Next steps and in the terminal list (#1278)', () => {
+  fixture((setup, f) => {
+    setupPrograms(f.root, f.env, ['codex'])
+    setup('--agent', 'codex', '--lang', 'en', '--apply')
+    const preview = setup('--agent', 'codex,cursor', '--lang', 'en')
+    assert.match(preview.split(bootstrap[0].next)[1] ?? '', /--codex-trust/, preview)
+  })
+  terminal(f => {
+    assert.equal(f.invoke(['--agent', 'codex', '--lang', 'en', '--apply']).status, 0)
+    const asked = f.invoke(['--agent', 'codex,cursor', '--lang', 'en'], 'n\n')
+    assert.equal(asked.status, 0, asked.stderr)
+    const list = asked.stdout.split(bootstrap[0].thisWill)[1] ?? ''
+    assert.ok(list.includes(bootstrap[0].trustPart.replace('{host}', 'Codex')), asked.stdout)
+  }, ['codex'])
+})
