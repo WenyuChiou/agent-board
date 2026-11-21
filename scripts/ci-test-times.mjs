@@ -1,6 +1,7 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { codeTokens } from './ci-impact.mjs'
 
 // Writes tests/ci-test-times.json from the logs of GitHub Actions jobs (#1762). scripts/ci-impact.mjs reads that table to
 // deal the tests of the self-parted files out to the parts by time, and to weigh each other file.
@@ -68,8 +69,25 @@ export const parseJob = (text, name = '') => {
   return { part, files, isSerial: plain.some(line => /^\s*CI_TEST_SERIAL: 1\s*$/.test(line)) }
 }
 
-// The u flag makes \p{L} and \p{N} the Unicode letters and digits; without it they are the characters p, {, L, N and }.
-const squash = text => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')
+const unescape = text => text.replace(/\\(?:u\{([\da-fA-F]+)\}|u([\da-fA-F]{4})|x([\da-fA-F]{2})|([\s\S]))/g, (all, point, unit, byte, char) =>
+  point || unit || byte ? String.fromCodePoint(parseInt(point || unit || byte, 16)) : ({ n: '\n', r: '\r', t: '\t' })[char] ?? char)
+const literal = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+
+// The titles a test file can give its tests: every string in its source, exactly as Node prints it, and every template with
+// its ${…} parts as wildcards, when the template has at least 12 letters of its own (so `${name}` alone matches nothing).
+// A title is matched whole, never by its letters only, so a test of another file in the same run is not taken for one of it.
+export const sourceTitles = source => {
+  const titles = new Set()
+  const patterns = []
+  for (const token of codeTokens(source)) {
+    if (!token.isString) continue
+    const inner = token.raw.slice(1, -1)
+    if (!token.raw.startsWith('`') || !inner.includes('${')) { titles.add(unescape(inner)); continue }
+    const parts = inner.split(/\$\{[^}]*\}/).map(unescape)
+    if (parts.join('').replace(/[^\p{L}]/gu, '').length >= 12) patterns.push(new RegExp('^' + parts.map(literal).join('[\\s\\S]+?') + '$'))
+  }
+  return { has: title => titles.has(title) || patterns.some(pattern => pattern.test(title)) }
+}
 
 // The items of one job log: the total of each file and the time of each top-level test of a self-parted file. A serial run has
 // one Node run for each file, in partFiles order. Any other run has one Node run for all its files, so a test belongs to the
@@ -100,10 +118,10 @@ export const readJob = (text, { name, partFiles, selfPartedTests, readSource }) 
   }
   // A log cut off before the run's summary holds no complete run: refuse it, so the table is never written without its tests.
   if (runs.length !== 1) throw new Error(name + ': ' + runs.length + ' complete test runs in the log, 1 expected for a run of all its files')
-  const owners = Object.fromEntries(selfPartedTests.filter(file => job.files.includes(file)).map(file => [file, squash(readSource(file))]))
+  const owners = selfPartedTests.filter(file => job.files.includes(file)).map(file => [file, sourceTitles(readSource(file))])
   const seenOf = new Map()
   for (const run of runs) for (const test of run.tests) {
-    const file = Object.keys(owners).find(path => owners[path].includes(squash(test.title)))
+    const file = owners.find(([, titles]) => titles.has(test.title))?.[0]
     if (!file) continue
     if (!seenOf.has(file)) seenOf.set(file, new Map())
     items.tests[file] ??= Object.create(null)

@@ -695,27 +695,52 @@ const jobLog = (files, { isSerial = false, lines = [] } = {}) => [
 ].join('\n')
 
 test('the time table counts a repeated title the same way for every title, constructor and __proto__ included (#1762)', async () => {
-  const { readJob } = await import('../scripts/ci-test-times.mjs')
+  const { readJob, buildTable } = await import('../scripts/ci-test-times.mjs')
   const file = 'tests/board.test.mjs'
   const text = jobLog([file], { isSerial: true, lines: ['✔ constructor (1.5ms)', '✔ __proto__ (2ms)', '✔ constructor (2.5ms)', 'ℹ duration_ms 9'] })
   const items = readJob(text, { name: 'synthetic', partFiles: files => files, selfPartedTests: [file], readSource: () => '' })
   assert.deepEqual(Object.entries(items.tests[file]), [['constructor', 1.5], ['__proto__', 2], ['constructor #2', 2.5]])
+  // And the table written from it, as the JSON file holds it, keeps all three with their times.
+  const table = JSON.parse(JSON.stringify(buildTable([items])))
+  assert.deepEqual(Object.entries(table.tests[file]), [['__proto__', 2], ['constructor', 2], ['constructor #2', 3]])
+  assert.equal(table.files[file], 7)
 })
 
-test('in a run of several files, only a test whose title is in a self-parted file\'s source is timed for that file (#1762)', async () => {
+test('a test.skip copy of a title counts in partTest as in the time table, so the next copy runs in the part its time gives it (#1762)', async () => {
+  const { partTest } = await import('../scripts/ci-impact.mjs')
+  const { readJob, buildTable } = await import('../scripts/ci-test-times.mjs')
+  const file = 'tests/board.test.mjs'
+  const lines = ['✔ the slowest test (1000ms)', '﹣ a repeated title (0.1ms) # SKIP', '✔ a repeated title (10ms)', 'ℹ duration_ms 1100']
+  const times = buildTable([readJob(jobLog([file], { isSerial: true, lines }), { name: 'synthetic', partFiles: files => files, selfPartedTests: [file], readSource: () => '' })])
+  assert.deepEqual(Object.keys(times.tests[file]), ['a repeated title #2', 'the slowest test'])
+  // By the table the slowest test goes to part 1 of 2 and the second copy to part 2; the title alone would hash to part 1.
+  const ran = {}
+  for (const part of ['1/2', '2/2']) {
+    const calls = ran[part] = []
+    const record = Object.assign(title => calls.push(title), { skip: title => calls.push('skip: ' + title), only: () => {}, todo: () => {} })
+    const run = partTest(record, part, file, times)
+    run('the slowest test')
+    run.skip('a repeated title')
+    run('a repeated title')
+  }
+  assert.ok(ran['2/2'].includes('a repeated title') && !ran['1/2'].includes('a repeated title'), JSON.stringify(ran))
+  assert.equal([...ran['1/2'], ...ran['2/2']].filter(call => call === 'skip: a repeated title').length, 1, JSON.stringify(ran))
+})
+
+test('in a run of several files, a test is timed for a self-parted file only when that file\'s source gives it that whole title, written out or built from a template (#1762)', async () => {
   const { readJob } = await import('../scripts/ci-test-times.mjs')
   const sources = {
-    'tests/messaging.test.mjs': "import { test } from 'node:test'\ntest('a message reaches its reader', () => {})\n",
-    'tests/exchange.test.mjs': "import { test } from 'node:test'\ntest('an exchange keeps its order', () => {})\n",
+    'tests/messaging.test.mjs': "import { test } from 'node:test'\ntest('a message reaches its reader', () => {})\nfor (const kind of ['direct', 'queued']) test(`a ${kind} message reaches every reader`, () => {})\n",
+    'tests/exchange.test.mjs': "import { test } from 'node:test'\ntest('an exchange keeps its order', () => {})\ntest('a message reaches its reader!', () => {})\n",
   }
-  const text = jobLog(Object.keys(sources), { lines: ['✔ a message reaches its reader (3ms)', '✔ an exchange keeps its order (4ms)', 'ℹ duration_ms 20'] })
-  const items = readJob(text, { name: 'synthetic', partFiles: files => files, selfPartedTests: ['tests/messaging.test.mjs'], readSource: file => sources[file] })
-  assert.deepEqual({ ...items.tests['tests/messaging.test.mjs'] }, { 'a message reaches its reader': 3 })
+  const lines = ['✔ a message reaches its reader (3ms)', '✔ a direct message reaches every reader (5ms)', '✔ an exchange keeps its order (4ms)', '✔ a message reaches its reader! (6ms)', 'ℹ duration_ms 20']
+  const items = readJob(jobLog(Object.keys(sources), { lines }), { name: 'synthetic', partFiles: files => files, selfPartedTests: ['tests/messaging.test.mjs'], readSource: file => sources[file] })
+  assert.deepEqual({ ...items.tests['tests/messaging.test.mjs'] }, { 'a message reaches its reader': 3, 'a direct message reaches every reader': 5 })
 })
 
 test('a log of a run of several files cut off before its summary is refused, so no table is written from it (#1762)', async () => {
   const { readJob } = await import('../scripts/ci-test-times.mjs')
-  const text = jobLog(['tests/messaging.test.mjs'], { lines: ['✔ a message reaches its reader (3ms)'] })
+  const text = jobLog(['tests/messaging.test.mjs', 'tests/exchange.test.mjs'], { lines: ['✔ a message reaches its reader (3ms)', '✔ an exchange keeps its order (4ms)'] })
   assert.throws(() => readJob(text, { name: 'cut', partFiles: files => files, selfPartedTests: ['tests/messaging.test.mjs'], readSource: () => "test('a message reaches its reader')" }), /cut: 0 complete test runs in the log/)
 })
 

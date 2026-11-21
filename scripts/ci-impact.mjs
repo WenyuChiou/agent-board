@@ -227,7 +227,7 @@ export const timingsPath = () => process.env.CI_TEST_TIMINGS
 export const readBoardTimings = (path = timingsPath()) => JSON.parse(readFileSync(path, 'utf8'))
 
 // Keep literals as tokens so braces and helper names inside prose cannot become code.
-const codeTokens = text => {
+export const codeTokens = text => {
   const tokens = []
   const pattern = /\s+|\/\/[^\r\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:\\[\s\S]|[^'\\])*'|"(?:\\[\s\S]|[^"\\])*"|`(?:\\[\s\S]|[^`\\])*`|[\w$]+|=>|\?\.|\.\.\.|[^\s]/gy
   let match
@@ -488,7 +488,12 @@ export const partTest = (test, part = process.env.CI_TEST_PART ?? '', file = cal
     const key = seen.get(title) === 1 ? title : title + ' #' + seen.get(title)
     return (dealt?.get(key) ?? hashOf(title) % total) === index - 1
   }
-  return Object.assign((...args) => (runs(...args) ? test(...args) : undefined), { skip: test.skip, only: test.only, todo: test.todo })
+  // A test.skip or test.todo is counted and dealt like any other test: a job log lists it too, so the table counts it (#1762).
+  return Object.assign((...args) => (runs(...args) ? test(...args) : undefined), {
+    skip: (...args) => (runs(...args) ? test.skip(...args) : undefined),
+    only: test.only,
+    todo: (...args) => (runs(...args) ? test.todo(...args) : undefined),
+  })
 }
 
 // A Windows job ran three spawn-heavy files at once on a 4-vCPU runner: every test slowed about 1.35x and the
