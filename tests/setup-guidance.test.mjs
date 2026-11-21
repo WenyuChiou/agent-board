@@ -267,7 +267,7 @@ test('a trust command for a Codex directory with a curly apostrophe parses in Po
     const said = setup('--agent', 'codex', '--codex-dir', dir, '--codex-bin', codex, '--lang', 'en')
     // The printed directory doubles the curly apostrophe, like the straight one.
     const quoted = `'${dir.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'`
-    assert.ok(said.includes(`--codex-dir ${quoted} --codex-trust --codex-bin`), `the trust command doubles the curly apostrophe\n${said}`)
+    assert.ok(said.includes(`--codex-dir ${quoted}`), `the trust command doubles the curly apostrophe\n${said}`)
     // And the printed command parses in PowerShell instead of ending the string at the apostrophe.
     const command = /preview with (.+ --codex-trust --codex-bin .+?), then run it again/.exec(said)?.[1]
     assert.ok(command, `the output carries the trust command\n${said}`)

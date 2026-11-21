@@ -857,7 +857,8 @@ const main = () => {
           // The upgrade kept the trust the read-back just confirmed: no trust step.
         } else if (untrusted !== undefined && untrusted.length > 0) {
           steps.push(words('codexTrustNeeded', { command: boardStep(plan, agent, ['--codex-trust'], codex).text, events: untrusted.map(event => event[0].toUpperCase() + event.slice(1)).join(', ') }))
-        } else {
+        } else if (!hasTrustedHooks) {
+          // Without a read-back, fall back to the confirmed-trust check: no trust step when the hooks are already trusted.
           steps.push(words('codex', { command: boardStep(plan, agent, ['--codex-trust'], codex).text }))
         }
       }
