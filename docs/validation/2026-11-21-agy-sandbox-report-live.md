@@ -4,7 +4,7 @@ Date: 2026-11-21. Verdict: **cause found; the conversation's own output carries 
 
 ## Versions
 
-- agy (Antigravity CLI) 1.5.10 and 1.5.13, default model, Windows 11 build 10.0.26300.
+- agy (Antigravity CLI) 1.5.10, 1.5.13 and 1.5.14, default model, Windows 11 build 10.0.26300.
 - Node v24.14.0.
 - The kept test home of `docs/validation/PARITY-CHECKLIST.md`. Its agy settings got two keys for these runs, `enableTerminalSandbox: true` and `toolPermission: proceed-in-sandbox`; a copy was kept and put back afterwards.
 
@@ -30,6 +30,23 @@ agy 1.5.13, `agy --print`, the board's hooks as installed plus a temporary captu
 3. `PostInvocation` carries `transcriptPath` and `conversationId`, as `Stop` does.
 4. A 4 KB line came through whole. A 20 KB output was cut to about 10 KB ("truncated 10296 of 20180 bytes from the middle"), the full text kept under the conversation's `steps/<n>/output.txt`. So the marked line is capped at 4096 bytes, and a line that does not parse whole is refused.
 5. Both scripts exited 3 and the entry said `Command exited with code 1.` Nothing reads the exit code; the marked line is what counts.
+
+## The fix, live in agy's terminal interface
+
+agy 1.5.14 in its terminal interface (`agy -i`), the two sandbox keys on, the board installed from this pull request's
+code (b33bc57a) with the Antigravity setup. The prompt asked the model to run the board's report command once, with a
+synthetic plan: one done step and one `[?]` question, state `waiting`.
+
+1. The report command printed one marked line (the plan's JSON was 127 bytes) and the answer `"kept": true` with the
+   note that the report reaches the board at the conversation's next step.
+2. The conversation's next hook (`PostInvocation`) applied it: the row has the plan's title and both steps, its state is
+   `waiting`, the `[?]` step is a Needs you card in the board's JSON, and `reportedAt` in the session record is the
+   marked line's time.
+3. The marked line was in the finished `MODEL/GENERIC` output entry after `Command output:`. The model's reply quoted
+   the output, so the line was in a `PLANNER_RESPONSE` entry too: that one was not read, and the hook error log noted
+   `MARK_OUTSIDE_OUTPUT`.
+4. The transcript the hooks name is under the conversation's `.system_generated/logs/` folder; the check that it is the
+   conversation's own accepted it.
 
 ## Not shown
 
