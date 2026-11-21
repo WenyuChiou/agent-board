@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { setTimeout as pause } from 'node:timers/promises'
 import { test } from 'node:test'
 import { observeHookRecovery } from './lib/recovery-observation.mjs'
 
@@ -33,21 +32,23 @@ test('L5 recovery observation waits for a claimed event to land before judging a
     const pendingEvent = join(fixture.pending, event)
     const inflightEvent = join(fixture.inflight, event)
     writeFileSync(pendingEvent, '{}')
-    const write = (async () => {
-      await pause(20)
-      renameSync(pendingEvent, inflightEvent)
-      await pause(50)
-      writeFileSync(fixture.progress, '<!-- auto session=abc agent=codex resume=codex-race-session-2 state=done -->\n')
-    })()
+    // The write lands on the observer's own reads, and the observer runs on a fake clock, so
+    // no wall-clock scheduling is involved: a stalled runner cannot time the test out (#1740).
+    // R6 forbids raising a timeout to fix a flaky test, so the bound stays at 500 ms.
+    const clock = { t: 0, now: () => clock.t, sleep: async ms => { clock.t += ms } }
+    let reads = 0
+    const read = () => {
+      reads += 1
+      if (reads === 2) renameSync(pendingEvent, inflightEvent)
+      if (reads === 3) writeFileSync(fixture.progress, '<!-- auto session=abc agent=codex resume=codex-race-session-2 state=done -->\n')
+      return fixture.read()
+    }
 
-    const started = performance.now()
-    const observed = await observeHookRecovery({ read: fixture.read, sessions: ['codex-race-session-2'], withinMs: 500, pollMs: 5 })
-    const observedElapsed = performance.now() - started
-    await write
+    const observed = await observeHookRecovery({ read, sessions: ['codex-race-session-2'], withinMs: 500, pollMs: 5, clock })
 
-    assert.equal(observed.isSettled, true)
+    assert.equal(observed.isSettled, true, JSON.stringify(observed.snapshots))
     assert.equal(observed.hasTimedOut, false)
-    assert.ok(observedElapsed >= 50, 'the observer returned before the delayed progress write could land')
+    assert.ok(observed.snapshots.at(-1).elapsedMs >= 5, 'the observer settled before the write could land')
     assert.deepEqual(observed.counts, { 'codex-race-session-2': 1 })
     assert.ok(observed.snapshots.some(snapshot => snapshot.pending.includes(event) && snapshot.counts['codex-race-session-2'] === 0))
     assert.ok(observed.snapshots.some(snapshot => snapshot.pending.length === 0 && snapshot.counts['codex-race-session-2'] === 0))

@@ -5879,6 +5879,52 @@ test('/progress looks for the board script beside a Windows or a POSIX progress 
   assert.equal(liveBoardScript('C:/Users/me/.agent-board/progress.md'), 'C:/Users/me/.agent-board/agent-board.mjs')
 })
 
+// A zombie has already exited and released its files, but kill(pid, 0) still finds it.
+// Unknown state keeps the cleanup waiting rather than deleting a live server's folder.
+const isFixtureServerAlive = (pid, {
+  probe = one => process.kill(one, 0),
+  readStat = one => readFileSync(`/proc/${one}/stat`, 'utf8'),
+  platform = process.platform,
+} = {}) => {
+  try { probe(pid) } catch (error) { return error.code !== 'ESRCH' }
+  if (platform !== 'linux') return true
+  try {
+    const stat = readStat(pid)
+    const close = stat.lastIndexOf(')')
+    return !stat.startsWith(`${pid} (`) || close < 0 || stat.slice(close + 1, close + 4) !== ' Z '
+  }
+  catch (error) { return error.code !== 'ENOENT' }
+}
+
+test('fixture cleanup distinguishes an exited zombie from a running server (#1647)', () => {
+  const options = state => ({ platform: 'linux', probe: () => {}, readStat: () => `42 (synthetic ) server) ${state} 1 0 0` })
+  assert.equal(isFixtureServerAlive(42, options('Z')), false)
+  for (const state of ['R', 'S', 'D', 'T']) assert.equal(isFixtureServerAlive(42, options(state)), true)
+  assert.equal(isFixtureServerAlive(42, { platform: 'linux', probe: () => {}, readStat: () => '42 (synthetic ) Z trap) S 1 0 0' }), true)
+  assert.equal(isFixtureServerAlive(42, { platform: 'linux', probe: () => {}, readStat: () => '43 (synthetic) Z 1 0 0' }), true)
+})
+
+test('fixture cleanup keeps unreadable or unknown process state alive and accepts a vanished process (#1647)', () => {
+  const failure = code => Object.assign(new Error('synthetic process state'), { code })
+  for (const code of ['EACCES', 'EIO']) {
+    assert.equal(isFixtureServerAlive(42, { platform: 'linux', probe: () => {}, readStat: () => { throw failure(code) } }), true)
+  }
+  for (const text of ['', 'not a process state', '42 (synthetic) ? 1 0 0']) {
+    assert.equal(isFixtureServerAlive(42, { platform: 'linux', probe: () => {}, readStat: () => text }), true)
+  }
+  assert.equal(isFixtureServerAlive(42, { platform: 'linux', probe: () => {}, readStat: () => { throw failure('ENOENT') } }), false)
+  assert.equal(isFixtureServerAlive(42, { probe: () => { throw failure('ESRCH') } }), false)
+  assert.equal(isFixtureServerAlive(42, { probe: () => { throw failure('EPERM') } }), true)
+})
+
+test('fixture cleanup retains native liveness checks outside Linux (#1647)', () => {
+  for (const platform of ['win32', 'darwin']) {
+    const readStat = () => { throw new Error('must not read procfs on this platform') }
+    assert.equal(isFixtureServerAlive(42, { platform, probe: () => {}, readStat }), true)
+    assert.equal(isFixtureServerAlive(42, { platform, probe: () => { throw Object.assign(new Error('gone'), { code: 'ESRCH' }) }, readStat }), false)
+  }
+})
+
 // A synthetic board for --serve runs, with its own folder for running programs.
 const serveIn = () => {
   const dir = mkdtempSync(join(tmpdir(), 'board-serve-'))
@@ -5930,7 +5976,7 @@ const serveIn = () => {
     for (let tries = 0; existsSync(served) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
     // Windows can still hold the process's working folder after its address file is
     // removed. Wait for that owned server to exit before deleting the fixture.
-    const alive = () => { try { process.kill(pid, 0); return true } catch { return false } }
+    const alive = () => isFixtureServerAlive(pid)
     if (typeof pid === 'number' && pid !== process.pid) {
       for (let tries = 0; alive() && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
       assert.ok(!alive(), 'the fixture server must exit before cleanup')
@@ -11913,6 +11959,59 @@ test('a reply button on an unconnected question says it copies and the card then
       assert.notEqual(words.pgPasteLater('A', 'B'), EN.pgPasteLater('A', 'B'))
     }
   } finally { await board.close() }
+})
+
+test('the page says the installed script is older and how to update it (#1304)', async () => {
+  const runtime = await sourceBoard()
+  const view = (words) => runtime.buildView([], [], null, groupedNow, 0, {}, words)
+  const model = (words, versions, olderScript) => runtime.serveModel(view(words), [], words, new Set(), false, undefined, false, { now: groupedNow, repoOf: () => null, versions, unreadable: [], ...(olderScript === undefined ? {} : { olderScript }) })
+  const command = 'npx @wenyuchiou/agent-board@9.9.9 setup'
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const setup = model(words, { board: '1.2.3', package: '9.9.9' }, { update: 'setup', command })
+    assert.equal(setup.health?.length, 1, JSON.stringify(setup.health))
+    assert.equal(setup.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', command))
+    const plugin = model(words, { board: '1.2.3', package: '9.9.9' }, { update: 'plugin' })
+    assert.equal(plugin.health?.length, 1, JSON.stringify(plugin.health))
+    assert.equal(plugin.health[0], words.serveOlderScriptPlugin('1.2.3', '9.9.9'))
+    // No package, the same version, or a newer script: the page shows nothing.
+    for (const versions of [{ board: '1.2.3', package: null }, { board: '1.2.3', package: '1.2.3' }, { board: '9.9.9', package: '1.2.3' }]) {
+      assert.equal(model(words, versions, { update: 'setup', command }).health, undefined)
+    }
+    // A newer package with no update instruction: nothing to say.
+    assert.equal(model(words, { board: '1.2.3', package: '9.9.9' }).health, undefined)
+  }
+})
+
+test('the page on the local network gets update advice without the data folder (#1304)', async () => {
+  const runtime = await sourceBoard()
+  const view = (words) => runtime.buildView([], [], null, groupedNow, 0, {}, words)
+  const model = (words, isLan, olderScript) => runtime.serveModel(view(words), [], words, new Set(), isLan, undefined, false, { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: '9.9.9' }, unreadable: [], olderScript })
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    // A custom data folder, bare, quoted, or holding a `$`, a backtick or a double quote: the
+    // phone's page keeps the advice the board script built without the folder, and no path
+    // survives in it, whatever the folder holds.
+    for (const [command, lanCommand] of [
+      ['npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir /home/person/custom-data', 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ['npx @wenyuchiou/agent-board@9.9.9 setup --data-dir "/home/person/my data"', 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir '/home/person/data$cache'", 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --agent codex --data-dir '/home/person/data`x`'", 'npx @wenyuchiou/agent-board@9.9.9 setup --agent codex'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '/home/person/board\"private\"/sensitive-project'", 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+      ["npx @wenyuchiou/agent-board@9.9.9 setup --data-dir '/home/person/data$cache more'", 'npx @wenyuchiou/agent-board@9.9.9 setup'],
+    ]) {
+      const lan = model(words, true, { update: 'setup', command, lanCommand })
+      assert.equal(lan.health?.length, 1, JSON.stringify(lan.health))
+      assert.equal(lan.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', lanCommand))
+      assert.equal(lan.health[0].includes('/home/person'), false, lan.health[0])
+      // The computer's own page keeps the full command, so the person can run it as written.
+      const local = model(words, false, { update: 'setup', command, lanCommand })
+      assert.equal(local.health?.length, 1, JSON.stringify(local.health))
+      assert.equal(local.health[0], words.serveOlderScriptSetup('1.2.3', '9.9.9', command))
+    }
+    // A plugin copy has no folder in its advice, so the phone's page is unchanged.
+    const plugin = model(words, true, { update: 'plugin' })
+    assert.equal(plugin.health?.length, 1, JSON.stringify(plugin.health))
+    assert.equal(plugin.health[0], words.serveOlderScriptPlugin('1.2.3', '9.9.9'))
+  }
 })
 
 test('the empty page lists the connected agents and how their work appears', async () => {

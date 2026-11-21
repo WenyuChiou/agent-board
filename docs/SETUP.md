@@ -98,6 +98,11 @@ The installed skill opens the interactive web board. Reopen with:
 node "$HOME/.agent-board/agent-board.mjs"
 ```
 
+This direct path works only while its script is installed. If `remove --apply`
+removes it, use `npx @wenyuchiou/agent-board` instead: the package entry gives setup
+guidance (and offers setup in an interactive terminal), rather than running a
+missing file.
+
 On Windows use the exact Node and script paths printed by setup. Closing a browser tab
 leaves the local service running. Close the board (the red power button) stops it;
 `--idle-minutes 30` opts into idle shutdown. No startup service is installed.
@@ -107,6 +112,9 @@ To run the normal archive sweep without a Claude session:
 ```sh
 node "$HOME/.agent-board/agent-board.mjs" --tidy
 ```
+
+If `remove --apply` removes that script, use `npx @wenyuchiou/agent-board --tidy`
+instead. With no board installed, it gives setup guidance and runs no sweep.
 
 Use the exact installed Node and script paths for a scheduler, including on Windows.
 The flag performs one sweep and exits; it installs no schedule or service and opens no
@@ -153,6 +161,10 @@ problem, run an explicit pass with the exact installed Node and script paths:
 ```sh
 node "$HOME/.agent-board/agent-board.mjs" --recover-hooks
 ```
+
+This direct path also stops working if `remove --apply` removes its script. Use
+`npx @wenyuchiou/agent-board --recover-hooks` instead; with no board installed, it
+gives setup guidance and runs no recovery.
 
 The JSON result names the processed and remaining metadata counts for the selected
 progress file. This command reads no stdin, starts no model, and changes no hook

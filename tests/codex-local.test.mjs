@@ -13205,7 +13205,7 @@ test('automatic hook recovery applies a queued Antigravity Stop after the lock i
   }
 }))
 
-test('automatic hook recovery exhausts three locked attempts and leaves manual recovery possible', { timeout: 30000 }, () => fixture(async f => {
+test('automatic hook recovery gives up within its deadline while the lock is held and leaves manual recovery possible', { timeout: 30000 }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
   const recovery = automaticRecoveryFixture(f)
   const started = await fireCommand(f, recovery.hooks.PreInvocation[0].command, recovery.payload)
@@ -13219,7 +13219,11 @@ test('automatic hook recovery exhausts three locked attempts and leaves manual r
     await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the installed Stop hook must launch recovery for its queued metadata')
     recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
     await waitForAutomaticRecovery(() => !isReporterAlive(recoveryPid), 'the bounded automatic helper must exit while the synthetic lock remains held')
-    assert.equal(readFileSync(recovery.attemptsFile, 'utf8'), '1\n1\n1\n')
+    // The helper has one 8 s deadline from the job's creation, gives each attempt up to 2 s and starts none with
+    // less than 0.4 s left (hooks/hook-recovery.ts). On a slow runner, attempts that each meet the held lock can
+    // spend it in two (#1745). The promise is at most three, at least one, and then the manual-recovery log line.
+    const attempts = readFileSync(recovery.attemptsFile, 'utf8')
+    assert.match(attempts, /^(?:1\n){1,3}$/, `attempts made: ${JSON.stringify(attempts)}`)
     assert.match(hookLog(f), /antigravity HOOK_RECOVERY_NEEDED\r?\n$/)
     assert.equal(existsSync(recovery.lease), false)
     assert.equal(pendingFiles(f).length, 1)
