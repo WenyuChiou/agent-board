@@ -265,12 +265,17 @@ test('a trust command for a Codex directory with a curly apostrophe parses in Po
     const dir = join(root, 'Codex\u2019s Home')
     mkdirSync(dir, { recursive: true })
     const said = setup('--agent', 'codex', '--codex-dir', dir, '--codex-bin', codex, '--lang', 'en')
-    // The printed directory doubles the curly apostrophe, like the straight one.
-    const quoted = `'${dir.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'`
-    assert.ok(said.includes(`--codex-dir ${quoted}`), `the trust command doubles the curly apostrophe\n${said}`)
-    // And the printed command parses in PowerShell instead of ending the string at the apostrophe.
+    // The trust command itself must carry the selected directory: a whole-output
+    // check could match the apply step while the trust command omits --codex-dir.
     const command = /preview with (.+ --codex-trust --codex-bin .+?), then run it again/.exec(said)?.[1]
     assert.ok(command, `the output carries the trust command\n${said}`)
+    // Parse the --codex-dir argument out of the captured trust command and compare it
+    // with the selected directory, undoing the doubled quotes PowerShell needs: the
+    // printed directory doubles the curly apostrophe, like the straight one.
+    const captured = /--codex-dir '((?:[^'\u2018\u2019\u201A\u201B]|['\u2018\u2019\u201A\u201B]{2})*)'/.exec(command)?.[1]
+    assert.ok(captured !== undefined, `the trust command names a Codex directory\n${command}`)
+    assert.equal(captured.replace(/(['\u2018\u2019\u201A\u201B])\1/g, '$1'), dir, `the trust command names the selected directory\n${command}`)
+    // And the printed command parses in PowerShell instead of ending the string at the apostrophe.
     const file = join(root, 'trust-command.txt')
     writeFileSync(file, command)
     const script = `$t = $null; $e = $null; [System.Management.Automation.Language.Parser]::ParseInput([System.IO.File]::ReadAllText('${file.replaceAll("'", "''")}'), [ref]$t, [ref]$e) | Out-Null; if ($e) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }`
