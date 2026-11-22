@@ -90,7 +90,7 @@ const receiver = (over = {}) => {
     isTaken: over.isTaken ?? (() => false),
     now: () => clock,
     run: async (program, options) => { runs.push({ program, options }); return results[Math.min(runs.length - 1, results.length - 1)] },
-    giveBackWaitMs: 0, onError: over.onError,
+    giveBackWaitMs: 0, onError: over.onError, ...(over.codexHome === undefined ? {} : { codexHome: over.codexHome }),
     env: { PATH: 'synthetic', AGENT_BOARD_TOKEN_SYNTHETIC: 'x', CODEX_INTERNAL_ORIGINATOR_OVERRIDE: CODEX_APP_ORIGINATOR, CODEX_HOME: 'synthetic-home' },
   })
   return { app, client, runs, state, advance: ms => { clock += ms } }
@@ -257,6 +257,18 @@ test('a reply runs Codex\'s own resume command in the conversation\'s folder, in
   app.kill()
 })
 
+test('a reply runs in the Codex home the board found the conversation in, when the board names one', async () => {
+  // The board finds app conversations in the Codex home `--codex-dir` names; the run that resumes one reads that home, or
+  // Codex cannot find the conversation (after round 5 of #1771).
+  for (const [name, codexHome, expected] of [['named', 'chosen-home', 'chosen-home'], ['not named', undefined, 'synthetic-home']]) {
+    const { app, client, runs } = receiver({ codexHome })
+    await app.tick()
+    assert.equal(await deliverWith(client.attached.get(THREAD), callbacks()), `ACK ${NONCE} Blue it is.`, name)
+    assert.equal(runs[0].options.env.CODEX_HOME, expected, name)
+    app.kill()
+  }
+})
+
 test('while the app still holds the conversation, nothing was sent: the message goes back to the queue and waits 30 seconds, each time it is refused', async () => {
   const { app, client, runs, advance } = receiver({ results: [writerHeld, writerHeld, answered] })
   await app.tick()
@@ -337,6 +349,10 @@ test('Codex\'s refusal as it prints it while the app holds the conversation read
   assert.equal(held({ ...writerHeld, stderr: `${wrapped}.\n` }), false, 'the wrapper with a full stop and no code')
   assert.equal(held({ ...writerHeld, stderr: `${wrapped} (code -32600).\n` }), false, 'a full stop after the code')
   assert.equal(held({ ...writerHeld, stderr: `Error: thread/resume: thread/resume failed: thread-store conflict: thread ${THREAD} already has an active writer (code -32600)\n` }), false, 'the wrapper around a thread-store conflict')
+  // The line as Codex printed it, not trimmed: spaces before or after it are another line (after round 5 of #1771).
+  assert.equal(held({ ...writerHeld, stderr: printed(THREAD).replace('Error: thread/resume:', '  Error: thread/resume:') }), false, 'with spaces before it')
+  assert.equal(held({ ...writerHeld, stderr: printed(THREAD).replace('(code -32600)\n', '(code -32600)  \n') }), false, 'with spaces after it')
+  assert.equal(held({ ...writerHeld, stderr: `${printed(THREAD)}  \n\n` }), true, 'with blank lines after it')
   assert.equal(held({ ...writerHeld, stderr: `${printed(THREAD)}Error: turn failed after writing\n` }), false, 'not the last line')
 })
 

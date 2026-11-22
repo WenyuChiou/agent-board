@@ -13,7 +13,7 @@ if (args[0] !== 'exec' || args[1] !== 'resume') process.exit(2)
 const chunks = []
 for await (const chunk of process.stdin) chunks.push(chunk)
 const prompt = Buffer.concat(chunks).toString('utf8')
-appendFileSync(config.log, JSON.stringify({ args, cwd: process.cwd() }) + '\n')
+appendFileSync(config.log, JSON.stringify({ args, cwd: process.cwd(), codexHome: process.env.CODEX_HOME ?? null }) + '\n')
 const nonce = /ACK ([A-Za-z0-9]+)/.exec(prompt)?.[1]
 if (config.refuse === true) {
   // As Codex 0.167 printed it in the test home while an app-server held the conversation (#557).

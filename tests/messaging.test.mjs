@@ -6992,6 +6992,41 @@ test('a reply the Codex desktop app refuses goes back to the board\'s queue with
   }
 })
 
+test('a Codex desktop app conversation found in the Codex home --codex-dir names is run in that home', async () => {
+  // The board, as shipped, started with `--codex-dir` while CODEX_HOME names another folder: the board finds the conversation
+  // in the named home, and the run that resumes it has to read the same one (after round 5 of #1771).
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-app-home-'))
+  const home = join(dir, 'chosen-codex')
+  const app = '99999999-8888-4777-8666-555555555555'
+  writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef03 agent=codex resume=${app} dir=${encodeURIComponent(dir)} state=waiting updated=${new Date().toISOString()} -->\n### A Codex app task\n- [?] Orange or teal?\n<!-- /auto session=abcdef03 -->\n`)
+  const day = join(home, 'sessions', '2026', '11', '22')
+  mkdirSync(day, { recursive: true })
+  writeFileSync(join(day, `rollout-2026-11-22T00-00-00-${app}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: app, originator: 'Codex Desktop', cwd: dir } }) + '\n')
+  const log = join(dir, 'exec.log'), release = join(dir, 'release-run'), stub = join(dir, 'exec-stub.json')
+  writeFileSync(stub, JSON.stringify({ log, release, refuse: true }))
+  process.env.AGENT_BOARD_CODEX_BIN = fileURLToPath(new URL('./helpers/codex-exec-stub.mjs', import.meta.url))
+  process.env.CODEX_EXEC_STUB = stub
+  codexShortWait()
+  let board
+  try {
+    const appRoutes = testUnitRoutes.map(one => one.agent === 'codex' && one.kind === 'live'
+      ? { ...one, routes: { ...one.routes, idle: { ...one.routes.idle, surfaces: [...one.routes.idle.surfaces, SURFACE_IDS.codexApp], surfaceLines: { [SURFACE_IDS.codexApp]: 'reopen' } } } }
+      : one)
+    board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send', '--codex-dir', home], appRoutes)
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === app && one.surface === SURFACE_IDS.codexApp))
+    const send = await board.call('/api/messages/send', { id: 'AB-APP-003', target: connection.id, turn: 'session', text: 'Teal.' })
+    assert.equal(send.status, 200, JSON.stringify(send.body))
+    const runs = await waitFor(async () => { const lines = (readFileSyncSafe(log) ?? '').split('\n').filter(Boolean); return lines.length > 0 ? lines : undefined })
+    assert.equal(JSON.parse(runs[0]).codexHome, home, 'the named home, not the CODEX_HOME the board was started with')
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_EXEC_STUB; codexShortWait(false)
+    writeFileSync(release, '')
+    await board?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
+  }
+})
+
 test('1139 both ACK parsers accept the same complete lines', async () => {
   const { ackLine: clientAck } = await import('../scripts/message-client.mjs')
   const { ackLine: claudeAck } = await import('../hooks/receiver.ts')
