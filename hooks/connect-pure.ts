@@ -358,10 +358,11 @@ const stripHermesHooks = (text: string, isKeepingTop: boolean, owns: RegExp = OU
 export const withoutHermesHooks = (text: string, owns: RegExp = OURS): string => stripHermesHooks(text, false, owns)
 
 type HermesEvents = Array<[string, string, string?]>
-const hermesHasTimeout = (item: string): boolean => [...item.matchAll(/(?:^|[,{\n])\s*timeout\s*:\s*(\d+)/g)].some(match => Number(match[1]) >= hostHookTimeout('hermes'))
+// An option name may be quoted, as HERMES_OPTION reads it, so the same values written that way still count (#1314).
+const hermesHasTimeout = (item: string): boolean => [...item.matchAll(/(?:^|[,{\n])\s*(?:timeout|"timeout"|'timeout')\s*:\s*(\d+)/g)].some(match => Number(match[1]) >= hostHookTimeout('hermes'))
 const hermesHasMatcher = (item: string, expected: string | undefined): boolean => {
   if (expected === undefined) return true
-  const match = /(?:^|[,{\n])\s*matcher\s*:\s*(?:"([^"]*)"|'([^']*)'|([^,\s}#]+))/.exec(item)
+  const match = /(?:^|[,{\n])\s*(?:matcher|"matcher"|'matcher')\s*:\s*(?:"([^"]*)"|'([^']*)'|([^,\s}#]+))/.exec(item)
   return (match?.[1] ?? match?.[2] ?? match?.[3]) === expected
 }
 
@@ -426,19 +427,30 @@ const HERMES_COMMAND = /^(?:command|"command"|'command')[ \t]*:[ \t]*/
 const HERMES_OPTION = /^(?:"(timeout|matcher)"|'(timeout|matcher)'|(timeout|matcher))[ \t]*:[ \t]*("(?:\\.|[^"\\])*"|'(?:''|[^'])*'|[\w.-]+)[ \t]*(?:#[^\r\n]*)?$/
 
 // An edited hook may share an anchor with another entry. Remove only the simple item shape we
-// write, so a successful removal cannot strand an alias elsewhere in the config.
-const hasSimpleHermesOptions = (options: readonly string[]): boolean => {
-  const seen = new Set<string>()
+// write, so a successful removal cannot strand an alias elsewhere in the config. Its options by
+// name, values unquoted; undefined when the item is not that shape.
+const hermesOptionsOf = (options: readonly string[]): ReadonlyMap<string, string> | undefined => {
+  const seen = new Map<string, string>()
   for (const option of options.filter(isContent)) {
     const match = HERMES_OPTION.exec(option.trim())
     const key = match?.[1] ?? match?.[2] ?? match?.[3]
-    if (key === undefined || seen.has(key) || (key === 'timeout' && !/^\d+$/.test(match?.[4] ?? ''))) return false
-    seen.add(key)
+    const value = match?.[4] ?? ''
+    if (key === undefined || seen.has(key) || (key === 'timeout' && !/^\d+$/.test(value))) return undefined
+    let text = value
+    if (value.startsWith("'")) text = value.slice(1, -1).replace(/''/g, "'")
+    else if (value.startsWith('"')) { try { text = JSON.parse(value) as string } catch {} }
+    seen.set(key, text)
   }
-  return true
+  return seen
 }
 
-type HermesSetupItem = { command: string; isSimple: boolean }
+// Exactly the options this release writes for an event: its timeout, and its matcher when it has one. The
+// timeout is compared as text: Hermes reads `010` as 8 (a leading zero is octal to PyYAML), not 10.
+const isReleaseHermesOptions = (options: ReadonlyMap<string, string> | undefined, matcher: string | undefined): boolean =>
+  options !== undefined && options.size === (matcher === undefined ? 1 : 2) &&
+  options.get('timeout') === String(hostHookTimeout('hermes')) && (matcher === undefined || options.get('matcher') === matcher)
+
+type HermesSetupItem = { command: string; isSimple: boolean; options?: ReadonlyMap<string, string> }
 
 // Decode identity separately from whether the item can be removed. A command written with YAML
 // escapes still belongs to its install record even when an anchor or alias prevents editing it.
@@ -492,23 +504,26 @@ const hermesSetupItemOf = (lines: readonly string[]): HermesSetupItem | undefine
   const after = rest.slice(scalar.length)
   if (isFlow) {
     const closing = /^[ \t]*((?:,[^}\r\n]*)?)\}[ \t]*(?:#[^\r\n]*)?\r?(?:\n|$)/.exec(after)
-    const isSimple = closing !== null && hasSimpleHermesOptions((closing[1] ?? '').split(',').slice(1)) &&
-      !after.slice(closing[0].length).split('\n').some(isContent)
-    return { command, isSimple }
+    const options = closing === null ? undefined : hermesOptionsOf((closing[1] ?? '').split(',').slice(1))
+    const isSimple = options !== undefined && !after.slice((closing?.[0] ?? '').length).split('\n').some(isContent)
+    return { command, isSimple, ...(options === undefined ? {} : { options }) }
   }
   const ending = /^[ \t]*(?:#[^\r\n]*)?\r?(?:\n|$)/.exec(after)
   const preceding = at === 0 ? [] : [lead, ...lines.slice(1, at)]
-  const isSimple = ending !== null && hasSimpleHermesOptions([...preceding, ...after.slice(ending[0].length).split('\n')])
-  return { command, isSimple }
+  const options = ending === null ? undefined : hermesOptionsOf([...preceding, ...after.slice(ending[0].length).split('\n')])
+  return { command, isSimple: options !== undefined, ...(options === undefined ? {} : { options }) }
 }
 
-// isComplete: every hook the install record names is still in the config. refused: the recorded events whose entry
-// the person changed.
-type HermesSetupEdit = { text: string; hasOwned: boolean; isComplete: boolean; refused: readonly string[] }
+// isComplete: every hook the install record names is still in the config. missing: the recorded events with no entry
+// left, neither the board's nor one the person changed. refused: the recorded events whose entry the person changed.
+type HermesSetupEdit = { text: string; hasOwned: boolean; isComplete: boolean; missing: readonly string[]; refused: readonly string[] }
 
 // Only the top-level hooks map and the recorded event/command pair can identify a setup entry.
-// Ambiguous copies are left alone rather than claiming both.
-export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string>, isRemoving: boolean): HermesSetupEdit | null => {
+// Ambiguous copies are left alone rather than claiming both. keepsEdits (an update): when the file must
+// be written, each of the board's own entries whose options are not exactly what this release writes
+// (a timeout or matcher the person changed, added or removed) is refused by its event, as an edited JSON
+// hook group is, so the rewrite never sets one back without a word (#1314).
+export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string>, isRemoving: boolean, keepsEdits = false): HermesSetupEdit | null => {
   const lines = text.split('\n')
   const tops = lines.flatMap((line, at) => /^(?:hooks|"hooks"|'hooks')\s*:/.test(line) ? [at] : [])
   const top = tops[0]
@@ -516,6 +531,7 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
   const desired = new Map(events.map(([event, command, matcher]) => [event, { command, matcher }]))
   const seen = new Set<string>()
   const owned = new Map<string, { command: string; item: string }>()
+  const edited = new Set<string>()
   const unrecognized = new Set<string>()
   const refused = new Set<string>()
   const drop = new Set<number>()
@@ -551,6 +567,7 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
         if (parsed?.isSimple !== true) return null
         const { command } = parsed
         const item = parts.join('\n')
+        if (keepsEdits && (command === previous || command === wanted) && !isReleaseHermesOptions(parsed.options, desired.get(event)?.matcher)) edited.add(event)
         if (command !== previous) {
           // An entry that already runs this release's command is the board's own (an earlier
           // release wrote the same bytes), even when no install record names it: adopt it
@@ -582,13 +599,15 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
   }
   const hasOwned = owned.size > 0
   const isComplete = [...recorded.keys()].every(event => owned.has(event))
+  const missing = [...recorded.keys()].filter(event => !owned.has(event) && !refused.has(event))
   if (!isRemoving && events.every(([event, command, matcher]) => {
     const entry = owned.get(event)
     return entry?.command === command && hermesHasTimeout(entry.item) && hermesHasMatcher(entry.item, matcher)
-  })) return { text, hasOwned, isComplete, refused: [...refused] }
+  })) return { text, hasOwned, isComplete, missing, refused: [...refused] }
+  for (const event of edited) refused.add(event)
   const kept = lines.filter((_, at) => !drop.has(at)).join('\n')
   const next = isRemoving ? kept : addHermesHooks(kept, events, text.includes('\r\n'))
-  return next === null ? null : { text: next, hasOwned, isComplete, refused: [...refused] }
+  return next === null ? null : { text: next, hasOwned, isComplete, missing, refused: [...refused] }
 }
 
 export const agentHooks = (ctx: ConnectContext): AgentHook[] => {

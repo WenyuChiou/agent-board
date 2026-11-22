@@ -86,10 +86,10 @@ const BOOL_FLAGS = new Set([
   '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--awaits-ack', '--chat', '--check-conflicts', '--codex-doctor',
   '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
   '--cross-project', '--no-codex-send',
-  '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
+  '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--hooks-approved', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
-  '--stop', '--stopped', '--tidy', '--unsent', '--version', '-v', '--watch',
+  '--stop', '--stopped', '--tidy', '--unsent', '--update', '--version', '-v', '--watch',
 ])
 const VALUE_FLAGS = new Set([
   '--agent', '--codex-bin', '--codex-dir', '--cwd', '--data-dir', '--deepseek-dir', '--event',
@@ -98,7 +98,7 @@ const VALUE_FLAGS = new Set([
   '--message-ack', '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
   '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
   '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--ref', '--removing',
-  '--send', '--session', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
+  '--send', '--session', '--setup-version', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
 ])
 type CliPair = { first: string | undefined; second: string | undefined }
 type ParsedCli = {
