@@ -711,7 +711,7 @@ test('replaying a keyed one-use open link after attacker pairs #k revokes the at
   }
 })
 
-const runServedPageInOrigin = async (html, pageUrl, originStores) => {
+const runServedPageInOrigin = async (html, pageUrl, originStores, { throwStorage = false } = {}) => {
   const nodes = new Map()
   const makeEl = tag => ({
     tag,
@@ -767,12 +767,11 @@ const runServedPageInOrigin = async (html, pageUrl, originStores) => {
     addEventListener() {},
     title: '',
   }
-  runInNewContext(script, {
+  const vmContext = {
     document,
     location: { pathname: url.pathname, search: url.search, hash: url.hash },
     history: { replaceState: (_s, _t, next) => { currentPath = next } },
     URLSearchParams,
-    sessionStorage,
     crypto: { randomUUID },
     window: {},
     navigator: {},
@@ -786,7 +785,17 @@ const runServedPageInOrigin = async (html, pageUrl, originStores) => {
       if (String(target).startsWith('/api/board')) boardPollResolve({ status: res.status, tokenSent: init.headers?.['x-board-token'] ?? '' })
       return res
     },
-  }, { timeout: 1000 })
+  }
+  if (throwStorage) {
+    Object.defineProperty(vmContext, 'sessionStorage', {
+      enumerable: true,
+      configurable: true,
+      get() { throw new Error('SecurityError') },
+    })
+  } else {
+    vmContext.sessionStorage = sessionStorage
+  }
+  runInNewContext(script, vmContext, { timeout: 1000 })
   return { firstBoardPoll, currentPath: () => currentPath }
 }
 
@@ -845,6 +854,16 @@ test('two local boards on different ports issue no cookies, reload independently
     // Sessions stay isolated per board server.
     assert.equal((await fetch(new URL('/api/board', boardA.origin), { headers: { 'x-board-token': sessionB } })).status, 403)
     assert.equal((await fetch(new URL('/api/board', boardB.origin), { headers: { 'x-board-token': sessionA } })).status, 403)
+
+    // Throwing sessionStorage getter (strict privacy / sandboxed iframes) must not abort page boot.
+    const blockedLink = (await boardA.call('/api/open-link', {})).body.url
+    const blockedRes = await fetch(blockedLink)
+    assert.equal(blockedRes.status, 200)
+    const blockedHtml = await blockedRes.text()
+    const blockedSession = sessionFromHtml(blockedHtml)
+    const blockedPage = await runServedPageInOrigin(blockedHtml, blockedLink, originStores, { throwStorage: true })
+    assert.equal(blockedPage.currentPath(), '/')
+    assert.deepEqual(await blockedPage.firstBoardPoll, { status: 200, tokenSent: blockedSession })
   } catch (error) {
     failed = true
     throw error
