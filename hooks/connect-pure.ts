@@ -358,10 +358,11 @@ const stripHermesHooks = (text: string, isKeepingTop: boolean, owns: RegExp = OU
 export const withoutHermesHooks = (text: string, owns: RegExp = OURS): string => stripHermesHooks(text, false, owns)
 
 type HermesEvents = Array<[string, string, string?]>
-const hermesHasTimeout = (item: string): boolean => [...item.matchAll(/(?:^|[,{\n])\s*timeout\s*:\s*(\d+)/g)].some(match => Number(match[1]) >= hostHookTimeout('hermes'))
+// An option name may be quoted, as HERMES_OPTION reads it, so the same values written that way still count (#1314).
+const hermesHasTimeout = (item: string): boolean => [...item.matchAll(/(?:^|[,{\n])\s*(?:timeout|"timeout"|'timeout')\s*:\s*(\d+)/g)].some(match => Number(match[1]) >= hostHookTimeout('hermes'))
 const hermesHasMatcher = (item: string, expected: string | undefined): boolean => {
   if (expected === undefined) return true
-  const match = /(?:^|[,{\n])\s*matcher\s*:\s*(?:"([^"]*)"|'([^']*)'|([^,\s}#]+))/.exec(item)
+  const match = /(?:^|[,{\n])\s*(?:matcher|"matcher"|'matcher')\s*:\s*(?:"([^"]*)"|'([^']*)'|([^,\s}#]+))/.exec(item)
   return (match?.[1] ?? match?.[2] ?? match?.[3]) === expected
 }
 
