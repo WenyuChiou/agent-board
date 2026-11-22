@@ -1811,13 +1811,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (isReadable && existing !== undefined && !(owned !== undefined && isSame(existing, owned)) && !(!remove && isSame(existing, desired))) conflicts.push(`${config}:${name}`)
     if (isReadable && owned !== undefined && existing === undefined) {
       if (remove) alreadyGone.push(`${config}:${name}`)
+      // An update leaves the group the person removed removed, and keeps it in the record so the next one does too.
+      else if (isUpdate) removedByPerson.add(name)
       else hasMissingGroup = true
     }
     nextConfig = { ...hookConfig }
-    if (!remove) { nextConfig[name] = desired; groups[name] = desired }
+    if (removedByPerson.has(name)) groups[name] = owned
+    else if (!remove) { nextConfig[name] = desired; groups[name] = desired }
     else if (owned !== undefined) delete nextConfig[name]
   }
   let nextConfigText: string | null = null
+  // An update that finds the board's whole part of a config removed leaves that config as the person left it.
+  let isConfigKept = false
   if (agent === 'openclaw') {
     const id = 'agent-board-local'
     const pluginFile = join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')
@@ -1832,15 +1837,20 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (isReadable && (plugins.enabled === false || existing !== undefined && !isSame(existing, owned ?? desired) || owned !== undefined && existing !== undefined && (!paths.includes(pluginFile) || allow?.length && !allow.includes(id)))) conflicts.push(`${nativeConfig}:${id}`)
     if (isReadable && owned !== undefined && existing === undefined) {
       if (remove) alreadyGone.push(`${nativeConfig}:${id}`)
+      // An update leaves the entry the person removed removed, with its path and allow list as the person left them.
+      else if (isUpdate) removedByPerson.add(id)
       else hasMissingGroup = true
     }
-    nextConfig = { ...hookConfig, plugins: {
+    nextConfig = removedByPerson.has(id) ? { ...hookConfig } : { ...hookConfig, plugins: {
       ...plugins,
       load: { ...load, paths: remove ? paths.filter(path => path !== pluginFile) : [...paths.filter(path => path !== pluginFile), pluginFile] },
       entries: { ...entries, ...(!remove ? { [id]: desired } : {}) },
       ...(allow === undefined ? {} : { allow: remove && manifest.groups.allowAdded === true ? allow.filter(one => one !== id) : !remove && allow.length && !allow.includes(id) ? [...allow, id] : allow }),
     } }
-    if (remove) delete object(object(nextConfig.plugins).entries)[id]
+    if (removedByPerson.has(id)) {
+      groups[id] = owned
+      if (manifest.groups.allowAdded !== undefined) groups.allowAdded = manifest.groups.allowAdded
+    } else if (remove) delete object(object(nextConfig.plugins).entries)[id]
     else {
       groups[id] = desired
       groups.allowAdded = manifest.groups.allowAdded ?? Boolean(allow?.length && !allow.includes(id))
@@ -1850,9 +1860,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const text = initial(nativeConfig) ?? ''
     if (manifest.groups.patch !== undefined && !text.includes('agent-board-local')) {
       if (remove) alreadyGone.push(`${nativeConfig}:agent-board-local`)
+      else if (isUpdate) removedByPerson.add('patch')
       else hasMissingGroup = true
     }
     if (isUnreadable(nativeConfig)) { if (!conflicts.includes(nativeConfig)) conflicts.push(nativeConfig) }
+    else if (removedByPerson.has('patch')) { groups.patch = manifest.groups.patch; isConfigKept = true }
     else {
       const patch = deepseekPatch(text, manifest.groups.patch, pathToFileURL(join(root, 'adapters', 'deepseek.mjs')).href, remove)
       if (patch.conflict) conflicts.push(nativeConfig)
@@ -1875,10 +1887,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const text = initial(nativeConfig) ?? ''
     const events = hermesEvents()
     const recorded = new Map(Object.entries(object(manifest.groups.hooks ?? {})).filter((pair): pair is [string, string] => typeof pair[1] === 'string'))
-    const patch = !isUnreadable(nativeConfig) && isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove) : null
+    let patch = !isUnreadable(nativeConfig) && isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove) : null
+    // An update leaves an entry the person removed removed: its event is not written again, and the record keeps its
+    // command so the next update does too.
+    if (isUpdate && patch !== null && patch.missing.length) {
+      for (const event of patch.missing) removedByPerson.add(event)
+      patch = editHermesSetup(text, events.filter(([event]) => !removedByPerson.has(event)), new Map([...recorded].filter(([event]) => !removedByPerson.has(event))), false)
+    }
     if (manifest.groups.hooks !== undefined && patch !== null && !patch.hasOwned) {
       if (remove) alreadyGone.push(`${nativeConfig}:hooks`)
-      else hasMissingGroup = true
+      else if (!isUpdate) hasMissingGroup = true
     }
     if (patch === null) conflicts.push(nativeConfig)
     // An entry the person changed is refused by its event, like the JSON agents' `${config}:${event}`,
@@ -1886,7 +1904,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     else for (const event of patch.refused) conflicts.push(`${nativeConfig}:${event}`)
     isHermesPartial = manifest.groups.hooks !== undefined && patch !== null && !patch.isComplete
     nextConfigText = patch?.text ?? text
-    if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
+    if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, removedByPerson.has(event) ? recorded.get(event) : command]))
     if (remove) {
       const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
       const mine = Object.entries(object(manifest.groups.hooks ?? {}))
@@ -2103,7 +2121,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (parsedConfig === null) conflicts.push(nativeConfig)
     else if (remove && initial(nativeConfig) === null) alreadyGone.push(nativeConfig)
     else if (remove && isReadable && isEmptyCreatedConfig) changes.push({ file: nativeConfig, action: 'remove' })
-    else if (!isHeld && (agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig))) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
+    else if (!isHeld && !isConfigKept && (agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig))) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
   }
   if (!remove && readLocal(progress) === null) { before.set(progress, NO_PATH); changes.push({ file: progress, action: 'create' }) }
   const createdDirs = new Set(Array.isArray(loaded.createdDirs) ? loaded.createdDirs.filter((value): value is string => typeof value === 'string') : [])
@@ -2134,8 +2152,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // file, Codex from Codex itself, never from config.toml. A Codex setup cannot ask is 'unknown', never trusted.
   const hermesTrust = (): boolean | 'unknown' => {
     const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
-    const wanted = Object.entries(object(manifest.groups.hooks ?? {}))
-    return approvals === null ? 'unknown' : wanted.length > 0 && wanted.every(([event, command]) => approvals.list.some(entry => entry.event === event && entry.command === command))
+    // An entry the person removed is not asked about, as for Codex; with every entry removed there is nothing left to approve.
+    const recordedHooks = Object.entries(object(manifest.groups.hooks ?? {})), wanted = recordedHooks.filter(([event]) => !removedByPerson.has(event))
+    return approvals === null ? 'unknown' : recordedHooks.length > 0 && wanted.every(([event, command]) => approvals.list.some(entry => entry.event === event && entry.command === command))
   }
   let trustNow: boolean | 'unknown' | undefined
   if (isUpdate && !args.includes('--apply') && (agent === 'codex' || agent === 'hermes') && initial(manifestFile) !== null) {

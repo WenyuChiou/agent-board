@@ -502,9 +502,9 @@ const hermesSetupItemOf = (lines: readonly string[]): HermesSetupItem | undefine
   return { command, isSimple }
 }
 
-// isComplete: every hook the install record names is still in the config. refused: the recorded events whose entry
-// the person changed.
-type HermesSetupEdit = { text: string; hasOwned: boolean; isComplete: boolean; refused: readonly string[] }
+// isComplete: every hook the install record names is still in the config. missing: the recorded events with no entry
+// left, neither the board's nor one the person changed. refused: the recorded events whose entry the person changed.
+type HermesSetupEdit = { text: string; hasOwned: boolean; isComplete: boolean; missing: readonly string[]; refused: readonly string[] }
 
 // Only the top-level hooks map and the recorded event/command pair can identify a setup entry.
 // Ambiguous copies are left alone rather than claiming both.
@@ -582,13 +582,14 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
   }
   const hasOwned = owned.size > 0
   const isComplete = [...recorded.keys()].every(event => owned.has(event))
+  const missing = [...recorded.keys()].filter(event => !owned.has(event) && !refused.has(event))
   if (!isRemoving && events.every(([event, command, matcher]) => {
     const entry = owned.get(event)
     return entry?.command === command && hermesHasTimeout(entry.item) && hermesHasMatcher(entry.item, matcher)
-  })) return { text, hasOwned, isComplete, refused: [...refused] }
+  })) return { text, hasOwned, isComplete, missing, refused: [...refused] }
   const kept = lines.filter((_, at) => !drop.has(at)).join('\n')
   const next = isRemoving ? kept : addHermesHooks(kept, events, text.includes('\r\n'))
-  return next === null ? null : { text: next, hasOwned, isComplete, refused: [...refused] }
+  return next === null ? null : { text: next, hasOwned, isComplete, missing, refused: [...refused] }
 }
 
 export const agentHooks = (ctx: ConnectContext): AgentHook[] => {
