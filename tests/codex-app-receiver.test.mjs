@@ -334,8 +334,10 @@ test('an error output too long to keep whole is never read as unsent', async () 
 test('a refusal read while a child of the run still holds its output is uncertain, never held', async () => {
   // The program writes the refusal and exits, but a program it started still holds the output open and writes later: the
   // runner reads the run two seconds after the exit, before the output has closed, so it cannot know nothing more came.
+  // The later program is started detached: on Windows a Node program ends the programs it started, unless detached, when
+  // it exits, which Codex does not do to the programs it starts.
   const late = 'setTimeout(() => process.stdout.write("late answer"), 3000)'
-  const parent = `const { spawn } = require('node:child_process'); spawn(process.execPath, ['-e', ${JSON.stringify(late)}], { stdio: ['ignore', 'inherit', 'inherit'] }).unref(); process.stderr.write(${JSON.stringify(sentence)}); process.exitCode = 1`
+  const parent = `const { spawn } = require('node:child_process'); spawn(process.execPath, ['-e', ${JSON.stringify(late)}], { stdio: ['ignore', 'inherit', 'inherit'], detached: true }).unref(); process.stderr.write(${JSON.stringify(sentence)}); process.exitCode = 1`
   const open = await runBackgroundProcess({ command: process.execPath, isShell: false, args: ['-e', parent] }, { maxWaitMs: 20_000 })
   assert.deepEqual([open.exitCode, open.hasStdout, open.isOutputOpen, isWriterHeld(open, THREAD)], [1, false, true, false])
 })
