@@ -1010,6 +1010,8 @@ test('J11b: a revoked approval is still revoked after an update', async () => {
   assert.match(output, /Codex: the board's hooks are not approved now.*--codex-trust/, output)
   assert.equal(writesOf(mock), writes, 'the update wrote no approval')
   assert.equal(JSON.parse(readFileSync(mock.stateFile, 'utf8')).trusted, false, 'still revoked')
+  const json = JSON.parse(checked(await update(f, ['--codex-bin', mock.executable, '--json']), 'setup --update --json'))
+  assert.deepEqual([json.revoked, json.unread], [['codex'], []], 'a refused approval is listed as revoked, not as unread')
 })
 
 test("an update that cannot read the host's trust asks and does not claim it", async () => {
@@ -1037,6 +1039,8 @@ test("an update that cannot read an approval the board gave before says it could
   assert.match(output, /Codex: the update could not read whether the board's hooks are approved.*--codex-trust/, output)
   assert.doesNotMatch(output, /not approved now|still trusted/, output)
   assert.equal(readRecord(f, 'codex').approved, true, 'the record keeps the approval the board gave')
+  const json = JSON.parse(checked(await update(f, ['--json'], { env: { PATH: '/usr/bin:/bin' } }), 'setup --update --json'))
+  assert.deepEqual([json.unread, json.revoked], [['codex'], []], 'an approval that cannot be read is listed as unread, not as revoked')
 })
 
 test('an update the person declines changes no file and the old hooks still report', async () => {
