@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -9,6 +10,7 @@ import { dirname, join } from 'node:path'
 import test from 'node:test'
 import { pathToFileURL } from 'node:url'
 import { EventEmitter } from 'node:events'
+import { runInNewContext } from 'node:vm'
 
 registerHooks({
   resolve(specifier, context, next) {
@@ -325,23 +327,34 @@ test('failed browser opener prints a one-use link whose second GET is refused', 
 
     const firstGet = await fetch(oneUseUrl)
     assert.equal(firstGet.status, 200)
-    const setCookie = firstGet.headers.get('set-cookie') ?? ''
-    assert.match(setCookie, /agent_board_session=[\w-]+/)
-    assert.match(setCookie, /\bHttpOnly\b/i)
-    assert.match(setCookie, /\bSameSite=Strict\b/i)
-    assert.match(setCookie, /\bPath=\//i)
+    assert.equal(firstGet.headers.get('set-cookie'), null, 'one-use open response sets no host-wide cookie')
     const html = await firstGet.text()
     assert.equal(html.includes(addressToken), false, 'page HTML never discloses the reusable address-file token')
-    sessionFromHtml(html)
+    const pageSession = sessionFromHtml(html)
 
     const secondGet = await fetch(oneUseUrl)
     assert.equal(secondGet.status, 403, 'second GET to one-use link must be refused')
 
-    const cookiePair = setCookie.split(';')[0]
-    const reload = await fetch(new URL('/', oneUseUrl), { headers: { cookie: cookiePair } })
-    assert.equal(reload.status, 200, 'reloading / with session cookie succeeds')
-    const unauth = await fetch(new URL('/', oneUseUrl))
-    assert.equal(unauth.status, 403, 'GET / without session cookie is refused')
+    const rootUrl = new URL('/', oneUseUrl)
+    const reload = await fetch(rootUrl)
+    assert.equal(reload.status, 200, 'bare GET / serves the static empty shell for sessionStorage reload')
+    assert.equal(reload.headers.get('set-cookie'), null)
+    const reloadHtml = await reload.text()
+    assert.equal(reloadHtml.includes('id="page-session"'), false, 'bare GET / embeds no session secret')
+    assert.equal(reloadHtml.includes(addressToken), false, 'bare GET / embeds no reusable token')
+
+    const badRootHost = await new Promise((resolve, reject) => {
+      const req = httpRequest({ host: '127.0.0.1', port: rootUrl.port, method: 'GET', path: '/', headers: { host: `evil.example:${rootUrl.port}` } }, res => {
+        res.resume().on('end', () => resolve(res.statusCode))
+      })
+      req.on('error', reject)
+      req.end()
+    })
+    assert.equal(badRootHost, 421, 'bare GET / rejects invalid Host headers')
+
+    assert.equal((await fetch(new URL('/?t=wrong', oneUseUrl))).status, 403, 'GET /?t=wrong is refused')
+    assert.equal((await fetch(new URL('/api/board', oneUseUrl))).status, 403, 'API route without token is refused')
+    assert.equal((await fetch(new URL('/api/board', oneUseUrl), { headers: { 'x-board-token': pageSession } })).status, 200, 'API route with redeemed pageSession succeeds')
 
     assert.equal((await fetch(serveOutUrl)).status, 200)
     assert.equal((await fetch(serveOutUrl)).status, 403)
@@ -486,7 +499,6 @@ test('page session cannot call client-only control routes, and /api/open uses a 
     const html = await redeemed.text()
     const pageSession = sessionFromHtml(html)
     assert.notEqual(pageSession, board.token)
-    assert.equal((await fetch(openUrl)).status, 403)
 
     const asPage = (path, body, extra = {}) => fetch(new URL(path, board.origin), {
       method: body === undefined ? 'GET' : 'POST',
@@ -523,6 +535,7 @@ test('page session cannot call client-only control routes, and /api/open uses a 
     const switched = await asPage('/api/approvals/switch', { enabled: false }, { 'x-board-approve': secret })
     assert.equal(switched.status, 200)
     assert.equal((await switched.json()).isOff, true)
+    assert.equal((await fetch(openUrl)).status, 403, 'replaying the keyed /open/ link is refused')
   } catch (error) {
     failed = true
     throw error
@@ -646,5 +659,195 @@ test('kept silent server never falls back to printing the reusable ?t= address',
     } catch (cleanupError) {
       if (!failed) throw cleanupError
     }
+  }
+})
+
+test('replaying a keyed one-use open link after attacker pairs #k revokes the attacker secret and locks approvals off', { timeout: 20_000 }, async () => {
+  const board = await startDirectBoard()
+  let failed = false
+  try {
+    const opened = await board.call('/api/open', { asApp: true })
+    assert.equal(opened.status, 200)
+    const [openUrl, fragment] = board.opened[0].split('#')
+    const pairKey = /^k=([\w-]+)$/.exec(fragment)?.[1]
+    assert.ok(pairKey)
+
+    const attackerGet = await fetch(openUrl)
+    assert.equal(attackerGet.status, 200)
+    const attackerSession = sessionFromHtml(await attackerGet.text())
+
+    const asAttacker = (path, body, extra = {}) => fetch(new URL(path, board.origin), {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: {
+        'x-board-token': attackerSession,
+        'x-board-page': 'p-attacker',
+        origin: board.origin,
+        ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+        ...extra,
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+
+    const paired = await asAttacker('/api/approvals/pair', { key: pairKey })
+    assert.equal(paired.status, 200)
+    const { secret } = await paired.json()
+    assert.ok(typeof secret === 'string' && secret.length > 0)
+
+    // Real browser opens the stolen link second: 403 and approvals lock down immediately.
+    const browserGet = await fetch(openUrl)
+    assert.equal(browserGet.status, 403)
+
+    const boardState = await (await asAttacker('/api/board')).json()
+    assert.equal(boardState.approvals?.isLockdown, true, 'replay locks approvals off')
+    const switchAfterReplay = await asAttacker('/api/approvals/switch', { enabled: false }, { 'x-board-approve': secret })
+    assert.equal(switchAfterReplay.status, 403, 'attacker secret is revoked after open-link replay')
+  } catch (error) {
+    failed = true
+    throw error
+  } finally {
+    try { await board.close() } catch (cleanupError) { if (!failed) throw cleanupError }
+  }
+})
+
+const runServedPageInOrigin = async (html, pageUrl, originStores) => {
+  const nodes = new Map()
+  const makeEl = tag => ({
+    tag,
+    childNodes: [],
+    attributes: {},
+    style: {},
+    className: '',
+    value: '',
+    textContent: '',
+    set id(v) { this.attributes.id = v; nodes.set(v, this) },
+    get id() { return this.attributes.id ?? '' },
+    appendChild(c) { c.parentNode = this; this.childNodes.push(c); return c },
+    removeChild(c) { this.childNodes = this.childNodes.filter(x => x !== c) },
+    insertBefore(c) { return this.appendChild(c) },
+    insertAdjacentElement() {},
+    remove() { this.parentNode?.removeChild(this) },
+    setAttribute(k, v) { this.attributes[k] = v; if (k === 'id') nodes.set(v, this) },
+    getAttribute(k) { return this.attributes[k] ?? null },
+    addEventListener() {},
+    querySelectorAll() { return [] },
+    querySelector() { return makeEl('div') },
+  })
+  const get = id => {
+    if (!nodes.has(id)) nodes.set(id, makeEl('div'))
+    return nodes.get(id)
+  }
+  const words = html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)
+  if (words) get('words').textContent = words[1]
+  const pageSessionTag = html.match(/<script[^>]*id="page-session"[^>]*>([\s\S]*?)<\/script>/)
+  if (pageSessionTag) get('page-session').textContent = pageSessionTag[1]
+  const script = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)]
+    .map(m => m[1])
+    .find(code => code.includes('(function ()'))
+  assert.ok(script, 'served HTML contains PAGE_SCRIPT')
+
+  const url = new URL(pageUrl)
+  if (!originStores.has(url.origin)) originStores.set(url.origin, new Map())
+  const store = originStores.get(url.origin)
+  const sessionStorage = {
+    getItem: key => store.get(key) ?? null,
+    setItem: (key, value) => store.set(key, String(value)),
+  }
+  let currentPath = url.pathname + url.search + url.hash
+  let boardPollResolve
+  const firstBoardPoll = new Promise(resolve => { boardPollResolve = resolve })
+  const document = {
+    body: get('body'),
+    getElementById: id => nodes.get(id) ?? get(id),
+    createElement: makeEl,
+    createTextNode: () => makeEl('text'),
+    querySelector: () => makeEl('main'),
+    querySelectorAll: () => [],
+    addEventListener() {},
+    title: '',
+  }
+  runInNewContext(script, {
+    document,
+    location: { pathname: url.pathname, search: url.search, hash: url.hash },
+    history: { replaceState: (_s, _t, next) => { currentPath = next } },
+    URLSearchParams,
+    sessionStorage,
+    crypto: { randomUUID },
+    window: {},
+    navigator: {},
+    setTimeout: () => 1,
+    clearTimeout: () => {},
+    fetch: async (target, init = {}) => {
+      const res = await fetch(new URL(target, url.origin), {
+        ...init,
+        headers: { ...(init.headers ?? {}), origin: url.origin },
+      })
+      if (String(target).startsWith('/api/board')) boardPollResolve({ status: res.status, tokenSent: init.headers?.['x-board-token'] ?? '' })
+      return res
+    },
+  }, { timeout: 1000 })
+  return { firstBoardPoll, currentPath: () => currentPath }
+}
+
+test('two local boards on different ports issue no cookies, reload independently via origin-scoped sessionStorage, and reject each other sessions', { timeout: 25_000 }, async () => {
+  const boardA = await startDirectBoard()
+  const boardB = await startDirectBoard()
+  let failed = false
+  try {
+    const linkA = (await boardA.call('/api/open-link', {})).body.url
+    const linkB = (await boardB.call('/api/open-link', {})).body.url
+    const resA = await fetch(linkA)
+    const resB = await fetch(linkB)
+    assert.equal(resA.status, 200)
+    assert.equal(resB.status, 200)
+    assert.equal(resA.headers.get('set-cookie'), null)
+    assert.equal(resB.headers.get('set-cookie'), null)
+    const htmlA = await resA.text()
+    const htmlB = await resB.text()
+    const sessionA = sessionFromHtml(htmlA)
+    const sessionB = sessionFromHtml(htmlB)
+    assert.notEqual(sessionA, sessionB)
+
+    const originStores = new Map()
+    const pageA1 = await runServedPageInOrigin(htmlA, linkA, originStores)
+    assert.equal(pageA1.currentPath(), '/')
+    assert.deepEqual(await pageA1.firstBoardPoll, { status: 200, tokenSent: sessionA })
+
+    const pageB1 = await runServedPageInOrigin(htmlB, linkB, originStores)
+    assert.equal(pageB1.currentPath(), '/')
+    assert.deepEqual(await pageB1.firstBoardPoll, { status: 200, tokenSent: sessionB })
+
+    // Opening B leaves A's origin-scoped session intact; reloading bare GET / on A still loads A's board.
+    const reloadA = await fetch(new URL('/', boardA.origin))
+    assert.equal(reloadA.status, 200)
+    assert.equal(reloadA.headers.get('set-cookie'), null)
+    const pageA2 = await runServedPageInOrigin(await reloadA.text(), `${boardA.origin}/`, originStores)
+    assert.deepEqual(await pageA2.firstBoardPoll, { status: 200, tokenSent: sessionA })
+
+    const reloadB = await fetch(new URL('/', boardB.origin))
+    assert.equal(reloadB.status, 200)
+    const pageB2 = await runServedPageInOrigin(await reloadB.text(), `${boardB.origin}/`, originStores)
+    assert.deepEqual(await pageB2.firstBoardPoll, { status: 200, tokenSent: sessionB })
+
+    // Also verify bare GET / does not bump pageAgo when no authenticated page asked yet.
+    const boardC = await startDirectBoard()
+    try {
+      const beforeBare = await boardC.call('/api/ping')
+      assert.equal(beforeBare.body.pageAgo, null)
+      assert.equal((await fetch(new URL('/', boardC.origin))).status, 200)
+      const afterBare = await boardC.call('/api/ping')
+      assert.equal(afterBare.body.pageAgo, null, 'bare GET / shell reload does not count as an open page')
+    } finally {
+      await boardC.close()
+    }
+
+    // Sessions stay isolated per board server.
+    assert.equal((await fetch(new URL('/api/board', boardA.origin), { headers: { 'x-board-token': sessionB } })).status, 403)
+    assert.equal((await fetch(new URL('/api/board', boardB.origin), { headers: { 'x-board-token': sessionA } })).status, 403)
+  } catch (error) {
+    failed = true
+    throw error
+  } finally {
+    try { await boardA.close() } catch (cleanupError) { if (!failed) throw cleanupError }
+    try { await boardB.close() } catch (cleanupError) { if (!failed) throw cleanupError }
   }
 })

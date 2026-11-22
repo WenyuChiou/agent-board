@@ -1439,8 +1439,12 @@ const PAGE_SCRIPT = String.raw`
   'use strict';
   var W = JSON.parse(document.getElementById('words').textContent);
   var sessionEl = document.getElementById('page-session');
-  var token = (sessionEl && sessionEl.textContent ? JSON.parse(sessionEl.textContent) : '') || new URLSearchParams(location.search).get('t') || '';
+  var pageSession = sessionEl && sessionEl.textContent ? JSON.parse(sessionEl.textContent) : '';
   if (sessionEl && sessionEl.parentNode) sessionEl.parentNode.removeChild(sessionEl);
+  if (pageSession && typeof sessionStorage !== 'undefined') { try { sessionStorage.setItem('agent_board_session', pageSession); } catch (error) {} }
+  var storedSession = '';
+  if (!pageSession && typeof sessionStorage !== 'undefined') { try { storedSession = sessionStorage.getItem('agent_board_session') || ''; } catch (error) {} }
+  var token = pageSession || new URLSearchParams(location.search).get('t') || storedSession || '';
   // Approvals (D3, #1318): a page the board opened itself carries a one-time key after its #. It is
   // traded once for this page's secret, which lives in this variable only: never in the tab's
   // storage, which the browser writes to disk where a program could read it. The key leaves the

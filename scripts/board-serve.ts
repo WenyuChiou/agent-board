@@ -144,7 +144,6 @@ const OPEN_LINK_MS = 10 * 60 * 1000
 const OPEN_LINK_MAX = 64
 const PAGE_SESSION_MS = 24 * 60 * 60 * 1000
 const PAGE_SESSION_MAX = 64
-const PAGE_SESSION_COOKIE = 'agent_board_session'
 
 type RawRefusal = { reason: ApprovalRefusalReason; at: string } | 'unreadable' | null
 
@@ -554,14 +553,20 @@ export const startServer = (o: ServeOptions): void => {
   // A pairing key used twice: no page answers approvals again until the board restarts.
   let isApprovalOff = false
   // One-use page open links and the non-URL sessions they mint (M8a, #1650).
-  const openLinks = new Map<string, number>()
+  const openLinks = new Map<string, { until: number; used: boolean; pairKey: string }>()
   const pageSessions = new Map<string, number>()
   const clockNow = o.now ?? Date.now
-  const mintOpenLink = (now: number): string => {
-    for (const [code, until] of openLinks) if (until < now) openLinks.delete(code)
-    if (openLinks.size >= OPEN_LINK_MAX) openLinks.delete(openLinks.keys().next().value as string)
+  const mintOpenLink = (now: number, pairKey = ''): string => {
+    for (const [code, entry] of openLinks) if (entry.until < now) openLinks.delete(code)
+    if (openLinks.size >= OPEN_LINK_MAX) {
+      let evictKey: string | undefined
+      for (const [code, entry] of openLinks) {
+        if (entry.pairKey === '') { evictKey = code; break }
+      }
+      openLinks.delete(evictKey ?? (openLinks.keys().next().value as string))
+    }
     const code = randomBytes(24).toString('base64url')
-    openLinks.set(code, now + (o.openLinkMs ?? OPEN_LINK_MS))
+    openLinks.set(code, { until: now + (o.openLinkMs ?? OPEN_LINK_MS), used: false, pairKey })
     return code
   }
   const mintPageSession = (now: number): string => {
@@ -582,18 +587,6 @@ export const startServer = (o: ServeOptions): void => {
     pageSessions.delete(candidate)
     pageSessions.set(candidate, now)
     return candidate
-  }
-  const cookieSessionOf = (header: string | undefined, now: number): string => {
-    if (!header) return ''
-    for (const part of header.split(';')) {
-      const trimmed = part.trim()
-      if (!trimmed.startsWith(`${PAGE_SESSION_COOKIE}=`)) continue
-      const value = trimmed.slice(PAGE_SESSION_COOKIE.length + 1)
-      if (!/^[\w-]{16,128}$/.test(value)) continue
-      const valid = livePageSession(value, now)
-      if (valid !== '') return valid
-    }
-    return ''
   }
   // A host asked for an approval since the board started: only then does an open page that cannot
   // answer one make the board script open another.
@@ -814,10 +807,18 @@ export const startServer = (o: ServeOptions): void => {
       const code = url.pathname.slice('/open/'.length)
       if (!/^[\w-]{16,128}$/.test(code)) return json(res, 403, {})
       const now = clockNow()
-      const until = openLinks.get(code)
-      if (until === undefined) return json(res, 403, {})
-      openLinks.delete(code)
-      if (until < now) return json(res, 403, {})
+      const entry = openLinks.get(code)
+      if (entry === undefined) return json(res, 403, {})
+      if (entry.until < now) {
+        openLinks.delete(code)
+        return json(res, 403, {})
+      }
+      if (entry.used) {
+        if (entry.pairKey !== '') turnApprovalsOff()
+        return json(res, 403, {})
+      }
+      if (entry.pairKey !== '') entry.used = true
+      else openLinks.delete(code)
       const session = mintPageSession(now)
       loadedAt = Date.now()
       lastSeen = loadedAt
@@ -827,13 +828,24 @@ export const startServer = (o: ServeOptions): void => {
         'content-type': 'text/html; charset=utf-8',
         'content-security-policy': pagePolicy(nonce),
         'x-frame-options': 'DENY',
-        'set-cookie': `${PAGE_SESSION_COOKIE}=${session}; HttpOnly; SameSite=Strict; Path=/`,
       })
       res.end(servePage(o.s, nonce, false, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, session))
       return
     }
+    if (!isLan && isPage && !url.searchParams.has('t')) {
+      if (!hosts.includes((req.headers.host ?? '').toLowerCase())) return json(res, 421, {})
+      if (isMoved) return json(res, 410, { moved: true })
+      const nonce = randomBytes(16).toString('base64')
+      res.writeHead(200, {
+        ...HEADERS,
+        'content-type': 'text/html; charset=utf-8',
+        'content-security-policy': pagePolicy(nonce),
+        'x-frame-options': 'DENY',
+      })
+      res.end(servePage(o.s, nonce, false, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, ''))
+      return
+    }
     const authNow = clockNow()
-    const cookieSession = !isLan && isPage ? cookieSessionOf(req.headers.cookie, authNow) : ''
     const headerToken = isPage ? '' : text(req.headers['x-board-token'])
     const pageSession = !isLan && !isPage ? livePageSession(headerToken, authNow) : ''
     const isClientToken = side === null && !isPage && pageSession === '' && isSame(headerToken, token)
@@ -843,7 +855,7 @@ export const startServer = (o: ServeOptions): void => {
         host: req.headers.host ?? '',
         origin: req.headers.origin ?? '',
         contentType: req.headers['content-type'] ?? '',
-        token: isPage ? (url.searchParams.has('t') ? (url.searchParams.get('t') ?? '') : cookieSession !== '' ? token : '') : (pageSession !== '' ? token : headerToken),
+        token: isPage ? (url.searchParams.get('t') ?? '') : (pageSession !== '' ? token : headerToken),
       },
       hosts,
       side === null ? token : side.token,
@@ -951,7 +963,7 @@ export const startServer = (o: ServeOptions): void => {
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
-      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, isLan ? '' : cookieSession))
+      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, ''))
       return
     }
     if (req.method === 'GET') {
@@ -1119,15 +1131,17 @@ export const startServer = (o: ServeOptions): void => {
         // in two minutes, or with approvals off, the page opens with no key.
         const key = isApprovalOff || pairKeys.size >= 16 ? '' : randomBytes(24).toString('base64url')
         if (key !== '') pairKeys.set(key, { until: now + APPROVAL_KEY_MS, secret: '' })
-        const openCode = mintOpenLink(clockNow())
+        const openCode = mintOpenLink(clockNow(), key)
         const tried = await o.open(`http://127.0.0.1:${port}/open/${openCode}${key === '' ? '' : `#k=${key}`}`, body.asApp === true).catch(() => false)
         const isOpen = tried === true
-        if (!isOpen) openLinks.delete(openCode)
-        if (!isOpen && key !== '') {
-          // No window opened, yet the key was used: whoever read it from the opener's command line
-          // paired, and it was not the person's page. Approvals go off, as for a key used twice.
-          if (pairKeys.get(key)?.secret) turnApprovalsOff()
-          pairKeys.delete(key)
+        if (!isOpen) {
+          if (key !== '') {
+            // No window opened, yet the key or link was used: whoever read it from the opener's command line
+            // paired with it or redeemed it, and it was not the person's page. Approvals go off, as for a key used twice.
+            if (pairKeys.get(key)?.secret || openLinks.get(openCode)?.used) turnApprovalsOff()
+            pairKeys.delete(key)
+          }
+          openLinks.delete(openCode)
         }
         // `hasTried`: this computer's browsers were tried and none opened, so the caller does not
         // try them again (a second window when a launcher reported an error after all).
