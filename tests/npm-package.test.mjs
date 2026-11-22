@@ -565,6 +565,18 @@ test('a person who declines the launcher\'s update keeps the older script and th
   assert.ok(result.stdout.split('Nothing changed.')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the answer\n${result.stdout}`)
 }))
 
+// #1314: Ctrl-C at setup's question stops the launcher too, so no board opens behind it. On Windows a process that stops
+// itself reports an exit status, not a signal, so the case runs on the other systems.
+test('a launcher whose update is stopped by a signal stops with it and opens no board', { skip: process.platform === 'win32' && 'Windows reports no signal here' }, () => fixture(f => {
+  const { pkg, root, script, text } = olderInstall(f)
+  // A stand-in for setup that Ctrl-C stops while it asks.
+  save(join(pkg, 'scripts/setup-agent.mjs'), "process.kill(process.pid, 'SIGINT')\n")
+  const result = f.run(pkg, ['--data-dir', root, '--print'], terminalLauncher(f), '')
+  assert.equal(result.signal, 'SIGINT', `status ${result.status}\n${result.stderr}`)
+  assert.equal(result.stdout, '', 'no board opened')
+  assert.equal(readFileSync(script, 'utf8'), text, 'the older script is left as it was')
+}))
+
 test('--json through an older script prints the notice on stderr and exits 1', () => fixture(f => {
   const pkg = packed(f)
   // An older installed script that prints the text board, as a released 0.24.2 script would:
