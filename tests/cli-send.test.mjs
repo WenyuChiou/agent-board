@@ -22,8 +22,11 @@ const { BOARD_SCRIPT } = await import('../hooks/board-script.ts')
 const { enrollMailbox, mailboxId } = await import('../hooks/hook-messages.ts')
 const { address, claimMessages, deliveryText, queueMessage, textHash } = await import('../hooks/messaging.ts')
 const { parseMessageStore, queuedMessagingOf } = await import('../hooks/queued-store.ts')
+const { ZH_TW } = await import('../hooks/i18n.ts')
 const { EN } = await import('../hooks/strings-en.ts')
+const { agentLabel } = await import('../hooks/strings.ts')
 const { folderIdentity } = await import('../scripts/folder-identity.ts')
+const { defaultMessagesDirectory } = await import('../scripts/runtime-folder.ts')
 
 const MACHINE_ENV_KEYS = ['PATH', 'SystemRoot', 'ComSpec', 'PATHEXT', 'WINDIR', 'NUMBER_OF_PROCESSORS', 'OS']
 
@@ -184,10 +187,29 @@ test('--send labels an authenticated peer session with its agent and task title 
     assert.ok(deliveredPeer.includes('Message from Codex (task "Implement API endpoint"), not from you'), deliveredPeer)
     assert.ok(/not message back unless the person asked/i.test(deliveredPeer), deliveredPeer)
 
-    // Settle first message so PAIR_OPEN_CAP allows an unauthenticated send test.
+    // Settle first message so PAIR_OPEN_CAP allows localized and unauthenticated send checks.
     saved = {
       ...claimedPeer.state,
       messages: claimedPeer.state.messages.map(m => ({ ...m, status: 'acknowledged', text: '', reply: `ACK ${m.nonce}` })),
+    }
+    writeStore(messagesDir, saved)
+
+    const zhPeer = await runCli(root, [
+      '--progress-file', progress,
+      '--messages-dir', messagesDir,
+      '--lang', 'zh-TW',
+      '--send', 'claude', '綱要已就緒',
+    ], { CODEX_THREAD_ID: 'sess-sender-444' }, workspace)
+    assert.equal(zhPeer.status, 0, `${zhPeer.stdout}\n${zhPeer.stderr}`)
+    saved = readStore(messagesDir)
+    const claimedZh = claimMessages(saved, saved.mailboxes.find(b => b.session === 'sess-target-555'), Date.now(), 'c3d4e5')
+    assert.equal(claimedZh.messages.length, 1)
+    const deliveredZh = deliveryText(claimedZh.messages[0], ZH_TW)
+    assert.ok(deliveredZh.includes(ZH_TW.cliSendDeliveryFrom(agentLabel('codex', ZH_TW), 'Implement API endpoint')), deliveredZh)
+
+    saved = {
+      ...claimedZh.state,
+      messages: claimedZh.state.messages.map(m => ({ ...m, status: 'acknowledged', text: '', reply: `ACK ${m.nonce}` })),
     }
     writeStore(messagesDir, saved)
 
@@ -322,6 +344,22 @@ test('--message-ack upgrades an open claimed message to acknowledged without --s
 
     const unknown = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--message-ack', '000000'], {}, workspace)
     assert.equal(unknown.status, 1)
+
+    // Expired OpenCode wake with hasAccepted=true still accepts a late CLI --message-ack.
+    let lateState = { messages: [], mailboxes: [] }
+    lateState = makeMailbox(lateState, 'opencode', 'sess-late-oc', workspace, now - 40 * 60_000)
+    const ocBox = lateState.mailboxes[0]
+    const ocQueued = queueMessage(lateState, { id: 'msg-late-1', target: ocBox.id, turn: ocBox.turn, text: 'Late ping' }, 'board', ocBox, now - 40 * 60_000)
+    const ocClaimed = claimMessages(ocQueued.state, ocBox, now - 40 * 60_000, 'cafeba')
+    writeStore(messagesDir, {
+      ...ocClaimed.state,
+      messages: ocClaimed.state.messages.map(m => ({ ...m, status: 'uncertain', error: 'EXPIRED', hasAccepted: true, updated: now - 5 * 60_000 })),
+    })
+    const lateAck = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--message-ack', 'cafeba', 'Late reply finished'], {}, workspace)
+    assert.equal(lateAck.status, 0, `${lateAck.stdout}\n${lateAck.stderr}`)
+    const savedLate = readStore(messagesDir)
+    assert.equal(savedLate.messages[0].status, 'acknowledged')
+    assert.equal(savedLate.messages[0].reply, 'ACK cafeba Late reply finished')
   } finally {
     await removeDir(root)
   }
@@ -388,6 +426,79 @@ test('terminal print and --chat show the latest message state without exposing s
       }
     }
   } finally {
+    await removeDir(root)
+  }
+})
+
+test('--send resolves and delivers to a live receiver connection through a running board server', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cli-send-live-'))
+  const workspace = join(root, 'workspace')
+  const otherWorkspace = join(root, 'other-workspace')
+  mkdirSync(workspace, { recursive: true })
+  mkdirSync(otherWorkspace, { recursive: true })
+  const progress = join(root, 'progress.md')
+  const env = cleanEnv(root)
+  const messagesDir = defaultMessagesDirectory(progress, env.HOME, env, process.platform)
+  const now = Date.now()
+  writeFileSync(progress, [
+    '# Progress',
+    block('sess-live-777', 'claude', 'working', 'LiveProj', 'Handle incoming task', workspace, now),
+    block('sess-ordinary-codex', 'codex', 'working', 'LiveProj', 'Ordinary hook sender', workspace, now),
+  ].join('\n'))
+  // Ordinary mailbox enrollment leaves folderDigest unset on the mailbox record; CLI + hub resolve workspace from progress dir.
+  writeStore(messagesDir, enrollMailbox({ messages: [], mailboxes: [] }, 'codex', 'sess-ordinary-codex', 'CLI', now, 600_000))
+
+  let owner = null
+  try {
+    const served = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--serve', '--no-open'], {}, workspace)
+    assert.equal(served.status, 0, `${served.stdout}\n${served.stderr}`)
+    owner = JSON.parse(readFileSync(join(messagesDir, 'server.owner'), 'utf8'))
+    const origin = new URL(owner.url).origin
+    const token = new URL(owner.url).searchParams.get('t')
+
+    const regRes = await fetch(`${origin}/api/messages/register`, {
+      method: 'POST',
+      headers: { 'x-board-token': token, 'content-type': 'application/json' },
+      body: JSON.stringify({ agent: 'claude', session: 'sess-live-777', surface: 'Claude Code', turn: 'session', scope: 'session' }),
+    })
+    assert.equal(regRes.status, 200)
+    const reg = await regRes.json()
+
+    // Same-workspace CLI --send reaches live connection (and binds ordinary mailbox sender via progress dir).
+    const sent = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'claude', 'Live hello'], { CODEX_THREAD_ID: 'sess-ordinary-codex' }, workspace)
+    assert.equal(sent.status, 0, `${sent.stdout}\n${sent.stderr}`)
+
+    const pollRes = await fetch(`${origin}/api/messages/poll`, {
+      method: 'POST',
+      headers: { 'x-board-token': token, 'content-type': 'application/json' },
+      body: JSON.stringify({ connection: reg.id, secret: reg.secret, turn: 'session', receive: true }),
+    })
+    assert.equal(pollRes.status, 200)
+    const polled = await pollRes.json()
+    assert.equal(polled.messages.length, 1)
+    assert.equal(polled.messages[0].from, 'codex:sess-ordinary-codex')
+    assert.ok(polled.messages[0].text.includes('Live hello'))
+    const delivered = deliveryText(polled.messages[0], EN)
+    assert.ok(delivered.includes('Message from Codex (task "Ordinary hook sender"), not from you'), delivered)
+
+    // Cross-project send to live connection is refused unless --cross-project is passed.
+    const blocked = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'claude', 'Cross blocked'], {}, otherWorkspace)
+    assert.equal(blocked.status, 1, `${blocked.stdout}\n${blocked.stderr}`)
+
+    const allowed = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--cross-project', '--send', 'claude', 'Cross allowed'], {}, otherWorkspace)
+    assert.equal(allowed.status, 0, `${allowed.stdout}\n${allowed.stderr}`)
+
+    // Same-workspace send TO an ordinary enrollMailbox session (no folderDigest stored on mailbox) also succeeds.
+    const toOrdinary = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'codex', 'Ping ordinary mailbox'], {}, workspace)
+    assert.equal(toOrdinary.status, 0, `${toOrdinary.stdout}\n${toOrdinary.stderr}`)
+  } finally {
+    await runCli(root, ['--progress-file', progress, '--stop'], {}, workspace).catch(() => {})
+    if (owner?.pid) {
+      const deadline = Date.now() + 5_000
+      while (Date.now() < deadline) {
+        try { process.kill(owner.pid, 0); await new Promise(r => setTimeout(r, 100)) } catch { break }
+      }
+    }
     await removeDir(root)
   }
 })

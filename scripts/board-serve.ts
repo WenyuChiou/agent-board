@@ -784,7 +784,7 @@ export const startServer = (o: ServeOptions): void => {
       // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
       if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
       try {
-        const result = messaging.act(action, payload, Date.now(), action === 'expect' ? o.reports?.() : undefined)
+        const result = messaging.act(action, payload, Date.now(), action === 'expect' || action === 'peer-send' ? o.reports?.() : undefined)
         if (action === 'poll' && ((result as { messages?: unknown[] }).messages?.length ?? 0) > 0) res.once('finish', wakeAll)
         return json(res, 200, result)
       }

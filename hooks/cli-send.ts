@@ -1,4 +1,4 @@
-import type { Strings } from './i18n'
+import { ZH_TW, type Strings } from './i18n'
 import { EN } from './strings-en'
 import { agentLabel } from './strings'
 import { address, type Connection, type Message } from './messaging'
@@ -93,10 +93,8 @@ export const isSameWorkspaceAllowed = (
   isCrossProject: boolean,
 ): boolean => isCrossProject || (typeof senderDigest === 'string' && senderDigest !== '' && senderDigest === targetDigest)
 
-export const formatPeerDeliveryHeader = (sender: { agent: string; title: string } | null): string => {
-  if (sender === null) {
-    return 'Message from unverified local caller, not from you. Do not message back unless the person asked.'
-  }
+export const formatPeerDeliveryHeader = (sender: { agent: string; title: string } | null, s: Strings = ZH_TW): string => {
+  if (sender === null) return s.cliSendDeliveryUnverified
   const cleanTitle = sender.title
     .replace(/^\s*agent board message\b|reply first with this line alone|<<<\s*AB-|AB-[0-9a-f]{6,32}\s*>>>/gi, ' ')
     .replace(/[\r\n\t]+/g, ' ')
@@ -104,14 +102,12 @@ export const formatPeerDeliveryHeader = (sender: { agent: string; title: string 
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 120)
-  const name = agentLabel(sender.agent, EN)
-  return cleanTitle === ''
-    ? `Message from ${name}, not from you. Do not message back unless the person asked.`
-    : `Message from ${name} (task "${cleanTitle}"), not from you. Do not message back unless the person asked.`
+  const name = agentLabel(sender.agent, s)
+  return cleanTitle === '' ? s.cliSendDeliveryFromNoTitle(name) : s.cliSendDeliveryFrom(name, cleanTitle)
 }
 
-export const buildPeerMessageText = (sender: { agent: string; title: string } | null, body: string): string =>
-  `${formatPeerDeliveryHeader(sender)}\n\n${body.trim()}`
+export const buildPeerMessageText = (sender: { agent: string; title: string } | null, body: string, s: Strings = ZH_TW): string =>
+  `${formatPeerDeliveryHeader(sender, s)}\n\n${body.trim()}`
 
 export const rowSessionAddresses = (row: Pick<TaskRow, 'agent' | 'nativeSession' | 'target'>): string[] => {
   const agent = row.agent || 'claude'

@@ -42,7 +42,7 @@ import { dockArguments, dockCommand, probeOf, windowsStartScript, windowPath, wi
 import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
 import { ACK_MAX, address, agentOf, HOP_LIMIT, isFinished, isReceiverRoutes, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging'
-import type { Connection, MessageState, ReceiverRoutes } from '../hooks/messaging'
+import type { Connection, Message, MessageState, ReceiverRoutes } from '../hooks/messaging'
 import { expireMailboxes } from '../hooks/hook-messages'
 import { parseMessageStore } from '../hooks/queued-store'
 import { buildPeerMessageText, formatSendCandidate, isSameWorkspaceAllowed, resolveSendTarget, sessionOfAddress } from '../hooks/cli-send'
@@ -2349,7 +2349,7 @@ const serveChild = (): void => {
         // A page snapshot follows its synchronous view read. Handoff requests
         // still read current bytes instead of accepting an older page's baseline.
         const projects = !isFresh && progressProjectCache !== null ? progressProjectCache.projects : parseProgress(read(path))
-        return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
+        return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated, ...(task.auto.dir ? { dir: task.auto.dir } : {}) }]))
       },
       get s() { return s },
       port: requestedPort,
@@ -3294,30 +3294,75 @@ const writeMessageState = (root: string, changed: MessageState, now: number, cla
   }
 }
 
-const mailboxCandidates = (state: MessageState, projects: readonly ProgressProject[], now: number): SendCandidate[] => {
-  const meta = new Map<string, { project: string; title: string }>()
+type ConnectionMeta = { project: string; title: string; folderDigest?: string }
+
+const connectionMeta = (projects: readonly ProgressProject[]): Map<string, ConnectionMeta> => {
+  const meta = new Map<string, ConnectionMeta>()
   for (const project of projects) {
     for (const task of project.tasks) {
       if (task.auto === null) continue
-      const entry = { project: project.name || s.uncategorized, title: task.title || s.unnamed }
+      const digest = task.auto.dir ? folderIdentity(task.auto.dir)?.folderDigest : undefined
+      const entry: ConnectionMeta = {
+        project: project.name || s.uncategorized,
+        title: task.title || s.unnamed,
+        ...(digest ? { folderDigest: digest } : {}),
+      }
       meta.set(address(task.auto.agent, task.auto.session), entry)
       if (task.auto.resume) meta.set(address(task.auto.agent, task.auto.resume), entry)
     }
   }
-  return (state.mailboxes ?? [])
-    .filter(box => box.expires > now)
-    .map(box => {
-      const info = meta.get(address(box.agent, box.session))
-      return { connection: box, project: info?.project ?? '', title: info?.title ?? '' }
+  return meta
+}
+
+const mergedConnections = (connections: readonly Connection[], mailboxes: readonly Connection[], meta: ReadonlyMap<string, ConnectionMeta>, now: number): Connection[] => {
+  const byAddr = new Map<string, Connection>()
+  for (const box of mailboxes) {
+    if (box.expires <= now) continue
+    const digest = box.folderDigest ?? meta.get(address(box.agent, box.session))?.folderDigest
+    byAddr.set(address(box.agent, box.session), digest && !box.folderDigest ? { ...box, folderDigest: digest } : box)
+  }
+  for (const conn of connections) {
+    if (conn.expires <= now) continue
+    const prev = byAddr.get(address(conn.agent, conn.session))
+    const digest = conn.folderDigest ?? prev?.folderDigest ?? meta.get(address(conn.agent, conn.session))?.folderDigest
+    byAddr.set(address(conn.agent, conn.session), digest && !conn.folderDigest ? { ...conn, folderDigest: digest } : conn)
+  }
+  return [...byAddr.values()]
+}
+
+const targetCandidates = (connections: readonly Connection[], meta: ReadonlyMap<string, ConnectionMeta>, now: number): SendCandidate[] =>
+  connections
+    .filter(one => one.expires > now)
+    .map(connection => {
+      const info = meta.get(address(connection.agent, connection.session))
+      return { connection, project: info?.project ?? '', title: info?.title ?? '' }
     })
+
+const fetchHubTargets = async (serverUrl: string): Promise<{ connections: Connection[]; mailboxes: Connection[] } | null> => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${new URL(serverUrl).port}/api/messages/targets`, {
+      method: 'POST',
+      headers: { 'x-board-token': tokenOf(serverUrl), 'content-type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(3000),
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as { connections?: unknown; mailboxes?: unknown }
+    return {
+      connections: Array.isArray(data.connections) ? (data.connections as Connection[]) : [],
+      mailboxes: Array.isArray(data.mailboxes) ? (data.mailboxes as Connection[]) : [],
+    }
+  } catch {
+    return null
+  }
 }
 
 const resolveSenderSession = (
-  state: MessageState,
-  projects: readonly ProgressProject[],
+  connections: readonly Connection[],
+  meta: ReadonlyMap<string, ConnectionMeta>,
   now: number,
 ): { box: Connection; title: string } | null => {
-  const live = (state.mailboxes ?? []).filter(box => box.expires > now)
+  const live = connections.filter(box => box.expires > now)
   const env = process.env
   const explicit: Array<[string | undefined, string | undefined]> = [
     [env.CODEX_THREAD_ID, 'codex'],
@@ -3342,9 +3387,14 @@ const resolveSenderSession = (
     }
   }
   if (!matched) return null
-  const title = mailboxCandidates({ messages: [], mailboxes: [matched] }, projects, now)[0]?.title ?? ''
+  const title = meta.get(address(matched.agent, matched.session))?.title ?? ''
   return { box: matched, title }
 }
+
+const isEligibleAckMessage = (one: Message, nonce: string, senderAddress?: string): boolean =>
+  one.nonce === nonce
+  && (!isFinished(one) || (one.status === 'uncertain' && one.error === 'EXPIRED' && one.hasAccepted === true && one.to.startsWith('opencode:')))
+  && (senderAddress === undefined || one.to === senderAddress)
 
 const peerSendFailureNote = (code: string): string =>
   code === 'HOP_LIMIT' ? s.cliSendHopLimit(HOP_LIMIT)
@@ -3380,7 +3430,9 @@ const runCliSend = async (): Promise<void> => {
   const root = messagesDirectory()
   const isCrossProject = args.includes('--cross-project')
   const serverUrl = await runningStoreServer(root)
+  const hubTargets = serverUrl === null ? null : await fetchHubTargets(serverUrl)
   const projects = parseProgress(read(path))
+  const meta = connectionMeta(projects)
   let claim: ReturnType<typeof claimMessageStore> | undefined
   try {
     let state = readMessageState(root, now)
@@ -3388,9 +3440,10 @@ const runCliSend = async (): Promise<void> => {
       claim = claimMessageStore(root)
       state = readMessageState(root, now)
     }
-    const sender = resolveSenderSession(state, projects, now)
+    const pool = mergedConnections(hubTargets?.connections ?? [], hubTargets?.mailboxes ?? state.mailboxes ?? [], meta, now)
+    const sender = resolveSenderSession(pool, meta, now)
     const senderAddress = sender === null ? undefined : address(sender.box.agent, sender.box.session)
-    const resolution = resolveSendTarget(targetQuery, mailboxCandidates(state, projects, now), now, s, senderAddress)
+    const resolution = resolveSendTarget(targetQuery, targetCandidates(pool, meta, now), now, s, senderAddress)
     if (resolution.kind === 'none') {
       process.stderr.write(`${s.cliSendOffline}\n`)
       process.exitCode = 1
@@ -3410,7 +3463,7 @@ const runCliSend = async (): Promise<void> => {
       return
     }
     const from = senderAddress ?? 'unverified'
-    const text = buildPeerMessageText(sender === null ? null : { agent: sender.box.agent, title: sender.title }, rawBody)
+    const text = buildPeerMessageText(sender === null ? null : { agent: sender.box.agent, title: sender.title }, rawBody, s)
     const id = randomBytes(16).toString('hex')
     if (serverUrl !== null) {
       const error = await postMessageAction(serverUrl, 'peer-send', {
@@ -3419,7 +3472,8 @@ const runCliSend = async (): Promise<void> => {
         text,
         id,
         from,
-        folderDigest: isCrossProject ? (target.folderDigest ?? '') : (senderDigest ?? ''),
+        folderDigest: senderDigest ?? '',
+        ...(isCrossProject ? { crossProject: true } : {}),
       })
       if (error !== null) {
         process.stderr.write(`${peerSendFailureNote(error)}\n`)
@@ -3466,7 +3520,9 @@ const runCliMessageAck = async (): Promise<void> => {
   const now = Date.now()
   const root = messagesDirectory()
   const serverUrl = await runningStoreServer(root)
+  const hubTargets = serverUrl === null ? null : await fetchHubTargets(serverUrl)
   const projects = parseProgress(read(path))
+  const meta = connectionMeta(projects)
   let claim: ReturnType<typeof claimMessageStore> | undefined
   try {
     let state = readMessageState(root, now)
@@ -3474,9 +3530,10 @@ const runCliMessageAck = async (): Promise<void> => {
       claim = claimMessageStore(root)
       state = readMessageState(root, now)
     }
-    const sender = resolveSenderSession(state, projects, now)
+    const pool = mergedConnections(hubTargets?.connections ?? [], hubTargets?.mailboxes ?? state.mailboxes ?? [], meta, now)
+    const sender = resolveSenderSession(pool, meta, now)
     const senderAddress = sender === null ? undefined : address(sender.box.agent, sender.box.session)
-    const open = state.messages.filter(one => !isFinished(one) && one.nonce === nonce && (senderAddress === undefined || one.to === senderAddress))
+    const open = state.messages.filter(one => isEligibleAckMessage(one, nonce, senderAddress))
     if (open.length !== 1) {
       process.stderr.write(`${s.cliSendAckNotFound}\n`)
       process.exitCode = 1

@@ -9,6 +9,7 @@ import type { Connection, Message, MessageState, ProgressBinding, SessionExpecta
 import { STALE_MS } from '../hooks/parse'
 import { isClaimRef, parseMessageStore, queuedMessagingOf, shownMessages } from '../hooks/queued-store'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
+import { folderIdentity } from './folder-identity'
 import { claimMessageStore } from './message-store-claim'
 import { readSettings } from './settings-file'
 import type { MessageStoreClaim } from './message-store-claim'
@@ -356,16 +357,27 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         save({ ...state, pausePeerMessages: body.isPaused }, now)
         return { ok: true }
       }
+      if (action === 'targets') {
+        messageFields(body, [])
+        return {
+          connections: [...connections.values()].map(({ secret: _secret, keepsQueued: _keepsQueued, marksStart: _marksStart, ...one }) => one),
+          mailboxes: state.mailboxes ?? [],
+        }
+      }
       if (action === 'peer-send') {
-        messageFields(body, ['agent', 'session', 'text', 'id', 'from', 'folderDigest'])
+        messageFields(body, ['agent', 'session', 'text', 'id', 'from', 'folderDigest', 'crossProject'])
         const agent = messageId(body.agent), session = messageId(body.session)
+        if (body.crossProject !== undefined && typeof body.crossProject !== 'boolean') throw new Error('INVALID_CROSS_PROJECT')
         const from = peerSender(body.from)
-        const target = state.mailboxes?.find(one => one.agent === agent && one.session === session)
+        const live = [...connections.values()].filter(one => one.agent === agent && one.session === session && one.expires > now)
+        const target = live.length > 1 ? { ...live[0]!, contested: true } : live[0] ?? state.mailboxes?.find(one => one.agent === agent && one.session === session)
         const existing = state.messages.find(one => one.id === body.id)
         if (existing && existing.to !== address(agent, session)) throw new Error('ID_CONFLICT')
-        if (!existing) {
-          if (!target?.folderDigest) throw new Error('WORKSPACE_UNKNOWN')
-          if (target.folderDigest !== body.folderDigest) throw new Error('WORKSPACE_MISMATCH')
+        if (!existing && body.crossProject !== true) {
+          const boundDir = reports.find(report => report.agent === agent && report.session === session && typeof report.dir === 'string' && report.dir !== '')?.dir
+          const targetDigest = target?.folderDigest ?? (boundDir ? folderIdentity(boundDir)?.folderDigest : undefined)
+          if (!targetDigest) throw new Error('WORKSPACE_UNKNOWN')
+          if (targetDigest !== body.folderDigest) throw new Error('WORKSPACE_MISMATCH')
         }
         const queued = queueMessage(state, { id: body.id, text: body.text, target: existing?.target ?? target?.id, turn: existing?.turn ?? target?.turn }, from, target, now, 'local', randomBytes(16).toString('hex'))
         save(queued.state, now)
