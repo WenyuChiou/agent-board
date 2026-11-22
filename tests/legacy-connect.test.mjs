@@ -330,12 +330,24 @@ const failedHermesMove = fn => fixture(async f => {
   return fn({ f, config, foreign, atA, moved, count })
 })
 
+const hermesDoctor = f => {
+  const checked = spawnSync(process.execPath, [f.script, '--codex-doctor', '--agent', 'hermes', '--home', f.home, '--hermes-dir', join(f.home, '.hermes'), '--json'], {
+    encoding: 'utf8', windowsHide: true, timeout: 10000,
+    env: { ...process.env, HERMES_HOME: join(f.home, '.hermes') },
+  })
+  assert.equal(checked.status, 0, checked.stderr)
+  return JSON.parse(checked.stdout)
+}
+
 const lockSkip = { skip: process.getuid?.() === 0 ? 'root ignores the read-only folder this test needs' : false }
 
-test('a move that cannot write the Hermes config keeps its old data folder for Hermes', lockSkip, () => failedHermesMove(({ f, moved }) => {
+test('a move that cannot write the Hermes config keeps its old data folder for Hermes', lockSkip, () => failedHermesMove(({ f, config, atA, moved }) => {
   const record = JSON.parse(readFileSync(f.control, 'utf8'))
   assert.equal(record.connectedProgress, moved)
   assert.equal(record.hermesProgress, f.progress)
+  // The doctor reads that folder too, so the hooks that still name it are reported (#1664 review round 1).
+  assert.equal(hermesDoctor(f).reportHook, 'connect')
+  assert.equal(readFileSync(config, 'utf8'), atA, 'the doctor only reads the config')
 }))
 
 test('a retry after a failed Hermes move replaces the old hooks instead of adding a second set', lockSkip, () => failedHermesMove(({ f, config, foreign, atA, moved, count }) => {
@@ -356,20 +368,6 @@ test('a removal after a failed Hermes move takes out the old hooks and keeps the
   assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).hermesProgress, undefined)
 }))
 
-const hermesDoctor = f => {
-  const checked = spawnSync(process.execPath, [f.script, '--codex-doctor', '--agent', 'hermes', '--home', f.home, '--hermes-dir', join(f.home, '.hermes'), '--json'], {
-    encoding: 'utf8', windowsHide: true, timeout: 10000,
-    env: { ...process.env, HERMES_HOME: join(f.home, '.hermes') },
-  })
-  assert.equal(checked.status, 0, checked.stderr)
-  return JSON.parse(checked.stdout)
-}
-
-test('the doctor after a failed Hermes move still finds the hooks that name the old folder', lockSkip, () => failedHermesMove(({ f, config, atA }) => {
-  assert.equal(hermesDoctor(f).reportHook, 'connect')
-  assert.equal(readFileSync(config, 'utf8'), atA, 'the doctor only reads the config')
-}))
-
 // #1664: a session start's own connect writes Hermes' hooks without recording a connected folder.
 test('Hermes hooks a session start wrote are replaced by a later connect elsewhere and taken out by its removal', () => fixture(async f => {
   mkdirSync(join(f.home, '.hermes'))
@@ -380,6 +378,7 @@ test('Hermes hooks a session start wrote are replaced by a later connect elsewhe
   const atA = readFileSync(config, 'utf8')
   const count = (text, folder) => text.split(folder).length - 1
   assert.ok(count(atA, 'data-a') > 0, 'the session start wrote hooks that name data-a')
+  assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).hermesProgress, f.progress, 'the session start records the folder it wrote for Hermes')
   assert.equal(hermesDoctor(f).reportHook, 'connect', 'the doctor finds the hooks the session start wrote')
   const moved = join(f.home, 'data-b', 'progress.md')
   f.run(f.request('connect', { progress: moved }))
