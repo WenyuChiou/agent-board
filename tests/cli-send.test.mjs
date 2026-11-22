@@ -27,7 +27,7 @@ const { EN } = await import('../hooks/strings-en.ts')
 const { agentLabel } = await import('../hooks/strings.ts')
 const { folderIdentity } = await import('../scripts/folder-identity.ts')
 const { processStart } = await import('../scripts/board-mcp.ts')
-const { defaultMessagesDirectory } = await import('../scripts/runtime-folder.ts')
+const { defaultMessagesDirectory, writePrivateRuntimeFile } = await import('../scripts/runtime-folder.ts')
 
 const MACHINE_ENV_KEYS = ['PATH', 'SystemRoot', 'ComSpec', 'PATHEXT', 'WINDIR', 'NUMBER_OF_PROCESSORS', 'OS']
 
@@ -653,7 +653,11 @@ test('--send resolves and delivers to a live receiver connection through a runni
     writeFileSync(join(messagesDir, 'server.lock'), String(process.pid))
     writeFileSync(join(messagesDir, 'server.owner'), JSON.stringify({ pid: process.pid, port: lostPort, url: lostRootUrl }))
     for (const f of addrFiles) {
-      writeFileSync(join(runDir, f), JSON.stringify({ pid: process.pid, port: lostPort, url: lostRootUrl, path: progress, built: '' }))
+      const addrPath = join(runDir, f)
+      rmSync(addrPath, { force: true })
+      const addrJson = JSON.stringify({ pid: process.pid, port: lostPort, url: lostRootUrl, path: progress, built: '' })
+      if (process.platform === 'win32') writePrivateRuntimeFile(addrPath, addrJson)
+      else writeFileSync(addrPath, addrJson, { mode: 0o600 })
     }
     const lost = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--id', 'lost-resp-001', '--send', 'claude', 'Lost response ping'], {}, workspace)
     assert.equal(lost.status, 1, `${lost.stdout}\n${lost.stderr}`)

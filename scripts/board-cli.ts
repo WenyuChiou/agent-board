@@ -161,8 +161,11 @@ const parseCliArgs = (argv: readonly string[]): ParsedCli => {
     }
     if (VALUE_FLAGS.has(arg)) {
       optionFlags.add(arg)
-      flagValues.set(arg, argv[i + 1])
-      i += 1
+      const next = argv[i + 1]
+      if (next !== undefined && next !== '--' && !BOOL_FLAGS.has(next) && !VALUE_FLAGS.has(next) && next !== '--days' && next !== '--lan') {
+        flagValues.set(arg, next)
+        i += 1
+      }
       continue
     }
     if (arg === '--days') {
