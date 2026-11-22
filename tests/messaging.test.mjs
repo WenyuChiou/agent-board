@@ -5214,7 +5214,7 @@ test('an unsent receipt from the connection that holds a claim puts the message 
 })
 
 test('a reply the app keeps refusing until the message\'s 30-minute limit is refused as not sent, not kept waiting for ever', () => {
-  // The Codex desktop app's receiver gives a claim back unsent each time the app refuses it (#557). The board stamps the first
+  // The Codex desktop app's receiver gives a claim back as held each time the app refuses it (#557). The board stamps the first
   // refusal and keeps that stamp, so the limit counts from it, whatever the receiver remembers, and across a restart.
   const now = Date.now()
   const app = { id: 'synthetic-app-binding', agent: 'codex', session: 'held-session', turn: 'session', surface: SURFACE_IDS.codexApp, expires: now + 2 * OPEN_LIMIT_MS }
@@ -5222,7 +5222,7 @@ test('a reply the app keeps refusing until the message\'s 30-minute limit is ref
   const refuse = (state, at, id = 'held-one') => {
     const claimed = claimMessages(state, app, at, 'abcdef')
     assert.deepEqual(claimed.messages.map(one => one.id), [id], `handed out ${at - now} ms on`)
-    return messageReceipt(claimed.state, app, { id, nonce: claimed.messages[0].nonce, status: 'unsent' }, at + 1)
+    return messageReceipt(claimed.state, app, { id, nonce: claimed.messages[0].nonce, status: 'held' }, at + 1)
   }
   const queued = queueMessage({ messages: [] }, { id: 'held-one', target: app.id, turn: app.turn, text: 'Check the build.' }, 'board', app, now).state
   const once = refuse(queued, now + 1)
@@ -5256,6 +5256,85 @@ test('a reply the app keeps refusing until the message\'s 30-minute limit is ref
   const otherBack = messageReceipt(otherClaim.state, daemon, { id: 'other-one', nonce: 'abcdef', status: 'unsent' }, now + 2)
   assert.equal(held(otherBack, 'other-one').heldSince, undefined)
   assert.equal(held(pruneMessages(otherBack, limit + 60_000), 'other-one').status, 'queued')
+})
+
+// The Codex desktop app's receiver and a connection of the same session, for the held-receipt tests below (#557).
+const appConnection = (session, now, id = `synthetic-app-${session}`) => ({ id, agent: 'codex', session, turn: 'session', surface: SURFACE_IDS.codexApp, expires: now + 3 * OPEN_LIMIT_MS })
+const messageIn = (state, id) => state.messages.find(one => one.id === id)
+const queuedFor = (target, id, now) => queueMessage({ messages: [] }, { id, target: target.id, turn: target.turn, text: 'Check the build.' }, 'board', target, now).state
+const givenBack = (state, target, id, at, status) => {
+  const claimed = claimMessages(state, target, at, 'abcdef')
+  assert.deepEqual(claimed.messages.map(one => one.id), [id], `handed out to ${target.id} for ${status}`)
+  return messageReceipt(claimed.state, target, { id, nonce: claimed.messages[0].nonce, status }, at + 1)
+}
+
+test('only Codex\'s writer refusal starts the 30-minute limit; any other give-back does not', () => {
+  const now = Date.now()
+  const app = appConnection('held-start', now)
+  // A give-back that is not Codex's refusal (a turn began, or the receiver let go of the conversation) starts no clock.
+  const other = givenBack(queuedFor(app, 'start-one', now), app, 'start-one', now + 1, 'unsent')
+  assert.equal(messageIn(other, 'start-one').heldSince, undefined)
+  // Codex refuses the writer for the first time 20 minutes on: the limit counts from there.
+  const first = now + 20 * 60_000
+  const refused = givenBack(other, app, 'start-one', first, 'held')
+  assert.equal(messageIn(refused, 'start-one').heldSince, first + 1)
+  const again = givenBack(refused, app, 'start-one', first + 60_000, 'unsent')
+  assert.equal(messageIn(again, 'start-one').heldSince, first + 1, 'another kind of give-back neither restarts nor clears it')
+  // Thirty minutes after the message was first handed out it is still handed out; thirty after the refusal, it is refused.
+  const early = now + OPEN_LIMIT_MS + 60_000
+  assert.equal(claimMessages(again, app, early, 'abcdef').messages.length, 1)
+  assert.equal(messageIn(pruneMessages(again, early), 'start-one').status, 'queued')
+  const limit = first + 1 + OPEN_LIMIT_MS
+  assert.equal(messageIn(pruneMessages(again, limit - 1), 'start-one').status, 'queued')
+  assert.deepEqual(['status', 'error'].map(key => messageIn(pruneMessages(again, limit), 'start-one')[key]), ['rejected', 'APP_STILL_OPEN'])
+})
+
+test('a held receipt is taken only from the app\'s receiver, for a claim nothing was said of', () => {
+  const now = Date.now()
+  const app = appConnection('held-only', now)
+  const held = (state, target, extra = {}) => messageReceipt(state, target, { id: 'only-one', nonce: 'abcdef', status: 'held', ...extra }, now + 2)
+  const queued = queuedFor(app, 'only-one', now)
+  const claimed = claimMessages(queued, app, now + 1, 'abcdef').state
+  assert.throws(() => held(queued, app), /CLAIM_REQUIRED/)
+  assert.throws(() => held(claimed, { ...app, id: 'synthetic-app-held-only-2' }), /INVALID_RECEIPT/, 'another connection of the session')
+  assert.throws(() => held(claimed, app, { error: 'BUSY' }), /INVALID_RECEIPT/)
+  assert.throws(() => held(claimed, app, { reply: 'ACK abcdef' }), /INVALID_RECEIPT/)
+  const accepted = messageReceipt(claimed, app, { id: 'only-one', nonce: 'abcdef', status: 'accepted' }, now + 2)
+  assert.throws(() => held(accepted, app), /INVALID_RECEIPT/, 'after an accept')
+  // Any other receiver says unsent: only the app's refusal is a wait the board counts.
+  const daemon = { ...appConnection('held-only', now, 'synthetic-daemon-held-only'), surface: SURFACE_IDS.codexDaemon }
+  const daemonClaimed = claimMessages(queuedFor(daemon, 'only-one', now), daemon, now + 1, 'abcdef').state
+  assert.throws(() => held(daemonClaimed, daemon), /INVALID_RECEIPT/, 'from the daemon receiver')
+  const taken = messageIn(held(claimed, app), 'only-one')
+  assert.deepEqual([taken.status, taken.text, taken.heldSince], ['queued', 'Check the build.', now + 2])
+})
+
+test('a message the daemon takes over drops the app\'s limit', () => {
+  const now = Date.now()
+  const app = appConnection('handed-session', now)
+  const daemon = { ...appConnection('handed-session', now, 'synthetic-daemon-handed'), surface: SURFACE_IDS.codexDaemon }
+  // A message that names no surface, as a peer's does, may go to either receiver of the session.
+  const held = givenBack(queuedFor(app, 'handed-one', now), app, 'handed-one', now + 1, 'held')
+  assert.equal(messageIn(held, 'handed-one').heldSince, now + 2)
+  // The app's receiver lets go 29 minutes on (not ended), and the daemon's receiver of the session takes the message over.
+  const left = disconnectMessages(held, app.id, now + 29 * 60_000, true)
+  const taken = rebindMessages(left, daemon, id => id === daemon.id)
+  assert.deepEqual(['target', 'heldSince', 'leftAt'].map(key => messageIn(taken, 'handed-one')[key]), [daemon.id, undefined, undefined])
+  const back = givenBack(taken, daemon, 'handed-one', now + 29 * 60_000 + 1000, 'unsent')
+  assert.equal(messageIn(pruneMessages(back, now + 2 + OPEN_LIMIT_MS + 60_000), 'handed-one').status, 'queued', 'as any message the daemon gives back (#1578)')
+  // The app's own next receiver keeps the limit.
+  const appAgain = appConnection('handed-session', now, 'synthetic-app-handed-2')
+  assert.equal(messageIn(rebindMessages(left, appAgain, id => id === appAgain.id), 'handed-one').heldSince, now + 2)
+})
+
+test('a reply queued for the app keeps its leave stamp and its limit when the receiver lets go', () => {
+  const now = Date.now()
+  const app = appConnection('left-session', now)
+  const held = givenBack(queuedFor(app, 'left-one', now), app, 'left-one', now + 1, 'held')
+  // The receiver closes without `ended` (#318): the reply stays queued with its text, the time it was left and its limit.
+  const left = disconnectMessages(held, app.id, now + 60_000, true)
+  assert.deepEqual(['status', 'text', 'leftAt', 'heldSince'].map(key => messageIn(left, 'left-one')[key]), ['queued', 'Check the build.', now + 60_000, now + 2])
+  assert.equal(messageIn(disconnectMessages(left, app.id, now + 120_000, true), 'left-one').leftAt, now + 60_000, 'left again, it keeps the first time')
 })
 
 // The claim meets the person's turn, which ends right after the receiver leaves again. A whole wait is 2 s here and the claim's time

@@ -22,7 +22,7 @@ const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
 const { SURFACE_IDS, isRoute, routeLine, sendDecision } = await import('../hooks/messaging.ts')
 const { RECEIVER_ROUTES } = await import('../hooks/receiver-routes.ts')
 const { routeText } = await import('../hooks/serve.ts')
-const { checkLiveResumeRecord, disallowedPermissionFlag } = await import('../scripts/background-resume.ts')
+const { checkLiveResumeRecord, disallowedPermissionFlag, runBackgroundProcess } = await import('../scripts/background-resume.ts')
 const { CODEX_APP_ORIGINATOR, isWriterHeld, startCodexAppReceiver } = await import('../scripts/codex-app-receiver.ts')
 const { messagingReceiver } = await import('../hooks/receivers/codex-app.ts')
 
@@ -32,8 +32,8 @@ const DIR = process.cwd()
 const NONCE = 'AB12CD'
 const EXE = process.platform === 'win32' ? 'C:\\synthetic\\codex.exe' : '/synthetic/codex'
 const message = { id: 'AB-APP-1', nonce: NONCE, prompt: `Synthetic board reply: Blue.\nReply with the line ACK ${NONCE} first.` }
-const writerHeld = { started: true, exitCode: 1, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: '', stderr: `Error: thread-store conflict: thread ${THREAD} already has an active writer\n` }
-const answered = { started: true, exitCode: 0, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: `ACK ${NONCE}\nBlue it is.\n`, stderr: '' }
+const writerHeld = { started: true, exitCode: 1, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: '', stderr: `Error: thread-store conflict: thread ${THREAD} already has an active writer\n`, hasStdout: false, isStderrCut: false }
+const answered = { started: true, exitCode: 0, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: `ACK ${NONCE}\nBlue it is.\n`, stderr: '', hasStdout: true, isStderrCut: false }
 
 // A stand-in board client: attach() keeps what the receiver gave it, so a test can deliver a message the way the board would.
 const fakeClient = () => {
@@ -49,7 +49,7 @@ const fakeClient = () => {
     },
   }
 }
-// The four callbacks the board client hands a delivery, each counting its calls.
+// The five callbacks the board client hands a delivery, each counting its calls.
 const callbacks = () => {
   const said = []
   return {
@@ -58,9 +58,10 @@ const callbacks = () => {
     begin: () => { said.push('begin') },
     unsent: async () => { said.push('unsent') },
     starting: async () => { said.push('starting') },
+    held: async () => { said.push('held') },
   }
 }
-const deliverWith = (one, cb) => one.options.deliver(message, cb.accept, cb.begin, cb.unsent, cb.starting)
+const deliverWith = (one, cb) => one.options.deliver(message, cb.accept, cb.begin, cb.unsent, cb.starting, cb.held)
 // As the board client does it: the delivery counts as in flight until its receipt has been sent, after the run is over.
 const processWith = async (one, cb, receipt) => {
   one.sending += 1
@@ -256,7 +257,8 @@ test('while the app still holds the conversation, nothing was sent: the message 
   for (const time of ['first', 'second']) {
     const cb = callbacks()
     assert.equal(await deliverWith(one, cb), undefined, time)
-    assert.deepEqual(cb.said, ['starting', 'unsent'], `given back, never begun (${time} refusal)`)
+    // `held`, not `unsent`: only Codex's refusal starts the board's 30 minutes (hooks/messaging.ts).
+    assert.deepEqual(cb.said, ['starting', 'held'], `given back as held, never begun (${time} refusal)`)
     assert.equal(await one.options.canReceive(), false, time)
     advance(29_999)
     assert.equal(await one.options.canReceive(), false, time)
@@ -270,7 +272,7 @@ test('while the app still holds the conversation, nothing was sent: the message 
   app.kill()
 })
 
-test('a refusal the app repeats past 30 minutes is still given back unsent: the board, not the receiver, counts the message\'s time', async () => {
+test('a refusal the app repeats past 30 minutes is still given back as held: the board, not the receiver, counts the message\'s time', async () => {
   const { app, client, runs, advance } = receiver({ results: [writerHeld] })
   await app.tick()
   const one = client.attached.get(THREAD)
@@ -278,7 +280,7 @@ test('a refusal the app repeats past 30 minutes is still given back unsent: the 
     advance(after)
     const cb = callbacks()
     assert.equal(await deliverWith(one, cb), undefined)
-    assert.deepEqual(cb.said, ['starting', 'unsent'], `given back, never begun (${after / 60_000} minutes on)`)
+    assert.deepEqual(cb.said, ['starting', 'held'], `given back as held, never begun (${after / 60_000} minutes on)`)
   }
   assert.equal(runs.length, 2)
   app.kill()
@@ -301,6 +303,28 @@ test('only Codex\'s own writer refusal reads as nothing sent', () => {
   assert.equal(held({ ...writerHeld, stderr: `Error: retried after thread ${THREAD} already has an active writer, then failed` }), false, 'inside a longer line')
   assert.equal(held({ ...writerHeld, stderr: `Error: thread ${THREAD} already has an active writer\nError: turn failed after writing` }), false, 'not the last line')
   assert.equal(held({ ...writerHeld, started: false }), false, 'never started')
+  assert.equal(held({ ...writerHeld, hasStdout: true }), false, 'a run that printed something before the output kept')
+  assert.equal(held({ ...writerHeld, isStderrCut: true }), false, 'an error output too long to keep whole')
+  const { hasStdout: _printed, isStderrCut: _cut, ...unsaid } = writerHeld
+  assert.equal(held(unsaid), false, 'a result that does not say whether anything was printed')
+})
+
+// A stand-in Codex: this Node, printing what a test asks for, then failing.
+const standIn = (stdout, stderr) => ({ command: process.execPath, isShell: false, args: ['-e', `process.stdout.write(${JSON.stringify(stdout)}); process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 1`] })
+const sentence = `Error: thread-store conflict: thread ${THREAD} already has an active writer\n`
+
+test('a run that printed anything, however far back, is never read as unsent', async () => {
+  const quiet = await runBackgroundProcess(standIn('', sentence), { maxWaitMs: 20_000 })
+  assert.deepEqual([quiet.exitCode, quiet.hasStdout, quiet.isStderrCut, isWriterHeld(quiet, THREAD)], [1, false, false, true], 'the refusal alone')
+  // An answer, then more blanks than the 8,000 characters of output kept: the kept part is blank, the run is not.
+  const answer = await runBackgroundProcess(standIn(`ACK ${NONCE}\nBlue it is.\n${' '.repeat(8001)}`, sentence), { maxWaitMs: 20_000 })
+  assert.equal(answer.stdout.trim(), '', 'the kept output is blank')
+  assert.deepEqual([answer.hasStdout, isWriterHeld(answer, THREAD)], [true, false])
+})
+
+test('an error output too long to keep whole is never read as unsent', async () => {
+  const long = await runBackgroundProcess(standIn('', `${'warning: synthetic notice\n'.repeat(100)}${sentence}`), { maxWaitMs: 20_000 })
+  assert.deepEqual([long.hasStdout, long.isStderrCut, isWriterHeld(long, THREAD)], [false, true, false])
 })
 
 test('a run that may have reached the model and gives no ACK is uncertain, never given back or tried again', async () => {
@@ -466,6 +490,46 @@ test('one reply at a time per conversation', async () => {
   assert.equal(await first, `ACK ${NONCE} Blue it is.`)
   assert.equal(await one.options.canReceive(), true)
   app.kill()
+})
+
+// A receipt the test holds: the delivery stays in flight, as the board client counts it, until the test lets the receipt go.
+const heldReceipt = () => { let sent; const receipt = new Promise(done => { sent = done }); return { receipt: () => receipt, sent: () => sent() } }
+
+test('a new connection takes nothing while an earlier one\'s receipt is on its way', async () => {
+  const { app, client, runs } = receiver()
+  await app.tick()
+  const first = client.attached.get(THREAD)
+  const pending = heldReceipt()
+  const reply = processWith(first, callbacks(), pending.receipt)
+  await new Promise(done => setImmediate(done))
+  assert.equal(runs.length, 1)
+  // The run is over and its ACK is on its way when the connection goes; the next tick attaches again.
+  await first.close()
+  await app.tick()
+  const again = client.attached.get(THREAD)
+  assert.notEqual(again, first)
+  assert.equal(app.sending(), 1, 'the earlier receipt still counts')
+  assert.equal(await again.options.canReceive(), false, 'while the earlier receipt is on its way')
+  pending.sent()
+  assert.equal(await reply, `ACK ${NONCE} Blue it is.`)
+  await app.tick()
+  assert.equal(app.sending(), 0)
+  assert.equal(await again.options.canReceive(), true)
+  app.kill()
+})
+
+test('a stopped board counts a receipt still on its way', async () => {
+  const { app, client } = receiver()
+  await app.tick()
+  const one = client.attached.get(THREAD)
+  const pending = heldReceipt()
+  const reply = processWith(one, callbacks(), pending.receipt)
+  await new Promise(done => setImmediate(done))
+  app.kill()
+  assert.equal(app.sending(), 1)
+  pending.sent()
+  await reply
+  assert.equal(app.sending(), 0)
 })
 
 test('a conversation that leaves the board\'s list while its run is in flight keeps its connection until the receipt is in', async () => {
