@@ -32,7 +32,13 @@ const DIR = process.cwd()
 const NONCE = 'AB12CD'
 const EXE = process.platform === 'win32' ? 'C:\\synthetic\\codex.exe' : '/synthetic/codex'
 const message = { id: 'AB-APP-1', nonce: NONCE, prompt: `Synthetic board reply: Blue.\nReply with the line ACK ${NONCE} first.` }
-const writerHeld = { started: true, exitCode: 1, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: '', stderr: `Error: thread-store conflict: thread ${THREAD} already has an active writer\n`, hasStdout: false, isStderrCut: false, isOutputOpen: false }
+// Codex 0.167's error output as it printed it in the test home on 11-22 while an app-server held the conversation, as the
+// desktop app holds it (#557): two log lines, then the error line, which wraps Codex's sentence in the resume request's
+// own failure and its error code.
+const printed = id => `2026-11-22T10:19:42.258094Z ERROR codex_core::session::session: failed to initialize thread persistence: thread-store conflict: thread ${id} already has an active writer\n`
+  + `2026-11-22T10:19:42.258206Z ERROR codex_core::session: Failed to create session: thread-store conflict: thread ${id} already has an active writer\n`
+  + `Error: thread/resume: thread/resume failed: thread ${id} already has an active writer (code -32600)\n`
+const writerHeld = { started: true, exitCode: 1, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: '', stderr: printed(THREAD), hasStdout: false, isStderrCut: false, isOutputOpen: false }
 const answered = { started: true, exitCode: 0, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: `ACK ${NONCE}\nBlue it is.\n`, stderr: '', hasStdout: true, isStderrCut: false, isOutputOpen: false }
 
 // A stand-in board client: attach() keeps what the receiver gave it, so a test can deliver a message the way the board would.
@@ -288,9 +294,11 @@ test('a refusal the app repeats past 30 minutes is still given back as held: the
 })
 
 test('only Codex\'s own writer refusal reads as nothing sent', () => {
-  // Codex 0.167's own words: `thread <id> already has an active writer`, inside a thread-store conflict, after `Error: `.
+  // Codex 0.167's own words: `thread <id> already has an active writer`, as Codex prints it (above), or inside a thread-store
+  // conflict after `Error: `.
   const held = result => isWriterHeld(result, THREAD)
   assert.equal(held(writerHeld), true)
+  assert.equal(held({ ...writerHeld, stderr: `Error: thread-store conflict: thread ${THREAD} already has an active writer\n` }), true, 'the thread-store conflict alone')
   assert.equal(held({ ...writerHeld, stderr: `Error: thread ${THREAD} already has an active writer` }), true, 'without the thread-store prefix')
   assert.equal(held({ ...writerHeld, stderr: `warning: synthetic notice\r\nthread-store conflict: thread ${THREAD} already has an active writer.\r\n` }), true, 'after another line, with a full stop')
   assert.equal(held({ ...writerHeld, exitCode: 0 }), false, 'a run that ended well')
@@ -313,9 +321,21 @@ test('only Codex\'s own writer refusal reads as nothing sent', () => {
   }
 })
 
+test('Codex\'s refusal as it prints it while the app holds the conversation reads as nothing sent', () => {
+  const held = result => isWriterHeld(result, THREAD)
+  assert.equal(held({ ...writerHeld, stderr: printed(THREAD) }), true)
+  assert.equal(held({ ...writerHeld, stderr: printed(THREAD).replaceAll('\n', '\r\n') }), true, 'with Windows line ends')
+  assert.equal(held({ ...writerHeld, stderr: printed(OTHER) }), false, 'another conversation')
+  assert.equal(held({ ...writerHeld, stderr: printed(THREAD).replace('(code -32600)', '(code -32603)') }), false, 'another error code')
+  assert.equal(held({ ...writerHeld, stderr: printed(THREAD).replace('(code -32600)', '(code -32600), retrying') }), false, 'more after the code')
+  assert.equal(held({ ...writerHeld, stderr: printed(THREAD).replace('thread/resume failed: thread', 'thread/resume failed: turn ran, then thread') }), false, 'other words in the wrapper')
+  assert.equal(held({ ...writerHeld, stderr: printed(THREAD).replace('Error: thread/resume: ', 'Error: turn/start: ') }), false, 'another request')
+  assert.equal(held({ ...writerHeld, stderr: `${printed(THREAD)}Error: turn failed after writing\n` }), false, 'not the last line')
+})
+
 // A stand-in Codex: this Node, printing what a test asks for, then failing.
 const standIn = (stdout, stderr) => ({ command: process.execPath, isShell: false, args: ['-e', `process.stdout.write(${JSON.stringify(stdout)}); process.stderr.write(${JSON.stringify(stderr)}); process.exitCode = 1`] })
-const sentence = `Error: thread-store conflict: thread ${THREAD} already has an active writer\n`
+const sentence = printed(THREAD)
 
 test('a run that printed anything, however far back, is never read as unsent', async () => {
   const quiet = await runBackgroundProcess(standIn('', sentence), { maxWaitMs: 20_000 })

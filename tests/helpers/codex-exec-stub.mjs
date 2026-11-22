@@ -16,7 +16,10 @@ const prompt = Buffer.concat(chunks).toString('utf8')
 appendFileSync(config.log, JSON.stringify({ args, cwd: process.cwd() }) + '\n')
 const nonce = /ACK ([A-Za-z0-9]+)/.exec(prompt)?.[1]
 if (config.refuse === true) {
-  process.stderr.write(`Error: thread-store conflict: thread ${args[3]} already has an active writer\n`)
+  // As Codex 0.167 printed it in the test home while an app-server held the conversation (#557).
+  process.stderr.write(`2026-11-22T10:19:42.258094Z ERROR codex_core::session::session: failed to initialize thread persistence: thread-store conflict: thread ${args[3]} already has an active writer\n`
+    + `2026-11-22T10:19:42.258206Z ERROR codex_core::session: Failed to create session: thread-store conflict: thread ${args[3]} already has an active writer\n`
+    + `Error: thread/resume: thread/resume failed: thread ${args[3]} already has an active writer (code -32600)\n`)
   process.exitCode = 1
 } else {
   while (!existsSync(config.release)) await new Promise(done => setTimeout(done, 50))
