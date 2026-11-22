@@ -326,7 +326,7 @@ export const antigravityTranscriptSize = (path: unknown): number | null => {
 }
 
 const ACK_READ_CHUNK_BYTES = 256 * 1024
-type TranscriptEntry = { type?: unknown; source?: unknown; content?: unknown }
+type TranscriptEntry = { type?: unknown; source?: unknown; status?: unknown; content?: unknown }
 const entryOf = (line: string): TranscriptEntry | null => {
   if (line.trim() === '') return null
   try {
@@ -402,6 +402,47 @@ export const antigravityReplyFirstLines = (path: unknown, from?: number): string
         }
       }
       return replies
+    } finally { closeSync(fd) }
+  } catch { return null }
+}
+
+export const MARK_PREFIX = 'AGENT_BOARD_REPORT_V1 '
+const OUTPUT_HEADER = 'Command output:\n'
+// The marked lines of reports agy's terminal sandbox refused (#1384), from the conversation's own transcript only. agy
+// keeps a command's output in a finished GENERIC entry of the model's, after its "Command output:" header; a marked line
+// anywhere else (a reply, a prompt, a command's own text) is counted in `stray` and not returned. With `from` (where the
+// last read ended, still within the file) it reads forward up to 8 MiB; without it, or when the file is now shorter, the
+// last 256 KiB. Only whole lines are read, and `end` is where the next read starts. null when the file is not this
+// conversation's transcript or cannot be read.
+export const antigravityMarkedLines = (path: unknown, conversationId: string, home: string, from?: number): { lines: string[]; stray: number; end: number } | null => {
+  if (!isSessionAntigravityTranscript(path, conversationId, home)) return null
+  try {
+    const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+    try {
+      const stat = fstatSync(fd)
+      if (!stat.isFile()) return null
+      const isForward = from !== undefined && from <= stat.size
+      const start = isForward ? from : Math.max(0, stat.size - MAX_TRANSCRIPT_HEAD_BYTES)
+      const size = Math.min(stat.size - start, isForward ? MAX_ACK_READ_BYTES : MAX_TRANSCRIPT_HEAD_BYTES)
+      const bytes = Buffer.alloc(size)
+      if (size > 0 && readSync(fd, bytes, 0, size, start) !== size) return null
+      // A read that starts inside the file starts mid-line; a last line with no line break may still be written.
+      const first = !isForward && start > 0 ? bytes.indexOf(0x0a) + 1 : 0
+      const last = bytes.lastIndexOf(0x0a)
+      if (first === 0 && start > 0 && !isForward || last < first) return { lines: [], stray: 0, end: start + first }
+      const lines: string[] = []
+      let stray = 0
+      for (const line of bytes.subarray(first, last + 1).toString('utf8').split(/\r?\n/)) {
+        if (!line.includes(MARK_PREFIX.trim())) continue
+        const entry = entryOf(line)
+        const content = typeof entry?.content === 'string' ? entry.content.replace(/\r\n/g, '\n') : ''
+        const header = content.indexOf(OUTPUT_HEADER)
+        const isOutput = entry?.source === 'MODEL' && entry.type === 'GENERIC' && entry.status === 'DONE' && (header === 0 || header > 0 && content[header - 1] === '\n')
+        const found = isOutput ? content.slice(header + OUTPUT_HEADER.length).split('\n').filter(one => one.startsWith(MARK_PREFIX)) : []
+        lines.push(...found)
+        if (found.length === 0) stray += 1
+      }
+      return { lines, stray, end: start + last + 1 }
     } finally { closeSync(fd) }
   } catch { return null }
 }
