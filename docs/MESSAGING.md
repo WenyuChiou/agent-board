@@ -18,8 +18,10 @@ replays a claimed message. If a poll response is lost after claiming, the messag
 uncertain until reconciled; a later heartbeat cannot turn it into an ACK.
 Temporary store locks (`EPERM`, `EBUSY`, `EAGAIN`) report HTTP 503 so polling can
 recover within that deadline. Idle polls do not rewrite the message file. Sending
-and receipts are never automatically retried, including after a store lock. The one exception is the Codex daemon receiver's
-`unsent` give-back after a busy store (#1625): the store saved nothing, so asking again a tick later cannot repeat it.
+and receipts are never automatically retried, including after a store lock. The exceptions are the Codex daemon receiver's
+`unsent` give-back after a busy store (#1625), and the Codex desktop app receiver's `unsent` and `held` give-backs after one,
+asked at most five times a quarter-second apart (#557): the store saved nothing, so asking again cannot repeat it. A
+give-back still unsaved after that is left to the board's limit, as any claim with no receipt.
 
 Use the existing reply box on the session's card. A matching receiver enables Send or
 Queue only when the route for its session state and the surface it registered or enrolled as has a live
@@ -312,7 +314,7 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 
 | State | Evidence |
 | --- | --- |
-| queued | Stored locally and not handed out since. A message an automatic Codex receiver left behind stays queued with the time it was left (see Codex daemon receiver), and one whose claim the Codex daemon receiver gave back with an `unsent` receipt before asking Codex for anything is queued again with its text (#1578), as is one whose claim it never said `starting` for when its connection ended (#1507). A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain (#1407) |
+| queued | Stored locally and not handed out since. A message an automatic Codex receiver left behind stays queued with the time it was left (see Codex daemon receiver), and one whose claim the Codex daemon receiver gave back with an `unsent` receipt before asking Codex for anything is queued again with its text (#1578), as is one whose claim it never said `starting` for when its connection ended (#1507). One whose claim the Codex desktop app's receiver gave back with a `held` receipt (Codex refused a second writer while the app holds the conversation) is queued again with the time of the first such refusal, and from 30 minutes after it is never handed out again and is refused as not sent (`APP_STILL_OPEN`); a receiver of another surface that takes it over starts no such time (#557). A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain (#1407) |
 | uncertain | Claimed durably with no acceptance on record: before delivery, or after a disconnect or timeout. Also an accepted message that a later receipt reports uncertain (for a hook's message, #1407), or that expired or was dismissed |
 | accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is not sent again while it stays accepted |
 | acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
@@ -517,7 +519,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Codex | CLI | 3 | Unknown | Verified | [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | nextTurn · no live note | none · no live note |
 | Codex | Daemon | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | [scripts/codex-receiver.mjs](../scripts/codex-receiver.mjs) | now · [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | stepEnd · no live note | none · no live note |
-| Codex | Desktop App | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
+| Codex | Desktop App | 2 | Unknown | Verified | [docs/validation/2026-11-22-codex-app-reopen-live.md](../docs/validation/2026-11-22-codex-app-reopen-live.md) | [hooks/receivers/codex-app.ts](../hooks/receivers/codex-app.ts) | reopen · [docs/validation/2026-11-22-codex-app-reopen-live.md](../docs/validation/2026-11-22-codex-app-reopen-live.md) | stepEnd · no live note | none · no live note |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
 | Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) | none · no live note | now · [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | none · no live note |
 | Cursor | cursor-agent CLI | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-cursor.ts](../hooks/receivers/hook-mailbox-cursor.ts) | chatOpen · no live note | chatOpen · no live note | none · no live note |

@@ -67,7 +67,9 @@ import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } 
 import { sha256 } from '../hooks/sha256'
 import { currentTidyCandidate, previewTidy, tidySelector, type TidyCandidate, type TidyPreview, type TidySelector } from '../hooks/tidy'
 import { codexSignal, isStrongRun, runLookupId } from '../hooks/runs'
-import { findSessionFile, readSessionMeta } from './codex-history'
+import { findSessionFile, readSessionFolder, readSessionMeta } from './codex-history'
+import { CODEX_APP_ORIGINATOR } from './codex-app-receiver'
+import type { CodexAppSession } from './codex-app-receiver'
 import { runMcp } from './board-mcp'
 import { createSettingsAgents } from './settings-agents'
 
@@ -2238,6 +2240,44 @@ const codexReceiverExecutable = (): string | null => {
   if (given !== undefined) return explicitCodexExecutable(given)
   return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
 }
+// The Codex desktop app conversations (#557): Codex rows the board has not read as ended whose history file names the
+// desktop app as where they began (`originator`, read by readSessionMeta), each with the folder it runs in (the row's own,
+// else the same record's `cwd`, read by readSessionFolder; nothing else of the file). Each conversation's answer is kept
+// once known; one whose file is not found or not readable is looked up again a minute later. A test run looks only in a
+// Codex home it names, never in the real ~/.codex.
+const appThreads = new Map<string, { isApp: boolean; dir: string | null; at: number }>()
+const APP_LOOKUP_AGAIN_MS = 60_000
+const appCodexHome = (): string | null => {
+  const given = flag('--codex-dir') ?? process.env.CODEX_HOME
+  if (given) return resolve(given)
+  return process.env.AGENT_BOARD_TEST_PID === undefined ? join(homedir(), '.codex') : null
+}
+const codexAppThread = (home: string, id: string, now: number): { isApp: boolean; dir: string | null } => {
+  const known = appThreads.get(id)
+  if (known !== undefined && (known.at < 0 || now - known.at < APP_LOOKUP_AGAIN_MS)) return known
+  const file = findSessionFile(home, id)
+  const meta = file === null ? null : readSessionMeta(file, id)
+  const isApp = meta?.originator === CODEX_APP_ORIGINATOR
+  // A file read whole settles the answer for good (at -1); a missing or unreadable one is asked again later.
+  const found = { isApp, dir: isApp && file !== null ? readSessionFolder(file, id) : null, at: meta === null ? now : -1 }
+  appThreads.set(id, found)
+  return found
+}
+const codexAppSessions = (path: string): (() => CodexAppSession[]) | undefined => {
+  const home = appCodexHome()
+  if (home === null) return undefined
+  return () => {
+    const now = Date.now()
+    return parseProgress(readFileSync(path, 'utf8')).flatMap(project => project.tasks.flatMap(task => {
+      const auto = task.auto
+      if (auto?.agent !== 'codex' || auto.state === 'ended') return []
+      const id = auto.resume ?? auto.session
+      const found = codexAppThread(home, id, now)
+      const dir = auto.dir ?? found.dir
+      return found.isApp && dir ? [{ id, dir }] : []
+    }))
+  }
+}
 // The detached Windows child reports startup failures through a private file too; redirecting
 // its standard handles would make Start-Process inherit the caller's extra pipes again.
 const serveChildError = (message: string): void => {
@@ -2305,6 +2345,9 @@ const serveChild = (): void => {
         // The daemon's own unload delay and a margin, which the receiver knows, unless a test process started this page and
         // names a shorter wait for its stand-in daemon (`testUnloadMs`).
         unloadMs: testUnloadMs(process.env, process.ppid),
+        appSessions: codexAppSessions(path),
+        // Only a home `--codex-dir` names is handed on: without it the run keeps the CODEX_HOME of this environment, or none.
+        ...(flag('--codex-dir') ? { appHome: resolve(flag('--codex-dir') as string) } : {}),
       },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests

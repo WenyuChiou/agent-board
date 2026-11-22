@@ -30,6 +30,8 @@ import { createMessaging } from './board-messaging'
 import { watchBoard } from './board-watch'
 import type { BoardWatch, WatchFn } from './board-watch'
 import { startCodexReceiver } from './codex-receiver.mjs'
+import { startCodexAppReceiver } from './codex-app-receiver'
+import type { CodexAppSession } from './codex-app-receiver'
 import { setupAgents } from './setup-discovery.mjs'
 import { repoLookup } from './repo-lookup'
 import type { ProgressBinding } from '../hooks/messaging'
@@ -48,8 +50,10 @@ export type ServeOptions = {
   messagesDirectory: string
   isDefaultMessagesDirectory?: boolean
   // The Codex receiver (#318): the Codex session ids the board knows, the Codex program to run (null: none found,
-  // so nothing runs). A running turn is never steered (#1409).
-  codex?: { threads: () => string[]; executable: string | null; unloadMs?: number }
+  // so nothing runs). A running turn is never steered (#1409). appSessions: the Codex desktop app conversations, for the
+  // receiver that runs their next turn in the background once the app has let go of them (#557); none, no such receiver.
+  // appHome: the Codex home `--codex-dir` named, where they were found, which those runs read too.
+  codex?: { threads: () => string[]; executable: string | null; unloadMs?: number; appSessions?: () => CodexAppSession[]; appHome?: string }
   reports?: (isFresh?: boolean) => ProgressBinding[]
   s: Strings
   port: number
@@ -662,7 +666,8 @@ export const startServer = (o: ServeOptions): void => {
   }
 
   let codexReceiver: ReturnType<typeof startCodexReceiver> | null = null
-  const isBusySending = (): boolean => sending.size > 0 || (codexReceiver?.sending() ?? 0) > 0
+  let codexAppReceiver: ReturnType<typeof startCodexAppReceiver> | null = null
+  const isBusySending = (): boolean => sending.size > 0 || (codexReceiver?.sending() ?? 0) > 0 || (codexAppReceiver?.sending() ?? 0) > 0
 
   const closeNonServer = (): void => {
     // A lock a scanner holds for a moment must not stop the page from closing; the next start recovers the pid once this process is gone.
@@ -699,6 +704,8 @@ export const startServer = (o: ServeOptions): void => {
       return
     }
     isStopping = true
+    // The Codex desktop app receiver lets go of its board connections; a turn it already started runs on in Codex.
+    codexAppReceiver?.kill()
     for (const id of [...approvals.keys()]) settleApproval(id, null)
     for (const one of approvals.values()) one.timers.forEach(clearTimeout)
     approvals.clear()
@@ -1037,7 +1044,7 @@ export const startServer = (o: ServeOptions): void => {
       // hidden still can; before any host asked, the page that is open is enough.
       if (url.pathname === '/api/ping' && !isLan) {
         if (!isClientToken) return json(res, 403, {})
-        return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserOff || isSwitchWanted) && !hasLiveSecret(Date.now()) })
+        return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0) + (codexAppReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserOff || isSwitchWanted) && !hasLiveSecret(Date.now()) })
       }
       return json(res, 404, {})
     }
@@ -1282,7 +1289,8 @@ export const startServer = (o: ServeOptions): void => {
               : receiptLine === 'chatOpen'
                 ? o.s.serveQueuedNextOpen(agentName)
                 : receiptLine === 'reopen'
-                  ? o.s.serveReopenRunning(agentName)
+                  // A Codex desktop app conversation runs only once the app has let go of it (#557).
+                  ? action.connection.isAfterAppQuit === true ? o.s.serveReopenWaitingCodexApp : o.s.serveReopenRunning(agentName)
                   : o.s.messagesQueued
             const acceptedNote = receiptLine === 'reopen' ? o.s.serveReopenRunning(agentName) : o.s.messagesAccepted
             const acknowledgedNote = receiptLine === 'reopen' ? o.s.serveReopenDone(agentName) : o.s.messagesAcknowledged
@@ -1462,6 +1470,18 @@ export const startServer = (o: ServeOptions): void => {
       codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable, ...(o.codex.unloadMs === undefined ? {} : { unloadMs: o.codex.unloadMs, unloadMarginMs: o.codex.unloadMs }) })
       // A process that exits another way (Windows sends no SIGTERM) still ends the Codex program it started.
       process.once('exit', () => codexReceiver?.kill())
+      if (o.codex.appSessions !== undefined) {
+        const executable = o.codex.executable, appSessions = o.codex.appSessions
+        codexAppReceiver = startCodexAppReceiver({
+          boardUrl: url, executable, sessions: appSessions,
+          // The Codex home the conversations were found in, so their runs resume from it too.
+          ...(o.codex.appHome === undefined ? {} : { codexHome: o.codex.appHome }),
+          stateOf: id => sessionState(o.view(), 'codex', id),
+          // The daemon receiver has a conversation it is attached to; two connections would contest its card.
+          isTaken: id => codexReceiver?.attached().includes(id) === true,
+        })
+        process.once('exit', () => codexAppReceiver?.kill())
+      }
     }
     // The idle timer starts only once the server is listening: a listen failure
     // throws before this point, and a timer made earlier would keep the failed

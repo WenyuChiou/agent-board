@@ -90,9 +90,12 @@ export const boardClient = address => {
           const unsent = () => hasStarted ? Promise.reject(new Error('DELIVERY_STARTED')) : receipt(message, 'unsent')
           // Right before the host is asked for anything: from then on a connection that ends leaves the claim in doubt (#1507).
           const starting = () => hasStarted ? Promise.reject(new Error('DELIVERY_STARTED')) : receipt(message, 'starting')
+          // As unsent, said only by the Codex desktop app's receiver when Codex refused a second writer: the board counts the
+          // message's 30 minutes from the first one (#557).
+          const held = () => hasStarted ? Promise.reject(new Error('DELIVERY_STARTED')) : receipt(message, 'held')
           // Older adapters have no explicit boundary, so entering them remains uncertain.
           if (deliver.length < 3) begin()
-          const reply = await (deliver.length >= 3 ? deliver(message, accept, begin, unsent, starting) : deliver(message, accept))
+          const reply = await (deliver.length >= 3 ? deliver(message, accept, begin, unsent, starting, held) : deliver(message, accept))
           if (typeof reply === 'string' && reply.trim()) await receipt(message, 'acknowledged', reply)
         } catch (error) {
           if (!hasStarted) await receipt(message, 'rejected', undefined, /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.message) ? error.message : undefined).catch(() => undefined)

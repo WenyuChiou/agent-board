@@ -161,6 +161,8 @@ const ON_HOOK = { via: 'mailbox', ref: REF } as const
 const RECEIVER_SHAPES: Record<string, Shape> = { onHook: ON_HOOK, awaitsAck: { ...ON_HOOK, awaitsAck: true }, onPull: { via: 'mailbox' }, onWake: wake }
 const ANY_RECEIVER: readonly DeliveryState[] = ['turnEnded', 'inDoubt', 'disconnected', 'acknowledged', 'rejected', 'dismissed', 'expired']
 const OWN_SHAPES: Partial<Record<DeliveryState, Record<string, Shape>>> = {
+  // Refused unsent by the Codex desktop app since a second short of the open limit before the next event (#557).
+  queued: { appHeld: { heldSince: SAMPLE_NOW - OPEN_LIMIT_MS + SECOND } },
   takenBack: { onHook: { via: 'mailbox' } },
   pulled: { onWake: { agent: 'opencode' } },
   handed: { onPull: { ref: undefined }, onWake: wake },
@@ -303,6 +305,8 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     attempt: 'INVALID_MAILBOX_CALL', release: 'queued', releaseUnsent: 'queued', dismiss: 'takenBack', disconnect: 'rejected', leave: 'queued', rebind: 'queued', openLimit: 'queued', dayLimit: 'queued' },
     shapes: {
       otherSurface: { on: { claim: 'queued', claimLate: 'queued' } },
+      // Held by the app for the open limit: never handed out again, and the board refuses it as not sent (APP_STILL_OPEN).
+      appHeld: { on: { claim: 'queued', openLimit: 'rejected', dayLimit: 'rejected' } },
     } },
   queuedForHook: { holdsSend: true, holdsStart: false, card: 'messagesQueued', claudeCard: 'claudeSendWorking', on: {
     claim: 'sent:leased', claimLate: 'sent:leased', pull: 'sent:pulled', accept: 'CLAIM_REQUIRED', ack: 'CLAIM_REQUIRED', reject: 'CLAIM_REQUIRED', fail: 'CLAIM_REQUIRED', timeout: 'CLAIM_REQUIRED', unsure: 'CLAIM_REQUIRED',

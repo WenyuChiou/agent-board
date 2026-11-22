@@ -237,7 +237,10 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   const replied = hasOpenQuestion && !isSettlingReply && (isHumanPrompt || previous?.replied !== undefined)
     ? acceptedAt > displayAt ? new Date(acceptedAt).toISOString() : now : undefined
   // A reply that ends on a question waits for the person, even after the model reported its own steps done.
-  const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : 'ended' : working ? 'working' : previous?.state === 'done' && !isClosingQuestion ? 'done' : 'waiting'
+  // The SessionEnd of the board's own background turn (#557) ends that `codex exec` run, not the conversation: it waits for
+  // the person again, so the board can send the next message the same way.
+  const isRunEnd = event === 'SessionEnd' && input.background_turn === true
+  const state = event === 'SessionStart' ? previous?.state === 'ended' ? 'waiting' : previous?.state ?? 'waiting' : event === 'SessionEnd' ? previous?.state === 'done' ? 'done' : isRunEnd ? 'waiting' : 'ended' : working ? 'working' : previous?.state === 'done' && !isClosingQuestion ? 'done' : 'waiting'
   // Keep the hook's own steps in place: the ledger needs to see their original words closed.
   // A session ending does not answer its last question, but it does end an approval.
   const placeholder = codexLifecycleStep(state, s)
