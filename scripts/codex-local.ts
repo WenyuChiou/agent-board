@@ -1899,9 +1899,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // The connect writes its board beside the progress file it connected: the default one, one a
   // CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names, or the one its own record keeps (#285).
   // Releases before de40dde wrote the command as node "<path>" for any path; later ones use boardRun.
-  const connected = ((): unknown => {
-    try { return object(JSON.parse(readFileSync(join(installControlRoot(home), 'legacy-connect.json'), 'utf8'))).connectedProgress } catch { return undefined }
+  const connectRecord = ((): Json => {
+    try { return object(JSON.parse(readFileSync(join(installControlRoot(home), 'legacy-connect.json'), 'utf8'))) } catch { return {} }
   })()
+  const connected = connectRecord.connectedProgress
+  // The folder Hermes' config still names when a connect's move did not reach it, or the one a
+  // session start's connect wrote there (#1664).
+  const hermesConnected = connectRecord.hermesProgress
   const legacyProgress = [join(home, '.claude', 'progress.md'), process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, 'progress.md') : '', process.env.CLAUDE_PROGRESS_FILE ?? '', typeof connected === 'string' ? connected : '']
   const legacyBoards = legacyProgress.filter(path => path !== '').flatMap(path => [path.replace(/[\\/][^\\/]*$/, '') + (process.platform === 'win32' ? '\\' : '/') + 'agent-board.mjs', join(dirname(path), 'agent-board.mjs')])
   const legacySkills = Object.values(STRINGS).flatMap(words => [...new Set(legacyBoards.flatMap(board => [boardRun(board), `node "${board}"`]))].map(run => `---\nname: agent-board\ndescription: ${JSON.stringify(words.boardCommandDescription)}\n---\n\n${words.boardSkillPrompt(run)}\n`))
@@ -2247,6 +2251,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       codexHome: dirname(configs.codex!), grokHome: dirname(dirname(configs.grok!)), hermesHome: hermesDir,
       openclawHome: openclawDir, opencodeHome: opencodeDir, board: join(connectorFolder, 'agent-board.mjs'),
       node: process.execPath, progress: connectorProgress,
+      ...(typeof hermesConnected === 'string' && isAbsolute(hermesConnected) ? { previousProgress: hermesConnected } : {}),
     })
     const hasConnectHook = connectedHooks.some(one => {
       if (one.agent !== agent || one.label === '') return false

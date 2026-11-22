@@ -403,11 +403,13 @@ export const connectLegacy = (transaction: ConnectTransaction, request: LegacyCo
   if (request.mode === 'connect') transaction.state.connectedProgress = path
   // Hermes' config can fail to change while the other hosts move on. Until a connect or remove
   // lands there, the folder it still names stays recorded, so the next run counts that folder's
-  // hooks as ours instead of adding a second set beside them (#1664). A probe never clears it: it
-  // can leave a host that reports to another folder alone.
-  if (request.mode === 'connect' || remove) {
+  // hooks as ours instead of adding a second set beside them (#1664). A session start's own
+  // connect that writes Hermes' config records the folder it wrote too, since it records no
+  // connected folder (#1664). Otherwise it never clears it: it can leave a host that reports to
+  // another folder alone.
+  if (request.mode === 'connect' || remove || isAuto && hasHermesLanded) {
     const hermesConfig = hooks.find(one => one.agent === 'hermes' && one.label !== '')?.file
-    const named = hasHermesLanded || hermesConfig === undefined || !existsSync(hermesConfig) ? undefined : hermesFolder
+    const named = hasHermesLanded ? remove ? undefined : path : hermesConfig === undefined || !existsSync(hermesConfig) ? undefined : hermesFolder
     if (named === undefined || named === transaction.state.connectedProgress) delete transaction.state.hermesProgress
     else transaction.state.hermesProgress = named
   }
