@@ -12,7 +12,7 @@ import { partTest } from '../scripts/ci-impact.mjs'
 import { turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage, rebindMessages } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/message-client.mjs'
-import { isNote, observeSession, routeRecord } from '../hooks/messaging.ts'
+import { isNote, observeSession, routeLine, routeRecord } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { explicitCodexExecutable, hasUnloadDelay, resolveCodexExecutable, startCodexReceiver, testUnloadMs } from '../scripts/codex-receiver.mjs'
@@ -7719,19 +7719,22 @@ test('each receiver record names a validation note that exists, and the table th
       assert.ok(!(route.line === 'none' && route.record !== null), `${record.source} ${state} names a note for a route that does not exist`)
     }
     const shipped = RECEIVER_ROUTES.find(one => one.agent === record.agent && one.kind === record.kind)
-    // Two adapters can share an agent and kind (the Codex owner connector and the daemon receiver): a note covers only the
-    // surfaces it names, so each record must match the shipped entry on its own surfaces.
+    // Three adapters can share an agent and kind (the Codex owner connector, the daemon receiver and the desktop app
+    // receiver): a note and a line cover only the surfaces they name, so each record must match the shipped entry on its
+    // own surfaces, read the way the send gate reads them (routeLine, routeRecord, #557).
     const ids = record.surfaces.map(surface => surface.id)
     const own = route => {
       const surfaces = route.surfaces.filter(id => ids.includes(id))
-      const notes = Object.entries(route.surfaceRecords ?? {}).filter(([id]) => ids.includes(id))
-      return { line: route.line, record: surfaces.length > 0 ? route.record : null, surfaces, ...(notes.length > 0 ? { surfaceRecords: Object.fromEntries(notes) } : {}) }
+      return { surfaces, each: surfaces.map(id => [id, routeLine(route, id), routeRecord(route, id)]) }
     }
-    assert.deepEqual(shipped && Object.fromEntries(states.map(state => [state, own(shipped.routes[state])])), record.routes, `${record.source} differs from hooks/receiver-routes.ts`)
+    assert.deepEqual(shipped && Object.fromEntries(states.map(state => [state, own(shipped.routes[state])])), Object.fromEntries(states.map(state => [state, own(record.routes[state])])), `${record.source} differs from hooks/receiver-routes.ts`)
+    // A state no surface of the record covers still names the same line, the one its card shows without a note.
+    for (const state of states) if (record.routes[state].surfaces.length === 0) assert.equal(shipped.routes[state].line, record.routes[state].line, `${record.source} ${state}`)
   }
-  // And every surface a shipped note covers is one a record names for that same note.
+  // And every surface a shipped note covers is one a record names for that same note and line.
   for (const shipped of RECEIVER_ROUTES) for (const state of states) for (const id of shipped.routes[state].surfaces) {
-    assert.ok(records.some(record => record.agent === shipped.agent && record.kind === shipped.kind && record.routes[state].record === shipped.routes[state].record && record.routes[state].surfaces.includes(id)), `${shipped.agent} ${shipped.kind} ${state}: ${id}`)
+    const route = shipped.routes[state]
+    assert.ok(records.some(record => record.agent === shipped.agent && record.kind === shipped.kind && record.routes[state].surfaces.includes(id) && routeRecord(record.routes[state], id) === routeRecord(route, id) && routeLine(record.routes[state], id) === routeLine(route, id)), `${shipped.agent} ${shipped.kind} ${state}: ${id}`)
   }
   // The stand-in the page tests and the e2e worlds use is the shipped table with a note named on every route that exists.
   // Except that a running-turn adapter takes a message while idle too: tests register connections without a scope, which is a turn.
@@ -7767,6 +7770,22 @@ test('with the receivers\' own records, a Claude card sends and a Codex card tha
   assert.equal((await board.call('/api/act', { ...request(cl), session: CLAUDE_SESSION, connection: claudeConnection.id, turn: 'session' })).status, 200)
   // A recorded route is not refused by the table (a second message to the same session is held back by the usual busy rule).
   assert.notEqual((await board.call('/api/messages/send', { id: 'AB-DIRECT-claude', target: claudeConnection.id, turn: 'session', text: 'Again' })).body.error, 'NO_RECORDED_ROUTE')
+}, '', undefined, RECEIVER_ROUTES))
+
+// Live run 2026-11-22 (#557): a Codex app conversation's message waits for the app to be quit, so the press says so, not "running".
+test('a board reply to a Codex desktop app conversation is answered with the wait for the app to quit, not a running turn (#557)', () => fixture(async (board, dir) => {
+  const codex = '33333333-4444-4555-8666-777777777777'
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n<!-- auto session=abcdef02 agent=codex resume=${codex} state=waiting updated=${new Date().toISOString()} -->\n### Codex app card\n- [?] Orange or teal?\n<!-- /auto session=abcdef02 -->\n`)
+  const app = (await board.call('/api/messages/register', { agent: 'codex', session: codex, turn: 'session', scope: 'session', surface: 'Codex desktop app' })).body
+  const ask = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  assert.equal(ask.canSend, true); assert.equal(ask.line, 'reopen'); assert.equal(ask.delivery.isAfterAppQuit, true)
+  const sent = await board.call('/api/act', { key: ask.key, type: 'message', id: 'AB-APP-QUIT', text: 'Teal', session: codex, asked: ask.text, fp: ask.fp, connection: app.id, turn: 'session' })
+  assert.equal(sent.status, 200)
+  assert.equal(sent.body.receipt.status, 'queued')
+  assert.equal(sent.body.note, EN.serveReopenWaitingCodexApp)
+  // The card's receipt after a redraw keeps the same wait.
+  const after = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  assert.equal(after.receipt.status, 'queued'); assert.equal(after.receipt.isAfterAppQuit, true)
 }, '', undefined, RECEIVER_ROUTES))
 
 test('the routes the tests hand the board are checked whole: a missing record key, an unknown line or a non-list is refused, and only a non-empty string is a record (#1351)', async () => {

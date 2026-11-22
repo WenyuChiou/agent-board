@@ -7916,6 +7916,40 @@ test('a Codex report after an approval keeps the approval closed, not waiting', 
   assert.ok(!reported.includes('native=codex'))
 }))
 
+test('the SessionEnd of the board\'s own background turn keeps a Codex conversation waiting on its question, and any other SessionEnd ends it', () => fixture(f => {
+  // Live run (#557): a `codex exec` run the board started for a Codex app conversation ended with SessionEnd, the row read as
+  // ended, and the board could not send that conversation its next message.
+  assert.equal(f.install('--apply').status, 0)
+  const stateOf = () => / state=(\w+)/.exec(readFileSync(f.progress, 'utf8').split('\n').find(line => line.startsWith('<!-- auto ')) ?? '')?.[1]
+  assert.equal(f.event('SessionStart', 'turn-1').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Synthetic step done.\n\nRed or purple?' }).status, 0)
+  assert.equal(stateOf(), 'waiting')
+  assert.equal(f.event('SessionEnd', 'turn-1', { turn_id: undefined }, { AGENT_BOARD_BACKGROUND_TURN: '1' }).status, 0)
+  assert.equal(stateOf(), 'waiting')
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Red or purple\?\n/)
+  assert.equal(f.event('SessionEnd', 'turn-1', { turn_id: undefined }, { AGENT_BOARD_BACKGROUND_TURN: '0' }).status, 0)
+  assert.equal(stateOf(), 'ended')
+}))
+
+test('a queued SessionEnd keeps the board\'s background-turn mark when it is replayed', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Synthetic step done.\n\nRed or purple?' }).status, 0)
+  const raw = { version: 1, kind: 'raw', at: Date.now(), argv: ['--codex-event', '--agent', 'codex', '--hook-event', 'SessionEnd', '--progress-file', f.progress], env: { AGENT_BOARD_BACKGROUND_TURN: '1' }, payload: { session_id: session, hook_event_name: 'SessionEnd' } }
+  f.save(join(f.root, 'pending', 'background.raw.json'), JSON.stringify(raw))
+  // Another conversation's event runs the replay, so this row shows only what the replayed event did.
+  assert.equal(f.event('UserPromptSubmit', 'other-turn', { session_id: 'other-codex-session-557' }).status, 0)
+  assert.deepEqual(pendingFiles(f), [])
+  // Applied, not dropped: an older board refused the mark as an unknown variable and left the row as it was.
+  assert.doesNotMatch(hookLog(f), /PENDING_DROPPED/)
+  assert.equal(sessionRecord(f, session).state, 'waiting')
+  f.save(join(f.root, 'pending', 'unmarked.raw.json'), JSON.stringify({ ...raw, at: Date.now(), env: {} }))
+  assert.equal(f.event('UserPromptSubmit', 'other-turn-2', { session_id: 'other-codex-session-557' }).status, 0)
+  assert.deepEqual(pendingFiles(f), [])
+  assert.equal(sessionRecord(f, session).state, 'ended')
+}))
+
 test('a native Codex chat reply keeps the durable question open until the next work report', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)

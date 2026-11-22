@@ -24,7 +24,7 @@ import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCo
 import type { LocalAgent } from '../hooks/local-agents'
 import type { AgentClaim } from '../hooks/session-liveness'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
-import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
+import { BACKGROUND_TURN_ENV, HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
 import { discoverCodexBinary, inspectCodexConfigToml, trustCodex } from './codex-host'
 import { withLocalLock } from './local-lock'
 import { installControlRoot, withInstallLock } from './install-control'
@@ -1105,6 +1105,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
           turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
           ...(hasResponse ? { has_response: true } : {}),
+          // The end of a `codex exec` run the board started for a Codex app conversation (#557), told by the board's mark.
+          ...(agent === 'codex' && payload.hook_event_name === 'SessionEnd' && env[BACKGROUND_TURN_ENV] === '1' ? { background_turn: true } : {}),
           ...(question === null ? {} : { question }),
         } : {
           ...(antigravityTitle === null ? {} : antigravityTitle),
