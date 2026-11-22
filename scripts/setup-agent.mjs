@@ -6,7 +6,7 @@ import { homedir } from 'node:os'
 import { isatty } from 'node:tty'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, isBoardPluginDisabled as isPluginDisabled, retiredAgents, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
+import { discoverSetupAgents, findOnPath, hasBoardPlugin as hasPlugin, isBoardPluginDisabled as isPluginDisabled, isNewer, newestUse, newUses, retiredAgents, setupAgents as targets, setupRecordChanges } from './setup-discovery.mjs'
 import { installCommand, installContext } from './setup-command.mjs'
 
 const args = process.argv.slice(2)
@@ -312,23 +312,11 @@ const summaries = [
 ]
 const summary = summaries[['en', 'zh-TW', 'zh-CN'].indexOf(language)]
 const words = (key, values = {}) => summary[key].replace(/\{(\w+)\}/g, (text, name) => String(values[name] ?? text))
-// What a release starts doing that reaches the network or reads files it did not read before, with the version that added
-// it and its off switch (#1314). An update from an install record older than an entry asks about it, once.
-const newUses = [
-  { id: 'version-check', version: '0.25.1', use: 'useVersionCheck', off: 'useVersionCheckOff' },
-  { id: 'codex-sessions', version: '0.25.1', use: 'useCodexSessions', off: 'useCodexSessionsOff' },
-]
-const versionParts = value => String(value).split(/[.+-]/).slice(0, 3).map(part => Number.parseInt(part, 10) || 0)
-const isNewer = (one, other) => {
-  const [a, b] = [versionParts(one), versionParts(other)]
-  const at = a.findIndex((part, i) => part !== b[i])
-  return at >= 0 && a[at] > b[at]
-}
 let packageVersion = '0.0.0'
 try { packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version } catch {}
-// The version an install records. A tree whose package.json still names the last release records the newest use's version,
-// so an update from that tree does not ask again about what its own question already showed.
-const setupVersion = newUses.reduce((newest, one) => isNewer(one.version, newest) ? one.version : newest, packageVersion)
+// The version an update names. A tree whose package.json still names the last release names the newest use's version.
+// The install record keeps the newest use's version (newestUse), whatever the package says.
+const setupVersion = isNewer(newestUse, packageVersion) ? newestUse : packageVersion
 // Keep this copy identical to setupNoAgent in all three tables.
 const noAgentWords = [
   {
@@ -548,7 +536,7 @@ const main = () => {
   const updateCodex = isUpdate ? flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
   const run = (agent, isApplying, extra = []) => {
     const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')]
-      : [...common, '--setup-version', setupVersion, ...(agent === 'codex' && updateCodex && !flag('--codex-bin') ? ['--codex-bin', updateCodex] : [])]
+      : [...common, '--setup-version', newestUse,...(agent === 'codex' && updateCodex && !flag('--codex-bin') ? ['--codex-bin', updateCodex] : [])]
     // A preview taken for an apply checks a conflict again under the install lock, so a copy another setup run is
     // writing stops this command as busy instead of being shown as a file to fix or move (#1694).
     const result = spawnSync(process.execPath, [script, ...runArgs, ...extra, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : apply ? ['--check-conflicts'] : [])], { encoding: 'utf8', windowsHide: true })

@@ -7,6 +7,7 @@ import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, insideHome, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, snapshot, tempFolder } from './e2e/lib/host-journey.mjs'
 import { spawnIsolated } from './e2e/lib/spawn.mjs'
+import { newestUse } from '../scripts/setup-discovery.mjs'
 
 // The upgrade journey of #466. It reads the 0.24.0 files from the release tag, so it stays in
 // the board group, whose CI job fetches the tags; the other host journeys are in tests/e2e/.
@@ -897,7 +898,7 @@ test('J11b: an update with nothing to ask counts 0 steps and prints one line', a
   const output = checked(await update(f, ['--codex-bin', mock.executable]), 'setup --update')
   assert.equal(output, 'Agent Board updated to 99.0.0.\n')
   assert.equal(updateSteps(output), 0, 'no step: nothing to ask')
-  for (const agent of ['codex', 'opencode']) assert.equal(readRecord(f, agent).version, '99.0.0', `${agent}: the record names the new version`)
+  for (const agent of ['codex', 'opencode']) assert.equal(readRecord(f, agent).version, newestUse, `${agent}: the record names the newest use's version`)
 })
 
 test('a second update of a current home writes nothing and asks nothing', async () => {
@@ -1006,7 +1007,8 @@ test('J11b: a revoked approval is still revoked after an update', async () => {
   const writes = writesOf(mock)
   const output = checked(await update(f, ['--codex-bin', mock.executable]), 'setup --update')
   assert.equal(questions(output), 0, output)
-  assert.ok(output.startsWith('Agent Board updated to 99.0.0.\n'), output)
+  // The files are current, so the update writes nothing and its one line says so; the next line names the trust command.
+  assert.ok(output.startsWith('Agent Board is up to date (99.0.0).\n'), output)
   assert.match(output, /Codex: the board's hooks are not approved now.*--codex-trust/, output)
   assert.equal(writesOf(mock), writes, 'the update wrote no approval')
   assert.equal(JSON.parse(readFileSync(mock.stateFile, 'utf8')).trusted, false, 'still revoked')
@@ -1132,7 +1134,7 @@ test('an update keeps a removed Codex hook group removed and reads the approval 
   delete hooks.hooks[removed]
   writeFileSync(config, `${JSON.stringify(hooks, null, 2)}\n`)
   const output = checked(await update(f, ['--codex-bin', mock.executable]), 'setup --update')
-  assert.equal(output, 'Agent Board updated to 99.0.0.\n', 'the hooks still there are approved: no question and no line about approval')
+  assert.equal(output, 'Agent Board is up to date (99.0.0).\n', 'the hooks still there are approved: no question, no line about approval, nothing written')
   assert.equal(JSON.parse(readFileSync(config, 'utf8')).hooks[removed], undefined, 'the removed hook group stays removed')
   assert.equal(readRecord(f, 'codex').approved, true)
 })
@@ -1167,7 +1169,7 @@ test('an update keeps what the person removed from the Antigravity, OpenClaw, De
   trust.approvals = trust.approvals.filter(entry => entry.event !== removed)
   writeFileSync(allowlist, `${JSON.stringify(trust, null, 2)}\n`)
   const kept = [antigravity, openclaw, deepseek, hermes].map(file => [file, readFileSync(file, 'utf8')])
-  assert.equal(checked(await update(f), 'setup --update'), 'Agent Board updated to 99.0.0.\n', 'nothing to ask, and no line about approval')
+  assert.equal(checked(await update(f), 'setup --update'), 'Agent Board is up to date (99.0.0).\n', 'nothing to ask, no line about approval, nothing written')
   for (const [file, text] of kept) assert.equal(readFileSync(file, 'utf8'), text, `${file} keeps what the person removed removed`)
   assert.equal(checked(await update(f), 'a second update'), 'Agent Board is up to date (99.0.0).\n')
   for (const [file, text] of kept) assert.equal(readFileSync(file, 'utf8'), text, `${file}: a second update leaves it removed too`)
