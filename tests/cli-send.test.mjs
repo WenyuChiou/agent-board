@@ -97,6 +97,12 @@ const mcpEnvFor = (agent, session, started) => ({
   AGENT_BOARD_HOST_STARTED: started,
 })
 
+let cachedHostStarted
+const ownProcessStart = async () => {
+  if (cachedHostStarted === undefined) cachedHostStarted = await processStart(process.pid)
+  return cachedHostStarted
+}
+
 const runCli = (root, args, extraEnv = {}, cwd = undefined) =>
   new Promise((resolve, reject) => {
     const script = join(root, 'agent-board.mjs')
@@ -175,7 +181,7 @@ test('--send labels an authenticated peer session with its agent and task title 
     mkdirSync(workspace, { recursive: true })
     const progress = join(root, 'progress.md')
     const messagesDir = join(root, 'messages')
-    const hostStarted = await processStart(process.pid)
+    const hostStarted = await ownProcessStart()
     assert.ok(hostStarted, 'expected host processStart timestamp')
     writeFileSync(progress, [
       '# Progress',
@@ -268,7 +274,7 @@ test('--send stops a reply loop at HOP_LIMIT and tells the sender why', async ()
     mkdirSync(workspace, { recursive: true })
     const progress = join(root, 'progress.md')
     const messagesDir = join(root, 'messages')
-    const hostStarted = await processStart(process.pid)
+    const hostStarted = await ownProcessStart()
     assert.ok(hostStarted, 'expected host processStart timestamp')
     writeFileSync(progress, [
       '# Progress',
@@ -728,7 +734,7 @@ test('--send matches same-workspace MCP mailbox alongside a live connection and 
     const origin = new URL(owner.url).origin
     const token = new URL(owner.url).searchParams.get('t')
 
-    const hostStarted = await processStart(process.pid)
+    const hostStarted = await ownProcessStart()
     assert.ok(hostStarted, 'expected host processStart timestamp')
 
     const mcpRes = await fetch(`${origin}/api/messages/mcp-enroll`, {

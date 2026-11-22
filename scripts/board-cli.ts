@@ -3278,8 +3278,29 @@ const runWatchTerminal = async (): Promise<void> => {
 const samePathKey = (a: string, b: string): boolean =>
   process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
 
+const hasLiveStoreLock = (root: string): boolean => {
+  try {
+    const pid = readFileSync(join(root, 'server.lock'), 'utf8').trim()
+    return /^[1-9][0-9]*$/.test(pid) && isRunning(Number(pid))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    return true
+  }
+}
+
 const runningStoreServer = async (root: string): Promise<string | null> => {
-  const running = readRunning()
+  if (!hasLiveStoreLock(root)) return null
+  const name = addressFileName(board(path))
+  const runtime = process.env.XDG_RUNTIME_DIR
+  let folder: string
+  try {
+    folder = process.platform === 'win32'
+      ? unprotectedRuntimeFolder(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'))
+      : (runtime && isOwnFolder(runtime) ? runtime : join(homedir(), '.cache', 'agent-board'))
+  } catch {
+    return null
+  }
+  const running = readRunning(join(folder, name))
   if (running === null) return null
   const answer = await ping(running, 1000)
   if (answer === null || answer === 'silent' || typeof answer.messagesDirectory !== 'string') return null
@@ -3334,16 +3355,6 @@ const replaceMessageFile = (from: string, to: string): void => {
       if (attempt >= 4 || !['EPERM', 'EBUSY', 'EAGAIN'].includes(code)) throw error
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1))
     }
-  }
-}
-
-const hasLiveStoreLock = (root: string): boolean => {
-  try {
-    const pid = readFileSync(join(root, 'server.lock'), 'utf8').trim()
-    return /^[1-9][0-9]*$/.test(pid) && isRunning(Number(pid))
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
-    return true
   }
 }
 
