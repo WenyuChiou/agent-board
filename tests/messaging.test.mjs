@@ -5213,6 +5213,51 @@ test('an unsent receipt from the connection that holds a claim puts the message 
   assert.throws(() => messageReceipt(queued, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2), /CLAIM_REQUIRED/)
 })
 
+test('a reply the app keeps refusing until the message\'s 30-minute limit is refused as not sent, not kept waiting for ever', () => {
+  // The Codex desktop app's receiver gives a claim back unsent each time the app refuses it (#557). The board stamps the first
+  // refusal and keeps that stamp, so the limit counts from it, whatever the receiver remembers, and across a restart.
+  const now = Date.now()
+  const app = { id: 'synthetic-app-binding', agent: 'codex', session: 'held-session', turn: 'session', surface: SURFACE_IDS.codexApp, expires: now + 2 * OPEN_LIMIT_MS }
+  const held = (state, id = 'held-one') => state.messages.find(one => one.id === id)
+  const refuse = (state, at, id = 'held-one') => {
+    const claimed = claimMessages(state, app, at, 'abcdef')
+    assert.deepEqual(claimed.messages.map(one => one.id), [id], `handed out ${at - now} ms on`)
+    return messageReceipt(claimed.state, app, { id, nonce: claimed.messages[0].nonce, status: 'unsent' }, at + 1)
+  }
+  const queued = queueMessage({ messages: [] }, { id: 'held-one', target: app.id, turn: app.turn, text: 'Check the build.' }, 'board', app, now).state
+  const once = refuse(queued, now + 1)
+  assert.deepEqual([held(once).status, held(once).text, held(once).heldSince], ['queued', 'Check the build.', now + 2])
+  const twice = refuse(once, now + 30_000)
+  assert.equal(held(twice).heldSince, now + 2, 'a later refusal keeps the first one\'s time')
+  // A restarted board reads the stamp back, and refuses a store whose stamp is not a time.
+  assert.equal(held(parseMessageStore(JSON.stringify({ version: 2, ...twice }), now + 60_000)).heldSince, now + 2)
+  assert.throws(() => parseMessageStore(JSON.stringify({ version: 2, messages: [{ ...held(twice), heldSince: 'soon' }] }), now + 60_000), /INVALID_MESSAGE_STORE/)
+  const limit = now + 2 + OPEN_LIMIT_MS
+  // Just inside the limit it is handed out, and a run begun then stands, even when its ACK comes after the limit.
+  const late = claimMessages(twice, app, limit - 1, 'abcdef')
+  assert.equal(late.messages.length, 1)
+  const begun = messageReceipt(late.state, app, { id: 'held-one', nonce: 'abcdef', status: 'starting' }, limit - 1)
+  assert.equal(held(messageReceipt(begun, app, { id: 'held-one', nonce: 'abcdef', status: 'acknowledged', reply: 'ACK abcdef' }, limit + 60_000)).status, 'acknowledged')
+  assert.equal(held(pruneMessages(twice, limit - 1)).status, 'queued')
+  // From the limit on, it is never handed out, a claim taken before is never begun, and the board refuses it as not sent by
+  // itself, with no receiver to ask.
+  assert.equal(claimMessages(twice, app, limit, 'abcdef').messages.length, 0)
+  assert.throws(() => messageReceipt(late.state, app, { id: 'held-one', nonce: 'abcdef', status: 'starting' }, limit), /APP_STILL_OPEN/)
+  const refused = held(pruneMessages(twice, limit))
+  assert.deepEqual([refused.status, refused.error, refused.text], ['rejected', 'APP_STILL_OPEN', ''])
+  // Another message starts its own time.
+  const next = queueMessage(dismissMessage(twice, 'held-one', now + 60_000), { id: 'held-two', target: app.id, turn: app.turn, text: 'Check the docs.' }, 'board', app, now + 60_000).state
+  assert.equal(held(next, 'held-two').heldSince, undefined)
+  assert.equal(held(refuse(next, now + 61_000, 'held-two'), 'held-two').heldSince, now + 61_001)
+  // Any other receiver's unsent receipt keeps its fresh claim's 30 minutes, as before (#1578): no stamp, and no refusal.
+  const daemon = { ...app, id: 'synthetic-daemon-binding', surface: SURFACE_IDS.codexDaemon }
+  const other = queueMessage({ messages: [] }, { id: 'other-one', target: daemon.id, turn: daemon.turn, text: 'Check the build.' }, 'board', daemon, now).state
+  const otherClaim = claimMessages(other, daemon, now + 1, 'abcdef')
+  const otherBack = messageReceipt(otherClaim.state, daemon, { id: 'other-one', nonce: 'abcdef', status: 'unsent' }, now + 2)
+  assert.equal(held(otherBack, 'other-one').heldSince, undefined)
+  assert.equal(held(pruneMessages(otherBack, limit + 60_000), 'other-one').status, 'queued')
+})
+
 // The claim meets the person's turn, which ends right after the receiver leaves again. A whole wait is 2 s here and the claim's time
 // 4 s, so the receiver gives the claim back while it watches the idle thread again (with less than 2.2 s left, about 1.8 s in), and the
 // thread reads as a person's about 2 s after the turn ended, well inside the claim's time.

@@ -270,41 +270,37 @@ test('while the app still holds the conversation, nothing was sent: the message 
   app.kill()
 })
 
-test('a reply the app keeps refusing until the message\'s 30-minute limit is refused as not sent, not kept waiting for ever', async () => {
+test('a refusal the app repeats past 30 minutes is still given back unsent: the board, not the receiver, counts the message\'s time', async () => {
   const { app, client, runs, advance } = receiver({ results: [writerHeld] })
   await app.tick()
   const one = client.attached.get(THREAD)
-  const first = callbacks()
-  assert.equal(await deliverWith(one, first), undefined)
-  assert.deepEqual(first.said, ['starting', 'unsent'])
-  advance(30 * 60 * 1000 - 1)
-  const before = callbacks()
-  assert.equal(await deliverWith(one, before), undefined, 'still within the limit')
-  assert.deepEqual(before.said, ['starting', 'unsent'])
-  advance(30_000)
-  const last = callbacks()
-  await assert.rejects(deliverWith(one, last), /^Error: APP_STILL_OPEN$/)
-  // Refused, never begun: the board client sends `rejected` with the reason, and nothing reached the model.
-  assert.deepEqual(last.said, ['starting'])
-  assert.equal(runs.length, 3)
-  // Another message starts its own 30 minutes.
-  const other = callbacks()
-  advance(30_000)
-  assert.equal(await one.options.deliver({ ...message, id: 'AB-APP-9' }, other.accept, other.begin, other.unsent, other.starting), undefined)
-  assert.deepEqual(other.said, ['starting', 'unsent'])
+  for (const after of [0, 31 * 60 * 1000]) {
+    advance(after)
+    const cb = callbacks()
+    assert.equal(await deliverWith(one, cb), undefined)
+    assert.deepEqual(cb.said, ['starting', 'unsent'], `given back, never begun (${after / 60_000} minutes on)`)
+  }
+  assert.equal(runs.length, 2)
   app.kill()
 })
 
 test('only Codex\'s own writer refusal reads as nothing sent', () => {
-  assert.equal(isWriterHeld(writerHeld), true)
-  assert.equal(isWriterHeld({ ...writerHeld, stderr: `Error: thread ${THREAD} already has an active writer` }), true)
-  assert.equal(isWriterHeld({ ...writerHeld, exitCode: 0 }), false, 'a run that ended well')
-  assert.equal(isWriterHeld({ ...writerHeld, stdout: `ACK ${NONCE}\n` }), false, 'a run that answered')
-  assert.equal(isWriterHeld({ ...writerHeld, stdout: 'Some reply text' }), false, 'a run that said something')
-  assert.equal(isWriterHeld({ ...writerHeld, timedOut: true }), false, 'a run that timed out')
-  assert.equal(isWriterHeld({ ...writerHeld, stderr: 'Error: model request failed' }), false, 'another failure')
-  assert.equal(isWriterHeld({ ...writerHeld, stderr: `Error: thread-store conflict: thread ${THREAD} could not be read` }), false, 'a thread-store conflict that names no writer')
-  assert.equal(isWriterHeld({ ...writerHeld, started: false }), false, 'never started')
+  // Codex 0.167's own words: `thread <id> already has an active writer`, inside a thread-store conflict, after `Error: `.
+  const held = result => isWriterHeld(result, THREAD)
+  assert.equal(held(writerHeld), true)
+  assert.equal(held({ ...writerHeld, stderr: `Error: thread ${THREAD} already has an active writer` }), true, 'without the thread-store prefix')
+  assert.equal(held({ ...writerHeld, stderr: `warning: synthetic notice\r\nthread-store conflict: thread ${THREAD} already has an active writer.\r\n` }), true, 'after another line, with a full stop')
+  assert.equal(held({ ...writerHeld, exitCode: 0 }), false, 'a run that ended well')
+  assert.equal(held({ ...writerHeld, stdout: `ACK ${NONCE}\n` }), false, 'a run that answered')
+  assert.equal(held({ ...writerHeld, stdout: 'Some reply text' }), false, 'a run that said something')
+  assert.equal(held({ ...writerHeld, timedOut: true }), false, 'a run that timed out')
+  assert.equal(held({ ...writerHeld, stderr: 'Error: model request failed' }), false, 'another failure')
+  assert.equal(held({ ...writerHeld, stderr: `Error: thread-store conflict: thread ${THREAD} could not be read` }), false, 'a thread-store conflict that names no writer')
+  assert.equal(held({ ...writerHeld, stderr: 'Error: thread-store conflict: no active writer' }), false, 'a conflict that says there is no writer')
+  assert.equal(held({ ...writerHeld, stderr: `Error: thread-store conflict: thread ${OTHER} already has an active writer` }), false, 'another conversation\'s writer')
+  assert.equal(held({ ...writerHeld, stderr: `Error: retried after thread ${THREAD} already has an active writer, then failed` }), false, 'inside a longer line')
+  assert.equal(held({ ...writerHeld, stderr: `Error: thread ${THREAD} already has an active writer\nError: turn failed after writing` }), false, 'not the last line')
+  assert.equal(held({ ...writerHeld, started: false }), false, 'never started')
 })
 
 test('a run that may have reached the model and gives no ACK is uncertain, never given back or tried again', async () => {
@@ -417,8 +413,10 @@ test('a conversation that leaves the board\'s list with no run in flight is let 
   listed = []
   await app.tick()
   assert.equal(one.isClosed(), true)
-  // Not `ended`: a reply still queued for it keeps its leave stamp and is refused only after the board's wait (#318).
+  // Closed without `ended`, by an automatic receiver (`unclaimed`): the board then keeps a reply still queued for it, with its
+  // leave stamp, and refuses it only after its wait (#318; the board's own rule, tests/delivery-states.test.mjs, queued on leave).
   assert.deepEqual(one.closed, [{}])
+  assert.equal(one.options.unclaimed, true)
   app.kill()
 })
 
@@ -453,10 +451,18 @@ test('one reply at a time per conversation', async () => {
   })
   await app.tick()
   const one = client.attached.get(THREAD)
-  const first = deliverWith(one, callbacks())
+  // The first delivery as the board client runs it: in flight until its receipt has been sent, after the run is over.
+  let sent
+  const receipt = new Promise(done => { sent = done })
+  const first = processWith(one, callbacks(), () => receipt)
   await new Promise(done => setImmediate(done))
-  assert.equal(await one.options.canReceive(), false)
+  assert.equal(await one.options.canReceive(), false, 'while the first run lasts')
   release()
+  await new Promise(done => setImmediate(done))
+  assert.equal(runs.length, 1)
+  assert.equal(app.sending(), 1, 'the run is over; its receipt is on its way')
+  assert.equal(await one.options.canReceive(), false, 'while the first receipt is on its way')
+  sent()
   assert.equal(await first, `ACK ${NONCE} Blue it is.`)
   assert.equal(await one.options.canReceive(), true)
   app.kill()
