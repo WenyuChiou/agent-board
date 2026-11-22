@@ -1007,6 +1007,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const now = Date.now(), supplied = Number(flag('--hook-started'))
     // Keep the source time even after a slow launch: re-dating an old Stop can replace a newer prompt.
     const started = Number.isSafeInteger(supplied) && supplied >= 0 && supplied <= now ? supplied : now
+    // The hook worker names the copy this run queues, so a worker that stops this run can tell the event is saved (#1781).
+    // Read once and taken out of the environment: no board run started from here names its own copy the same.
+    const suppliedQueueId = process.env.AGENT_BOARD_HOOK_QUEUE_ID
+    delete process.env.AGENT_BOARD_HOOK_QUEUE_ID
+    const queueId = typeof suppliedQueueId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(suppliedQueueId) ? suppliedQueueId : undefined
     const value = flag('--hook-deadline')
     const suppliedDeadline = value === undefined ? Infinity : Number(value)
     if (value !== undefined && !Number.isSafeInteger(suppliedDeadline)) throw new Error('INVALID_HOOK_DEADLINE')
@@ -1447,7 +1452,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (current === undefined || queuedFile !== undefined) return
       mkdirSync(pending, { recursive: true })
       if (pendingFiles().length >= 64) throw error
-      const file = join(pending, `${String(started).padStart(15, '0')}-${randomUUID()}.json`)
+      const file = join(pending, `${String(started).padStart(15, '0')}-${queueId ?? randomUUID()}.json`)
       atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
       queuedFile = file
     }
