@@ -143,6 +143,8 @@ export const EN: Strings = {
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
     "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command}, then run it again with --apply (in the Codex CLI, /hooks also works).",
+    "codexTrustHeld": "Codex: the board's hooks are still trusted.",
+    "codexTrustNeeded": "Codex: the board's hooks for {events} are not trusted. Approve them: preview with {command}, then run it again with --apply (in the Codex CLI, /hooks also works).",
     "codexMissing": "Codex: setup could not find Codex. Find it with where.exe codex on Windows or command -v codex elsewhere, then replace {codex} in this preview command: {command}",
     "codexPath": "<full path to codex>",
     "hermes": "Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command}, then run it again with --apply.",

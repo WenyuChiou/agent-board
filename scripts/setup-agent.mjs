@@ -71,6 +71,8 @@ const summaries = [
     "next": "Next steps:",
     "apply": "Apply these changes: {command}",
     "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command}, then run it again with --apply (in the Codex CLI, /hooks also works).",
+    "codexTrustHeld": "Codex: the board's hooks are still trusted.",
+    "codexTrustNeeded": "Codex: the board's hooks for {events} are not trusted. Approve them: preview with {command}, then run it again with --apply (in the Codex CLI, /hooks also works).",
     "codexMissing": "Codex: setup could not find Codex. Find it with where.exe codex on Windows or command -v codex elsewhere, then replace {codex} in this preview command: {command}",
     "codexPath": "<full path to codex>",
     "hermes": "Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command}, then run it again with --apply.",
@@ -141,6 +143,8 @@ const summaries = [
     "next": "接下來：",
     "apply": "套用這些變更：{command}",
     "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
+    "codexTrustHeld": "Codex：看板的 hooks 仍然受信任。",
+    "codexTrustNeeded": "Codex：看板在 {events} 的 hooks 尚未受信任。請核准它們：先執行 {command} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
     "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系統用 command -v codex 找到它，再替換這個預覽指令中的 {codex}：{command}",
     "codexPath": "<Codex 的完整路徑>",
     "hermes": "Hermes Agent：Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} 預覽，再加上 --apply 重新執行同一命令。",
@@ -211,6 +215,8 @@ const summaries = [
     "next": "接下来：",
     "apply": "应用这些更改：{command}",
     "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
+    "codexTrustHeld": "Codex：看板的 hooks 仍然受信任。",
+    "codexTrustNeeded": "Codex：看板在 {events} 的 hooks 尚未受信任。请批准它们：先运行 {command} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
     "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系统用 command -v codex 找到它，再替换这个预览命令中的 {codex}：{command}",
     "codexPath": "<Codex 的完整路径>",
     "hermes": "Hermes Agent：Hermes 会问一次是否信任看板的 hooks，请回答 y。在无法询问的聊天渠道中，先运行 {command} 预览，再加上 --apply 重新运行同一命令。",
@@ -426,8 +432,10 @@ const main = () => {
   const hasDisabledPlugin = isPluginInstalled && isPluginDisabled(claudeDirectory)
   const isPluginNeeded = isAsking && !!claude && !isPluginInstalled
   const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
+  // PowerShell ends a single-quoted string at the curly single quotes too, so each is doubled like ' (#1303).
+  // The curly double quotes (U+201C, U+201D) are literal inside single quotes, so doubling them would change the path.
   const quote = value => /^[\w./:@=,-]+$/.test(value) ? value : process.platform === 'win32'
-    ? `'${value.replaceAll("'", "''")}'` : `'${value.replaceAll("'", "'\\''")}'`
+    ? `'${value.replace(/['\u2018\u2019\u201A\u201B]/g, '$&$&')}'` : `'${value.replaceAll("'", "'\\''")}'`
   const nodeCommand = script => `${process.platform === 'win32' ? '& ' : ''}${quote(process.execPath)} ${quote(script)}`
   const context = installContext(args)
   const setupCommand = extra => {
@@ -503,6 +511,26 @@ const main = () => {
     process.stdout.write(`${JSON.stringify({ targets: selected, plans: results, applied: apply && available.length > 0, ...(!isRemove && hasSidecar(results) ? { sidecarNotice: words('sidecarTerms') } : {}) }, null, 2)}\n`)
     return
   }
+  // After an apply that rewrote Codex hooks, ask Codex itself whether the board's hooks are
+  // still trusted (#1303): the upgrade kept them when only the runner changed, and lost them
+  // when a hook definition changed. The read-back is the trust preview without --apply, so it
+  // writes nothing. A first install has only creates, so it keeps the trust step as before.
+  // The asking flow already re-approves on its yes, so this runs only for a plain --apply.
+  const trustAfterApply = new Map()
+  if (apply && !isAsking && !isRemove) {
+    for (const [i, agent] of selected.entries()) {
+      if (agent !== 'codex' || results[i].conflicts.length) continue
+      if (!results[i].changes.some(change => change.action === 'update')) continue
+      const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
+      if (!codex) continue
+      const script = results[i].script ?? join(results[i].data, 'agent-board.mjs')
+      const read = spawnSync(process.execPath, [script, ...common, '--agent', 'codex', '--codex-trust', '--json', '--codex-bin', codex], { encoding: 'utf8', windowsHide: true })
+      try {
+        const observation = JSON.parse(read.stdout)
+        if (read.status === 0 && Array.isArray(observation.hooks)) trustAfterApply.set(agent, observation.hooks.filter(hook => hook.trust !== 'trusted').map(hook => hook.event))
+      } catch {}
+    }
+  }
   const shortPath = file => {
     const path = relative(resolve(home), file)
     return path === '' ? '~' : path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path) ? join('~', path) : file
@@ -576,6 +604,9 @@ const main = () => {
   // The sidecar's files are in this run's plan, by the flag or the question: say what they are and who switches them on.
   if (!isRemove && hasSidecar(results)) lines.push(words('sidecarTerms'))
   if (hasClaude && !isRemove) lines.push(`Claude Code: ${words('claude')}`)
+  // The upgrade kept Codex's trust, as the read-back above just confirmed: say so once, so the
+  // person does not run the trust command for nothing.
+  for (const untrusted of trustAfterApply.values()) if (untrusted.length === 0) lines.push(words('codexTrustHeld'))
   if (isRemove && results.length) {
     const progress = results[0]?.progress || join(data, 'progress.md')
     const progressDir = dirname(progress)
@@ -820,8 +851,16 @@ const main = () => {
         steps.push(words('skill', { host: names[agent] }))
         continue
       }
-      if (agent === 'codex' && !hasTrustedHooks) {
-        steps.push(words('codex', { command: boardStep(plan, agent, ['--codex-trust'], codex).text }))
+      if (agent === 'codex') {
+        const untrusted = trustAfterApply.get(agent)
+        if (untrusted !== undefined && untrusted.length === 0) {
+          // The upgrade kept the trust the read-back just confirmed: no trust step.
+        } else if (untrusted !== undefined && untrusted.length > 0) {
+          steps.push(words('codexTrustNeeded', { command: boardStep(plan, agent, ['--codex-trust'], codex).text, events: untrusted.map(event => event[0].toUpperCase() + event.slice(1)).join(', ') }))
+        } else if (!hasTrustedHooks) {
+          // Without a read-back, fall back to the confirmed-trust check: no trust step when the hooks are already trusted.
+          steps.push(words('codex', { command: boardStep(plan, agent, ['--codex-trust'], codex).text }))
+        }
       }
       if (agent === 'hermes' && !hasTrustedHooks) {
         steps.push(words('hermes', { command: boardStep(plan, agent, ['--hermes-trust']).text }))
