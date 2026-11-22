@@ -2432,7 +2432,7 @@ export const LINES = [
 "    } else if (installed && agent === \"codex\") {",
 "      hooksTrusted = inspectCodexConfigToml(configToml);",
 "    }",
-"    const connectorProgress = typeof connected === \"string\" && isAbsolute5(connected) ? connected : progress;",
+"    const connectorProgress = typeof connected === \"string\" && isAbsolute6(connected) ? connected : progress;",
 "    const connectorFolder = dirname7(connectorProgress);",
 "    const connectedHooks = agentHooks({",
 "      home,",
