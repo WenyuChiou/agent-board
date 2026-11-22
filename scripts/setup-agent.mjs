@@ -790,7 +790,8 @@ const main = () => {
       part(agent, words('trustPart', { host: names[agent] }), result !== undefined && !result.error && result.status === 0, retry.text)
     }
     const revokedLines = [...revoked, ...unread].map(agent => words(unread.includes(agent) ? 'updateTrustUnread' : 'updateRevoked', { host: names[agent], command: boardStep(planOf(agent), agent, [`--${agent}-trust`], agent === 'codex' ? updateCodex || { placeholder: words('codexPath') } : undefined).text }))
-    const lines = [...(failed.size || !own.length ? [] : [words(changed.length ? 'updated' : 'updateCurrent', { version: setupVersion })]), ...out, ...revokedLines, ...(asks.length ? [] : kept), ...skipped.map(agent => agentLines[selected.indexOf(agent)])]
+    // A trust step that ran wrote too, so only an update that wrote nothing says it is up to date.
+    const lines = [...(failed.size || !own.length ? [] : [words(changed.length || approvals.length ? 'updated' : 'updateCurrent', { version: setupVersion })]), ...out, ...revokedLines, ...(asks.length ? [] : kept), ...skipped.map(agent => agentLines[selected.indexOf(agent)])]
     if (skipped.length) lines.push(words('retry', { command: setupCommand(['--agent', skipped.join(','), '--update']) }))
     if (failed.size || skipped.length) process.exitCode = 1
     process.stdout.write(`${isJson ? JSON.stringify({ mode: 'update', version: setupVersion, targets: selected, applied: own.length > 0 && !failed.size, failed: [...failed], revoked, unread, plans }, null, 2) : lines.join('\n')}\n`)

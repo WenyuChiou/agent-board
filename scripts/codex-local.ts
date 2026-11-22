@@ -1888,12 +1888,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const text = initial(nativeConfig) ?? ''
     const events = hermesEvents()
     const recorded = new Map(Object.entries(object(manifest.groups.hooks ?? {})).filter((pair): pair is [string, string] => typeof pair[1] === 'string'))
-    let patch = !isUnreadable(nativeConfig) && isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove) : null
+    let patch = !isUnreadable(nativeConfig) && isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove, isUpdate) : null
     // An update leaves an entry the person removed removed: its event is not written again, and the record keeps its
     // command so the next update does too.
     if (isUpdate && patch !== null && patch.missing.length) {
       for (const event of patch.missing) removedByPerson.add(event)
-      patch = editHermesSetup(text, events.filter(([event]) => !removedByPerson.has(event)), new Map([...recorded].filter(([event]) => !removedByPerson.has(event))), false)
+      patch = editHermesSetup(text, events.filter(([event]) => !removedByPerson.has(event)), new Map([...recorded].filter(([event]) => !removedByPerson.has(event))), false, isUpdate)
     }
     if (manifest.groups.hooks !== undefined && patch !== null && !patch.hasOwned) {
       if (remove) alreadyGone.push(`${nativeConfig}:hooks`)

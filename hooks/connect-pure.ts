@@ -507,8 +507,10 @@ const hermesSetupItemOf = (lines: readonly string[]): HermesSetupItem | undefine
 type HermesSetupEdit = { text: string; hasOwned: boolean; isComplete: boolean; missing: readonly string[]; refused: readonly string[] }
 
 // Only the top-level hooks map and the recorded event/command pair can identify a setup entry.
-// Ambiguous copies are left alone rather than claiming both.
-export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string>, isRemoving: boolean): HermesSetupEdit | null => {
+// Ambiguous copies are left alone rather than claiming both. keepsEdits (an update): the board's own entry
+// whose timeout or matcher the person changed is refused by its event, as an edited JSON hook group is,
+// instead of being set back without a word (#1314).
+export const editHermesSetup = (text: string, events: HermesEvents, recorded: ReadonlyMap<string, string>, isRemoving: boolean, keepsEdits = false): HermesSetupEdit | null => {
   const lines = text.split('\n')
   const tops = lines.flatMap((line, at) => /^(?:hooks|"hooks"|'hooks')\s*:/.test(line) ? [at] : [])
   const top = tops[0]
@@ -551,6 +553,10 @@ export const editHermesSetup = (text: string, events: HermesEvents, recorded: Re
         if (parsed?.isSimple !== true) return null
         const { command } = parsed
         const item = parts.join('\n')
+        if (keepsEdits && (command === previous || command === wanted) && !(hermesHasTimeout(item) && hermesHasMatcher(item, desired.get(event)?.matcher))) {
+          refused.add(event)
+          continue
+        }
         if (command !== previous) {
           // An entry that already runs this release's command is the board's own (an earlier
           // release wrote the same bytes), even when no install record names it: adopt it
