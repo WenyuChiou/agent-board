@@ -271,7 +271,8 @@ export const inspectCodexHooks = async (executable: string, config: string, expe
 export const trustCodex = async (executable: string, config: string, groups: Record<string, unknown>, apply: boolean) => {
   const before = readFileSync(config, 'utf8')
   const expected = Object.entries(groups).map(([event, group]) => ({ event: event[0]!.toLowerCase() + event.slice(1), command: (group as { hooks: { command: string }[] }).hooks[0]!.command }))
-  if (expected.length !== 7) throw new Error('SEVEN_OWNED_HOOKS_REQUIRED')
+  // Trust is written only for all seven; a read may cover fewer, the groups an update finds still installed (#1314).
+  if (apply ? expected.length !== 7 : expected.length === 0 || expected.length > 7) throw new Error('SEVEN_OWNED_HOOKS_REQUIRED')
   const control = client(executable, undefined, undefined, undefined, dirname(resolve(config)))
   try {
     await control.initialize()
