@@ -356,6 +356,42 @@ test('a removal after a failed Hermes move takes out the old hooks and keeps the
   assert.equal(JSON.parse(readFileSync(f.control, 'utf8')).hermesProgress, undefined)
 }))
 
+const hermesDoctor = f => {
+  const checked = spawnSync(process.execPath, [f.script, '--codex-doctor', '--agent', 'hermes', '--home', f.home, '--hermes-dir', join(f.home, '.hermes'), '--json'], {
+    encoding: 'utf8', windowsHide: true, timeout: 10000,
+    env: { ...process.env, HERMES_HOME: join(f.home, '.hermes') },
+  })
+  assert.equal(checked.status, 0, checked.stderr)
+  return JSON.parse(checked.stdout)
+}
+
+test('the doctor after a failed Hermes move still finds the hooks that name the old folder', lockSkip, () => failedHermesMove(({ f, config, atA }) => {
+  assert.equal(hermesDoctor(f).reportHook, 'connect')
+  assert.equal(readFileSync(config, 'utf8'), atA, 'the doctor only reads the config')
+}))
+
+// #1664: a session start's own connect writes Hermes' hooks without recording a connected folder.
+test('Hermes hooks a session start wrote are replaced by a later connect elsewhere and taken out by its removal', () => fixture(async f => {
+  mkdirSync(join(f.home, '.hermes'))
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const foreign = '    - {command: "node ./tools/keep-this.mjs", timeout: 5}'
+  writeFileSync(config, `model: synthetic\nhooks:\n  on_session_start:\n${foreign}\n`)
+  f.run(f.request('auto'))
+  const atA = readFileSync(config, 'utf8')
+  const count = (text, folder) => text.split(folder).length - 1
+  assert.ok(count(atA, 'data-a') > 0, 'the session start wrote hooks that name data-a')
+  assert.equal(hermesDoctor(f).reportHook, 'connect', 'the doctor finds the hooks the session start wrote')
+  const moved = join(f.home, 'data-b', 'progress.md')
+  f.run(f.request('connect', { progress: moved }))
+  const atB = readFileSync(config, 'utf8')
+  assert.equal(count(atB, 'data-a'), 0, 'no hook names the old data folder')
+  assert.equal(count(atB, 'data-b'), count(atA, 'data-a'), 'one set of hooks names the new data folder')
+  f.run(f.request('remove', { progress: moved }))
+  const after = readFileSync(config, 'utf8')
+  assert.equal(count(after, 'data-a') + count(after, 'data-b'), 0, 'the removal leaves no hook of ours')
+  assert.ok(after.includes(foreign), "the person's hook stays")
+}))
+
 test('a config that cannot be parsed is named when its hook cannot be taken out', () => withBothHooks('muse', ({ f, run }) => {
   const config = join(f.home, '.config', 'muse', 'settings.json')
   writeFileSync(config, `// mine\n${readFileSync(config, 'utf8')}`)
