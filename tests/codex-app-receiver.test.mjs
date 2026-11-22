@@ -32,8 +32,8 @@ const DIR = process.cwd()
 const NONCE = 'AB12CD'
 const EXE = process.platform === 'win32' ? 'C:\\synthetic\\codex.exe' : '/synthetic/codex'
 const message = { id: 'AB-APP-1', nonce: NONCE, prompt: `Synthetic board reply: Blue.\nReply with the line ACK ${NONCE} first.` }
-const writerHeld = { started: true, exitCode: 1, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: '', stderr: `Error: thread-store conflict: thread ${THREAD} already has an active writer\n`, hasStdout: false, isStderrCut: false }
-const answered = { started: true, exitCode: 0, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: `ACK ${NONCE}\nBlue it is.\n`, stderr: '', hasStdout: true, isStderrCut: false }
+const writerHeld = { started: true, exitCode: 1, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: '', stderr: `Error: thread-store conflict: thread ${THREAD} already has an active writer\n`, hasStdout: false, isStderrCut: false, isOutputOpen: false }
+const answered = { started: true, exitCode: 0, timedOut: false, spawnErrorCode: null, spawnErrorMessage: null, stdout: `ACK ${NONCE}\nBlue it is.\n`, stderr: '', hasStdout: true, isStderrCut: false, isOutputOpen: false }
 
 // A stand-in board client: attach() keeps what the receiver gave it, so a test can deliver a message the way the board would.
 const fakeClient = () => {
@@ -84,6 +84,7 @@ const receiver = (over = {}) => {
     isTaken: over.isTaken ?? (() => false),
     now: () => clock,
     run: async (program, options) => { runs.push({ program, options }); return results[Math.min(runs.length - 1, results.length - 1)] },
+    giveBackWaitMs: 0, onError: over.onError,
     env: { PATH: 'synthetic', AGENT_BOARD_TOKEN_SYNTHETIC: 'x', CODEX_INTERNAL_ORIGINATOR_OVERRIDE: CODEX_APP_ORIGINATOR, CODEX_HOME: 'synthetic-home' },
   })
   return { app, client, runs, state, advance: ms => { clock += ms } }
@@ -305,8 +306,11 @@ test('only Codex\'s own writer refusal reads as nothing sent', () => {
   assert.equal(held({ ...writerHeld, started: false }), false, 'never started')
   assert.equal(held({ ...writerHeld, hasStdout: true }), false, 'a run that printed something before the output kept')
   assert.equal(held({ ...writerHeld, isStderrCut: true }), false, 'an error output too long to keep whole')
-  const { hasStdout: _printed, isStderrCut: _cut, ...unsaid } = writerHeld
-  assert.equal(held(unsaid), false, 'a result that does not say whether anything was printed')
+  assert.equal(held({ ...writerHeld, isOutputOpen: true }), false, 'a run read before its output had closed')
+  for (const field of ['hasStdout', 'isStderrCut', 'isOutputOpen']) {
+    const { [field]: _said, ...unsaid } = writerHeld
+    assert.equal(held(unsaid), false, `a result that does not say ${field}`)
+  }
 })
 
 // A stand-in Codex: this Node, printing what a test asks for, then failing.
@@ -315,7 +319,7 @@ const sentence = `Error: thread-store conflict: thread ${THREAD} already has an 
 
 test('a run that printed anything, however far back, is never read as unsent', async () => {
   const quiet = await runBackgroundProcess(standIn('', sentence), { maxWaitMs: 20_000 })
-  assert.deepEqual([quiet.exitCode, quiet.hasStdout, quiet.isStderrCut, isWriterHeld(quiet, THREAD)], [1, false, false, true], 'the refusal alone')
+  assert.deepEqual([quiet.exitCode, quiet.hasStdout, quiet.isStderrCut, quiet.isOutputOpen, isWriterHeld(quiet, THREAD)], [1, false, false, false, true], 'the refusal alone')
   // An answer, then more blanks than the 8,000 characters of output kept: the kept part is blank, the run is not.
   const answer = await runBackgroundProcess(standIn(`ACK ${NONCE}\nBlue it is.\n${' '.repeat(8001)}`, sentence), { maxWaitMs: 20_000 })
   assert.equal(answer.stdout.trim(), '', 'the kept output is blank')
@@ -325,6 +329,57 @@ test('a run that printed anything, however far back, is never read as unsent', a
 test('an error output too long to keep whole is never read as unsent', async () => {
   const long = await runBackgroundProcess(standIn('', `${'warning: synthetic notice\n'.repeat(100)}${sentence}`), { maxWaitMs: 20_000 })
   assert.deepEqual([long.hasStdout, long.isStderrCut, isWriterHeld(long, THREAD)], [false, true, false])
+})
+
+test('a refusal read while a child of the run still holds its output is uncertain, never held', async () => {
+  // The program writes the refusal and exits, but a program it started still holds the output open and writes later: the
+  // runner reads the run two seconds after the exit, before the output has closed, so it cannot know nothing more came.
+  const late = 'setTimeout(() => process.stdout.write("late answer"), 3000)'
+  const parent = `const { spawn } = require('node:child_process'); spawn(process.execPath, ['-e', ${JSON.stringify(late)}], { stdio: ['ignore', 'inherit', 'inherit'] }).unref(); process.stderr.write(${JSON.stringify(sentence)}); process.exitCode = 1`
+  const open = await runBackgroundProcess({ command: process.execPath, isShell: false, args: ['-e', parent] }, { maxWaitMs: 20_000 })
+  assert.deepEqual([open.exitCode, open.hasStdout, open.isOutputOpen, isWriterHeld(open, THREAD)], [1, false, true, false])
+})
+
+// The board client's error for an answer that saved nothing because the message store was busy (scripts/message-client.mjs).
+const busy = () => Object.assign(new Error('MESSAGE_STORE_BUSY'), { isBusy: true, isRefused: true, isRetryable: true })
+
+test('a busy store is asked for the held give-back again until it saves it', async () => {
+  const errors = []
+  const { app, client, runs } = receiver({ results: [writerHeld], onError: error => errors.push(error.message) })
+  await app.tick()
+  const cb = callbacks()
+  let asks = 0
+  cb.held = async () => { cb.said.push('held'); asks += 1; if (asks <= 2) throw busy() }
+  assert.equal(await deliverWith(client.attached.get(THREAD), cb), undefined)
+  assert.deepEqual(cb.said, ['starting', 'held', 'held', 'held'], 'asked again, never begun')
+  assert.deepEqual(errors, ['MESSAGE_STORE_BUSY'], 'a store that stays busy is reported once')
+  assert.equal(runs.length, 1)
+  app.kill()
+})
+
+test('a store that stays busy is asked for a give-back five times at most, and an answer that may have saved it is never asked again', async () => {
+  for (const [name, failure, asked] of [['busy', busy, 5], ['server error', () => Object.assign(new Error('BOARD_UNAVAILABLE'), { isRetryable: true, isRefused: false }), 1], ['no answer', () => new Error('fetch failed'), 1]]) {
+    const errors = []
+    const { app, client, runs } = receiver({ results: [writerHeld], onError: error => errors.push(error.message) })
+    await app.tick()
+    const cb = callbacks()
+    cb.held = async () => { cb.said.push('held'); throw failure() }
+    assert.equal(await deliverWith(client.attached.get(THREAD), cb), undefined, name)
+    assert.deepEqual(cb.said, ['starting', ...Array(asked).fill('held')], name)
+    assert.equal(errors.length, 1, name)
+    assert.equal(runs.length, 1, name)
+    app.kill()
+  }
+  // An `unsent` give-back is asked again the same way: here the conversation runs a turn when the claim comes.
+  const { app, client, state } = receiver()
+  await app.tick()
+  state.set(THREAD, 'working')
+  const cb = callbacks()
+  let asks = 0
+  cb.unsent = async () => { cb.said.push('unsent'); asks += 1; if (asks === 1) throw busy() }
+  assert.equal(await deliverWith(client.attached.get(THREAD), cb), undefined)
+  assert.deepEqual(cb.said, ['unsent', 'unsent'])
+  app.kill()
 })
 
 test('a run that may have reached the model and gives no ACK is uncertain, never given back or tried again', async () => {
