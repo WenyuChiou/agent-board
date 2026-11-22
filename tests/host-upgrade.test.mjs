@@ -1024,6 +1024,21 @@ test("an update that cannot read the host's trust asks and does not claim it", a
   assert.match(result.stdout, /Approve the board's hooks in Codex: failed\. Run: .*--codex-trust/, result.stdout)
 })
 
+test("an update that cannot read an approval the board gave before says it could not read it and changes no approval", async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  writeFileSync(mock.stateFile, JSON.stringify({ trusted: false }))
+  await apply(f, ['codex'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'codex', '--codex-trust', '--apply', '--json', '--codex-bin', mock.executable], { timeoutMs: 60000 }), 'the board approves its hooks')
+  assert.equal(readRecord(f, 'codex').approved, true, 'the record says the board approved them')
+  // No codex on PATH and none named: the update cannot read whether Codex still trusts the hooks.
+  const output = checked(await update(f, [], { env: { PATH: '/usr/bin:/bin' } }), 'setup --update')
+  assert.equal(questions(output), 0, output)
+  assert.match(output, /Codex: the update could not read whether the board's hooks are approved.*--codex-trust/, output)
+  assert.doesNotMatch(output, /not approved now|still trusted/, output)
+  assert.equal(readRecord(f, 'codex').approved, true, 'the record keeps the approval the board gave')
+})
+
 test('an update the person declines changes no file and the old hooks still report', async () => {
   const f = fixture(['.codex'])
   const mock = mockCodex(f)
@@ -1064,6 +1079,23 @@ test('an update with no terminal and something to ask writes nothing and prints 
   assert.ok(answer.question.files.some(file => resolve(file) === resolve(f.script)), json.stdout)
   assert.match(answer.question.command, /--update/)
   assert.deepEqual(snapshot(f.home), before, 'no file changed')
+})
+
+test('an update given --apply still asks first and writes nothing without a yes', async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  olderHook(f, 'codex', '.codex/hooks.json')
+  olderScript(f)
+  const before = snapshot(f.home)
+  // --apply is no yes for --update: with no terminal it prints the question, and in a terminal a no still writes nothing.
+  const plain = await update(f, ['--codex-bin', mock.executable, '--apply'], { terminal: false })
+  assert.equal(plain.status, 3, `${plain.stderr}\n${plain.stdout}`)
+  assert.deepEqual(snapshot(f.home), before, 'no file changed with no terminal')
+  const declined = await update(f, ['--codex-bin', mock.executable, '--apply'], { input: 'n\n' })
+  assert.equal(declined.status, 1, declined.stderr)
+  assert.equal(questions(declined.stdout), 1, declined.stdout)
+  assert.deepEqual(snapshot(f.home), before, 'no file changed on a no')
 })
 
 test('an update keeps a removed hook group removed and an agent turned off', async () => {
