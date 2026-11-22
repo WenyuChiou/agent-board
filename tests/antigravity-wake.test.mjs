@@ -769,6 +769,48 @@ test('the hook worker marks an Antigravity turn before the board script runs, so
   }
 })
 
+test('a turn start whose record cannot be made writes no number and hands on no mark, so the board script marks the turn itself', async () => {
+  const { hookWorker, HOOK_VERSION } = await import('../hooks/hook-safety.ts')
+  const { defaultMessagesDirectory } = await import('../scripts/runtime-folder.ts')
+  const home = mkdtempSync(join(tmpdir(), 'agy-worker-'))
+  const env = { ...process.env }
+  delete env.XDG_RUNTIME_DIR
+  delete env.AGENT_BOARD_TURN_MARK
+  const root = join(home, '.agent-board'), progress = join(root, 'progress.md'), script = join(root, 'agent-board.mjs'), worker = join(root, 'agent-board-hook.mjs'), seen = join(home, 'seen.json')
+  const messages = defaultMessagesDirectory(progress, home, env, process.platform)
+  const file = join(messages, `${mailboxId('antigravity', APP)}.turns.json`)
+  const opened = `${mailboxId('antigravity', APP)}.turns.open.`
+  // A stand-in for a disk that refuses the start's record, every time it is tried, and nothing else.
+  const refuse = join(home, 'refuse.cjs')
+  writeFileSync(refuse, `const fs = require('node:fs'), write = fs.writeFileSync
+fs.writeFileSync = (target, ...rest) => { if (String(target).includes(${JSON.stringify(opened)})) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); return write(target, ...rest) }
+`)
+  const hook = event => {
+    rmSync(seen, { force: true })
+    const args = ['--hook-version', String(HOOK_VERSION), '--hook-event', event, '--agent-status', '--agent', 'antigravity', '--state', 'working', '--event', event, '--progress-file', progress]
+    const result = spawnSync(process.execPath, ['--require', refuse, worker, ...args], {
+      env: { ...env, AGY_SEEN: seen }, input: JSON.stringify({ conversationId: APP, hookEventName: event }), encoding: 'utf8', windowsHide: true, timeout: 10000,
+    })
+    assert.equal(result.status, 0, result.stderr)
+    return existsSync(seen) ? JSON.parse(readFileSync(seen, 'utf8')) : undefined
+  }
+  try {
+    mkdirSync(root, { recursive: true })
+    writeFileSync(script, standIn(HOOK_VERSION))
+    writeFileSync(worker, hookWorker(home, script, 'const isBoardRequest = () => false', root))
+    const named = process.platform === 'win32' ? resolve(progress).toLowerCase() : resolve(progress)
+    writeFileSync(join(root, `hook-recovery-${createHash('sha256').update(named).digest('hex')}.json`), JSON.stringify({ version: 1, pid: process.pid, token: createHash('sha256').update(root).digest('hex').slice(0, 32), created: Date.now() }))
+    mkdirSync(messages, { recursive: true })
+    // The worker leaves both the number and the mark to the board script, whose own record try comes later and whose
+    // count waits longer (#1612, codex_618 P1 1): a count written here alone could let a wake read the turn idle first.
+    assert.equal(hook('PreInvocation'), null)
+    assert.equal(existsSync(file), false)
+    assert.deepEqual(readdirSync(messages).filter(name => name.startsWith(opened)), [])
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+})
+
 test('the board script takes the turn number the hook worker handed it and does not mark the turn again', async () => {
   const { defaultMessagesDirectory } = await import('../scripts/runtime-folder.ts')
   const home = mkdtempSync(join(tmpdir(), 'agy-handed-'))
