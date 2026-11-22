@@ -272,7 +272,7 @@ test('a trust command for a Codex directory with a curly apostrophe parses in Po
     // Parse the --codex-dir argument out of the captured trust command and compare it
     // with the selected directory, undoing the doubled quotes PowerShell needs: the
     // printed directory doubles the curly apostrophe, like the straight one.
-    const captured = /--codex-dir '((?:[^'\u2018\u2019\u201A\u201B]|['\u2018\u2019\u201A\u201B]{2})*)'/.exec(command)?.[1]
+    const captured = /(?:^|\s)--codex-dir '((?:[^'\u2018\u2019\u201A\u201B]|['\u2018\u2019\u201A\u201B]{2})*)'/.exec(command)?.[1]
     assert.ok(captured !== undefined, `the trust command names a Codex directory\n${command}`)
     assert.equal(captured.replace(/(['\u2018\u2019\u201A\u201B])\1/g, '$1'), dir, `the trust command names the selected directory\n${command}`)
     // And the printed command parses in PowerShell instead of ending the string at the apostrophe.
