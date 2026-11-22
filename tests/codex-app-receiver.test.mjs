@@ -330,6 +330,13 @@ test('Codex\'s refusal as it prints it while the app holds the conversation read
   assert.equal(held({ ...writerHeld, stderr: printed(THREAD).replace('(code -32600)', '(code -32600), retrying') }), false, 'more after the code')
   assert.equal(held({ ...writerHeld, stderr: printed(THREAD).replace('thread/resume failed: thread', 'thread/resume failed: turn ran, then thread') }), false, 'other words in the wrapper')
   assert.equal(held({ ...writerHeld, stderr: printed(THREAD).replace('Error: thread/resume: ', 'Error: turn/start: ') }), false, 'another request')
+  // Only the line Codex was seen to print: the resume request's wrapper never goes without its code, with a full stop, or
+  // around a thread-store conflict (round 5 of #1771).
+  const wrapped = `Error: thread/resume: thread/resume failed: thread ${THREAD} already has an active writer`
+  assert.equal(held({ ...writerHeld, stderr: `${wrapped}\n` }), false, 'the wrapper without the code')
+  assert.equal(held({ ...writerHeld, stderr: `${wrapped}.\n` }), false, 'the wrapper with a full stop and no code')
+  assert.equal(held({ ...writerHeld, stderr: `${wrapped} (code -32600).\n` }), false, 'a full stop after the code')
+  assert.equal(held({ ...writerHeld, stderr: `Error: thread/resume: thread/resume failed: thread-store conflict: thread ${THREAD} already has an active writer (code -32600)\n` }), false, 'the wrapper around a thread-store conflict')
   assert.equal(held({ ...writerHeld, stderr: `${printed(THREAD)}Error: turn failed after writing\n` }), false, 'not the last line')
 })
 
