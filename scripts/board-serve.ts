@@ -52,7 +52,7 @@ export type ServeOptions = {
   // The Codex receiver (#318): the Codex session ids the board knows, the Codex program to run (null: none found,
   // so nothing runs). A running turn is never steered (#1409). appSessions: the Codex desktop app conversations, for the
   // receiver that runs their next turn in the background once the app has let go of them (#557); none, no such receiver.
-  // appHome: the Codex home they were found in, which those runs read too.
+  // appHome: the Codex home `--codex-dir` named, where they were found, which those runs read too.
   codex?: { threads: () => string[]; executable: string | null; unloadMs?: number; appSessions?: () => CodexAppSession[]; appHome?: string }
   reports?: (isFresh?: boolean) => ProgressBinding[]
   s: Strings

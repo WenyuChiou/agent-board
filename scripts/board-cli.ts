@@ -2329,7 +2329,8 @@ const serveChild = (): void => {
         // names a shorter wait for its stand-in daemon (`testUnloadMs`).
         unloadMs: testUnloadMs(process.env, process.ppid),
         appSessions: codexAppSessions(path),
-        ...(appCodexHome() === null ? {} : { appHome: appCodexHome() as string }),
+        // Only a home `--codex-dir` names is handed on: without it the run keeps the CODEX_HOME of this environment, or none.
+        ...(flag('--codex-dir') ? { appHome: resolve(flag('--codex-dir') as string) } : {}),
       },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests

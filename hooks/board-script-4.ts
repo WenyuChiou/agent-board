@@ -8109,7 +8109,7 @@ export const LINES = [
 "        executable: codexReceiverExecutable(),",
 "        unloadMs: testUnloadMs(process.env, process.ppid),",
 "        appSessions: codexAppSessions(path),",
-"        ...appCodexHome() === null ? {} : { appHome: appCodexHome() }",
+"        ...flag(\"--codex-dir\") ? { appHome: resolve17(flag(\"--codex-dir\")) } : {}",
 "      },",
 "      reports: (isFresh = true) => {",
 "        const projects = !isFresh && progressProjectCache !== null ? progressProjectCache.projects : parseProgress(read(path));",
