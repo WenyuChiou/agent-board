@@ -229,11 +229,16 @@ These board calls run the board script setup installed: the one beside `$CLAUDE_
 the board the Claude Code plugin's connector last connected, else
 `~/.agent-board/agent-board.mjs`, else the Claude Code plugin's beside
 `~/.claude/progress.md`. It never runs a second copy from the package, which would restart
-the page the installed copy serves. When the installed copy comes from another release,
-`agent-board` says so on stderr and names the command that updates it. For an independent
-install, that is a setup preview for the same agents and data folder; add `--apply` to update
-it, which still leaves files you edited alone. For the Claude Code plugin's copy, it is
-updating the plugin, then `/progress connect`. Installing runs nothing: the package has no
+the page the installed copy serves. When the installed copy of an independent install comes
+from another release and you open the board in a terminal, `agent-board` first runs
+`setup --update` for the same agents and data folder: it updates in one line, or asks its one
+question when something it must ask about changed. Answer anything but `y` and nothing
+changes; the board then opens on the copy that is there (Ctrl-C stops both). Outside a
+terminal, or with `--json`
+or a management command, `agent-board` says on stderr that the copy is from another release
+and names the command that updates it: a setup preview for the same agents and data folder;
+add `--apply` to update it, which still leaves files you edited alone. For the Claude Code
+plugin's copy, it is updating the plugin, then `/progress connect`. Installing runs nothing: the package has no
 dependencies and no install scripts. Pre-releases are on the `next` tag
 (`npx @wenyuchiou/agent-board@next setup`); what makes a release stable is in [RELEASING.md](RELEASING.md).
 
