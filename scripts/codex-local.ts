@@ -1727,6 +1727,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(hookNode, home, agent, worker, progress, event, state)
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'
+  // setup --update (#1314): keeps what the person turned off, and reports what its one question must show.
+  const isUpdate = !remove && args.includes('--update')
+  // The board's hook groups the person removed, which an update leaves removed and does not read trust for.
+  const removedByPerson = new Set<string>()
   const conflicts: string[] = []
   const changes: { file: string; action: string }[] = []
   // Beside the hooks.json it trusts, as the doctor reads it, so --codex-dir finds the same installation.
@@ -1780,6 +1784,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (remove && Array.isArray(foreign) && hasUnknown) conflicts.push(`${config}:${event}`)
       else if (remove) alreadyGone.push(`${config}:${event}`)
       else if (entries.length && hasUnknown) conflicts.push(`${config}:${event}`)
+      // An update leaves a hook group the person removed removed, and keeps it in the record so the next one does too.
+      else if (isUpdate) { groups[event] = old; removedByPerson.add(event); continue }
       else hasMissingGroup = true
     }
     if (!remove) {
@@ -2124,8 +2130,25 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
   }
   const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
+  // Whether the host trusts the board's hooks now, as an update reads it before it asks (#1314): Hermes from its trust
+  // file, Codex from Codex itself, never from config.toml. A Codex setup cannot ask is 'unknown', never trusted.
+  const hermesTrust = (): boolean | 'unknown' => {
+    const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
+    const wanted = Object.entries(object(manifest.groups.hooks ?? {}))
+    return approvals === null ? 'unknown' : wanted.length > 0 && wanted.every(([event, command]) => approvals.list.some(entry => entry.event === event && entry.command === command))
+  }
+  let trustNow: boolean | 'unknown' | undefined
+  if (isUpdate && !args.includes('--apply') && (agent === 'codex' || agent === 'hermes') && initial(manifestFile) !== null) {
+    const executable = flag('--codex-bin')
+    try { trustNow = agent === 'hermes' ? hermesTrust() : executable ? (await trustCodex(executable, config, Object.fromEntries(Object.entries(manifest.groups).filter(([event]) => !removedByPerson.has(event))), false)).hooks.every(hook => hook.trust === 'trusted') : 'unknown' } catch { trustNow = 'unknown' }
+  }
+  // Whether this board approved the hooks before, so an update tells an approval the person revoked from one never given
+  // (#1314). A record from before this field says neither, and an update treats that as revoked.
+  const isApproved = loaded.approved === true || args.includes('--hooks-approved') || trustNow === true
+  const approval = agent !== 'codex' && agent !== 'hermes' ? {} : isApproved ? { approved: true } : loaded.approved === false || initial(manifestFile) === null && flag('--setup-version') !== undefined ? { approved: false } : {}
+  const setupVersion = flag('--setup-version') ?? (typeof loaded.version === 'string' ? loaded.version : undefined)
   // A kept /board file keeps its record entry, so it still goes as setup wrote it once the script is taken (#1698).
-  const nextManifest = `${JSON.stringify({ files: Object.fromEntries([...Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]]), ...keptBoards.flatMap(file => manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])]), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
+  const nextManifest = `${JSON.stringify({ files: Object.fromEntries([...Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]]), ...keptBoards.flatMap(file => manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])]), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}), ...(setupVersion === undefined ? {} : { version: setupVersion }), ...approval }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   if (remove && agent === 'antigravity' && initial(sidecarRecord) !== null) changes.push({ file: sidecarRecord, action: 'remove' })
   if (remove && listOf(ownList) !== null) changes.push({ file: pendingFile(agent), action: 'remove' })
@@ -2167,8 +2190,19 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
   }
+  // What an update's question shows (#1314): each hook whose command changes, as the host will run it, and every changed
+  // file a host loads as code (not text it only reads, which keeps the person's edit beside it).
+  const commandsIn = (value: unknown): string[] => typeof value !== 'object' || value === null ? [] : Object.entries(value).flatMap(([key, one]) => key === 'command' && typeof one === 'string' ? [one] : commandsIn(one))
+  const hookCommands = (all: Json): Map<string, string[]> => new Map(agent === 'hermes' ? Object.entries(object(all.hooks ?? {})).map(([event, command]) => [event, typeof command === 'string' ? [command] : []]) : Object.entries(all).map(([event, group]) => [event, commandsIn(group)]))
+  const wasHooks = hookCommands(manifest.groups), nowHooks = hookCommands(groups)
+  const update = !isUpdate ? undefined : {
+    version: typeof loaded.version === 'string' ? loaded.version : null, approved: typeof loaded.approved === 'boolean' ? loaded.approved : null,
+    ...(trustNow === undefined ? {} : { trust: trustNow }),
+    hooks: [...new Set([...wasHooks.keys(), ...nowHooks.keys()])].filter(event => !isSame(wasHooks.get(event) ?? [], nowHooks.get(event) ?? [])).map(event => ({ event, before: wasHooks.get(event) ?? [], after: nowHooks.get(event) ?? [] })),
+    loaded: changes.filter(change => change.action !== 'remove' && Object.hasOwn(files, change.file) && !isTextFile(change.file) && !change.file.endsWith('.new')).map(change => change.file),
+  }
   const plan = {
-    mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
+    mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts, ...(update === undefined ? {} : { update }),
     alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), ...(opens === undefined ? {} : { opens }), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
@@ -2179,11 +2213,20 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     else if (remove) process.stdout.write(codexRemoveOutput(result, s, nextCommand('--codex-remove')))
     else process.stdout.write(codexSetupOutput(result, s, nextCommand('--codex-setup', ['--plain']), nextCommand('--codex-doctor')))
   }
+  // An approval this board gave is written in the record, so a later update tells it revoked from never given (#1314).
+  const markApproved = (): void => {
+    if (loaded.approved !== true) withInstallLock(home, () => {
+      if (!isAsPlanned(manifestFile)) throw new Error('INSTALL_CHANGED')
+      put(manifestFile, `${JSON.stringify({ ...loaded, approved: true }, null, 2)}
+`)
+    })
+  }
   if (mode === '--codex-trust') {
     if (agent !== 'codex' || conflicts.length || changes.length || readLocal(manifestFile) === null) throw new Error('OWNED_CODEX_INSTALL_REQUIRED')
     const executable = flag('--codex-bin')
     if (!executable) throw new Error('CODEX_BINARY_REQUIRED')
     const result = await trustCodex(executable, config, manifest.groups, args.includes('--apply'))
+    if (args.includes('--apply')) markApproved()
     if (local) output(result)
     else process.stdout.write(codexTrustOutput(result, s, args.includes('--json'), home))
     return true
@@ -2206,6 +2249,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         put(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
       })
     }
+    if (isApplied) markApproved()
     output({ mode: 'trust', agent, file: allowlistFile, entries: wanted.map(([event, command]) => ({ event, command, trusted: isApplied || !missing.some(one => one[0] === event) })), changes: missing.length, ...(isApplied ? { applied: true } : {}) })
     return true
   }
@@ -2227,11 +2271,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     let hooksTrusted: boolean | 'unknown' = 'unknown'
-    if (agent === 'hermes' && installed) {
-      const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
-      const wanted = Object.entries(object(manifest.groups.hooks ?? {}))
-      hooksTrusted = approvals === null ? 'unknown' : wanted.length > 0 && wanted.every(([event, command]) => approvals.list.some(entry => entry.event === event && entry.command === command))
-    }
+    if (agent === 'hermes' && installed) hooksTrusted = hermesTrust()
     if (host) {
       hooksTrusted = host.hooks.every(hook => hook.trust === 'trusted')
     } else if (installed && agent === 'codex') {

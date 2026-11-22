@@ -223,7 +223,22 @@ export const ZH_TW = {
     "applyRemove": "套用此移除變更：{command}",
     "restartRemove": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
     "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
-    "directRemoved": "直接執行的 node 指令已無法使用；請改用 {command}。"
+    "directRemoved": "直接執行的 node 指令已無法使用；請改用 {command}。",
+    "updateAsk": "Agent Board {version} 已準備好。更新前，需要你同意這幾件事：",
+    "updateHook": "{host}：{event} hook 會改跑另一個命令。\n    現在：{before}\n    更新後：{after}",
+    "updateLoaded": "agent 會執行的程式碼有變更：{files}",
+    "updateUse": "新功能：{use}關閉方式：{off}",
+    "updateQuestion": "現在更新嗎？輸入 y 更新。[y/N] ",
+    "updated": "Agent Board 已更新到 {version}。",
+    "updateCurrent": "Agent Board 已是最新版（{version}）。",
+    "updateRevoked": "{host}：看板的 hooks 現在沒有被批准，這次更新也沒有替你批准。要批准它們：先執行 {command} 預覽，再加上 --apply 重新執行同一命令。",
+    "updateLater": "沒有任何變更。要更新，請在終端機執行這個命令並回答 y：{command}",
+    "updatePlugin": "這個看板來自 Claude Code 外掛，setup 不會動它。請用 claude plugin update agent-board@agent-board 更新外掛，再開一個新的 Claude Code 工作階段。",
+    "updateNone": "這裡還沒設定 Agent Board，所以沒有可更新的東西。設定它：{command}",
+    "useVersionCheck": "看板每天向 npm 查一次最新的版本號。",
+    "useVersionCheckOff": "看板設定裡的「檢查新版本」。",
+    "useCodexSessions": "看板會讀取你的 Codex 工作階段清單（資料夾、開始時間、id、最後寫入時間），從不讀取對話內容。",
+    "useCodexSessionsOff": "看板設定裡的「顯示 Codex 工作階段」。"
   },
   setupNoAgent: {
     "anywhere": "setup 在這台電腦沒有找到 agent。它找過 {home} 裡的資料夾、PATH 上的命令和已安裝的應用程式。請安裝一個 agent 再執行一次 setup，或指定一個：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",

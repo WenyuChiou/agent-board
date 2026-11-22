@@ -293,7 +293,7 @@ export const LINES = [
 "var trustCodex = async (executable, config, groups, apply) => {",
 "  const before = readFileSync3(config, \"utf8\");",
 "  const expected = Object.entries(groups).map(([event, group]) => ({ event: event[0].toLowerCase() + event.slice(1), command: group.hooks[0].command }));",
-"  if (expected.length !== 7)",
+"  if (apply ? expected.length !== 7 : expected.length === 0 || expected.length > 7)",
 "    throw new Error(\"SEVEN_OWNED_HOOKS_REQUIRED\");",
 "  const control = client(executable, undefined, undefined, undefined, dirname2(resolve2(config)));",
 "  try {",

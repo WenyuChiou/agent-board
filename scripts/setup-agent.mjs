@@ -11,6 +11,8 @@ import { installCommand, installContext } from './setup-command.mjs'
 
 const args = process.argv.slice(2)
 const isRemove = args.includes('--remove')
+// setup --update (#1314): update what setup installed, with one question only when the person must decide.
+const isUpdate = !isRemove && args.includes('--update')
 // The npm launcher supplies its package name for the setup command in guidance.
 const command = process.env.AGENT_BOARD_SETUP_COMMAND || ''
 const isJson = args.includes('--json')
@@ -113,7 +115,22 @@ const summaries = [
     "applyRemove": "Apply this removal: {command}",
     "restartRemove": "Restart each of: {agents} to unload their removed reporting hooks.",
     "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks.",
-    "directRemoved": "The direct node command stops working; use {command} instead."
+    "directRemoved": "The direct node command stops working; use {command} instead.",
+    "updateAsk": "Agent Board {version} is ready. Before it updates, it needs your yes for:",
+    "updateHook": "{host}: the {event} hook runs another command.\n    Now: {before}\n    New: {after}",
+    "updateLoaded": "Code your agents run changes: {files}",
+    "updateUse": "New: {use} Off switch: {off}",
+    "updateQuestion": "Update now? Type y to update. [y/N] ",
+    "updated": "Agent Board updated to {version}.",
+    "updateCurrent": "Agent Board is up to date ({version}).",
+    "updateRevoked": "{host}: the board's hooks are not approved now, so the update left them unapproved. To approve them, preview {command}, then run it again with --apply.",
+    "updateLater": "Nothing changed. To update, run this in a terminal and answer y: {command}",
+    "updatePlugin": "This board comes from the Claude Code plugin, so setup leaves it alone. Update the plugin with claude plugin update agent-board@agent-board, then start a new Claude Code session.",
+    "updateNone": "Agent Board is not set up here, so there is nothing to update. Set it up: {command}",
+    "useVersionCheck": "Once a day, the board asks npm for the newest version number.",
+    "useVersionCheckOff": "\"Check for new versions\" in the board's Settings.",
+    "useCodexSessions": "The board reads the list of your Codex sessions (folder, start time, id, last-written time), never the conversation.",
+    "useCodexSessionsOff": "\"Show Codex sessions\" in the board's Settings."
   },
   {
     "previewCreate": "將建立 {count} 個設定檔案",
@@ -185,7 +202,22 @@ const summaries = [
     "applyRemove": "套用此移除變更：{command}",
     "restartRemove": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
     "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
-    "directRemoved": "直接執行的 node 指令已無法使用；請改用 {command}。"
+    "directRemoved": "直接執行的 node 指令已無法使用；請改用 {command}。",
+    "updateAsk": "Agent Board {version} 已準備好。更新前，需要你同意這幾件事：",
+    "updateHook": "{host}：{event} hook 會改跑另一個命令。\n    現在：{before}\n    更新後：{after}",
+    "updateLoaded": "agent 會執行的程式碼有變更：{files}",
+    "updateUse": "新功能：{use}關閉方式：{off}",
+    "updateQuestion": "現在更新嗎？輸入 y 更新。[y/N] ",
+    "updated": "Agent Board 已更新到 {version}。",
+    "updateCurrent": "Agent Board 已是最新版（{version}）。",
+    "updateRevoked": "{host}：看板的 hooks 現在沒有被批准，這次更新也沒有替你批准。要批准它們：先執行 {command} 預覽，再加上 --apply 重新執行同一命令。",
+    "updateLater": "沒有任何變更。要更新，請在終端機執行這個命令並回答 y：{command}",
+    "updatePlugin": "這個看板來自 Claude Code 外掛，setup 不會動它。請用 claude plugin update agent-board@agent-board 更新外掛，再開一個新的 Claude Code 工作階段。",
+    "updateNone": "這裡還沒設定 Agent Board，所以沒有可更新的東西。設定它：{command}",
+    "useVersionCheck": "看板每天向 npm 查一次最新的版本號。",
+    "useVersionCheckOff": "看板設定裡的「檢查新版本」。",
+    "useCodexSessions": "看板會讀取你的 Codex 工作階段清單（資料夾、開始時間、id、最後寫入時間），從不讀取對話內容。",
+    "useCodexSessionsOff": "看板設定裡的「顯示 Codex 工作階段」。"
   },
   {
     "previewCreate": "将创建 {count} 个设置文件",
@@ -257,11 +289,43 @@ const summaries = [
     "applyRemove": "应用此移除更改：{command}",
     "restartRemove": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
     "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
-    "directRemoved": "直接运行的 node 命令已无法使用；请改用 {command}。"
+    "directRemoved": "直接运行的 node 命令已无法使用；请改用 {command}。",
+    "updateAsk": "Agent Board {version} 已准备好。更新前，需要你同意这几件事：",
+    "updateHook": "{host}：{event} hook 会改为运行另一个命令。\n    现在：{before}\n    更新后：{after}",
+    "updateLoaded": "agent 会运行的代码有变更：{files}",
+    "updateUse": "新功能：{use}关闭方式：{off}",
+    "updateQuestion": "现在更新吗？输入 y 更新。[y/N] ",
+    "updated": "Agent Board 已更新到 {version}。",
+    "updateCurrent": "Agent Board 已是最新版（{version}）。",
+    "updateRevoked": "{host}：看板的 hooks 现在没有被批准，这次更新也没有替你批准。要批准它们：先运行 {command} 预览，再加上 --apply 重新运行同一命令。",
+    "updateLater": "没有任何更改。要更新，请在终端运行这个命令并回答 y：{command}",
+    "updatePlugin": "这个看板来自 Claude Code 插件，setup 不会动它。请用 claude plugin update agent-board@agent-board 更新插件，再开一个新的 Claude Code 会话。",
+    "updateNone": "这里还没设置 Agent Board，所以没有可更新的东西。设置它：{command}",
+    "useVersionCheck": "看板每天向 npm 查询一次最新的版本号。",
+    "useVersionCheckOff": "看板设置里的「检查新版本」。",
+    "useCodexSessions": "看板会读取你的 Codex 会话列表（文件夹、开始时间、id、最后写入时间），从不读取对话内容。",
+    "useCodexSessionsOff": "看板设置里的「显示 Codex 会话」。"
   }
 ]
 const summary = summaries[['en', 'zh-TW', 'zh-CN'].indexOf(language)]
 const words = (key, values = {}) => summary[key].replace(/\{(\w+)\}/g, (text, name) => String(values[name] ?? text))
+// What a release starts doing that reaches the network or reads files it did not read before, with the version that added
+// it and its off switch (#1314). An update from an install record older than an entry asks about it, once.
+const newUses = [
+  { id: 'version-check', version: '0.25.1', use: 'useVersionCheck', off: 'useVersionCheckOff' },
+  { id: 'codex-sessions', version: '0.25.1', use: 'useCodexSessions', off: 'useCodexSessionsOff' },
+]
+const versionParts = value => String(value).split(/[.+-]/).slice(0, 3).map(part => Number.parseInt(part, 10) || 0)
+const isNewer = (one, other) => {
+  const [a, b] = [versionParts(one), versionParts(other)]
+  const at = a.findIndex((part, i) => part !== b[i])
+  return at >= 0 && a[at] > b[at]
+}
+let packageVersion = '0.0.0'
+try { packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version } catch {}
+// The version an install records. A tree whose package.json still names the last release records the newest use's version,
+// so an update from that tree does not ask again about what its own question already showed.
+const setupVersion = newUses.reduce((newest, one) => isNewer(one.version, newest) ? one.version : newest, packageVersion)
 // Keep this copy identical to setupNoAgent in all three tables.
 const noAgentWords = [
   {
@@ -424,6 +488,8 @@ const main = () => {
   // --home can name another account's home; PATH and apps belong to the running account.
   const selected = isRemove
     ? (selector === 'all' ? [...removable] : selector === 'auto' ? touched : selector.split(','))
+    // An update changes only agents setup installed: one the person removed stays removed.
+    : isUpdate ? (selector === 'auto' || selector === 'all' ? targets : selector.split(',')).filter(agent => targets.includes(agent) && existsSync(join(data, `install-${agent}.json`)))
     : (selector === 'all' ? [...targets] : selector === 'auto' ? discoverSetupAgents(home, data, hostDirs, homeAt < 0) : selector.split(','))
   const claudeDirectory = process.env.CLAUDE_CONFIG_DIR || join(home, '.claude')
   const claude = homeAt < 0 || resolve(home) === resolve(homedir()) ? findOnPath(['claude'], ['.exe', '.cmd']) : undefined
@@ -441,7 +507,7 @@ const main = () => {
   const setupCommand = extra => {
     const at = extra.indexOf('--agent')
     return installCommand({ ...context, program: command || nodeCommand(fileURLToPath(import.meta.url)) }, {
-      target: 'setup', mode: extra.includes('--remove') ? '--remove' : undefined,
+      target: 'setup', mode: extra.includes('--remove') ? '--remove' : extra.includes('--update') ? '--update' : undefined,
       agent: at < 0 ? undefined : extra[at + 1], apply: extra.includes('--apply'),
       extra: [...(args.includes('--antigravity-sidecar') ? ['--antigravity-sidecar'] : []), ...extra],
       // The Codex the person named stays the one the copied command uses (#1356).
@@ -449,6 +515,13 @@ const main = () => {
     }, quote).text
   }
   const enablePluginStep = () => words('enablePlugin', { command: 'claude plugin enable agent-board@agent-board --scope user' })
+  if (isUpdate && !selected.length) {
+    // A board the Claude Code plugin wrote is the plugin's to update; setup writes nothing for it.
+    const isPluginBoard = [process.env.CLAUDE_PROGRESS_FILE ? join(dirname(resolve(process.env.CLAUDE_PROGRESS_FILE)), 'agent-board.mjs') : '', join(claudeDirectory, 'agent-board.mjs')].some(file => file && existsSync(file))
+    process.stdout.write(`${isJson ? JSON.stringify({ mode: 'update', targets: [], plans: [], applied: false }, null, 2) : words(isPluginBoard ? 'updatePlugin' : 'updateNone', { command: setupCommand([]) })}
+`)
+    return
+  }
   if (isRemove && selector === 'auto' && !selected.length) {
     process.stdout.write(`${isJson ? JSON.stringify({ targets: [], plans: [], applied: false }, null, 2) : words('noInstalled')}\n`)
     return
@@ -467,8 +540,11 @@ const main = () => {
   // Only inside a test run (as AGENT_BOARD_SETUP_TTY), a stand-in helper can report what a real one cannot on cue.
   const script = process.env.AGENT_BOARD_TEST_PID && process.env.AGENT_BOARD_SETUP_HELPER ? process.env.AGENT_BOARD_SETUP_HELPER : fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
   let removing = selected
+  // An update reads Codex's trust through the Codex it would name in a trust command.
+  const updateCodex = isUpdate ? flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
   const run = (agent, isApplying, extra = []) => {
-    const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')] : common
+    const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')]
+      : [...common, '--setup-version', setupVersion, ...(agent === 'codex' && updateCodex && !flag('--codex-bin') ? ['--codex-bin', updateCodex] : [])]
     // A preview taken for an apply checks a conflict again under the install lock, so a copy another setup run is
     // writing stops this command as busy instead of being shown as a file to fix or move (#1694).
     const result = spawnSync(process.execPath, [script, ...runArgs, ...extra, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : apply ? ['--check-conflicts'] : [])], { encoding: 'utf8', windowsHide: true })
@@ -506,7 +582,7 @@ const main = () => {
     // An unchanged install still rewrites its manifest; keep a second run read-only.
     return plan.changes.length ? run(selected[i], true) : { ...plan, applied: true }
   })
-  if (isJson) {
+  if (isJson && !isUpdate) {
     // Structured output carries the terms line too, whenever a plan writes the sidecar's files.
     process.stdout.write(`${JSON.stringify({ targets: selected, plans: results, applied: apply && available.length > 0, ...(!isRemove && hasSidecar(results) ? { sidecarNotice: words('sidecarTerms') } : {}) }, null, 2)}\n`)
     return
@@ -596,11 +672,12 @@ const main = () => {
   })
   lines.push(...agentLines)
   // A file the person edited is named once, even when several agents share it (#1302).
-  lines.push(...new Set(results.filter(plan => !plan.conflicts.length).flatMap(plan => [
+  const keptLines = list => [...new Set(list.filter(plan => !plan.conflicts.length).flatMap(plan => [
     ...(plan.keptText ?? []).map(one => `  ${words('keptText', { file: shortPath(one.file), beside: shortPath(one.beside) })}`),
     ...(plan.keptCode ?? []).map(file => `  ${words('keptCode', { file: shortPath(file) })}`),
     ...(plan.keptHeld ?? []).map(one => `  ${words('keptHeld', { file: shortPath(one.file), by: one.by })}`),
-  ])))
+  ]))]
+  lines.push(...keptLines(results))
   // The sidecar's files are in this run's plan, by the flag or the question: say what they are and who switches them on.
   if (!isRemove && hasSidecar(results)) lines.push(words('sidecarTerms'))
   if (hasClaude && !isRemove) lines.push(`Claude Code: ${words('claude')}`)
@@ -654,6 +731,77 @@ const main = () => {
   const hasChanges = changedAgents.length > 0
   const isRepair = hasChanges && changedAgents.every(agent => touched.includes(agent))
   const isPluginInstallNeeded = isPluginNeeded && !isRepair
+  if (isUpdate) {
+    // One plan, then the writes: every file is written only after the yes, or with nothing to ask, so a no, a closed input
+    // or no terminal leaves the install as it was (#1314).
+    const own = available.filter(agent => plans[selected.indexOf(agent)].managedBy !== 'connector')
+    const planOf = agent => plans[selected.indexOf(agent)]
+    const facts = agent => planOf(agent).update ?? { hooks: [], loaded: [] }
+    // A host that trusts the hooks now is asked again only for hook commands that change. One whose trust cannot be read, or
+    // is gone, is asked only when this board never approved the hooks; an approval revoked since is never given back.
+    const approvals = own.filter(agent => facts(agent).trust === true ? facts(agent).hooks.length > 0 : facts(agent).trust !== undefined && facts(agent).approved === false)
+    const revoked = own.filter(agent => facts(agent).trust !== undefined && facts(agent).trust !== true && facts(agent).approved !== false)
+    const uses = newUses.filter(one => own.some(agent => typeof facts(agent).version !== 'string' || isNewer(one.version, facts(agent).version)))
+    const hooks = own.flatMap(agent => facts(agent).hooks.map(hook => ({ agent, ...hook })))
+    const files = [...new Set(own.flatMap(agent => facts(agent).loaded))]
+    const asks = [
+      ...hooks.map(hook => words('updateHook', { host: names[hook.agent], event: hook.event, before: hook.before.join(' ; ') || '-', after: hook.after.join(' ; ') || '-' })),
+      ...(files.length ? [words('updateLoaded', { files: files.map(shortPath).join(', ') })] : []),
+      ...uses.map(one => words('updateUse', { use: words(one.use), off: words(one.off) })),
+      ...approvals.map(agent => words('trustPart', { host: names[agent] })),
+    ]
+    const kept = keptLines(own.map(planOf))
+    const skipped = selected.filter((agent, i) => plans[i].conflicts.length)
+    const again = setupCommand([...(selector === 'auto' ? [] : ['--agent', selected.join(',')]), '--update'])
+    const question = [words('updateAsk', { version: setupVersion }), ...asks.map(line => `- ${line}`), ...kept]
+    const out = []
+    const failed = new Set()
+    const part = (agent, name, isDone, next) => {
+      if (!isDone) failed.add(agent)
+      out.push(words(isDone ? 'partDone' : 'partFailed', { part: name, command: next }))
+    }
+    if (asks.length && !isTerminal) {
+      // No terminal to answer in: print the question and the command that asks it, and write nothing. The board's page
+      // confirm (#1315) reads this JSON.
+      process.exitCode = 3
+      const json = { mode: 'update', version: setupVersion, targets: selected, applied: false, question: { hooks, files, uses: uses.map(one => ({ id: one.id, version: one.version, use: words(one.use), off: words(one.off) })), trust: approvals, text: question, command: again }, revoked, plans }
+      process.stdout.write(`${isJson ? JSON.stringify(json, null, 2) : [...question, words('updateLater', { command: again })].join('\n')}\n`)
+      return
+    }
+    if (asks.length) {
+      process.stdout.write(`${question.join('\n')}\n`)
+      // Only a typed yes counts: Enter, a no, a closed input or Ctrl-C leaves every file as it was.
+      const isYes = askYes('updateQuestion', false)
+      process.stdout.write('\n')
+      if (!isYes) {
+        process.exitCode = 1
+        process.stdout.write(`${words('updateLater', { command: again })}\n`)
+        return
+      }
+    }
+    const changed = own.filter(agent => planOf(agent).changes.length)
+    for (const agent of changed) {
+      let isDone = false
+      try {
+        const applied = run(agent, true, facts(agent).trust === true ? ['--hooks-approved'] : [])
+        isDone = applied.applied === true && !applied.conflicts.length
+      } catch {}
+      if (!isDone) part(agent, words('filesPart', { host: names[agent] }), false, setupCommand(['--agent', agent, '--update']))
+    }
+    for (const agent of approvals) {
+      const extra = [`--${agent}-trust`, ...(agent === 'codex' && updateCodex ? ['--codex-bin', updateCodex] : []), '--apply', '--json']
+      const retry = boardStep(planOf(agent), agent, extra.filter(word => word !== '--json'), agent === 'codex' ? updateCodex || { placeholder: words('codexPath') } : undefined)
+      // Trust follows only the files it is for: a failed file update leaves the trust step failed too.
+      const result = retry.isRunnable && !failed.has(agent) ? boardRun(planOf(agent), agent, extra) : undefined
+      part(agent, words('trustPart', { host: names[agent] }), result !== undefined && !result.error && result.status === 0, retry.text)
+    }
+    const revokedLines = revoked.map(agent => words('updateRevoked', { host: names[agent], command: boardStep(planOf(agent), agent, [`--${agent}-trust`], agent === 'codex' ? updateCodex || { placeholder: words('codexPath') } : undefined).text }))
+    const lines = [...(failed.size || !own.length ? [] : [words(changed.length ? 'updated' : 'updateCurrent', { version: setupVersion })]), ...out, ...revokedLines, ...(asks.length ? [] : kept), ...skipped.map(agent => agentLines[selected.indexOf(agent)])]
+    if (skipped.length) lines.push(words('retry', { command: setupCommand(['--agent', skipped.join(','), '--update']) }))
+    if (failed.size || skipped.length) process.exitCode = 1
+    process.stdout.write(`${isJson ? JSON.stringify({ mode: 'update', version: setupVersion, targets: selected, applied: own.length > 0 && !failed.size, failed: [...failed], revoked, plans }, null, 2) : lines.join('\n')}\n`)
+    return
+  }
   if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
     const approvals = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
