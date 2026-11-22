@@ -1,7 +1,7 @@
 import childProcess, { execFileSync, spawn, spawnSync } from 'node:child_process'
 import fs, { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, join, sep } from 'node:path'
 import { createServer, request } from 'node:http'
 import { createHash } from 'node:crypto'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
@@ -1150,7 +1150,8 @@ const startTrace = file => {
   const read = line => { try { return JSON.parse(line) } catch { return { phase: 'unreadable line' } } }
   return text.split('\n').map(read).map(one => one.ms === undefined ? `${one.phase}@${one.at}` : `${one.phase} ${one.ms}ms@${one.at}`).join(', ')
 }
-const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messages')], routes = testUnitRoutes) => {
+// env: variables this board gets over the folder's own (a test that names its own CODEX_HOME).
+const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messages')], routes = testUnitRoutes, env = {}) => {
   // The board uses XDG_RUNTIME_DIR only when no other account can open it.
   const runtime = join(dir, 'runtime'); mkdirSync(runtime, { recursive: true, mode: 0o700 })
   // `--serve` makes this folder private before it starts the page (runningPage reads its address
@@ -1174,7 +1175,7 @@ const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messa
   const startedAt = performance.now()
   // The boards these tests start take every route as shown live, like the page tests; the real records are tested apart.
   const routesFile = join(dir, 'routes.json'); writeFileSync(routesFile, JSON.stringify(routes))
-  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, AGENT_BOARD_CODEX_BIN: process.env.AGENT_BOARD_CODEX_BIN ?? '', CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_ROUTES: routesFile, HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }) }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, AGENT_BOARD_CODEX_BIN: process.env.AGENT_BOARD_CODEX_BIN ?? '', CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_ROUTES: routesFile, HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }), ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
   const exited = new Promise(done => child.once('exit', done))
   let address
   try { address = await new Promise((done, fail) => {
@@ -7019,6 +7020,41 @@ test('a Codex desktop app conversation found in the Codex home --codex-dir names
     assert.equal(send.status, 200, JSON.stringify(send.body))
     const runs = await waitFor(async () => { const lines = (readFileSyncSafe(log) ?? '').split('\n').filter(Boolean); return lines.length > 0 ? lines : undefined })
     assert.equal(JSON.parse(runs[0]).codexHome, home, 'the named home, not the CODEX_HOME the board was started with')
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_EXEC_STUB; codexShortWait(false)
+    writeFileSync(release, '')
+    await board?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
+  }
+})
+
+test('a Codex desktop app conversation found through CODEX_HOME, with no --codex-dir, runs with CODEX_HOME exactly as the board was given it', async () => {
+  // The board, as shipped, started without `--codex-dir`: the run that resumes the conversation keeps the CODEX_HOME the
+  // board's own environment holds, unchanged, as before #1771 (codex_653). A trailing separator shows it is not rewritten.
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-app-own-home-'))
+  const given = `${dir}${sep}`
+  const app = '99999999-8888-4777-8666-666666666666'
+  writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef04 agent=codex resume=${app} dir=${encodeURIComponent(dir)} state=waiting updated=${new Date().toISOString()} -->\n### A Codex app task\n- [?] Orange or teal?\n<!-- /auto session=abcdef04 -->\n`)
+  const day = join(dir, 'sessions', '2026', '11', '22')
+  mkdirSync(day, { recursive: true })
+  writeFileSync(join(day, `rollout-2026-11-22T00-00-00-${app}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: app, originator: 'Codex Desktop', cwd: dir } }) + '\n')
+  const log = join(dir, 'exec.log'), release = join(dir, 'release-run'), stub = join(dir, 'exec-stub.json')
+  writeFileSync(stub, JSON.stringify({ log, release, refuse: true }))
+  process.env.AGENT_BOARD_CODEX_BIN = fileURLToPath(new URL('./helpers/codex-exec-stub.mjs', import.meta.url))
+  process.env.CODEX_EXEC_STUB = stub
+  codexShortWait()
+  let board
+  try {
+    const appRoutes = testUnitRoutes.map(one => one.agent === 'codex' && one.kind === 'live'
+      ? { ...one, routes: { ...one.routes, idle: { ...one.routes.idle, surfaces: [...one.routes.idle.surfaces, SURFACE_IDS.codexApp], surfaceLines: { [SURFACE_IDS.codexApp]: 'reopen' } } } }
+      : one)
+    board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send'], appRoutes, { CODEX_HOME: given })
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === app && one.surface === SURFACE_IDS.codexApp))
+    const send = await board.call('/api/messages/send', { id: 'AB-APP-004', target: connection.id, turn: 'session', text: 'Teal.' })
+    assert.equal(send.status, 200, JSON.stringify(send.body))
+    const runs = await waitFor(async () => { const lines = (readFileSyncSafe(log) ?? '').split('\n').filter(Boolean); return lines.length > 0 ? lines : undefined })
+    assert.equal(JSON.parse(runs[0]).codexHome, given, 'the board\'s own CODEX_HOME, not one the board wrote for the run')
   } finally {
     delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_EXEC_STUB; codexShortWait(false)
     writeFileSync(release, '')
