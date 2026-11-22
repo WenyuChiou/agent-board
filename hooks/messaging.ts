@@ -49,6 +49,9 @@ export type Message = {
   // When an automatic receiver left with this message still queued. The board refuses the message a fixed time after
   // this, working from the store alone; the next receiver of the session takes it over and clears the stamp (#318).
   leftAt?: number
+  // When the Codex desktop app first refused this message, with nothing sent, because it held the conversation (#557).
+  // Later refusals keep it: from the open limit after it, the message is never handed out or begun, and is refused as not sent.
+  heldSince?: number
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
@@ -186,6 +189,11 @@ const settleWake = (one: Message, now: number): Message | undefined => {
 
 export const FINISHED_KEEP_MS = 24 * 60 * 60 * 1000
 export const OPEN_LIMIT_MS = 30 * 60 * 1000
+// The receivers whose `unsent` keeps the message's clock instead of starting a fresh claim's 30 minutes (#1578): the Codex
+// desktop app refuses a second writer for as long as it is open, so each refusal is the same wait, counted by the board from
+// the first one, whatever its receiver remembers (#557).
+const HELD_CLOCK_SURFACES: readonly string[] = [SURFACE_IDS.codexApp]
+export const isHeldTooLong = (one: Pick<Message, 'heldSince'>, now: number): boolean => one.heldSince !== undefined && now - one.heldSince >= OPEN_LIMIT_MS
 export const HOP_LIMIT = 2
 export const PEER_PAIR_BUDGET = 6
 export const TARGET_OPEN_CAP = 3
@@ -257,6 +265,8 @@ export const pruneMessages = (state: MessageState, now: number): MessageState =>
   const kept = state.messages.filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(one => {
     const wake = settleWake(one, now)
     if (wake !== undefined) return wake
+    // A reply the Codex desktop app held for the whole open limit is refused as not sent, with no receiver to ask (#557).
+    if (one.status === 'queued' && isHeldTooLong(one, now)) return settled({ ...one, status: 'rejected' as const, error: 'APP_STILL_OPEN', updated: now })
     return settled((one.status === 'uncertain' || one.status === 'accepted' && (one.error !== '' || isMailboxTarget(one.target))) && !isFinished(one) && now - one.updated > OPEN_LIMIT_MS
       ? { ...one, status: 'uncertain' as const, error: 'EXPIRED', updated: now, ...(one.status === 'accepted' ? { hasAccepted: true } : {}) } : one)
   })
@@ -385,7 +395,7 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   // only when every one is this binding's and can be taken again, and only on a surface that message allows. A wake
   // that reads "sent, not confirmed" or a confirmed turn-ended uncertain delivery no longer holds the session (`isHolding`).
   const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isHolding(one) && !isHookDelivered(one))
-  const canTake = (one: Message): boolean => one.status === 'queued' && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
+  const canTake = (one: Message): boolean => one.status === 'queued' && !isHeldTooLong(one, now) && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
   const pick = held.length === 0 ? state.messages.find(canTake) : held.every(isRetaken) ? held.find(canReach) : undefined
   const messages = pick === undefined ? [] : [pick]
   if (messages.length === 0) return { state, messages }
@@ -416,9 +426,14 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
     if (one.status !== 'uncertain' || one.error !== '' || one.hasAccepted === true || one.target !== target.id || isMailboxTarget(one.target) || input.reply !== undefined || input.error !== undefined) throw new Error('INVALID_RECEIPT')
     const { awaitsStart: _awaitsStart, ...rest } = one
     // starting: the receiver is about to ask its host for the message, so from now on a connection that ends leaves it in doubt.
-    // Said twice it changes nothing. It changes nothing else either: the claim still waits for its accept.
-    if (input.status === 'starting') return one.awaitsStart === true ? { ...state, messages: state.messages.map(message => message === one ? rest : message) } : state
-    return { ...state, messages: state.messages.map(message => message === one ? { ...rest, status: 'queued' as const, claimed: 0, updated: now } : message) }
+    // Said twice it changes nothing. It changes nothing else either: the claim still waits for its accept. A reply the Codex
+    // desktop app has held for the open limit is not begun: its receiver runs nothing when this is refused (#557).
+    if (input.status === 'starting') {
+      if (isHeldTooLong(one, now)) throw new Error('APP_STILL_OPEN')
+      return one.awaitsStart === true ? { ...state, messages: state.messages.map(message => message === one ? rest : message) } : state
+    }
+    const heldSince = HELD_CLOCK_SURFACES.includes(target.surface) ? { heldSince: one.heldSince ?? now } : {}
+    return { ...state, messages: state.messages.map(message => message === one ? { ...rest, status: 'queued' as const, claimed: 0, updated: now, ...heldSince } : message) }
   }
   if (!['uncertain', 'accepted', 'acknowledged', 'rejected'].includes(String(input.status))) throw new Error('INVALID_RECEIPT')
   const status = input.status as Message['status']

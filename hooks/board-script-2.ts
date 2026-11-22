@@ -1734,7 +1734,7 @@ export const LINES = [
 "      throw new Error(\"INVALID_MESSAGE_STORE\");",
 "    if (one.hasAccepted !== undefined && typeof one.hasAccepted !== \"boolean\" || one.awaitsStart !== undefined && one.awaitsStart !== true)",
 "      throw new Error(\"INVALID_MESSAGE_STORE\");",
-"    if (one.leftAt !== undefined && !Number.isFinite(one.leftAt))",
+"    if (one.leftAt !== undefined && !Number.isFinite(one.leftAt) || one.heldSince !== undefined && !Number.isFinite(one.heldSince))",
 "      throw new Error(\"INVALID_MESSAGE_STORE\");",
 "    if (one.line !== undefined && !ROUTE_LINES.includes(one.line))",
 "      throw new Error(\"INVALID_MESSAGE_STORE\");",

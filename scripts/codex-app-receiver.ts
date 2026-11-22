@@ -4,7 +4,9 @@
 // Codex itself decides that: while the app has the conversation loaded (shown, or another chat in view), any second writer
 // is refused before anything is written ("thread-store conflict ... already has an active writer"), so no turn of the board
 // can clash with one of the app's. Such a refusal sent nothing: the message goes back to the board's queue and is tried
-// again `retryMs` later, for as long as an open message may wait (30 minutes), then refused as not sent. Every other outcome follows the shared background-resume rules (scripts/background-resume.ts and
+// again `retryMs` later. The board counts its time from the first refusal (hooks/messaging.ts, `heldSince`): once an open
+// message's limit (30 minutes) has passed, it is never handed out or begun again, and is refused as not sent.
+// Every other outcome follows the shared background-resume rules (scripts/background-resume.ts and
 // docs/MESSAGING.md, "Background resume"): the local board only, the person's default permission mode (no flags), never
 // while the board reads a turn running, a dated live record before Send, and card wording that says the turn runs in the
 // background. A run that may have reached the model and shows no `ACK <code>` line is `uncertain` and never run again.
@@ -13,7 +15,7 @@ import { MAX_RESUME_WAIT, disallowedPermissionFlag, isFolder, parseResumeOutput,
 import type { Program, ProcessResult } from './background-resume'
 import { boardClient, deliveryPrompt } from './message-client.mjs'
 import { BACKGROUND_TURN_ENV } from '../hooks/hook-safety'
-import { OPEN_LIMIT_MS, SURFACE_IDS } from '../hooks/messaging'
+import { SURFACE_IDS } from '../hooks/messaging'
 import type { RowState } from '../hooks/messaging'
 
 // The receiver's record is hooks/receivers/codex-app.ts (the board's route table and the messaging matrix read it there).
@@ -23,15 +25,18 @@ export const CODEX_APP_ORIGINATOR = 'Codex Desktop'
 const THREAD = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const TICK_MS = 3000
 const RETRY_MS = 30_000
-// Codex's own words when another client holds the conversation (Codex 0.167 to 0.169, CLI and shared server alike). A
-// thread-store conflict counts only when it names the active writer: any other conflict may have written something.
-const WRITER_HELD = /thread-store conflict[^\n]*active writer|already has an active writer/i
+// Codex's own words when another client holds the conversation, as Codex 0.167's program writes them: `thread <id> already
+// has an active writer`, inside a thread-store conflict, after `Error: `. A wrong "unsent" would run a turn twice, and a wrong
+// "uncertain" only asks the person to send again, so only that sentence, naming this conversation, counts.
+const writerLine = (id: string): RegExp => new RegExp(`^(?:Error: )?(?:thread-store conflict: )?thread ${id} already has an active writer\\.?$`)
 
 // Whether a finished run is Codex refusing a second writer, which wrote nothing and asked the model nothing: it failed, it
-// printed no reply at all, and its error says another writer holds the conversation. Anything else (a reply, an ACK, a
-// timeout, any other error) may have reached the model and is never read as unsent.
-export const isWriterHeld = (result: ProcessResult): boolean =>
-  result.started && !result.timedOut && result.exitCode !== null && result.exitCode !== 0 && result.stdout.trim() === '' && WRITER_HELD.test(result.stderr)
+// printed no reply at all, and the last line of its error is that sentence for this conversation, whole. Anything else (a
+// reply, an ACK, a timeout, any other error or wording) may have reached the model and is never read as unsent.
+export const isWriterHeld = (result: ProcessResult, id: string): boolean => {
+  const last = result.stderr.split(/\r?\n/).map(line => line.trim()).filter(line => line !== '').at(-1) ?? ''
+  return result.started && !result.timedOut && result.exitCode !== null && result.exitCode !== 0 && result.stdout.trim() === '' && THREAD.test(id) && writerLine(id).test(last)
+}
 
 // The board's address and token live only in this process, and the app's own name is not passed on: the resumed turn is the
 // board's, not the app's. Everything else, the person's Codex home included, is what their own Codex reads. One mark is
@@ -82,8 +87,6 @@ export const startCodexAppReceiver = ({
   // Conversations with a run in flight, and when one Codex refused may be tried again.
   const running = new Set<string>()
   const heldUntil = new Map<string, number>()
-  // When Codex first refused each message (by the message's id) because the app held its conversation (`id`).
-  const firstRefused = new Map<string, { id: string; at: number }>()
   let listed = new Map<string, string>(), isClosed = false, isTicking = false
 
   const isWanted = (id: string): boolean => !isClosed && listed.has(id) && !isTaken(id)
@@ -101,7 +104,8 @@ export const startCodexAppReceiver = ({
     const one = await board.attach({
       agent: 'codex', session: id, scope: 'session', turn: 'session', surface: SURFACE, unclaimed: true, marksStart: true, pollMs, onError,
       verify: async () => isKept(id),
-      canReceive: async () => !running.has(id) && now() >= (heldUntil.get(id) ?? 0) && stateOf(id) === 'idle' && isWanted(id),
+      // One reply at a time: none while a run lasts, or while the last one's receipt is still on its way.
+      canReceive: async () => !running.has(id) && !isSending(id) && now() >= (heldUntil.get(id) ?? 0) && stateOf(id) === 'idle' && isWanted(id),
       deliver: async (message: { id: string; nonce?: string; prompt?: string }, _accept: () => Promise<unknown>, begin: () => void, unsent: () => Promise<unknown>, starting: () => Promise<unknown>) => {
         const dir = listed.get(id)
         // Never mid-turn (limit 3): a conversation the board no longer reads as idle, or one this receiver is running, gets
@@ -122,16 +126,12 @@ export const startCodexAppReceiver = ({
           const result = await run(programFor(executable, args), { cwd: dir, stdin: prompt, maxWaitMs, env: childEnvironment(env) })
           // Nothing ran: the claim is refused with the reason, and nothing reached Codex.
           if (!result.started) throw new Error(result.spawnErrorCode === 'ENOENT' ? 'COMMAND_MISSING' : 'SPAWN_FAILED')
-          if (isWriterHeld(result)) {
-            // An app left open does not keep the message queued for ever: after the time an open message may wait, it is
-            // refused as not sent, with the reason (nothing has begun, so the board client says `rejected`).
-            const first = firstRefused.get(message.id)?.at ?? now()
-            if (now() - first >= OPEN_LIMIT_MS) { firstRefused.delete(message.id); throw new Error('APP_STILL_OPEN') }
-            firstRefused.set(message.id, { id, at: first })
+          // Nothing was sent: back to the queue. The board keeps the time of the first refusal, so an app left open does not
+          // keep the message queued for ever.
+          if (isWriterHeld(result, id)) {
             heldUntil.set(id, now() + retryMs)
             return await giveBack(unsent)
           }
-          firstRefused.delete(message.id)
           // From here the turn may have reached the model: any failure is uncertain, and nothing runs it again.
           begin()
           if (result.timedOut) throw new Error('EXIT_TIMEOUT')
@@ -161,7 +161,6 @@ export const startCodexAppReceiver = ({
         }
       }
       for (const id of [...heldUntil.keys()]) if (!listed.has(id)) heldUntil.delete(id)
-      for (const [key, one] of [...firstRefused]) if (!listed.has(one.id)) firstRefused.delete(key)
       for (const id of listed.keys()) {
         if (attached.has(id) || attaching.has(id) || !isWanted(id)) continue
         attaching.add(id)
