@@ -3,7 +3,7 @@
 import { execFile, execFileSync, spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { EventEmitter } from 'node:events'
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { createServer, request } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
@@ -6315,23 +6315,31 @@ test('the Cursor shell helper accepts a command that runs longer than 5 seconds 
 test('the Cursor shell helper stops a command that never exits when its abort signal fires, ends the whole process and rejects at once', { skip: process.platform !== 'win32', timeout: 15_000 }, async t => {
   const board = serveIn()
   const pidFile = join(board.dir, 'hung.pid')
+  const startupHold = join(board.dir, 'startup.hold')
   const controller = new AbortController()
   let pid, run
   const tStart = performance.now()
-  let tPidFile = null, tAborted = null, tStopped = null
+  let tPidWaitStart = null, tPidFile = null, tAborted = null, tStopped = null
   try {
-    // Startup on a loaded Windows runner happens before the abort is sent (#1673); advance a manual clock before
-    // aborting, then run the wall clock from the abort so startup time never consumes the promptness check.
+    // Hold child readiness behind a startup gate and advance the manual clock before releasing it (#1645/#1665 pattern);
+    // restoring startup-inclusive wall timing fails against >= 12_500 even on a fast runner, while post-abort stays real time.
+    writeFileSync(startupHold, '')
     let clock = 0, since = null
     const now = () => since === null ? clock : clock + performance.now() - since
-    const hung = `import { writeFileSync } from 'node:fs'
+    const startedAt = now()
+    const hung = `import { existsSync, writeFileSync } from 'node:fs'
+while (existsSync(${JSON.stringify(startupHold)})) await new Promise(done => setTimeout(done, 25))
 writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))
 setInterval(() => {}, 1000)`
     run = cursorShell(fakeBoard(board, hung), [], {}, async () => {}, () => {}, controller.signal)
     run.catch(() => {})
-    while (!(existsSync(pidFile) && readFileSync(pidFile, 'utf8')) && performance.now() - tStart < 8_000) await delay(25)
-    tPidFile = performance.now()
+    assert.equal(existsSync(pidFile), false, 'child must hold behind startup gate before advancing the clock')
     clock += 12_500
+    unlinkSync(startupHold)
+    // Exclude where.exe Git Bash lookup and the held startup gate from the 8 s PID wait budget.
+    tPidWaitStart = performance.now()
+    while (!(existsSync(pidFile) && readFileSync(pidFile, 'utf8')) && performance.now() - tPidWaitStart < 8_000) await delay(25)
+    tPidFile = performance.now()
     pid = Number(readFileSync(pidFile, 'utf8'))
     assert.ok(pid > 0 && processAlive(pid), 'the stand-in command must be running before the abort')
     since = performance.now()
@@ -6342,14 +6350,17 @@ setInterval(() => {}, 1000)`
     while (processAlive(pid) && performance.now() - tAborted < 3_000) await delay(25)
     tStopped = performance.now()
     assert.ok(!processAlive(pid), 'the stand-in command must be gone after the abort')
+    assert.ok(now() - startedAt >= 12_500, 'forced slow startup must exceed the old 12 s startup-inclusive limit')
     assert.ok(now() - abortedAt < 12_000, 'the abort must end the helper promptly')
   } finally {
     const tEnd = performance.now()
-    const pidLabel = tPidFile === null ? `${Math.round(tEnd - tStart)} ms (unfinished)` : `${Math.round(tPidFile - tStart)} ms`
+    const waitOrigin = tPidWaitStart ?? tStart
+    const pidLabel = tPidFile === null ? `${Math.round(tEnd - waitOrigin)} ms (unfinished)` : `${Math.round(tPidFile - waitOrigin)} ms`
     const abortLabel = tPidFile !== null && tAborted !== null ? `${Math.round(tAborted - tPidFile)} ms` : 'n/a'
     const treeLabel = tAborted !== null && tStopped !== null ? `${Math.round(tStopped - tAborted)} ms` : 'n/a'
     t.diagnostic(`#1673 steps: pid file ${pidLabel}, abort ${abortLabel}, process-tree stop ${treeLabel} (total ${Math.round(tEnd - tStart)} ms)`)
-    // Whatever failed above (a pid file that cannot be read, too), the stand-in is stopped and settled before the fixture goes.
+    // Whatever failed above (a pid file that cannot be read, too), release any gate and stop the stand-in before the fixture goes.
+    try { if (existsSync(startupHold)) unlinkSync(startupHold) } catch {}
     controller.abort()
     await run?.catch(() => {})
     if (pid && processAlive(pid)) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true })
@@ -6371,12 +6382,14 @@ test('the Cursor shell helper still fails, naming the pipe, when a command retur
   } finally { await board.end([]) }
 })
 
-const withFd3Holder = async (board, name, run) => {
+const withFd3Holder = async (board, name, run, { holdFile } = {}) => {
   const holderPidFile = join(board.dir, `${name}.pid`)
-  const holder = `import { writeFileSync } from 'node:fs'\nimport { spawn } from 'node:child_process'\nconst c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })\nwriteFileSync(${JSON.stringify(holderPidFile)}, String(c.pid))\nc.unref()`
+  const holdWait = holdFile ? `while (existsSync(${JSON.stringify(holdFile)})) await new Promise(done => setTimeout(done, 25))\n` : ''
+  const holder = `import { existsSync, writeFileSync } from 'node:fs'\nimport { spawn } from 'node:child_process'\n${holdWait}const c = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 10000)'], { detached: true, stdio: 'ignore' })\nwriteFileSync(${JSON.stringify(holderPidFile)}, String(c.pid))\nc.unref()`
   try {
     return await run(fakeBoard(board, holder))
   } finally {
+    if (holdFile) try { if (existsSync(holdFile)) unlinkSync(holdFile) } catch {}
     if (existsSync(holderPidFile)) {
       const pid = Number(readFileSync(holderPidFile, 'utf8'))
       if (pid && processAlive(pid)) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true })
@@ -6399,11 +6412,14 @@ test('the Cursor shell helper keeps the open-pipe error naming fd3 when page cle
 
 test('the Cursor shell helper stops at once on test abort when bash exited with fd3 still open instead of waiting 5 seconds (#1451)', { skip: process.platform !== 'win32', timeout: 15_000 }, async t => {
   const board = serveIn()
+  const startupHold = join(board.dir, 'startup-1451.hold')
+  writeFileSync(startupHold, '')
   const controller = new AbortController()
   const tStart = performance.now()
-  let tBashExit = null, tAborted = null
-  let clock = 0, since = null, bashExitedAt = null
+  let tBashExit = null, tAbortSent = null, tAborted = null
+  let clock = 0, since = null, abortedAt = null
   const now = () => since === null ? clock : clock + performance.now() - since
+  const startedAt = now()
   let pipeWaitMs = null, pipeTimerCleared = false, pipeTimerFired = false
   let abortImmediate
   await withFd3Holder(board, 'holder-1451-abort', async target => {
@@ -6413,8 +6429,15 @@ test('the Cursor shell helper stops at once on test abort when bash exited with 
         setPipeTimer: (onTimeout, ms) => {
           pipeWaitMs = ms
           const entry = { cleared: false, timer: setTimeout(() => { pipeTimerFired = true; onTimeout() }, ms) }
-          // Abort on the check phase right after cursorShell enters the 5 s pipe-wait Promise.race.
-          abortImmediate = setImmediate(() => { if (!entry.cleared) controller.abort() })
+          // Abort on the check phase right after cursorShell enters the 5 s pipe-wait Promise.race; start wall clock at abort.
+          abortImmediate = setImmediate(() => {
+            if (!entry.cleared) {
+              since = performance.now()
+              abortedAt = now()
+              tAbortSent = performance.now()
+              controller.abort()
+            }
+          })
           return entry
         },
         clearPipeTimer: entry => {
@@ -6427,11 +6450,11 @@ test('the Cursor shell helper stops at once on test abort when bash exited with 
       await assert.rejects(
         () => cursorShell(target, [], {}, async () => {}, line => {
           marks.push(line)
-          if (line.startsWith('bash exit code=0')) {
-            tBashExit = performance.now()
+          if (line.startsWith('bash ') && line.includes(' started ')) {
             clock += 4_000
-            since = performance.now()
-            bashExitedAt = now()
+            if (existsSync(startupHold)) unlinkSync(startupHold)
+          } else if (line.startsWith('bash exit code=0')) {
+            tBashExit = performance.now()
           }
         }, controller.signal, options),
         /stopped by the test's abort/,
@@ -6440,39 +6463,33 @@ test('the Cursor shell helper stops at once on test abort when bash exited with 
       assert.equal(pipeWaitMs, 5000)
       assert.equal(pipeTimerCleared, true)
       assert.equal(pipeTimerFired, false)
-      assert.ok(bashExitedAt !== null && marks.some(line => line.includes('stopping pipe wait after bash exit')), marks.join('\n'))
-      assert.ok(now() - bashExitedAt < 3_500, 'test abort after bash exit must not wait out the 5 s pipe deadline')
+      assert.ok(abortedAt !== null && marks.some(line => line.includes('stopping pipe wait after bash exit')), marks.join('\n'))
+      assert.ok(now() - startedAt >= 4_000, 'forced slow startup must exceed the old 3.5 s startup-inclusive limit')
+      assert.ok(now() - abortedAt < 3_500, 'test abort after bash exit must not wait out the 5 s pipe deadline')
     } finally {
       clearImmediate(abortImmediate)
       const tEnd = performance.now()
       const bashLabel = tBashExit === null ? `${Math.round(tEnd - tStart)} ms (unfinished)` : `${Math.round(tBashExit - tStart)} ms`
-      const abortLabel = tBashExit !== null && tAborted !== null ? `${Math.round(tAborted - tBashExit)} ms` : 'n/a'
+      const abortLabel = tAbortSent !== null && tAborted !== null ? `${Math.round(tAborted - tAbortSent)} ms` : 'n/a'
       t.diagnostic(`#1451 steps: bash exit ${bashLabel}, abort ${abortLabel} (total ${Math.round(tEnd - tStart)} ms)`)
       controller.abort()
     }
-  })
+  }, { holdFile: startupHold })
 })
 
 test('the Cursor shell helper does not block the event loop while ending a hung process tree on abort (#1673)', { skip: process.platform !== 'win32', timeout: 15_000 }, async () => {
   const board = serveIn()
   const pidFile = join(board.dir, 'hung-async-kill.pid')
   const controller = new AbortController()
-  let pid, run, timerTicked = false, timerTickedBeforeKillDone = false, killDone = false, killCalls = 0
-  let tickTimer
+  let pid, run, tickedBeforeKillDone = false, killDone = false, killCalls = 0
+  let immediate
   try {
     const hung = `import { writeFileSync } from 'node:fs'
 writeFileSync(${JSON.stringify(pidFile)}, String(process.pid))
 setInterval(() => {}, 1000)`
     const killTree = child => {
       killCalls += 1
-      return new Promise(done => {
-        setTimeout(() => {
-          execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {
-            killDone = true
-            done()
-          })
-        }, 100)
-      })
+      return defaultKillTree(child).then(() => { killDone = true })
     }
     run = cursorShell(fakeBoard(board, hung), [], {}, async () => {}, () => {}, controller.signal, { killTree })
     run.catch(() => {})
@@ -6480,19 +6497,18 @@ setInterval(() => {}, 1000)`
     while (!(existsSync(pidFile) && readFileSync(pidFile, 'utf8')) && performance.now() - began < 8_000) await delay(25)
     pid = Number(readFileSync(pidFile, 'utf8'))
     assert.ok(pid > 0 && processAlive(pid))
-    tickTimer = setTimeout(() => {
-      timerTicked = true
-      timerTickedBeforeKillDone = !killDone
-    }, 10)
+    immediate = setImmediate(() => { tickedBeforeKillDone = !killDone })
+    const syncStart = performance.now()
     controller.abort()
+    const syncBlockMs = performance.now() - syncStart
     await assert.rejects(run, /stopped by the test's abort/)
     assert.equal(killCalls, 1)
     assert.equal(killDone, true)
-    assert.equal(timerTicked, true)
-    assert.equal(timerTickedBeforeKillDone, true, 'abort must not freeze the event loop while taskkill stops the process tree')
+    assert.ok(syncBlockMs < 50, `abort must not block synchronously during taskkill (${syncBlockMs.toFixed(1)} ms)`)
+    assert.equal(tickedBeforeKillDone, true, 'abort must not freeze the event loop while taskkill stops the process tree')
     assert.ok(!processAlive(pid), 'the stand-in command must be gone once the helper settles')
   } finally {
-    clearTimeout(tickTimer)
+    clearImmediate(immediate)
     controller.abort()
     await run?.catch(() => {})
     if (pid && processAlive(pid)) spawnSync('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true })
