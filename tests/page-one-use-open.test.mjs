@@ -362,60 +362,59 @@ test('failed browser opener prints a one-use link whose second GET is refused', 
 })
 
 test('--no-open and SSH fallbacks print only a one-use link with no reusable token', { timeout: 30_000 }, async () => {
-  await withCliFixture({ openResult: true }, async ({ env, script }) => {
-    const htmlNoOpen = await runCli(script, ['--html', '--no-open'], env)
-    assert.equal(htmlNoOpen.status, 0, htmlNoOpen.stderr)
-    assert.doesNotMatch(htmlNoOpen.stdout, REUSABLE_LINK_RE)
-    const link1 = htmlNoOpen.stdout.trim()
-    assert.match(link1, /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
-    assert.equal((await fetch(link1)).status, 200)
-    assert.equal((await fetch(link1)).status, 403)
+  await Promise.all([
+    withCliFixture({ openResult: true }, async ({ env, script }) => {
+      const htmlNoOpen = await runCli(script, ['--html', '--no-open'], env)
+      assert.equal(htmlNoOpen.status, 0, htmlNoOpen.stderr)
+      assert.doesNotMatch(htmlNoOpen.stdout, REUSABLE_LINK_RE)
+      const link1 = htmlNoOpen.stdout.trim()
+      assert.match(link1, /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
+      assert.equal((await fetch(link1)).status, 200)
+      assert.equal((await fetch(link1)).status, 403)
 
-    const serveNoOpen = await runCli(script, ['--serve', '--no-open'], env)
-    assert.equal(serveNoOpen.status, 0, serveNoOpen.stderr)
-    assert.doesNotMatch(serveNoOpen.stdout, REUSABLE_LINK_RE)
-    const link2 = OPEN_LINK_RE.exec(serveNoOpen.stdout)?.[0]
-    assert.ok(link2)
-    assert.notEqual(link2, link1)
-    assert.equal((await fetch(link2)).status, 200)
-    assert.equal((await fetch(link2)).status, 403)
+      const serveNoOpen = await runCli(script, ['--serve', '--no-open'], env)
+      assert.equal(serveNoOpen.status, 0, serveNoOpen.stderr)
+      assert.doesNotMatch(serveNoOpen.stdout, REUSABLE_LINK_RE)
+      const link2 = OPEN_LINK_RE.exec(serveNoOpen.stdout)?.[0]
+      assert.ok(link2)
+      assert.notEqual(link2, link1)
+      assert.equal((await fetch(link2)).status, 200)
+      assert.equal((await fetch(link2)).status, 403)
 
-    const sshEnv = { ...env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222', SSH_TTY: '/dev/pts/0' }
-    const keysRes = await runCli(script, ['--keys', 'o', '--no-open'], sshEnv)
-    assert.equal(keysRes.status, 0, keysRes.stderr)
-    assert.doesNotMatch(keysRes.stdout, REUSABLE_LINK_RE)
-    const linkKeys = OPEN_LINK_RE.exec(keysRes.stdout)?.[0]
-    assert.ok(linkKeys, keysRes.stdout)
-    assert.equal((await fetch(linkKeys)).status, 200)
-    assert.equal((await fetch(linkKeys)).status, 403)
+      const sshEnv = { ...env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222', SSH_TTY: '/dev/pts/0' }
+      const keysRes = await runCli(script, ['--keys', 'o', '--no-open'], sshEnv)
+      assert.equal(keysRes.status, 0, keysRes.stderr)
+      assert.doesNotMatch(keysRes.stdout, REUSABLE_LINK_RE)
+      const linkKeys = OPEN_LINK_RE.exec(keysRes.stdout)?.[0]
+      assert.ok(linkKeys, keysRes.stdout)
+      assert.equal((await fetch(linkKeys)).status, 200)
+      assert.equal((await fetch(linkKeys)).status, 403)
+    }),
+    withCliFixture({ openResult: true }, async ({ env, script }) => {
+      const sshEnv = { ...env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222', SSH_TTY: '/dev/pts/0' }
+      const firstSsh = await runCli(script, [], sshEnv)
+      assert.equal(firstSsh.status, 0, firstSsh.stderr)
+      assert.doesNotMatch(firstSsh.stdout, REUSABLE_LINK_RE)
+      const firstLines = firstSsh.stdout.trim().split(/\r?\n/)
+      const sshUrl1 = firstLines.at(-1)
+      assert.match(sshUrl1, /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
+      const port = Number(new URL(sshUrl1).port)
+      assert.equal(firstLines.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', sshUrl1))
+      assert.equal((await fetch(sshUrl1)).status, 200)
+      assert.equal((await fetch(sshUrl1)).status, 403)
 
-    // With page loaded above, start a clean second SSH fixture to cover before-open and already-open SSH output.
-  })
-
-  await withCliFixture({ openResult: true }, async ({ env, script }) => {
-    const sshEnv = { ...env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222', SSH_TTY: '/dev/pts/0' }
-    const firstSsh = await runCli(script, [], sshEnv)
-    assert.equal(firstSsh.status, 0, firstSsh.stderr)
-    assert.doesNotMatch(firstSsh.stdout, REUSABLE_LINK_RE)
-    const firstLines = firstSsh.stdout.trim().split(/\r?\n/)
-    const sshUrl1 = firstLines.at(-1)
-    assert.match(sshUrl1, /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
-    const port = Number(new URL(sshUrl1).port)
-    assert.equal(firstLines.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', sshUrl1))
-    assert.equal((await fetch(sshUrl1)).status, 200)
-    assert.equal((await fetch(sshUrl1)).status, 403)
-
-    const againSsh = await runCli(script, [], sshEnv)
-    assert.equal(againSsh.status, 0, againSsh.stderr)
-    assert.doesNotMatch(againSsh.stdout, REUSABLE_LINK_RE)
-    const againLines = againSsh.stdout.trim().split(/\r?\n/)
-    const sshUrl2 = OPEN_LINK_RE.exec(againLines.at(-2) ?? '')?.[0]
-    assert.ok(sshUrl2 && sshUrl2 !== sshUrl1, againSsh.stdout)
-    assert.equal(againLines.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', sshUrl2))
-    assert.equal(againLines.at(-1), EN.boardPageAlreadyOpen)
-    assert.equal((await fetch(sshUrl2)).status, 200)
-    assert.equal((await fetch(sshUrl2)).status, 403)
-  })
+      const againSsh = await runCli(script, [], sshEnv)
+      assert.equal(againSsh.status, 0, againSsh.stderr)
+      assert.doesNotMatch(againSsh.stdout, REUSABLE_LINK_RE)
+      const againLines = againSsh.stdout.trim().split(/\r?\n/)
+      const sshUrl2 = OPEN_LINK_RE.exec(againLines.at(-2) ?? '')?.[0]
+      assert.ok(sshUrl2 && sshUrl2 !== sshUrl1, againSsh.stdout)
+      assert.equal(againLines.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', sshUrl2))
+      assert.equal(againLines.at(-1), EN.boardPageAlreadyOpen)
+      assert.equal((await fetch(sshUrl2)).status, 200)
+      assert.equal((await fetch(sshUrl2)).status, 403)
+    }),
+  ])
 })
 
 test('concurrent and non-GET requests against a one-use link consume it at most once', { timeout: 20_000 }, async () => {
@@ -596,8 +595,7 @@ test('DeepSeek agent_board open tool returns no reusable token on opened window 
       }
     }
   }
-  await runCase(true)
-  await runCase(false)
+  await Promise.all([runCase(true), runCase(false)])
 })
 
 test('Claude plugin liveBoardPage and showBoardPage omit links when a window opened and accept one-use links on fallback', () => {
@@ -612,54 +610,58 @@ test('Claude plugin liveBoardPage and showBoardPage omit links when a window ope
 })
 
 test('kept silent server never falls back to printing the reusable ?t= address', { timeout: 45_000 }, async () => {
-  const root = mkdtempSync(join(tmpdir(), 'board-one-use-silent-'))
-  const run = join(root, 'run')
-  const env = isolatedEnv(root, run)
-  const progress = join(root, 'progress.md')
-  const script = join(root, 'agent-board.mjs')
-  writeFileSync(progress, '# Progress\n## Demo\n### Synthetic task\n- [ ] Task 1\n')
-  writeFileSync(script, patchedBoardScript({ progress, openResult: false }))
+  const runSilentCase = async args => {
+    const root = mkdtempSync(join(tmpdir(), 'board-one-use-silent-'))
+    const run = join(root, 'run')
+    const env = isolatedEnv(root, run)
+    const progress = join(root, 'progress.md')
+    const script = join(root, 'agent-board.mjs')
+    writeFileSync(progress, '# Progress\n## Demo\n### Synthetic task\n- [ ] Task 1\n')
+    writeFileSync(script, patchedBoardScript({ progress, openResult: false }))
 
-  const sockets = new Set()
-  const silent = createNetServer(socket => {
-    sockets.add(socket)
-    socket.on('error', () => {})
-  })
-  await new Promise(done => silent.listen(0, '127.0.0.1', done))
-  const { port } = silent.address()
+    const sockets = new Set()
+    const silent = createNetServer(socket => {
+      sockets.add(socket)
+      socket.on('error', () => {})
+    })
+    await new Promise(done => silent.listen(0, '127.0.0.1', done))
+    const { port } = silent.address()
 
-  const runtimeSubdir = process.platform === 'win32' ? join(run, 'agent-board') : run
-  const addressFile = join(runtimeSubdir, `agent-board-${createHash('sha256').update(progress).digest('hex').slice(0, 16)}.json`)
-  const stale = `http://127.0.0.1:${port}/?t=synthetic-quiet`
-  const payload = JSON.stringify({ pid: process.pid, port, url: stale, path: progress, built: String(statSync(script).mtimeMs) })
-  if (process.platform === 'win32') {
-    privateRuntimeFolder(runtimeSubdir)
-    writePrivateRuntimeFile(addressFile, payload)
-  } else {
-    writeFileSync(addressFile, payload, { mode: 0o600 })
-  }
+    const runtimeSubdir = process.platform === 'win32' ? join(run, 'agent-board') : run
+    const addressFile = join(runtimeSubdir, `agent-board-${createHash('sha256').update(progress).digest('hex').slice(0, 16)}.json`)
+    const stale = `http://127.0.0.1:${port}/?t=synthetic-quiet`
+    const payload = JSON.stringify({ pid: process.pid, port, url: stale, path: progress, built: String(statSync(script).mtimeMs) })
+    if (process.platform === 'win32') {
+      privateRuntimeFolder(runtimeSubdir)
+      writePrivateRuntimeFile(addressFile, payload)
+    } else {
+      writeFileSync(addressFile, payload, { mode: 0o600 })
+    }
 
-  let failed = false
-  try {
-    for (const args of [['--serve', '--no-open'], ['--html', '--no-open']]) {
+    let failed = false
+    try {
       const res = await runCli(script, args, env)
       assert.equal(res.status, 0, `${args.join(' ')}: ${res.stderr}`)
       assert.ok(res.stdout.includes('already open is kept'), `${args.join(' ')} kept note:\n${res.stdout}`)
       assert.doesNotMatch(res.stdout, REUSABLE_LINK_RE)
       assert.equal(res.stdout.includes('synthetic-quiet'), false)
-    }
-  } catch (error) {
-    failed = true
-    throw error
-  } finally {
-    try {
-      for (const socket of sockets) socket.destroy()
-      await new Promise(done => silent.close(done))
-      await removeDir(root)
-    } catch (cleanupError) {
-      if (!failed) throw cleanupError
+    } catch (error) {
+      failed = true
+      throw error
+    } finally {
+      try {
+        for (const socket of sockets) socket.destroy()
+        await new Promise(done => silent.close(done))
+        await removeDir(root)
+      } catch (cleanupError) {
+        if (!failed) throw cleanupError
+      }
     }
   }
+  await Promise.all([
+    runSilentCase(['--serve', '--no-open']),
+    runSilentCase(['--html', '--no-open']),
+  ])
 })
 
 test('replaying a keyed one-use open link after attacker pairs #k revokes the attacker secret and locks approvals off', { timeout: 20_000 }, async () => {
