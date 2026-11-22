@@ -15,7 +15,8 @@ import { goneBlocksOf } from './session-liveness'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
 import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { folderIdentity } from './folder-identity'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
@@ -40,8 +41,12 @@ import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder
 import { dockArguments, dockCommand, probeOf, windowsStartScript, windowPath, windowPlaceOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
-import { isReceiverRoutes } from '../hooks/messaging'
-import type { ReceiverRoutes } from '../hooks/messaging'
+import { ACK_MAX, address, agentOf, HOP_LIMIT, isFinished, isReceiverRoutes, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging'
+import type { Connection, MessageState, ReceiverRoutes } from '../hooks/messaging'
+import { expireMailboxes } from '../hooks/hook-messages'
+import { parseMessageStore } from '../hooks/queued-store'
+import { buildPeerMessageText, formatSendCandidate, isSameWorkspaceAllowed, resolveSendTarget, sessionOfAddress } from '../hooks/cli-send'
+import type { SendCandidate } from '../hooks/cli-send'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pagePortOf, pickSurface, sshTargetOf } from '../hooks/surface'
 import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
@@ -85,7 +90,7 @@ const flag = (name: string): string | undefined => {
 const BOOL_FLAGS = new Set([
   '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--awaits-ack', '--chat', '--check-conflicts', '--codex-doctor',
   '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
-  '--no-codex-send',
+  '--cross-project', '--no-codex-send',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
@@ -95,16 +100,24 @@ const VALUE_FLAGS = new Set([
   '--agent', '--codex-bin', '--codex-dir', '--cwd', '--data-dir', '--deepseek-dir', '--event',
   '--grok-dir', '--hermes-dir', '--home', '--hook-deadline', '--hook-event', '--hook-started',
   '--id', '--idle-minutes', '--keys', '--lang', '--legacy-connect-request', '--mailbox',
-  '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
+  '--message-ack', '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
   '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
   '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--ref', '--removing',
-  '--session', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
+  '--send', '--session', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
 ])
 const unknownFlag = (argv: readonly string[]): string | undefined => {
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
     if (arg === '--') break
     if (!arg.startsWith('-')) continue
+    if (arg === '--send' || arg === '--message-ack') {
+      i += 1
+      const second = argv[i + 1]
+      if (second !== undefined && second !== '--' && !BOOL_FLAGS.has(second) && !VALUE_FLAGS.has(second) && second !== '--days' && second !== '--lan') {
+        i += 1
+      }
+      continue
+    }
     if (VALUE_FLAGS.has(arg)) { i += 1; continue }
     if (arg === '--days') {
       const next = argv[i + 1]
@@ -2088,7 +2101,7 @@ const serveFile = (): string => {
   const name = addressFileName(board(path))
   return (served = join(runFolder(name), name))
 }
-const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? (args.includes('--mcp') ? defaultMessagesDirectory(path, homedir(), process.env, process.platform) : serveFile().replace(/\.json$/, '-messages')))
+const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? (args.includes('--mcp') || args.includes('--send') || args.includes('--message-ack') ? defaultMessagesDirectory(path, homedir(), process.env, process.platform) : serveFile().replace(/\.json$/, '-messages')))
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
@@ -3210,6 +3223,311 @@ const runWatchTerminal = async (): Promise<void> => {
   void refreshRoutes().then(isChanged => { if (isChanged) draw() })
 }
 
+const cliFlagPair = (name: string): { first: string | undefined; second: string | undefined } => {
+  const at = args.indexOf(name)
+  if (at === -1) return { first: undefined, second: undefined }
+  const first = args[at + 1]
+  const maybeSecond = args[at + 2]
+  if (maybeSecond === '--') return { first, second: args[at + 3] }
+  if (maybeSecond !== undefined && (BOOL_FLAGS.has(maybeSecond) || VALUE_FLAGS.has(maybeSecond) || maybeSecond === '--days' || maybeSecond === '--lan')) {
+    return { first, second: undefined }
+  }
+  return { first, second: maybeSecond }
+}
+
+const samePathKey = (a: string, b: string): boolean =>
+  process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
+
+const runningStoreServer = async (root: string): Promise<string | null> => {
+  const running = readRunning()
+  if (running === null) return null
+  const answer = await ping(running, 1000)
+  if (answer === null || answer === 'silent' || typeof answer.messagesDirectory !== 'string') return null
+  return samePathKey(answer.messagesDirectory, root) ? running.url : null
+}
+
+const readMessageState = (root: string, now: number): MessageState => {
+  if (existsSync(root) && lstatSync(root).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_FILE')
+  const file = join(root, 'messages.json')
+  const found = readSettings(file)
+  if (found.kind === 'missing') return { messages: [], mailboxes: [] }
+  if (found.kind !== 'ok') throw new Error('UNSAFE_MESSAGE_FILE')
+  return expireMailboxes(parseMessageStore(found.text, now), now)
+}
+
+const replaceMessageFile = (from: string, to: string): void => {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(from, to)
+      return
+    } catch (error) {
+      const code = String((error as NodeJS.ErrnoException | null)?.code ?? '')
+      if (attempt >= 4 || !['EPERM', 'EBUSY', 'EAGAIN'].includes(code)) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1))
+    }
+  }
+}
+
+const hasLiveStoreLock = (root: string): boolean => {
+  try {
+    const pid = readFileSync(join(root, 'server.lock'), 'utf8').trim()
+    return /^[1-9][0-9]*$/.test(pid) && isRunning(Number(pid))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    return true
+  }
+}
+
+const writeMessageState = (root: string, changed: MessageState, now: number, claim: ReturnType<typeof claimMessageStore>): void => {
+  const next = pruneMessages(changed, now)
+  claim.check(root)
+  const file = join(root, 'messages.json')
+  const temp = `${file}.${process.pid}.tmp`
+  try {
+    try { unlinkSync(temp) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    writeFileSync(temp, JSON.stringify({ version: 2, ...next }), { mode: 0o600, flag: 'wx' })
+    replaceMessageFile(temp, file)
+  } finally {
+    try { unlinkSync(temp) } catch {}
+  }
+}
+
+const mailboxCandidates = (state: MessageState, projects: readonly ProgressProject[], now: number): SendCandidate[] => {
+  const meta = new Map<string, { project: string; title: string }>()
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto === null) continue
+      const entry = { project: project.name || s.uncategorized, title: task.title || s.unnamed }
+      meta.set(address(task.auto.agent, task.auto.session), entry)
+      if (task.auto.resume) meta.set(address(task.auto.agent, task.auto.resume), entry)
+    }
+  }
+  return (state.mailboxes ?? [])
+    .filter(box => box.expires > now)
+    .map(box => {
+      const info = meta.get(address(box.agent, box.session))
+      return { connection: box, project: info?.project ?? '', title: info?.title ?? '' }
+    })
+}
+
+const resolveSenderSession = (
+  state: MessageState,
+  projects: readonly ProgressProject[],
+  now: number,
+): { box: Connection; title: string } | null => {
+  const live = (state.mailboxes ?? []).filter(box => box.expires > now)
+  const env = process.env
+  const explicit: Array<[string | undefined, string | undefined]> = [
+    [env.CODEX_THREAD_ID, 'codex'],
+    [env.CLAUDE_SESSION_ID, 'claude'],
+    [env.GEMINI_SESSION_ID, 'gemini'],
+    [env.HERMES_SESSION_ID, 'hermes'],
+    [env.GROK_SESSION_ID, 'grok'],
+  ]
+  let matched: Connection | undefined
+  for (const [sessionId, agent] of explicit) {
+    if (!sessionId) continue
+    matched = live.find(box => box.agent === agent && box.session === sessionId)
+    if (matched) break
+  }
+  if (!matched && env.AGENT_BOARD_SESSION_ID) {
+    const id = env.AGENT_BOARD_SESSION_ID
+    const agent = env.AGENT_BOARD_AGENT
+    if (agent) matched = live.find(box => box.agent === agent && box.session === id)
+    else {
+      const hits = live.filter(box => box.session === id)
+      if (hits.length === 1) matched = hits[0]
+    }
+  }
+  if (!matched) return null
+  const title = mailboxCandidates({ messages: [], mailboxes: [matched] }, projects, now)[0]?.title ?? ''
+  return { box: matched, title }
+}
+
+const peerSendFailureNote = (code: string): string =>
+  code === 'HOP_LIMIT' ? s.cliSendHopLimit(HOP_LIMIT)
+    : code === 'PEER_PAUSED' ? s.cliSendPaused
+      : code === 'PAIR_BUDGET_EXHAUSTED' ? s.cliSendBudget
+        : code === 'TARGET_BUSY' || code === 'PAIR_BUSY' ? s.messagesBusy
+          : code === 'TEXT_REFUSED' ? s.messagesTextRefused
+            : code === 'CONTESTED' ? s.messagesContested
+              : code === 'WORKSPACE_MISMATCH' ? s.cliSendCrossProject
+                : ['OFFLINE', 'STALE_TURN', 'WORKSPACE_UNKNOWN'].includes(code) ? s.cliSendOffline
+                  : s.cliSendRefused(code)
+
+const postMessageAction = async (serverUrl: string, action: string, payload: Record<string, unknown>): Promise<string | null> => {
+  const res = await fetch(`http://127.0.0.1:${new URL(serverUrl).port}/api/messages/${action}`, {
+    method: 'POST',
+    headers: { 'x-board-token': tokenOf(serverUrl), 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(5000),
+  })
+  if (res.ok) return null
+  const body = (await res.json().catch(() => ({}))) as { error?: unknown }
+  return typeof body.error === 'string' && body.error !== '' ? body.error : `HTTP_${res.status}`
+}
+
+const runCliSend = async (): Promise<void> => {
+  const { first: targetQuery, second: rawBody } = cliFlagPair('--send')
+  if (targetQuery === undefined || targetQuery.trim() === '' || rawBody === undefined || rawBody.trim() === '') {
+    process.stderr.write(`${s.cliSendMissingTarget}\n`)
+    process.exitCode = 1
+    return
+  }
+  const now = Date.now()
+  const root = messagesDirectory()
+  const isCrossProject = args.includes('--cross-project')
+  const serverUrl = await runningStoreServer(root)
+  const projects = parseProgress(read(path))
+  let claim: ReturnType<typeof claimMessageStore> | undefined
+  try {
+    let state = readMessageState(root, now)
+    if (serverUrl === null && existsSync(root)) {
+      claim = claimMessageStore(root)
+      state = readMessageState(root, now)
+    }
+    const sender = resolveSenderSession(state, projects, now)
+    const senderAddress = sender === null ? undefined : address(sender.box.agent, sender.box.session)
+    const resolution = resolveSendTarget(targetQuery, mailboxCandidates(state, projects, now), now, s, senderAddress)
+    if (resolution.kind === 'none') {
+      process.stderr.write(`${s.cliSendOffline}\n`)
+      process.exitCode = 1
+      return
+    }
+    if (resolution.kind === 'ambiguous') {
+      const lines = resolution.candidates.map(one => `  ${formatSendCandidate(one, s)}`)
+      process.stderr.write(`${s.cliSendAmbiguous(targetQuery)}\n${lines.join('\n')}\n`)
+      process.exitCode = 1
+      return
+    }
+    const target = resolution.candidate.connection
+    const senderDigest = sender?.box.folderDigest ?? folderIdentity(process.cwd())?.folderDigest
+    if (!isSameWorkspaceAllowed(senderDigest, target.folderDigest, isCrossProject)) {
+      process.stderr.write(`${s.cliSendCrossProject}\n`)
+      process.exitCode = 1
+      return
+    }
+    const from = senderAddress ?? 'unverified'
+    const text = buildPeerMessageText(sender === null ? null : { agent: sender.box.agent, title: sender.title }, rawBody)
+    const id = randomBytes(16).toString('hex')
+    if (serverUrl !== null) {
+      const error = await postMessageAction(serverUrl, 'peer-send', {
+        agent: target.agent,
+        session: target.session,
+        text,
+        id,
+        from,
+        folderDigest: isCrossProject ? (target.folderDigest ?? '') : (senderDigest ?? ''),
+      })
+      if (error !== null) {
+        process.stderr.write(`${peerSendFailureNote(error)}\n`)
+        process.exitCode = 1
+        return
+      }
+      process.stdout.write(`${s.cliSendSent(formatSendCandidate(resolution.candidate, s))}\n`)
+      return
+    }
+    if (claim === undefined) {
+      mkdirSync(root, { recursive: true, mode: 0o700 })
+      claim = claimMessageStore(root)
+      state = readMessageState(root, now)
+    }
+    const liveTarget = (state.mailboxes ?? []).find(box => box.id === target.id && box.expires > now)
+    if (!liveTarget) {
+      process.stderr.write(`${s.cliSendOffline}\n`)
+      process.exitCode = 1
+      return
+    }
+    if (hasLiveStoreLock(root)) throw new Error('MESSAGE_STORE_IN_USE')
+    const queued = queueMessage(state, { id, target: liveTarget.id, turn: liveTarget.turn, text }, from, liveTarget, now, 'local', randomBytes(16).toString('hex'))
+    writeMessageState(root, queued.state, now, claim)
+    process.stdout.write(`${s.cliSendSent(formatSendCandidate(resolution.candidate, s))}\n`)
+  } catch (error) {
+    const code = error instanceof Error ? error.message : 'UNKNOWN'
+    process.stderr.write(`${peerSendFailureNote(code)}\n`)
+    process.exitCode = 1
+  } finally {
+    try { claim?.release() } catch {}
+  }
+}
+
+const runCliMessageAck = async (): Promise<void> => {
+  const { first: rawNonce, second: rawSummary } = cliFlagPair('--message-ack')
+  const nonce = (rawNonce ?? '').trim().toLowerCase()
+  if (!/^[0-9a-f]{6}$/.test(nonce)) {
+    process.stderr.write(`${s.cliSendAckInvalid}\n`)
+    process.exitCode = 1
+    return
+  }
+  const summary = (rawSummary ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
+  const reply = (summary === '' ? `ACK ${nonce}` : `ACK ${nonce} ${summary}`).slice(0, ACK_MAX)
+  const now = Date.now()
+  const root = messagesDirectory()
+  const serverUrl = await runningStoreServer(root)
+  const projects = parseProgress(read(path))
+  let claim: ReturnType<typeof claimMessageStore> | undefined
+  try {
+    let state = readMessageState(root, now)
+    if (serverUrl === null && existsSync(root)) {
+      claim = claimMessageStore(root)
+      state = readMessageState(root, now)
+    }
+    const sender = resolveSenderSession(state, projects, now)
+    const senderAddress = sender === null ? undefined : address(sender.box.agent, sender.box.session)
+    const open = state.messages.filter(one => !isFinished(one) && one.nonce === nonce && (senderAddress === undefined || one.to === senderAddress))
+    if (open.length !== 1) {
+      process.stderr.write(`${s.cliSendAckNotFound}\n`)
+      process.exitCode = 1
+      return
+    }
+    const found = open[0]!
+    const targetAgent = agentOf(found.to)
+    const targetSession = sessionOfAddress(found.to)
+    if (serverUrl !== null) {
+      const error = await postMessageAction(serverUrl, 'mailbox-ack', {
+        agent: targetAgent,
+        session: targetSession,
+        id: found.id,
+        nonce,
+        reply,
+      })
+      if (error !== null) {
+        process.stderr.write(`${peerSendFailureNote(error)}\n`)
+        process.exitCode = 1
+        return
+      }
+      process.stdout.write(`${s.cliSendAcked}\n`)
+      return
+    }
+    if (claim === undefined) {
+      process.stderr.write(`${s.cliSendAckNotFound}\n`)
+      process.exitCode = 1
+      return
+    }
+    const target: Connection = state.mailboxes?.find(one => one.id === found.target) ?? {
+      id: found.target,
+      agent: targetAgent,
+      session: targetSession,
+      surface: found.surface ?? 'CLI',
+      turn: found.turn,
+      scope: 'mailbox',
+      expires: now + 60_000,
+    }
+    if (hasLiveStoreLock(root)) throw new Error('MESSAGE_STORE_IN_USE')
+    const next = messageReceipt(state, target, { id: found.id, nonce, status: 'acknowledged', reply }, now)
+    writeMessageState(root, next, now, claim)
+    process.stdout.write(`${s.cliSendAcked}\n`)
+  } catch (error) {
+    const code = error instanceof Error ? error.message : 'UNKNOWN'
+    process.stderr.write(`${['TARGET_MISMATCH', 'NOT_FOUND'].includes(code) ? s.cliSendAckNotFound : peerSendFailureNote(code)}\n`)
+    process.exitCode = 1
+  } finally {
+    try { claim?.release() } catch {}
+  }
+}
+
 const run = async (): Promise<void> => {
   const badFlag = unknownFlag(args)
   if (badFlag !== undefined) {
@@ -3243,6 +3561,14 @@ const run = async (): Promise<void> => {
   }
   if (args.includes('--mcp')) {
     await runMcp({ directory: messagesDirectory(), cwd: process.cwd(), version: boardVersion, s, document: () => { try { return boardJson() } catch (error) { return jsonFailureDocument(error) } } })
+    return
+  }
+  if (args.includes('--send')) {
+    await runCliSend()
+    return
+  }
+  if (args.includes('--message-ack')) {
+    await runCliMessageAck()
     return
   }
   if (args.includes('--status')) {
