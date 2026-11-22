@@ -10,7 +10,7 @@ import { homedir } from 'node:os'
 import { basename, delimiter, isAbsolute, join } from 'node:path'
 import type { Strings } from '../hooks/i18n'
 import { ZH_TW } from '../hooks/i18n'
-import { ACK_MAX, address, deliveryText } from '../hooks/messaging'
+import { ACK_MAX, address, deliveryText, routeLine, routeRecord } from '../hooks/messaging'
 import type { Message, ReceiverRoutes, Route, RouteKind, RowState } from '../hooks/messaging'
 import { RECEIVER_ROUTES } from '../hooks/receiver-routes'
 import type { SendPlan } from '../hooks/serve'
@@ -164,7 +164,7 @@ export type ProcessResult = {
 
 export const runBackgroundProcess = (
   program: Program,
-  options: { cwd?: string | null; stdin?: string | null; maxWaitMs?: number; killWaitMs?: number } = {},
+  options: { cwd?: string | null; stdin?: string | null; maxWaitMs?: number; killWaitMs?: number; env?: NodeJS.ProcessEnv } = {},
 ): Promise<ProcessResult> =>
   new Promise(resolve => {
     const maxWaitMs = options.maxWaitMs ?? MAX_RESUME_WAIT
@@ -187,7 +187,7 @@ export const runBackgroundProcess = (
       detached: !isWindows,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' },
+      env: { ...(options.env ?? process.env), NoDefaultCurrentDirectoryInExePath: '1' },
     }
     let child: ChildProcess
     try {
@@ -302,7 +302,10 @@ export const checkLiveResumeRecord = (
   const matching = routes.filter(one => one.agent === normalized && (kind === undefined || one.kind === kind))
   for (const entry of matching) {
     const route = entry.routes[state]
-    if (route.line !== 'reopen' || typeof route.record !== 'string' || route.record === '') continue
+    // A surface asked about is read with its own line and note, as the send gate reads them (#557).
+    const line = surface === undefined ? route.line : routeLine(route, surface)
+    const record = surface === undefined ? route.record : routeRecord(route, surface)
+    if (line !== 'reopen' || typeof record !== 'string' || record === '') continue
     if (surface === undefined ? route.surfaces.length > 0 : route.surfaces.includes(surface)) return { ok: true, route }
   }
   return { ok: false, error: 'NO_RECORDED_ROUTE' }

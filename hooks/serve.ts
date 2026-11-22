@@ -32,9 +32,11 @@ import { RECEIVER_ROUTES } from './receiver-routes'
 // own window, since it is still open and two writers on one session would mix up; claude: in
 // that Claude Code session; none: copied, then pasted into the agent's chat.
 export type SendMode = 'send' | 'connected' | 'mailbox' | 'open' | 'claude' | 'none'
-type Delivery = { id: string; turn: string; agent: string }
-type ShownMessage = Omit<Message, 'nonce' | 'hash'> & { isSurfaceLost?: boolean }
-type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean; isSurfaceLost?: true }
+// isAfterAppQuit: the connection is a Codex desktop app conversation, whose message waits for the app to be quit (#557).
+type Delivery = { id: string; turn: string; agent: string; isAfterAppQuit?: true }
+type ShownMessage = Omit<Message, 'nonce' | 'hash'> & { isSurfaceLost?: boolean; isAfterAppQuit?: boolean }
+// isAfterAppQuit: a message to a Codex desktop app conversation, which runs only once the app has let go of it (#557).
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean; isSurfaceLost?: true; isAfterAppQuit?: true }
 type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly ShownMessage[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
@@ -54,7 +56,13 @@ const isClaimInFlight = (one: ShownMessage, connections: readonly Connection[], 
   && one.claimed > 0 && one.updated === one.claimed && !isMailboxTarget(one.target)
   && now >= one.claimed && now - one.claimed < CLAIM_HANDOFF_MS
   && connections.some(c => c.id === one.target && c.turn === one.turn && !c.contested && c.expires > now)
-const rowReceipt = (agent: string, session: string | undefined, messages: readonly ShownMessage[], now: number, s: Strings, answers?: string, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true, connections: readonly Connection[] = []): { receipt?: Receipt } => {
+// A Codex desktop app turn the receiver said `starting` for runs in the background for as long as the model takes, and the
+// receiver keeps its connection until the receipt is in: while it does, the turn is running, not unconfirmed (#557).
+const isAppTurnRunning = (one: ShownMessage, connections: readonly Connection[], now: number): boolean =>
+  one.isAfterAppQuit === true && one.status === 'uncertain' && one.error === '' && one.hasAccepted !== true && one.reply === ''
+  && one.claimed > 0 && one.awaitsStart !== true
+  && connections.some(c => c.id === one.target && c.turn === one.turn && !c.contested && c.expires > now)
+const rowReceipt =(agent: string, session: string | undefined, messages: readonly ShownMessage[], now: number, s: Strings, answers?: string, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true, connections: readonly Connection[] = []): { receipt?: Receipt } => {
   // A kept question (no live session here) is found by the one message the board sent to answer it; a message
   // with no such link is no receipt for it. Only the board sets that link, so the question id alone names the
   // message. On a live question's card, an answer to another question is no receipt for this one (#725), while
@@ -64,8 +72,8 @@ const rowReceipt = (agent: string, session: string | undefined, messages: readon
     ? answers === undefined ? undefined : messages.filter(message => message.answers === answers).at(-1)
     : messages.filter(message => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1)
   if (one === undefined) return {}
-  const status = isClaimInFlight(one, connections, now) ? 'queued' : one.status
-  return { receipt: { id: one.id, status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
+  const status = isClaimInFlight(one, connections, now) ? 'queued' : isAppTurnRunning(one, connections, now) ? 'accepted' : one.status
+  return { receipt: { id: one.id, status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), ...(one.isAfterAppQuit === true ? { isAfterAppQuit: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 // The person's answer to this question reached its session: the session took it, or replied.
 const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
@@ -118,7 +126,8 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
     : line === 'nextTurn' ? s.serveNextTurnHint(name)
     : line === 'chatOpen' ? s.serveNextOpenHint
-    : line === 'reopen' ? s.serveLineReopen(name)
+    // The Codex desktop app receiver runs the turn only once the app has let go of the conversation (#557): its card says so.
+    : line === 'reopen' ? (agent === 'codex' && surface === SURFACE_IDS.codexApp ? s.serveLineReopenCodexApp : s.serveLineReopen(name))
     : s.serveLineNone(name)
   return canSend || line === 'none' ? text : `${text} ${s.serveLineUnrecorded}`
 }
@@ -586,7 +595,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       if (answerFailed(messaging?.messages ?? [], heldBy, ask.questionId, openInSession, isMessageSurfaceLost)) failed.add(item.key)
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
-        ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
+        ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent, ...(connection.surface === SURFACE_IDS.codexApp ? { isAfterAppQuit: true as const } : {}) } }),
         // A question the board knows gets the receipt of the answer sent to it, not of an earlier message
         // to the same session.
         ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId, isMessageSurfaceLost, messaging?.connections)),
@@ -668,7 +677,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
           // The row's one derived state (#1317), with its age in `at`/`when`.
           ...(row.rowState === undefined ? {} : { rowState: row.rowState }),
         }),
-        ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent } }),
+        ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent, ...(connection.surface === SURFACE_IDS.codexApp ? { isAfterAppQuit: true as const } : {}) } }),
         ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, undefined, isMessageSurfaceLost, messaging?.connections)),
         key: item.key,
         project: row.project,
@@ -918,7 +927,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
   if (request.type === 'message') {
     const question = item.type === 'ask' ? item.ask.text : item.row.question ?? ''
     if (isLan || !connected || connected.id !== request.connection || connected.turn !== request.turn || connected.session !== request.session || (request.asked ?? '') !== question || !text) return { type: 'refuse', note: s.messagesFailed }
-    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent }, text, title, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
+    return { type: 'message', connection: { id: connected.id, turn: connected.turn, agent: connected.agent, ...(connected.surface === SURFACE_IDS.codexApp ? { isAfterAppQuit: true as const } : {}) }, text, title, ...(item.type === 'ask' && item.ask.questionId !== undefined ? { answers: item.ask.questionId } : {}) }
   }
   if (connected) return { type: 'refuse', note: s.boardLineChanged }
   if (item.type === 'row' && item.row.auto === 'working') return { type: 'refuse', note: s.serveSendBusy(agentLabel(agent || 'claude', s)) }
@@ -1001,7 +1010,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesSentUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
+  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenWaitingCodexApp', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesSentUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
   'archiveNow', 'cleanUp', 'stoppedCount',
@@ -1859,6 +1868,10 @@ const PAGE_SCRIPT = String.raw`
     if (!result || !receipt || result.messageId !== receipt.id) return;
     clearResultSlot(key);
   }
+  // A queued background turn: a Codex desktop app conversation waits for the app to be quit; any other starts at once (#557).
+  function reopenQueued(agent, isAfterAppQuit) {
+    return isAfterAppQuit ? w('serveReopenWaitingCodexApp') : w('serveReopenRunning', agentName(agent));
+  }
   function nativeAct(key, text, delivery, session, asked, fp, go, line) {
     if (isUnreachable) return Promise.resolve(false);
     var slot = JSON.stringify([key, delivery.id, delivery.turn, session, asked, fp]);
@@ -1870,7 +1883,7 @@ const PAGE_SCRIPT = String.raw`
       : line === 'chatOpen'
         ? w('serveQueuingNextOpen', who)
         : line === 'reopen'
-          ? w('serveReopenRunning', who)
+          ? reopenQueued(delivery.agent, delivery.isAfterAppQuit === true)
           : line === 'stepEnd' && isClaudeAgent(delivery.agent)
             ? w('claudeSendWorking')
             : line === 'stepEnd'
@@ -1892,7 +1905,7 @@ const PAGE_SCRIPT = String.raw`
           : line === 'chatOpen'
             ? w('serveQueuedNextOpen', who)
             : line === 'reopen'
-              ? w('serveReopenRunning', who)
+              ? reopenQueued(delivery.agent, delivery.isAfterAppQuit === true)
               : w('messagesQueued');
       var noteText = data.note && !(data.ok && line === 'nextTurn' && data.note === w('messagesQueued')) ? data.note : fallback;
       say(noteText, tone, key, undefined, !data.ok);
@@ -2011,7 +2024,7 @@ const PAGE_SCRIPT = String.raw`
                 : receipt.status === 'queued' && line === 'chatOpen'
                   ? w('serveQueuedNextOpen', agentName(agent))
                   : receipt.status === 'queued' && line === 'reopen'
-                    ? w('serveReopenRunning', agentName(agent))
+                    ? reopenQueued(agent, receipt.isAfterAppQuit === true)
                     : w(labels[receipt.status]);
     var lineEl = el('p', 'receipt' + toneClass, labelText + (reply ? ' · ' + reply : ''));
     lineEl.setAttribute('role', isFailTone ? 'alert' : 'status');
@@ -2218,7 +2231,7 @@ const PAGE_SCRIPT = String.raw`
             : parts.line === 'chatOpen'
               ? w('serveQueuedNextOpen', agentName(parts.agent))
               : parts.line === 'reopen'
-                ? w('serveReopenRunning', agentName(parts.agent))
+                ? reopenQueued(parts.agent, parts.isAfterAppQuit)
                 : w('messagesQueued'))
       : state.mode === 'sent' ? w('pgSentTo', agentName(parts.agent), state.text)
       : parts.canHide ? w(parts.late ? 'pgPasteLater' : 'pgPasteIn', state.text, agentName(parts.agent)) : w('copied');
@@ -2369,7 +2382,7 @@ const PAGE_SCRIPT = String.raw`
       if (hideBtn) others.push(hideBtn);
     }
     var moreActs = null;
-    var parts = { agent: agent, line: ask.line || '', canHide: ask.canHide === true, late: lateWord(agentPresence[id]) !== '', routeNote: routeNote || null, hideBtn: hideBtn || null, moreActs: null, hasReceipt: false, receiptActs: null };
+    var parts = { agent: agent, line: ask.line || '', isAfterAppQuit: !!(ask.delivery && ask.delivery.isAfterAppQuit), canHide: ask.canHide === true, late: lateWord(agentPresence[id]) !== '', routeNote: routeNote || null, hideBtn: hideBtn || null, moreActs: null, hasReceipt: false, receiptActs: null };
     cardParts[key] = parts;
     var askBlock = el('div');
     add(askBlock, answers);
