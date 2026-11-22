@@ -1,5 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 import { HOOK_VERSION } from '../hooks/hook-safety'
+import { ZH_TW } from '../hooks/i18n'
+import { ZH_CN } from '../hooks/strings-zh-cn'
 import { EN, FILE, LIVE_SCRIPT, PANE, PROPS, TIDY, engineBeneath, installedBoard } from './pane-helpers'
 import type { World } from './pane-helpers'
 
@@ -52,30 +54,38 @@ test('the progress open command and the pane page button request a browser and r
   } finally { await ui.unmount() }
 })
 
-test('when a browser window opens or is already open, /progress open and the pane page button omit URLs and ?t= while /open/ fallback keeps only the one-use link', async ($, on) => {
-  const world: World = {
-    files: new Map([[FILE, '## demo\n### Synthetic task\n- [ ] Continue\n'], [LIVE_SCRIPT, installedBoard()]]),
-    mtime: 1, hasTasks: true, liveCalls: [], liveOutput: `${EN.boardPageWindowOpened}\n`,
-    store: { autoConnectOff: true, lang: 'en', inboxDone: {} },
-  }
-  engineBeneath(on, world)
-  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+for (const [code, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]] as const) {
+  test(`when a browser window opens or is already open (${code}), /progress open and the pane page button omit URLs and ?t= while /open/ fallback keeps only the one-use link`, async ($, on) => {
+    const world: World = {
+      files: new Map([[FILE, '## demo\n### Synthetic task\n- [ ] Continue\n'], [LIVE_SCRIPT, installedBoard()]]),
+      mtime: 1, hasTasks: true, liveCalls: [], liveOutput: `${s.boardPageWindowOpened}\n`,
+      store: { autoConnectOff: true, lang: code, inboxDone: {} },
+    }
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
 
-  const opened = await $.command.run({ ...TIDY, args: 'open' })
-  expect(opened.text).toBe(EN.boardPageWindowOpened)
-  expect(opened.text).not.toContain('http://')
-  expect(opened.text).not.toContain('?t=')
+    const opened = await $.command.run({ ...TIDY, args: 'open' })
+    expect(opened.text).toBe(s.boardPageWindowOpened)
+    expect(opened.text).not.toContain('http://')
+    expect(opened.text).not.toContain('?t=')
 
-  world.liveOutput = `${EN.boardPageAlreadyOpen}\n`
-  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
-  try {
-    await ui.press({ key: 'page' })
-    expect(JSON.stringify(await ui.drawn())).not.toContain('?t=')
-  } finally { await ui.unmount() }
+    world.liveOutput = `${s.boardPageAlreadyOpen}\n`
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    try {
+      await ui.press({ key: 'page' })
+      expect(JSON.stringify(await ui.drawn())).not.toContain('?t=')
+    } finally { await ui.unmount() }
 
-  const openUrl = 'http://127.0.0.1:34567/open/synthetic-one-use-code'
-  world.liveOutput = `${EN.serveAt(openUrl)}\n`
-  const fallback = await $.command.run({ ...TIDY, args: 'open' })
-  expect(fallback.text).toContain(`<${openUrl}>`)
-  expect(fallback.text).not.toContain('?t=')
-})
+    const openUrl = 'http://127.0.0.1:34567/open/synthetic-one-use-code'
+    world.liveOutput = `${s.serveAt(openUrl)}\n`
+    const fallback = await $.command.run({ ...TIDY, args: 'open' })
+    expect(fallback.text).toContain(`<${openUrl}>`)
+    expect(fallback.text).not.toContain('?t=')
+
+    world.liveFailure = 'exit'
+    world.liveOutput = `${s.serveKeptNoLink}\n`
+    const keptNoLink = await $.command.run({ ...TIDY, args: 'open' })
+    expect(keptNoLink.text).toBe(s.serveKeptNoLink)
+    expect(keptNoLink.text).not.toContain('--serve')
+  })
+}

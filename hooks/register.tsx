@@ -1569,7 +1569,7 @@ const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; t
 
 let isInteractiveSession = true
 
-const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean; opened?: 'window' | 'already' } | null; needsInstall: boolean; reason?: string }> => {
+const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean; opened?: 'window' | 'already' } | null; needsInstall: boolean; reason?: string; isKeptNoLink?: boolean }> => {
   // Use the connector's installed file so sessions and agents share the same script
   // and the CLI's existing running-page check.
   const script = liveBoardScript(path)
@@ -1583,6 +1583,7 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInt
     if (ran.isStdoutTruncated) return { page: null, needsInstall: false, reason: s.livePageTruncated }
     if (ran.exitCode !== 0) {
       const output = `${ran.stdout}\n${ran.stderr}`
+      if (output.includes(s.serveKeptNoLink)) return { page: null, needsInstall: false, reason: s.serveKeptNoLink, isKeptNoLink: true }
       const code = /\b(EACCES|EPERM|EROFS|ENOSPC|EBUSY|EAGAIN)\b/.exec(output)?.[1]
       const reason = output.includes(s.serveRuntimePrivate) ? s.serveRuntimePrivate : code ? plainReason(s, code) : s.livePageExit(ran.exitCode)
       return { page: null, needsInstall: false, reason }
@@ -1608,9 +1609,10 @@ const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, h
       await isDoneWithin($, connecting, 5000)
       live = await openLiveBoard($, progress, s, isInteractive)
     }
-    const { page, needsInstall, reason } = live
+    const { page, needsInstall, reason, isKeptNoLink } = live
     if (page !== null && page.url === '') return { text: `${page.opened === 'already' ? s.boardPageAlreadyOpen : s.boardPageWindowOpened}${page.isKept ? `\n${s.serveKept}` : ''}` }
     if (page !== null) return { text: `${headline}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
+    if (isKeptNoLink) return { text: s.serveKeptNoLink }
     return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : `${s.serveFailed(reason ?? s.serveNotStarted)}\n`}${s.livePageCommand(boardRun(liveBoardScript(progress), ['--serve']))}` }
   } finally {
     startingPages -= 1

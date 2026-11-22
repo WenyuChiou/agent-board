@@ -2984,7 +2984,8 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
   }
   const address = server.url
   const isNoOpen = args.includes('--no-open')
-  const isShape = !isNoOpen && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
+  const isSsh = Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY)
+  const isShape = !isNoOpen && !isSsh && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
   // The page is already in a window: point at it rather than opening another one that would poll too.
   const page = isShape ? await openPageState(server) : 'none'
   if (page === 'open') return { note: s.boardPageAlreadyOpen, isOpen: true, url: address }
@@ -3002,7 +3003,7 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
     return { note: serveFailureNote(failure), isOpen: false }
   }
   const isSuppressed = isNoWindowHere()
-  const note = isNoOpen || isSuppressed
+  const note = isNoOpen || isSsh || isSuppressed
     ? s.boardPageLink(openUrl)
     : s.serveBrowserNone(openUrl)
   return { note, isOpen: false, url: address, openUrl }
@@ -3175,10 +3176,13 @@ const json = (): void => {
 const runWatchTerminal = async (): Promise<void> => {
   let sshHint = ''
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) {
-    const server = await ensureServer()
+    const failure: ServeFailure = {}
+    const server = await ensureServer(failure)
     if (server) {
       const sshUrl = await requestOpenLink(server.url)
-      if (sshUrl !== null) sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshTargetOf(process.env), sshUrl), options())}\n`
+      sshHint = sshUrl !== null
+        ? `\n${mutedLine(s.serveSshHint(server.port, sshTargetOf(process.env), sshUrl), options())}\n`
+        : `\n${mutedLine(server.isKept ? s.serveKeptNoLink : serveFailureNote(failure), options())}\n`
     }
   }
   let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }

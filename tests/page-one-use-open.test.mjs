@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer as createHttpServer, request as httpRequest } from 'node:http'
@@ -281,16 +281,15 @@ test('already-open browser window prints no token or URL on --html and --serve',
     const records = findRecords(run)
     assert.equal(records.length, 1)
     const serverUrl = new URL(records[0].url)
-    const boardRes = await fetch(new URL('/api/board', serverUrl), {
-      headers: {
-        'x-board-token': serverUrl.searchParams.get('t'),
-        'x-board-page': 'page-visible',
-        'x-board-visible': '1',
-      },
-    })
-    assert.equal(boardRes.status, 200)
-
     for (const args of [['--html'], ['--serve']]) {
+      const boardRes = await fetch(new URL('/api/board', serverUrl), {
+        headers: {
+          'x-board-token': serverUrl.searchParams.get('t'),
+          'x-board-page': 'page-visible',
+          'x-board-visible': '1',
+        },
+      })
+      assert.equal(boardRes.status, 200)
       const result = await runCli(script, args, env)
       assert.equal(result.status, 0, result.stderr)
       assert.equal(result.stderr, '')
@@ -363,7 +362,7 @@ test('failed browser opener prints a one-use link whose second GET is refused', 
 
 test('--no-open and SSH fallbacks print only a one-use link with no reusable token', { timeout: 30_000 }, async () => {
   await Promise.all([
-    withCliFixture({ openResult: true }, async ({ env, script }) => {
+    withCliFixture({ openResult: true }, async ({ run, env, script }) => {
       const htmlNoOpen = await runCli(script, ['--html', '--no-open'], env)
       assert.equal(htmlNoOpen.status, 0, htmlNoOpen.stderr)
       assert.doesNotMatch(htmlNoOpen.stdout, REUSABLE_LINK_RE)
@@ -378,17 +377,26 @@ test('--no-open and SSH fallbacks print only a one-use link with no reusable tok
       const link2 = OPEN_LINK_RE.exec(serveNoOpen.stdout)?.[0]
       assert.ok(link2)
       assert.notEqual(link2, link1)
-      assert.equal((await fetch(link2)).status, 200)
+      const link2Res = await fetch(link2)
+      assert.equal(link2Res.status, 200)
       assert.equal((await fetch(link2)).status, 403)
 
       const sshEnv = { ...env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222', SSH_TTY: '/dev/pts/0' }
-      const keysRes = await runCli(script, ['--keys', 'o', '--no-open'], sshEnv)
-      assert.equal(keysRes.status, 0, keysRes.stderr)
-      assert.doesNotMatch(keysRes.stdout, REUSABLE_LINK_RE)
-      const linkKeys = OPEN_LINK_RE.exec(keysRes.stdout)?.[0]
-      assert.ok(linkKeys, keysRes.stdout)
-      assert.equal((await fetch(linkKeys)).status, 200)
-      assert.equal((await fetch(linkKeys)).status, 403)
+      // Mark a visible remote browser open, then run `--keys o` WITHOUT `--no-open` over SSH: still mints a fresh one-use link.
+      const records = findRecords(run)
+      assert.equal(records.length, 1)
+      const visibleSession = sessionFromHtml(await link2Res.text())
+      assert.equal((await fetch(new URL('/api/board', records[0].url), {
+        headers: { 'x-board-token': visibleSession, 'x-board-page': 'p-ssh-keys-visible', 'x-board-visible': '1' },
+      })).status, 200)
+      const keysVisibleSsh = await runCli(script, ['--keys', 'o'], sshEnv)
+      assert.equal(keysVisibleSsh.status, 0, keysVisibleSsh.stderr)
+      assert.doesNotMatch(keysVisibleSsh.stdout, REUSABLE_LINK_RE)
+      assert.equal(keysVisibleSsh.stdout.includes(EN.boardPageAlreadyOpen), false, keysVisibleSsh.stdout)
+      const keysVisibleUrl = OPEN_LINK_RE.exec(keysVisibleSsh.stdout)?.[0]
+      assert.ok(keysVisibleUrl && keysVisibleUrl !== link2, keysVisibleSsh.stdout)
+      assert.equal((await fetch(keysVisibleUrl)).status, 200)
+      assert.equal((await fetch(keysVisibleUrl)).status, 403)
     }),
     withCliFixture({ openResult: true }, async ({ env, script }) => {
       const sshEnv = { ...env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222', SSH_TTY: '/dev/pts/0' }
@@ -406,16 +414,17 @@ test('--no-open and SSH fallbacks print only a one-use link with no reusable tok
       const againSsh = await runCli(script, [], sshEnv)
       assert.equal(againSsh.status, 0, againSsh.stderr)
       assert.doesNotMatch(againSsh.stdout, REUSABLE_LINK_RE)
+      assert.equal(againSsh.stdout.includes(EN.boardPageAlreadyOpen), false, againSsh.stdout)
       const againLines = againSsh.stdout.trim().split(/\r?\n/)
-      const sshUrl2 = OPEN_LINK_RE.exec(againLines.at(-2) ?? '')?.[0]
-      assert.ok(sshUrl2 && sshUrl2 !== sshUrl1, againSsh.stdout)
+      const sshUrl2 = againLines.at(-1)
+      assert.match(sshUrl2, /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
+      assert.notEqual(sshUrl2, sshUrl1)
       assert.equal(againLines.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', sshUrl2))
-      assert.equal(againLines.at(-1), EN.boardPageAlreadyOpen)
       const res2 = await fetch(sshUrl2)
       assert.equal(res2.status, 200)
       assert.equal((await fetch(sshUrl2)).status, 403)
 
-      // Make the remote browser visibly open, then run --serve over SSH: still prints a one-use link instead of "already open".
+      // Make the remote browser visibly open, then run --serve over SSH: still mints and prints a fresh one-use link instead of "already open".
       const sshSession2 = sessionFromHtml(await res2.text())
       assert.equal((await fetch(new URL('/api/board', sshUrl2), {
         headers: { 'x-board-token': sshSession2, 'x-board-page': 'p-ssh-visible', 'x-board-visible': '1' },
@@ -517,26 +526,42 @@ test('page session cannot call client-only control routes, and /api/open uses a 
     const pageSession = sessionFromHtml(html)
     assert.notEqual(pageSession, board.token)
 
-    const asPage = (path, body, extra = {}) => fetch(new URL(path, board.origin), {
+    const asPage = (path, body, extra = {}, sendOrigin = true) => fetch(new URL(path, board.origin), {
       method: body === undefined ? 'GET' : 'POST',
       headers: {
         'x-board-token': pageSession,
         'x-board-page': 'p-one-use',
-        origin: board.origin,
+        ...(sendOrigin ? { origin: board.origin } : {}),
         ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         ...extra,
       },
       body: body === undefined ? undefined : JSON.stringify(body),
     })
 
-    assert.equal((await asPage('/api/board')).status, 200)
-    assert.equal((await asPage('/api/ping')).status, 403)
-    assert.equal((await asPage('/api/open', { asApp: true })).status, 403)
-    assert.equal((await asPage('/api/open-link', {})).status, 403)
-    assert.equal((await asPage('/api/lan', { address: '' })).status, 403)
-    assert.equal((await asPage('/api/package', { version: '9.9.9' })).status, 403)
-    assert.equal((await asPage('/api/approvals/ask', {})).status, 403)
-    assert.equal((await asPage('/api/messages/register', {})).status, 403)
+    for (const withOrigin of [false, true]) {
+      assert.equal((await asPage('/api/board', undefined, {}, withOrigin)).status, 200)
+      assert.equal((await asPage('/api/ping', undefined, {}, withOrigin)).status, 403)
+      assert.equal((await asPage('/api/open', { asApp: true }, {}, withOrigin)).status, 403)
+      assert.equal((await asPage('/api/open-link', {}, {}, withOrigin)).status, 403)
+      assert.equal((await asPage('/api/lan', { address: '' }, {}, withOrigin)).status, 403)
+      assert.equal((await asPage('/api/package', { version: '9.9.9' }, {}, withOrigin)).status, 403)
+      assert.equal((await asPage('/api/approvals/ask', {}, {}, withOrigin)).status, 403)
+      assert.equal((await asPage('/api/messages/poll', {}, {}, withOrigin)).status, 403)
+      assert.equal((await asPage('/api/messages/register', {}, {}, withOrigin)).status, 403)
+    }
+
+    // When /api/open's opener fails, the freshly minted unused open code is deleted immediately.
+    const failingOpenBoard = await startDirectBoard({ open: async () => false })
+    try {
+      const failedOpened = await failingOpenBoard.call('/api/open', { asApp: true })
+      assert.equal(failedOpened.status, 200)
+      assert.equal(failingOpenBoard.opened.length, 1)
+      const [failedOpenUrl] = failingOpenBoard.opened[0].split('#')
+      assert.match(failedOpenUrl, OPEN_LINK_RE)
+      assert.equal((await fetch(failedOpenUrl)).status, 403, 'failed /api/open deletes unused code immediately')
+    } finally {
+      await failingOpenBoard.close()
+    }
 
     const paired = await asPage('/api/approvals/pair', { key: pairKey })
     assert.equal(paired.status, 200)
@@ -592,6 +617,8 @@ test('DeepSeek agent_board open tool returns no reusable token on opened window 
       assert.ok(registered, 'registers agent_board tool')
       const reply = await registered.execute({ action: 'open' }, {})
       assert.doesNotMatch(reply.text, REUSABLE_LINK_RE)
+      const savedProgress = readFileSync(progress, 'utf8')
+      assert.doesNotMatch(savedProgress, /http:\/\/127\.0\.0\.1|\?t=/)
       if (openResult) {
         assert.equal(reply.text, EN.boardPageWindowOpened)
         assert.doesNotMatch(reply.text, /http:\/\/127\.0\.0\.1/)
@@ -616,7 +643,7 @@ test('DeepSeek agent_board open tool returns no reusable token on opened window 
   await Promise.all([runCase(true), runCase(false)])
 })
 
-test('Claude plugin liveBoardPage and showBoardPage omit links when a window opened and accept one-use links on fallback', () => {
+test('Claude plugin liveBoardPage omits links when a window opened and accepts one-use links on fallback', () => {
   for (const s of [EN, ZH_TW, ZH_CN]) {
     assert.equal(typeof s.boardPageWindowOpened, 'string')
     assert.equal(typeof s.boardPageAlreadyOpen, 'string')
@@ -628,10 +655,19 @@ test('Claude plugin liveBoardPage and showBoardPage omit links when a window ope
 })
 
 test('kept silent server never falls back to printing the reusable ?t= address', { timeout: 45_000 }, async () => {
-  const runSilentCase = async args => {
+  const assertKeptNoLink = (argsLabel, out, status) => {
+    assert.equal(status, 1, `${argsLabel} must exit non-zero when kept server cannot mint link`)
+    assert.ok(out.includes(EN.serveKeptNoLink), `${argsLabel} actionable recovery note:\n${out}`)
+    assert.equal(out.includes(EN.boardPageAlreadyOpen), false, `${argsLabel} must not say already open:\n${out}`)
+    assert.equal(out.includes(EN.serveKept), false, `${argsLabel} must not print serveKept:\n${out}`)
+    assert.equal(out.includes('already open'), false, `${argsLabel} must not claim page is already open:\n${out}`)
+    assert.doesNotMatch(out, REUSABLE_LINK_RE)
+    assert.equal(out.includes('synthetic-quiet'), false)
+  }
+  const runSilentGroup = async () => {
     const root = mkdtempSync(join(tmpdir(), 'board-one-use-silent-'))
     const run = join(root, 'run')
-    const env = isolatedEnv(root, run)
+    const env = isolatedEnv(root, run, { AGENT_BOARD_TEST_PID: String(process.pid) })
     const progress = join(root, 'progress.md')
     const script = join(root, 'agent-board.mjs')
     writeFileSync(progress, '# Progress\n## Demo\n### Synthetic task\n- [ ] Task 1\n')
@@ -658,14 +694,12 @@ test('kept silent server never falls back to printing the reusable ?t= address',
 
     let failed = false
     try {
-      const res = await runCli(script, args, env)
-      assert.equal(res.status, 1, `${args.join(' ')} must exit non-zero when kept server cannot mint link: ${res.stderr}`)
-      assert.ok(res.stdout.includes(EN.serveKeptNoLink), `${args.join(' ')} actionable recovery note:\n${res.stdout}`)
-      assert.equal(res.stdout.includes(EN.boardPageAlreadyOpen), false, `${args.join(' ')} must not say already open:\n${res.stdout}`)
-      assert.equal(res.stdout.includes(EN.serveKept), false, `${args.join(' ')} must not print serveKept:\n${res.stdout}`)
-      assert.equal(res.stdout.includes('already open'), false, `${args.join(' ')} must not claim page is already open:\n${res.stdout}`)
-      assert.doesNotMatch(res.stdout, REUSABLE_LINK_RE)
-      assert.equal(res.stdout.includes('synthetic-quiet'), false)
+      const results = await Promise.all([
+        runCli(script, ['--serve', '--no-open'], env),
+        runCli(script, ['--html', '--no-open'], env),
+      ])
+      assertKeptNoLink('--serve --no-open (silent)', results[0].stdout, results[0].status)
+      assertKeptNoLink('--html --no-open (silent)', results[1].stdout, results[1].status)
     } catch (error) {
       failed = true
       throw error
@@ -679,14 +713,16 @@ test('kept silent server never falls back to printing the reusable ?t= address',
       }
     }
   }
-  const runLegacyKeptCase = async args => {
+  const runLegacyGroup = async () => {
     const root = mkdtempSync(join(tmpdir(), 'board-one-use-legacy-kept-'))
     const run = join(root, 'run')
-    const env = isolatedEnv(root, run)
+    const env = isolatedEnv(root, run, { AGENT_BOARD_TEST_PID: String(process.pid) })
     const progress = join(root, 'progress.md')
     const script = join(root, 'agent-board.mjs')
+    const shim = join(root, 'tty-shim.cjs')
     writeFileSync(progress, '# Progress\n## Demo\n### Synthetic task\n- [ ] Task 1\n')
     writeFileSync(script, patchedBoardScript({ progress, openResult: false }))
+    writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
 
     const legacy = createHttpServer((req, res) => {
       if (req.url === '/api/ping') {
@@ -716,16 +752,39 @@ test('kept silent server never falls back to printing the reusable ?t= address',
       writeFileSync(addressFile, payload, { mode: 0o600 })
     }
 
+    const runWatch = async () => {
+      let child = null
+      try {
+        const sshEnv = { ...env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222', SSH_TTY: '/dev/pts/0' }
+        child = spawn(process.execPath, ['--require', shim, script, '--watch'], { env: sshEnv, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+        let out = ''
+        child.stdout.on('data', chunk => { out += String(chunk) })
+        child.stderr.on('data', chunk => { out += String(chunk) })
+        const deadline = Date.now() + 12_000
+        while (Date.now() < deadline && !out.includes(EN.serveKeptNoLink)) {
+          await new Promise(done => setTimeout(done, 50))
+        }
+        assert.ok(out.includes(EN.serveKeptNoLink), `watcher over SSH must render recovery guidance when mint fails:\n${out}`)
+        assert.doesNotMatch(out, REUSABLE_LINK_RE)
+        assert.equal(out.includes('synthetic-quiet'), false)
+        child.stdin.write('q')
+        await new Promise(done => {
+          const timer = setTimeout(() => { try { child.kill() } catch {}; done() }, 3000)
+          child.once('exit', () => { clearTimeout(timer); done() })
+        })
+      } finally {
+        try { child?.kill() } catch {}
+      }
+    }
+
     let failed = false
     try {
-      const res = await runCli(script, args, env)
-      assert.equal(res.status, 1, `${args.join(' ')} must exit non-zero when legacy kept server cannot mint link: ${res.stderr}`)
-      assert.ok(res.stdout.includes(EN.serveKeptNoLink), `${args.join(' ')} actionable recovery note:\n${res.stdout}`)
-      assert.equal(res.stdout.includes(EN.boardPageAlreadyOpen), false, `${args.join(' ')} must not say already open:\n${res.stdout}`)
-      assert.equal(res.stdout.includes(EN.serveKept), false, `${args.join(' ')} must not print serveKept:\n${res.stdout}`)
-      assert.equal(res.stdout.includes('already open'), false, `${args.join(' ')} must not claim page is already open:\n${res.stdout}`)
-      assert.doesNotMatch(res.stdout, REUSABLE_LINK_RE)
-      assert.equal(res.stdout.includes('synthetic-quiet'), false)
+      const cliArgs = [['--serve'], ['--serve', '--no-open'], ['--html', '--no-open']]
+      const [cliResults] = await Promise.all([
+        Promise.all(cliArgs.map(args => runCli(script, args, env))),
+        runWatch(),
+      ])
+      cliResults.forEach((res, i) => assertKeptNoLink(`${cliArgs[i].join(' ')} (legacy)`, res.stdout, res.status))
     } catch (error) {
       failed = true
       throw error
@@ -738,13 +797,7 @@ test('kept silent server never falls back to printing the reusable ?t= address',
       }
     }
   }
-  await Promise.all([
-    runSilentCase(['--serve', '--no-open']),
-    runSilentCase(['--html', '--no-open']),
-    runLegacyKeptCase(['--serve']),
-    runLegacyKeptCase(['--serve', '--no-open']),
-    runLegacyKeptCase(['--html', '--no-open']),
-  ])
+  await Promise.all([runSilentGroup(), runLegacyGroup()])
 })
 
 test('replaying a keyed one-use open link after attacker pairs #k revokes the attacker secret and locks approvals off', { timeout: 20_000 }, async () => {
@@ -840,10 +893,12 @@ const runServedPageInOrigin = async (html, pageUrl, originStores, { throwStorage
   const sessionStorage = {
     getItem: key => store.get(key) ?? null,
     setItem: (key, value) => store.set(key, String(value)),
+    removeItem: key => store.delete(key),
   }
   let currentPath = url.pathname + url.search + url.hash
   let boardPollResolve
   let polled = false
+  let pollCount = 0
   const firstBoardPoll = new Promise(resolve => { boardPollResolve = resolve })
   const document = {
     body: get('body'),
@@ -872,6 +927,7 @@ const runServedPageInOrigin = async (html, pageUrl, originStores, { throwStorage
       })
       if (String(target).startsWith('/api/board')) {
         polled = true
+        pollCount += 1
         boardPollResolve({ status: res.status, tokenSent: init.headers?.['x-board-token'] ?? '' })
       }
       return res
@@ -890,6 +946,7 @@ const runServedPageInOrigin = async (html, pageUrl, originStores, { throwStorage
   return {
     firstBoardPoll,
     polled: () => polled,
+    pollCount: () => pollCount,
     currentPath: () => currentPath,
     offlineText: () => textOf(get('offline')),
     mainText: () => textOf(mainEl),
@@ -970,6 +1027,36 @@ test('two local boards on different ports issue no cookies, reload independently
     assert.equal(blockedReload.offlineText(), '')
     assert.ok(blockedReload.mainText().includes(EN.serveSessionLost))
     assert.equal(blockedReload.mainText().includes(EN.serveOffline), false)
+
+    // Stored session expiring on a running board shows session-lost reopen guidance and stops polling.
+    let expClock = 1_000_000
+    const boardExp = await startDirectBoard({ now: () => expClock })
+    try {
+      const expLink = (await boardExp.call('/api/open-link', {})).body.url
+      const expRes = await fetch(expLink)
+      assert.equal(expRes.status, 200)
+      const expHtml = await expRes.text()
+      const expSession = sessionFromHtml(expHtml)
+      const expLive = await runServedPageInOrigin(expHtml, expLink, originStores)
+      assert.deepEqual(await expLive.firstBoardPoll, { status: 200, tokenSent: expSession })
+
+      expClock += 24 * 60 * 60 * 1000 + 1_000
+      const expReloadRes = await fetch(new URL('/', boardExp.origin))
+      assert.equal(expReloadRes.status, 200)
+      const expReload = await runServedPageInOrigin(await expReloadRes.text(), `${boardExp.origin}/`, originStores)
+      assert.deepEqual(await expReload.firstBoardPoll, { status: 403, tokenSent: expSession })
+      const deadline = Date.now() + 2_000
+      while (Date.now() < deadline && !expReload.mainText().includes(EN.serveSessionLost)) {
+        await new Promise(done => setTimeout(done, 20))
+      }
+      assert.ok(expReload.mainText().includes(EN.serveSessionLost))
+      assert.equal(expReload.offlineText(), '')
+      assert.equal(expReload.mainText().includes(EN.serveOffline), false)
+      assert.equal(originStores.get(boardExp.origin)?.get('agent_board_session'), undefined)
+      assert.equal(expReload.pollCount(), 1)
+    } finally {
+      await boardExp.close()
+    }
   } catch (error) {
     failed = true
     throw error

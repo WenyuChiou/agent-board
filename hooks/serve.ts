@@ -1725,6 +1725,7 @@ const PAGE_SCRIPT = String.raw`
     return fetch(path, init).then(function (res) {
       if (path === '/api/board' && res.status === 304) return { ok: true, unchanged: true };
       return res.json().catch(function () { return {}; }).then(function (data) {
+        data.status = res.status;
         data.ok = res.ok && data.ok !== false;
         if (requestPage === pageId && path === '/api/board') boardEtag = data.ok && data.model && res.headers ? res.headers.get('etag') || '' : '';
         return data;
@@ -3719,6 +3720,12 @@ const PAGE_SCRIPT = String.raw`
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) { showMoved(); return; }
       if (data.unchanged) { reachable(); maybeShowAway(); return; }
+      if (data.status === 403 && !data.note) {
+        token = '';
+        try { if (typeof sessionStorage !== 'undefined' && typeof sessionStorage.removeItem === 'function') sessionStorage.removeItem('agent_board_session'); } catch (error) {}
+        showSessionLost();
+        return;
+      }
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }
         else unreachable();
