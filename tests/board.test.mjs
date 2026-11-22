@@ -8857,7 +8857,8 @@ test('a page whose process runs and whose port takes the connection but says not
     assert.equal(board.openUrlOf(out), null, out)
     assert.doesNotMatch(out, /\?t=/)
     assert.ok(!out.includes(stale), out)
-    assert.ok(out.includes('A reply may still be on its way to an agent, so the board page that is already open is kept'), out)
+    assert.ok(!out.includes(EN.serveKept), out)
+    assert.ok(!out.includes('already open'), out)
     assert.equal(out.trim().split(/\r?\n/).at(-1), EN.serveKeptNoLink, out)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, stale)
   } finally {

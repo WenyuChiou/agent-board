@@ -2956,7 +2956,7 @@ const serveBoard = async (): Promise<void> => {
         if (isShape && !isSsh && page === 'none' && !isNoWindowHere()) process.stderr.write(`${s.serveBrowserNone(openUrl)}\n`)
       } else if (isKept) {
         process.exitCode = 1
-        process.stdout.write(`${prefix}${s.serveKeptNoLink}\n`)
+        process.stdout.write(`\n${idleNote}${s.serveKeptNoLink}\n`)
       } else {
         process.exitCode = 1
         process.stdout.write(`${prefix}${s.serveFailed(s.serveOffline)}\n`)
@@ -2996,7 +2996,7 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
   if (openUrl === null) {
     if (server.isKept) {
       process.exitCode = 1
-      return { note: `${s.serveKept}\n${s.serveKeptNoLink}`, isOpen: false }
+      return { note: s.serveKeptNoLink, isOpen: false }
     }
     process.exitCode = 1
     return { note: serveFailureNote(failure), isOpen: false }

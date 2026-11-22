@@ -662,6 +662,8 @@ test('kept silent server never falls back to printing the reusable ?t= address',
       assert.equal(res.status, 1, `${args.join(' ')} must exit non-zero when kept server cannot mint link: ${res.stderr}`)
       assert.ok(res.stdout.includes(EN.serveKeptNoLink), `${args.join(' ')} actionable recovery note:\n${res.stdout}`)
       assert.equal(res.stdout.includes(EN.boardPageAlreadyOpen), false, `${args.join(' ')} must not say already open:\n${res.stdout}`)
+      assert.equal(res.stdout.includes(EN.serveKept), false, `${args.join(' ')} must not print serveKept:\n${res.stdout}`)
+      assert.equal(res.stdout.includes('already open'), false, `${args.join(' ')} must not claim page is already open:\n${res.stdout}`)
       assert.doesNotMatch(res.stdout, REUSABLE_LINK_RE)
       assert.equal(res.stdout.includes('synthetic-quiet'), false)
     } catch (error) {
@@ -720,6 +722,8 @@ test('kept silent server never falls back to printing the reusable ?t= address',
       assert.equal(res.status, 1, `${args.join(' ')} must exit non-zero when legacy kept server cannot mint link: ${res.stderr}`)
       assert.ok(res.stdout.includes(EN.serveKeptNoLink), `${args.join(' ')} actionable recovery note:\n${res.stdout}`)
       assert.equal(res.stdout.includes(EN.boardPageAlreadyOpen), false, `${args.join(' ')} must not say already open:\n${res.stdout}`)
+      assert.equal(res.stdout.includes(EN.serveKept), false, `${args.join(' ')} must not print serveKept:\n${res.stdout}`)
+      assert.equal(res.stdout.includes('already open'), false, `${args.join(' ')} must not claim page is already open:\n${res.stdout}`)
       assert.doesNotMatch(res.stdout, REUSABLE_LINK_RE)
       assert.equal(res.stdout.includes('synthetic-quiet'), false)
     } catch (error) {
