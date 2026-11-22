@@ -12,7 +12,7 @@ import { partTest } from '../scripts/ci-impact.mjs'
 import { turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage, rebindMessages } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/message-client.mjs'
-import { isNote, observeSession, routeRecord } from '../hooks/messaging.ts'
+import { isNote, observeSession, routeLine, routeRecord } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { explicitCodexExecutable, hasUnloadDelay, resolveCodexExecutable, startCodexReceiver, testUnloadMs } from '../scripts/codex-receiver.mjs'
@@ -6776,6 +6776,58 @@ test('a page that stops, is replaced, or reaches idle while a Codex delivery is 
   }
 })
 
+test('a page that stops, is replaced, or reaches idle while a Codex desktop app turn runs in the background waits for it to settle (#557)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-app-close-'))
+  const app = '99999999-8888-4777-8666-555555555555'
+  writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${app} dir=${encodeURIComponent(dir)} state=waiting updated=${new Date().toISOString()} -->\n### A Codex app task\n- [?] Orange or teal?\n<!-- /auto session=abcdef01 -->\n`)
+  // The board's Codex home is the test folder (start sets CODEX_HOME): the history names the desktop app as where it began.
+  const day = join(dir, 'sessions', '2026', '11', '22')
+  mkdirSync(day, { recursive: true })
+  writeFileSync(join(day, `rollout-2026-11-22T00-00-00-${app}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: app, originator: 'Codex Desktop', cwd: dir } }) + '\n')
+  const log = join(dir, 'exec.log'), release = join(dir, 'release-run'), stub = join(dir, 'exec-stub.json')
+  writeFileSync(stub, JSON.stringify({ log, release }))
+  process.env.AGENT_BOARD_CODEX_BIN = fileURLToPath(new URL('./helpers/codex-exec-stub.mjs', import.meta.url))
+  process.env.CODEX_EXEC_STUB = stub
+  codexShortWait()
+  let board
+  try {
+    // The tests' route table with the app's own surface and line added, as the shipped Codex route has them.
+    const appRoutes = testUnitRoutes.map(one => one.agent === 'codex' && one.kind === 'live'
+      ? { ...one, routes: { ...one.routes, idle: { ...one.routes.idle, surfaces: [...one.routes.idle.surfaces, SURFACE_IDS.codexApp], surfaceLines: { [SURFACE_IDS.codexApp]: 'reopen' } } } }
+      : one)
+    board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send', '--idle-minutes', '0.03'], appRoutes)
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === app && one.surface === SURFACE_IDS.codexApp))
+    const send = await board.call('/api/messages/send', { id: 'AB-APP-001', target: connection.id, turn: 'session', text: 'Teal.' })
+    assert.equal(send.status, 200, JSON.stringify(send.body))
+    const sent = async () => (await board.call('/api/board')).body.messaging.messages.find(one => one.id === 'AB-APP-001')
+
+    // The turn runs in the background, held until the release file is there: the page counts it, refuses to close and
+    // does not stop for being idle.
+    await waitFor(async () => (readFileSyncSafe(log) ?? '').includes('"resume"'))
+    assert.deepEqual(JSON.parse((readFileSyncSafe(log) ?? '').split('\n')[0]).args, ['exec', 'resume', '--skip-git-repo-check', app, '-'])
+    assert.equal((await board.call('/api/ping')).body.sending, 1)
+    assert.equal((await board.call('/api/close', {})).status, 409)
+    assert.equal((await board.call('/api/close', { moved: true })).status, 409)
+    await pause(2100)
+    assert.equal((await board.call('/api/ping')).body.sending, 1)
+    assert.equal((await board.call('/api/close', {})).status, 409)
+
+    // The turn answers with its ACK: the receipt is in, nothing is sending, and the page stops cleanly.
+    writeFileSync(release, '')
+    await waitFor(async () => (await sent())?.status === 'acknowledged')
+    await waitFor(async () => (await board.call('/api/ping')).body.sending === 0)
+    assert.equal((await board.call('/api/close', {})).status, 200)
+    await board.exited
+    board = undefined
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_EXEC_STUB; codexShortWait(false)
+    writeFileSync(release, '')
+    await board?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
+  }
+})
+
 test('1139 both ACK parsers accept the same complete lines', async () => {
   const { ackLine: clientAck } = await import('../scripts/message-client.mjs')
   const { ackLine: claudeAck } = await import('../hooks/receiver.ts')
@@ -7719,19 +7771,22 @@ test('each receiver record names a validation note that exists, and the table th
       assert.ok(!(route.line === 'none' && route.record !== null), `${record.source} ${state} names a note for a route that does not exist`)
     }
     const shipped = RECEIVER_ROUTES.find(one => one.agent === record.agent && one.kind === record.kind)
-    // Two adapters can share an agent and kind (the Codex owner connector and the daemon receiver): a note covers only the
-    // surfaces it names, so each record must match the shipped entry on its own surfaces.
+    // Three adapters can share an agent and kind (the Codex owner connector, the daemon receiver and the desktop app
+    // receiver): a note and a line cover only the surfaces they name, so each record must match the shipped entry on its
+    // own surfaces, read the way the send gate reads them (routeLine, routeRecord, #557).
     const ids = record.surfaces.map(surface => surface.id)
     const own = route => {
       const surfaces = route.surfaces.filter(id => ids.includes(id))
-      const notes = Object.entries(route.surfaceRecords ?? {}).filter(([id]) => ids.includes(id))
-      return { line: route.line, record: surfaces.length > 0 ? route.record : null, surfaces, ...(notes.length > 0 ? { surfaceRecords: Object.fromEntries(notes) } : {}) }
+      return { surfaces, each: surfaces.map(id => [id, routeLine(route, id), routeRecord(route, id)]) }
     }
-    assert.deepEqual(shipped && Object.fromEntries(states.map(state => [state, own(shipped.routes[state])])), record.routes, `${record.source} differs from hooks/receiver-routes.ts`)
+    assert.deepEqual(shipped && Object.fromEntries(states.map(state => [state, own(shipped.routes[state])])), Object.fromEntries(states.map(state => [state, own(record.routes[state])])), `${record.source} differs from hooks/receiver-routes.ts`)
+    // A state no surface of the record covers still names the same line, the one its card shows without a note.
+    for (const state of states) if (record.routes[state].surfaces.length === 0) assert.equal(shipped.routes[state].line, record.routes[state].line, `${record.source} ${state}`)
   }
-  // And every surface a shipped note covers is one a record names for that same note.
+  // And every surface a shipped note covers is one a record names for that same note and line.
   for (const shipped of RECEIVER_ROUTES) for (const state of states) for (const id of shipped.routes[state].surfaces) {
-    assert.ok(records.some(record => record.agent === shipped.agent && record.kind === shipped.kind && record.routes[state].record === shipped.routes[state].record && record.routes[state].surfaces.includes(id)), `${shipped.agent} ${shipped.kind} ${state}: ${id}`)
+    const route = shipped.routes[state]
+    assert.ok(records.some(record => record.agent === shipped.agent && record.kind === shipped.kind && record.routes[state].surfaces.includes(id) && routeRecord(record.routes[state], id) === routeRecord(route, id) && routeLine(record.routes[state], id) === routeLine(route, id)), `${shipped.agent} ${shipped.kind} ${state}: ${id}`)
   }
   // The stand-in the page tests and the e2e worlds use is the shipped table with a note named on every route that exists.
   // Except that a running-turn adapter takes a message while idle too: tests register connections without a scope, which is a turn.
@@ -7767,6 +7822,22 @@ test('with the receivers\' own records, a Claude card sends and a Codex card tha
   assert.equal((await board.call('/api/act', { ...request(cl), session: CLAUDE_SESSION, connection: claudeConnection.id, turn: 'session' })).status, 200)
   // A recorded route is not refused by the table (a second message to the same session is held back by the usual busy rule).
   assert.notEqual((await board.call('/api/messages/send', { id: 'AB-DIRECT-claude', target: claudeConnection.id, turn: 'session', text: 'Again' })).body.error, 'NO_RECORDED_ROUTE')
+}, '', undefined, RECEIVER_ROUTES))
+
+// Live run 2026-11-22 (#557): a Codex app conversation's message waits for the app to be quit, so the press says so, not "running".
+test('a board reply to a Codex desktop app conversation is answered with the wait for the app to quit, not a running turn (#557)', () => fixture(async (board, dir) => {
+  const codex = '33333333-4444-4555-8666-777777777777'
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n<!-- auto session=abcdef02 agent=codex resume=${codex} state=waiting updated=${new Date().toISOString()} -->\n### Codex app card\n- [?] Orange or teal?\n<!-- /auto session=abcdef02 -->\n`)
+  const app = (await board.call('/api/messages/register', { agent: 'codex', session: codex, turn: 'session', scope: 'session', surface: 'Codex desktop app' })).body
+  const ask = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  assert.equal(ask.canSend, true); assert.equal(ask.line, 'reopen'); assert.equal(ask.delivery.isAfterAppQuit, true)
+  const sent = await board.call('/api/act', { key: ask.key, type: 'message', id: 'AB-APP-QUIT', text: 'Teal', session: codex, asked: ask.text, fp: ask.fp, connection: app.id, turn: 'session' })
+  assert.equal(sent.status, 200)
+  assert.equal(sent.body.receipt.status, 'queued')
+  assert.equal(sent.body.note, EN.serveReopenWaitingCodexApp)
+  // The card's receipt after a redraw keeps the same wait.
+  const after = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  assert.equal(after.receipt.status, 'queued'); assert.equal(after.receipt.isAfterAppQuit, true)
 }, '', undefined, RECEIVER_ROUTES))
 
 test('the routes the tests hand the board are checked whole: a missing record key, an unknown line or a non-list is refused, and only a non-empty string is a record (#1351)', async () => {
@@ -8062,7 +8133,7 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     if (!(record.kind === 'mailbox' && state === 'ended')) {
       const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
       const isCodexCopy = record.agent === 'codex' && route.line === 'nextTurn' && !canSend
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface.id === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: isCodexCopy ? s.serveCodexCopyHint : s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface.id === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: isCodexCopy ? s.serveCodexCopyHint : s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: surface.id === SURFACE_IDS.codexApp ? s.serveLineReopenCodexApp : s.serveLineReopen(name), none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
       assert.equal(card.line, route.line, `${record.source}/${surface.id}/${state}`)
       assert.ok(card.lineText.includes(words), `${record.source}/${surface.id}/${state}: ${card.lineText}`)
     }
