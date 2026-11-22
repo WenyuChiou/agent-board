@@ -881,6 +881,8 @@ test('the time check passes the Windows times that failed pull requests after #1
   slowest['tests/setup-sidecar.test.mjs'] = 49_000
   // #1730: host-upgrade's Windows Node 24 time with its three copied-Node setup tests (run 44681768984).
   slowest['tests/host-upgrade.test.mjs'] = 109_100
+  // #1778: host-upgrade's Windows Node 24 time with the `setup --update` tests of #1314 (run 45073388887, attempt 2).
+  slowest['tests/host-upgrade.test.mjs'] = 170_800
   for (const [path, ms] of Object.entries(slowest)) assert.ok(budgetOf(path) * 7 / 10 >= ms * 13 / 10, path + ': ' + budgetOf(path))
 })
 
