@@ -124,6 +124,7 @@ const summaries = [
     "updated": "Agent Board updated to {version}.",
     "updateCurrent": "Agent Board is up to date ({version}).",
     "updateRevoked": "{host}: the board's hooks are not approved now, so the update left them unapproved. To approve them, preview {command}, then run it again with --apply.",
+    "updateTrustUnread": "{host}: the update could not read whether the board's hooks are approved, so it changed no approval. To check, preview {command}; to approve them, run it again with --apply.",
     "updateLater": "Nothing changed. To update, run this in a terminal and answer y: {command}",
     "updatePlugin": "This board comes from the Claude Code plugin, so setup leaves it alone. Update the plugin with claude plugin update agent-board@agent-board, then start a new Claude Code session.",
     "updateNone": "Agent Board is not set up here, so there is nothing to update. Set it up: {command}",
@@ -211,6 +212,7 @@ const summaries = [
     "updated": "Agent Board 已更新到 {version}。",
     "updateCurrent": "Agent Board 已是最新版（{version}）。",
     "updateRevoked": "{host}：看板的 hooks 現在沒有被批准，這次更新也沒有替你批准。要批准它們：先執行 {command} 預覽，再加上 --apply 重新執行同一命令。",
+    "updateTrustUnread": "{host}：這次更新讀不到看板的 hooks 是否已被批准，所以沒有更動任何批准。要確認，先執行 {command} 預覽；要批准它們，再加上 --apply 重新執行同一命令。",
     "updateLater": "沒有任何變更。要更新，請在終端機執行這個命令並回答 y：{command}",
     "updatePlugin": "這個看板來自 Claude Code 外掛，setup 不會動它。請用 claude plugin update agent-board@agent-board 更新外掛，再開一個新的 Claude Code 工作階段。",
     "updateNone": "這裡還沒設定 Agent Board，所以沒有可更新的東西。設定它：{command}",
@@ -298,6 +300,7 @@ const summaries = [
     "updated": "Agent Board 已更新到 {version}。",
     "updateCurrent": "Agent Board 已是最新版（{version}）。",
     "updateRevoked": "{host}：看板的 hooks 现在没有被批准，这次更新也没有替你批准。要批准它们：先运行 {command} 预览，再加上 --apply 重新运行同一命令。",
+    "updateTrustUnread": "{host}：这次更新读不到看板的 hooks 是否已被批准，所以没有更改任何批准。要确认，先运行 {command} 预览；要批准它们，再加上 --apply 重新运行同一命令。",
     "updateLater": "没有任何更改。要更新，请在终端运行这个命令并回答 y：{command}",
     "updatePlugin": "这个看板来自 Claude Code 插件，setup 不会动它。请用 claude plugin update agent-board@agent-board 更新插件，再开一个新的 Claude Code 会话。",
     "updateNone": "这里还没设置 Agent Board，所以没有可更新的东西。设置它：{command}",
@@ -535,7 +538,8 @@ const main = () => {
   }
   if (!isRemove && selected.some(agent => agent === 'claude' || agent === 'claude-code')) fail('INVALID_TARGETS', noAgentText('claude', {}))
   if ((!selected.length && selector !== 'auto') || selected.some(agent => !(isRemove ? removable : targets).includes(agent)) || new Set(selected).size !== selected.length) fail('INVALID_TARGETS', noTarget)
-  const apply = args.includes('--apply')
+  // --apply is no yes for --update: an update writes only after the person's yes, or with nothing to ask (#1314).
+  const apply = args.includes('--apply') && !isUpdate
   const isShowingApplied = apply
   // Only inside a test run (as AGENT_BOARD_SETUP_TTY), a stand-in helper can report what a real one cannot on cue.
   const script = process.env.AGENT_BOARD_TEST_PID && process.env.AGENT_BOARD_SETUP_HELPER ? process.env.AGENT_BOARD_SETUP_HELPER : fileURLToPath(new URL('./setup-codex.mjs', import.meta.url))
@@ -740,7 +744,9 @@ const main = () => {
     // A host that trusts the hooks now is asked again only for hook commands that change. One whose trust cannot be read, or
     // is gone, is asked only when this board never approved the hooks; an approval revoked since is never given back.
     const approvals = own.filter(agent => facts(agent).trust === true ? facts(agent).hooks.length > 0 : facts(agent).trust !== undefined && facts(agent).approved === false)
-    const revoked = own.filter(agent => facts(agent).trust !== undefined && facts(agent).trust !== true && facts(agent).approved !== false)
+    const revoked = own.filter(agent => facts(agent).trust === false && facts(agent).approved !== false)
+    // Trust that cannot be read now, after this board approved the hooks: no approval is written, and none is claimed gone.
+    const unread = own.filter(agent => facts(agent).trust === 'unknown' && facts(agent).approved !== false)
     const uses = newUses.filter(one => own.some(agent => typeof facts(agent).version !== 'string' || isNewer(one.version, facts(agent).version)))
     const hooks = own.flatMap(agent => facts(agent).hooks.map(hook => ({ agent, ...hook })))
     const files = [...new Set(own.flatMap(agent => facts(agent).loaded))]
@@ -764,7 +770,7 @@ const main = () => {
       // No terminal to answer in: print the question and the command that asks it, and write nothing. The board's page
       // confirm (#1315) reads this JSON.
       process.exitCode = 3
-      const json = { mode: 'update', version: setupVersion, targets: selected, applied: false, question: { hooks, files, uses: uses.map(one => ({ id: one.id, version: one.version, use: words(one.use), off: words(one.off) })), trust: approvals, text: question, command: again }, revoked, plans }
+      const json = { mode: 'update', version: setupVersion, targets: selected, applied: false, question: { hooks, files, uses: uses.map(one => ({ id: one.id, version: one.version, use: words(one.use), off: words(one.off) })), trust: approvals, text: question, command: again }, revoked, unread, plans }
       process.stdout.write(`${isJson ? JSON.stringify(json, null, 2) : [...question, words('updateLater', { command: again })].join('\n')}\n`)
       return
     }
@@ -795,11 +801,11 @@ const main = () => {
       const result = retry.isRunnable && !failed.has(agent) ? boardRun(planOf(agent), agent, extra) : undefined
       part(agent, words('trustPart', { host: names[agent] }), result !== undefined && !result.error && result.status === 0, retry.text)
     }
-    const revokedLines = revoked.map(agent => words('updateRevoked', { host: names[agent], command: boardStep(planOf(agent), agent, [`--${agent}-trust`], agent === 'codex' ? updateCodex || { placeholder: words('codexPath') } : undefined).text }))
+    const revokedLines = [...revoked, ...unread].map(agent => words(unread.includes(agent) ? 'updateTrustUnread' : 'updateRevoked', { host: names[agent], command: boardStep(planOf(agent), agent, [`--${agent}-trust`], agent === 'codex' ? updateCodex || { placeholder: words('codexPath') } : undefined).text }))
     const lines = [...(failed.size || !own.length ? [] : [words(changed.length ? 'updated' : 'updateCurrent', { version: setupVersion })]), ...out, ...revokedLines, ...(asks.length ? [] : kept), ...skipped.map(agent => agentLines[selected.indexOf(agent)])]
     if (skipped.length) lines.push(words('retry', { command: setupCommand(['--agent', skipped.join(','), '--update']) }))
     if (failed.size || skipped.length) process.exitCode = 1
-    process.stdout.write(`${isJson ? JSON.stringify({ mode: 'update', version: setupVersion, targets: selected, applied: own.length > 0 && !failed.size, failed: [...failed], revoked, plans }, null, 2) : lines.join('\n')}\n`)
+    process.stdout.write(`${isJson ? JSON.stringify({ mode: 'update', version: setupVersion, targets: selected, applied: own.length > 0 && !failed.size, failed: [...failed], revoked, unread, plans }, null, 2) : lines.join('\n')}\n`)
     return
   }
   if (isAsking) {
