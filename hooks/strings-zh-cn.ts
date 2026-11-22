@@ -669,9 +669,9 @@ export const ZH_CN: Strings = {
 
   // The board other agents show (the standalone script and each agent's board command)
   boardOpenPage: '打开看板网页',
-  boardPageWindowOpened: (url: string): string => `已在浏览器打开 Agent Board：${url}`,
+  boardPageWindowOpened: '已在浏览器打开 Agent Board。',
   boardPageLink: (url: string): string => url,
-  boardPageAlreadyOpen: (url: string): string => `Agent Board 已在浏览器开着：${url}`,
+  boardPageAlreadyOpen: 'Agent Board 已在浏览器开着。',
   boardInbox: '收件箱里还没整理的回合（开一个 Claude Code 对话就会整理进来）',
   boardWatching: '每 2 秒更新，Ctrl+C 结束',
   boardCommandDescription: 'Agent Board：每个 agent 在做什么、什么在等你',

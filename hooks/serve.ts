@@ -969,7 +969,7 @@ export const lanAddress = (interfaces: Record<string, readonly NetAddress[] | un
   return found[0]?.address ?? null
 }
 
-const isSame = (a: string, b: string): boolean => {
+export const isSame = (a: string, b: string): boolean => {
   if (b === '' || a.length !== b.length) return false
   let diff = 0
   for (let index = 0; index < a.length; index += 1) diff |= a.charCodeAt(index) ^ b.charCodeAt(index)
@@ -1387,7 +1387,7 @@ const sideView = (id: keyof typeof VIEW_ICONS, label: string, hasCount: boolean)
   `<button type="button" class="s-item v-${id}" id="view-${id}" data-view="${id}" data-local data-nav title="${esc(label)}" aria-pressed="${id === 'all'}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${VIEW_ICONS[id]}</svg><span class="s-txt">${esc(label)}</span>${hasCount ? `<span class="s-n${id === 'needs' ? ' hot' : ''}" id="count-${id}"></span>` : ''}</button>`
 
 // `isLan`: the page a phone opens on the local network, which closes sooner.
-export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, language: SettingsLang = 'auto', isLangOverridden = false): string => `<!doctype html>
+export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, language: SettingsLang = 'auto', isLangOverridden = false, pageSession = ''): string => `<!doctype html>
 <html lang="${htmlLang(s)}">
 <head>
 <meta charset="utf-8">
@@ -1429,7 +1429,7 @@ ${settingsCss}
 </div>
 ${settingsPanel(s, language, isLan, isLangOverridden)}
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
-<script nonce="${nonce}">${PAGE_SCRIPT}</script>
+${pageSession === '' ? '' : `<script type="application/json" id="page-session">${JSON.stringify(pageSession).replace(/</g, '\\u003c')}</script>\n`}<script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
 </html>
 `
@@ -1438,14 +1438,17 @@ const PAGE_SCRIPT = String.raw`
 (function () {
   'use strict';
   var W = JSON.parse(document.getElementById('words').textContent);
-  var token = new URLSearchParams(location.search).get('t') || '';
+  var sessionEl = document.getElementById('page-session');
+  var token = (sessionEl && sessionEl.textContent ? JSON.parse(sessionEl.textContent) : '') || new URLSearchParams(location.search).get('t') || '';
+  if (sessionEl && sessionEl.parentNode) sessionEl.parentNode.removeChild(sessionEl);
   // Approvals (D3, #1318): a page the board opened itself carries a one-time key after its #. It is
   // traded once for this page's secret, which lives in this variable only: never in the tab's
   // storage, which the browser writes to disk where a program could read it. The key leaves the
   // address. A page opened any other way, or reloaded, shows the requests with no button.
   var approveSecret = '';
   var pairKey = /^#k=([\w-]+)$/.exec(location.hash || '');
-  if (pairKey) { try { history.replaceState(null, '', location.pathname + location.search); } catch (error) {} }
+  var isOpenPath = /^\/open\//.test(location.pathname || '');
+  if (pairKey || isOpenPath) { try { history.replaceState(null, '', (isOpenPath ? '/' : location.pathname) + (location.search || '')); } catch (error) {} }
   var board = document.getElementById('board');
   var note = document.getElementById('note');
   var offline = document.getElementById('offline');

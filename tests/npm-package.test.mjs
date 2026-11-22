@@ -769,10 +769,8 @@ test('a later launcher that reuses a server without its address record still ref
       // surface: run the launcher as a non-CI call so it opens the page and prints its address.
       const second = f.run(pkg, [], { CI: '0' })
       success(second)
-      const found = second.stdout.match(/https?:\/\/\S+/)
-      assert.ok(found, `the launcher printed no address: ${second.stdout}`)
-      const secondUrl = new URL(found[0])
-      assert.equal(secondUrl.href, firstUrl.href)
+      assert.doesNotMatch(second.stdout, /\?t=|http:\/\/127\.0\.0\.1:/)
+      assert.equal(second.stdout.trim(), 'Agent Board is already open in your browser.')
       const after = await board()
       assert.equal(after.view.versions.package, manifest.version)
       // The package is the board's own version, so there is no update to name.
@@ -818,6 +816,7 @@ test('a later launcher that reuses a server through the retry wait or the claim 
     // package version the launcher tells it. A hanging /api/ping stands in for a page still
     // starting, so the launcher's wait loop cannot find it until the test lets it answer.
     const posts = []
+    let openCount = 0
     let answerPing = true
     const sockets = new Set()
     const fake = createServer((req, res) => {
@@ -826,6 +825,16 @@ test('a later launcher that reuses a server through the retry wait or the claim 
         if (!answerPing) return
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ path: resolve(progressPath), built, allowResume: false, codexSend: true, messagesDirectory: resolve(messagesDir) }))
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/api/open-link') {
+        if (req.headers['x-board-token'] !== 'retrytesttoken') {
+          res.writeHead(403, { 'content-type': 'application/json' })
+          res.end('{}')
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ url: `http://127.0.0.1:${fake.address().port}/open/synthetic-open-${++openCount}` }))
         return
       }
       if (req.method === 'POST' && url.pathname === '/api/package') {
@@ -921,7 +930,8 @@ test('a later launcher that reuses a server through the retry wait or the claim 
       writeRecord()
       const waited = await run
       assert.equal(waited.code, 0, waited.stderr)
-      assert.ok(waited.stdout.includes(fakeUrl), waited.stdout)
+      assert.match(waited.stdout, /http:\/\/127\.0\.0\.1:\d+\/open\/synthetic-open-\d+/, waited.stdout)
+      assert.doesNotMatch(waited.stdout, /\?t=/)
       assert.equal(posts.length, 1, JSON.stringify(posts))
       assert.equal(posts[0]?.version, manifest.version)
       assert.ok(claimCreates - before <= 1, `the launcher started ${claimCreates - before} children in the wait scenario`)
@@ -946,7 +956,8 @@ test('a later launcher that reuses a server through the retry wait or the claim 
       writeRecord()
       const backedOff = await run
       assert.equal(backedOff.code, 0, backedOff.stderr)
-      assert.ok(backedOff.stdout.includes(fakeUrl), backedOff.stdout)
+      assert.match(backedOff.stdout, /http:\/\/127\.0\.0\.1:\d+\/open\/synthetic-open-\d+/, backedOff.stdout)
+      assert.doesNotMatch(backedOff.stdout, /\?t=/)
       assert.equal(posts.length, 1, JSON.stringify(posts))
       assert.equal(posts[0]?.version, manifest.version)
       assert.ok(claimCreates - before <= 1, `the launcher started ${claimCreates - before} children in the backoff scenario`)

@@ -2131,18 +2131,34 @@ const readRunning = (file = serveFile()): Running | null => {
 
 const tokenOf = (url: string): string => new URL(url).searchParams.get('t') ?? ''
 
+const requestOpenLink = async (address: string): Promise<string | null> => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${new URL(address).port}/api/open-link`, {
+      method: 'POST',
+      headers: { 'x-board-token': tokenOf(address), 'content-type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(5000),
+    })
+    if (!res.ok) return null
+    const reply = (await res.json()) as { url?: unknown }
+    return typeof reply.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/.test(reply.url) ? reply.url : null
+  } catch {
+    return null
+  }
+}
+
 // The board opens its own page, with a one-time approval key the address file never holds, so only
 // that page can answer approvals (D3, #1318). A page started by an older copy has no such route:
 // the page is opened here, as before, and cannot answer approvals. Over SSH and in tests nothing
 // opens, as before.
 // `canOpenHere`: false when a page is open already and only one that can answer approvals is wanted:
 // if the board cannot open that one, the open page stays the only window.
-const openThroughBoard = async (url: string, asApp: boolean, canOpenHere = true): Promise<boolean> => {
+const openThroughBoard = async (address: string, asApp: boolean, canOpenHere = true): Promise<boolean> => {
   if (!isNoWindowHere()) {
     try {
-      const answer = await fetch(`http://127.0.0.1:${new URL(url).port}/api/open`, {
+      const answer = await fetch(`http://127.0.0.1:${new URL(address).port}/api/open`, {
         method: 'POST',
-        headers: { 'x-board-token': tokenOf(url), 'content-type': 'application/json' },
+        headers: { 'x-board-token': tokenOf(address), 'content-type': 'application/json' },
         body: JSON.stringify({ asApp }),
         signal: AbortSignal.timeout(15_000),
       })
@@ -2160,7 +2176,8 @@ const openThroughBoard = async (url: string, asApp: boolean, canOpenHere = true)
   // An older board (no such route, or no `hasTried`), or one that opens no window where it runs (a
   // test's board, #959): this process opens the page as before, with this caller's browsers, and
   // that page cannot answer approvals.
-  if (!canOpenHere) return false
+  if (!canOpenHere || process.env.SSH_CONNECTION || process.env.SSH_TTY) return false
+  const url = isNoWindowHere() ? address : ((await requestOpenLink(address)) ?? address)
   return new Promise<boolean>(done => openInBrowser(url, done, asApp))
 }
 
@@ -2877,14 +2894,27 @@ const serveBoard = async (): Promise<void> => {
   // The note goes above the address, so the address stays the last line an agent shows.
   const show = async (url: string, isKept = false, actualIdle?: number, page: PageState = 'none'): Promise<void> => {
     const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60_000)}\n` : ''
-    process.stdout.write(`\n${isKept ? `${s.serveKept}\n` : ''}${idleNote}${s.serveAt(url)}\n`)
-    // The address comes from a file and goes to a shell on Windows: only the shape this server
-    // writes is opened.
-    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && page !== 'open') {
+    const prefix = `\n${isKept ? `${s.serveKept}\n` : ''}${idleNote}`
+    const isShape = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)
+    let isWindow = page === 'open'
+    let isAlready = page === 'open'
+    if (isShape && page !== 'open') {
       const isOpen = await openThroughBoard(url, true, page === 'none')
-      // With a page already open, no window is missing.
-      if (!isOpen && page === 'none' && !isNoWindowHere()) {
-        process.stderr.write(`${s.serveBrowserNone(url)}\n`)
+      if (isOpen) isWindow = true
+      else if (page === 'unkeyed') { isWindow = true; isAlready = true }
+    }
+    if (isWindow) {
+      process.stdout.write(`${prefix}${isAlready ? s.boardPageAlreadyOpen : s.boardPageWindowOpened}\n`)
+    } else {
+      const openUrl = await requestOpenLink(url)
+      if (openUrl !== null) {
+        process.stdout.write(`${prefix}${s.serveAt(openUrl)}\n`)
+        if (isShape && page === 'none' && !isNoWindowHere()) process.stderr.write(`${s.serveBrowserNone(openUrl)}\n`)
+      } else if (isKept) {
+        process.stdout.write(`${prefix}${s.boardPageAlreadyOpen}\n`)
+      } else {
+        process.exitCode = 1
+        process.stdout.write(`${prefix}${s.serveFailed(s.serveOffline)}\n`)
       }
     }
     if (args.includes('--lan')) await showLan(url)
@@ -2896,10 +2926,11 @@ const serveBoard = async (): Promise<void> => {
     process.stdout.write(`\n${serveFailureNote(failure)}\n`)
     return
   }
-  await show(server.url, server.isKept, server.idleMs, await openPageState(server))
+  const page = args.includes('--no-open') ? 'none' : await openPageState(server)
+  await show(server.url, server.isKept, server.idleMs, page)
 }
 
-const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string }> => {
+const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string; openUrl?: string }> => {
   const failure: ServeFailure = {}
   const server = await ensureServer(failure)
   if (server === null) {
@@ -2911,17 +2942,22 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
   const isShape = !isNoOpen && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
   // The page is already in a window: point at it rather than opening another one that would poll too.
   const page = isShape ? await openPageState(server) : 'none'
-  if (page === 'open') return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
+  if (page === 'open') return { note: s.boardPageAlreadyOpen, isOpen: true, url: address }
   const isOpen = isShape ? await openThroughBoard(address, true, page === 'none') : false
   // The board could not open a page that answers approvals beside the open one: point at that one.
-  if (!isOpen && page === 'unkeyed') return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
+  if (!isOpen && page === 'unkeyed') return { note: s.boardPageAlreadyOpen, isOpen: true, url: address }
+  if (isOpen) return { note: s.boardPageWindowOpened, isOpen: true, url: address }
+  const openUrl = await requestOpenLink(address)
+  if (openUrl === null) {
+    if (server.isKept) return { note: s.serveKept, isOpen: false, url: address }
+    process.exitCode = 1
+    return { note: serveFailureNote(failure), isOpen: false }
+  }
   const isSuppressed = isNoWindowHere()
-  const note = isOpen
-    ? s.boardPageWindowOpened(address)
-    : isNoOpen || (isSuppressed && !isOpen)
-      ? s.boardPageLink(address)
-      : s.serveBrowserNone(address)
-  return { note, isOpen, url: address }
+  const note = isNoOpen || isSuppressed
+    ? s.boardPageLink(openUrl)
+    : s.serveBrowserNone(openUrl)
+  return { note, isOpen: false, url: address, openUrl }
 }
 
 const openPageSurface = async (): Promise<void> => {
@@ -2930,7 +2966,8 @@ const openPageSurface = async (): Promise<void> => {
   // how to forward its port first, as the terminal board does, so the address stays the last line
   // an agent shows (#1283). The terminal board's own `o` keeps one-line notes.
   if (opened.url !== undefined && (process.env.SSH_CONNECTION || process.env.SSH_TTY)) {
-    process.stdout.write(`${s.serveSshHint(pagePortOf(opened.url), sshTargetOf(process.env), opened.url)}\n`)
+    const sshUrl = opened.openUrl ?? (await requestOpenLink(opened.url))
+    if (sshUrl !== null) process.stdout.write(`${s.serveSshHint(pagePortOf(sshUrl), sshTargetOf(process.env), sshUrl)}\n`)
   }
   process.stdout.write(`${opened.note}\n`)
   // `--lan` without `--serve`: the page opens here and the phone's address follows it (#868).
@@ -3087,7 +3124,8 @@ const runWatchTerminal = async (): Promise<void> => {
   if (process.env.SSH_CONNECTION || process.env.SSH_TTY) {
     const server = await ensureServer()
     if (server) {
-      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshTargetOf(process.env), server.url), options())}\n`
+      const sshUrl = await requestOpenLink(server.url)
+      if (sshUrl !== null) sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshTargetOf(process.env), sshUrl), options())}\n`
     }
   }
   let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }

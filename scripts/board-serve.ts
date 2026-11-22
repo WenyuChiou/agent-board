@@ -22,7 +22,7 @@ import type { ReceiverRoutes } from '../hooks/messaging'
 import { isRecordedRoute } from '../hooks/messaging'
 import type { SendDecision } from '../hooks/messaging'
 import { RECEIVER_ROUTES } from '../hooks/receiver-routes'
-import { cardSendKey, handledOnly, lanAddress, localHosts, pagePolicy, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
+import { cardSendKey, handledOnly, isSame, lanAddress, localHosts, pagePolicy, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { isFolder, runSendPlan } from './background-resume'
@@ -110,8 +110,9 @@ export type ServeOptions = {
   boardTimes?: { holdMs?: number; fallbackMs?: number }
   // Address file path used to locate sibling approvals-off and approvals-refused state files.
   addressFile?: string
-  // Wall clock override for deterministic hook-race ordering tests.
+  // Wall clock override and one-use open-link lifetime override for tests.
   now?: () => number
+  openLinkMs?: number
 }
 
 type Result = { ok: boolean; note: string }
@@ -139,6 +140,11 @@ const BOARD_PROBE_MS = 1500
 const HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' }
 const REFUSAL_MAX_BYTES = 4096
 const REFUSAL_PROBE_MS = 5000
+const OPEN_LINK_MS = 10 * 60 * 1000
+const OPEN_LINK_MAX = 64
+const PAGE_SESSION_MS = 24 * 60 * 60 * 1000
+const PAGE_SESSION_MAX = 64
+const PAGE_SESSION_COOKIE = 'agent_board_session'
 
 type RawRefusal = { reason: ApprovalRefusalReason; at: string } | 'unreadable' | null
 
@@ -547,12 +553,53 @@ export const startServer = (o: ServeOptions): void => {
   }
   // A pairing key used twice: no page answers approvals again until the board restarts.
   let isApprovalOff = false
+  // One-use page open links and the non-URL sessions they mint (M8a, #1650).
+  const openLinks = new Map<string, number>()
+  const pageSessions = new Map<string, number>()
+  const clockNow = o.now ?? Date.now
+  const mintOpenLink = (now: number): string => {
+    for (const [code, until] of openLinks) if (until < now) openLinks.delete(code)
+    if (openLinks.size >= OPEN_LINK_MAX) openLinks.delete(openLinks.keys().next().value as string)
+    const code = randomBytes(24).toString('base64url')
+    openLinks.set(code, now + (o.openLinkMs ?? OPEN_LINK_MS))
+    return code
+  }
+  const mintPageSession = (now: number): string => {
+    for (const [id, seen] of pageSessions) if (now - seen > PAGE_SESSION_MS) pageSessions.delete(id)
+    if (pageSessions.size >= PAGE_SESSION_MAX) pageSessions.delete(pageSessions.keys().next().value as string)
+    const id = randomBytes(24).toString('base64url')
+    pageSessions.set(id, now)
+    return id
+  }
+  const livePageSession = (candidate: string, now: number): string => {
+    if (candidate === '') return ''
+    const seen = pageSessions.get(candidate)
+    if (seen === undefined) return ''
+    if (now - seen > PAGE_SESSION_MS) {
+      pageSessions.delete(candidate)
+      return ''
+    }
+    pageSessions.delete(candidate)
+    pageSessions.set(candidate, now)
+    return candidate
+  }
+  const cookieSessionOf = (header: string | undefined, now: number): string => {
+    if (!header) return ''
+    for (const part of header.split(';')) {
+      const trimmed = part.trim()
+      if (!trimmed.startsWith(`${PAGE_SESSION_COOKIE}=`)) continue
+      const value = trimmed.slice(PAGE_SESSION_COOKIE.length + 1)
+      if (!/^[\w-]{16,128}$/.test(value)) continue
+      const valid = livePageSession(value, now)
+      if (valid !== '') return valid
+    }
+    return ''
+  }
   // A host asked for an approval since the board started: only then does an open page that cannot
   // answer one make the board script open another.
   let hasAsked = false
   // A page that held no secret pressed the approvals switch: the next board command opens a keyed page.
   let isSwitchWanted = false
-  const clockNow = o.now ?? Date.now
   let lastPassedAskAt = 0
   let isUserOff = o.addressFile !== undefined && isOffMarkerAt(o.addressFile)
   let rawRefusal: RawRefusal = null
@@ -758,15 +805,47 @@ export const startServer = (o: ServeOptions): void => {
     const isPage = req.method === 'GET' && url.pathname === '/'
     const side = isLan ? lan : null
     if (isLan && side === null) return json(res, 404, {})
+    const hosts = side === null ? localHosts(port) : [side.host]
+    if (!isLan && url.pathname.startsWith('/open/')) {
+      if (!hosts.includes((req.headers.host ?? '').toLowerCase())) return json(res, 421, {})
+      if (req.method !== 'GET') return json(res, 405, {})
+      if (isMoved) return json(res, 410, { moved: true })
+      if (/prefetch/i.test(text(req.headers['sec-purpose']) || text(req.headers.purpose))) return json(res, 403, {})
+      const code = url.pathname.slice('/open/'.length)
+      if (!/^[\w-]{16,128}$/.test(code)) return json(res, 403, {})
+      const now = clockNow()
+      const until = openLinks.get(code)
+      if (until === undefined) return json(res, 403, {})
+      openLinks.delete(code)
+      if (until < now) return json(res, 403, {})
+      const session = mintPageSession(now)
+      loadedAt = Date.now()
+      lastSeen = loadedAt
+      const nonce = randomBytes(16).toString('base64')
+      res.writeHead(200, {
+        ...HEADERS,
+        'content-type': 'text/html; charset=utf-8',
+        'content-security-policy': pagePolicy(nonce),
+        'x-frame-options': 'DENY',
+        'set-cookie': `${PAGE_SESSION_COOKIE}=${session}; HttpOnly; SameSite=Strict; Path=/`,
+      })
+      res.end(servePage(o.s, nonce, false, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, session))
+      return
+    }
+    const authNow = clockNow()
+    const cookieSession = !isLan && isPage ? cookieSessionOf(req.headers.cookie, authNow) : ''
+    const headerToken = isPage ? '' : text(req.headers['x-board-token'])
+    const pageSession = !isLan && !isPage ? livePageSession(headerToken, authNow) : ''
+    const isClientToken = side === null && !isPage && pageSession === '' && isSame(headerToken, token)
     const problem = requestProblem(
       {
         method: req.method ?? '',
         host: req.headers.host ?? '',
         origin: req.headers.origin ?? '',
         contentType: req.headers['content-type'] ?? '',
-        token: isPage ? (url.searchParams.get('t') ?? '') : text(req.headers['x-board-token']),
+        token: isPage ? (url.searchParams.has('t') ? (url.searchParams.get('t') ?? '') : cookieSession !== '' ? token : '') : (pageSession !== '' ? token : headerToken),
       },
-      side === null ? localHosts(port) : [side.host],
+      hosts,
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
@@ -775,7 +854,7 @@ export const startServer = (o: ServeOptions): void => {
     if (req.method !== 'GET' && url.pathname !== '/api/messages/poll') res.once('finish', wakeAll)
     const replyMessage = (action: string, payload: Record<string, unknown>): void => {
       // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
-      if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
+      if (!['send', 'dismiss'].includes(action) && (!isClientToken || req.headers.origin !== undefined)) return json(res, 403, {})
       try {
         const result = messaging.act(action, payload, Date.now(), action === 'expect' ? o.reports?.() : undefined)
         if (action === 'poll' && ((result as { messages?: unknown[] }).messages?.length ?? 0) > 0) res.once('finish', wakeAll)
@@ -872,7 +951,7 @@ export const startServer = (o: ServeOptions): void => {
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
-      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false))
+      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, isLan ? '' : cookieSession))
       return
     }
     if (req.method === 'GET') {
@@ -944,11 +1023,19 @@ export const startServer = (o: ServeOptions): void => {
       // wantsKeyedPage: approvals are in use and no open page can answer them, so the board script
       // opens one with a key rather than pointing at a page that cannot. A paired page that is only
       // hidden still can; before any host asked, the page that is open is enough.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserOff || isSwitchWanted) && !hasLiveSecret(Date.now()) })
+      if (url.pathname === '/api/ping' && !isLan) {
+        if (!isClientToken) return json(res, 403, {})
+        return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserOff || isSwitchWanted) && !hasLiveSecret(Date.now()) })
+      }
       return json(res, 404, {})
     }
     const body = await readBody(req)
     if (body === null) return json(res, 400, {})
+    if (url.pathname === '/api/open-link') {
+      if (isLan || !isClientToken || req.headers.origin !== undefined) return json(res, 403, {})
+      const code = mintOpenLink(clockNow())
+      return json(res, 200, { url: `http://127.0.0.1:${port}/open/${code}` })
+    }
     if (url.pathname === '/api/page-gone' && !isLan) {
       // The page is gone for good: a poll of it that was already on its way must not bring it back as an open page.
       // Its approval secret retires at once so /api/ping asks for a keyed page right away (#1378).
@@ -967,7 +1054,7 @@ export const startServer = (o: ServeOptions): void => {
       const now = Date.now()
       // The host's hook asks, as a script on the computer: a web page always sends an Origin.
       if (url.pathname === '/api/approvals/ask') {
-        if (req.headers.origin !== undefined) return json(res, 403, {})
+        if (!isClientToken || req.headers.origin !== undefined) return json(res, 403, {})
         const ask = readAsk(body)
         if (ask === null) return json(res, 400, {})
         // No decision where the host would not ask the person: refused, and nothing is shown.
@@ -1026,14 +1113,16 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/open') {
         // Only the board script on the computer asks the board to open its page.
         if (o.open === undefined) return json(res, 404, {})
-        if (req.headers.origin !== undefined) return json(res, 403, {})
+        if (!isClientToken || req.headers.origin !== undefined) return json(res, 403, {})
         for (const [key, one] of pairKeys) if (one.until < now) pairKeys.delete(key)
         // A used key stays known until it expires, so it is never pushed out early; past this many
         // in two minutes, or with approvals off, the page opens with no key.
         const key = isApprovalOff || pairKeys.size >= 16 ? '' : randomBytes(24).toString('base64url')
         if (key !== '') pairKeys.set(key, { until: now + APPROVAL_KEY_MS, secret: '' })
-        const tried = await o.open(`http://127.0.0.1:${port}/?t=${token}${key === '' ? '' : `#k=${key}`}`, body.asApp === true).catch(() => false)
+        const openCode = mintOpenLink(clockNow())
+        const tried = await o.open(`http://127.0.0.1:${port}/open/${openCode}${key === '' ? '' : `#k=${key}`}`, body.asApp === true).catch(() => false)
         const isOpen = tried === true
+        if (!isOpen) openLinks.delete(openCode)
         if (!isOpen && key !== '') {
           // No window opened, yet the key was used: whoever read it from the opener's command line
           // paired, and it was not the person's page. Approvals go off, as for a key used twice.
@@ -1266,7 +1355,7 @@ export const startServer = (o: ServeOptions): void => {
     // Only the board script on the computer opens the page to the network: it asks with the
     // computer's token and no Origin, which a script on a web page always sends.
     if (url.pathname === '/api/lan') {
-      if (isLan || req.headers.origin !== undefined) return json(res, 403, {})
+      if (isLan || !isClientToken || req.headers.origin !== undefined) return json(res, 403, {})
       const wanted = text(body.address)
       const opened = await openLan(wanted === '' ? null : wanted)
       return json(res, 'url' in opened ? 200 : 409, opened)
@@ -1275,7 +1364,7 @@ export const startServer = (o: ServeOptions): void => {
     // from: a reused server learns the newer package, and its page shows the notice (#1304).
     // A web page always sends an Origin, and the phone's page never sends this.
     if (url.pathname === '/api/package') {
-      if (isLan || req.headers.origin !== undefined) return json(res, 403, {})
+      if (isLan || !isClientToken || req.headers.origin !== undefined) return json(res, 403, {})
       const version = text(body.version)
       if (!/^\d+\.\d+\.\d+$/.test(version)) return json(res, 400, {})
       refreshPackageVersion(version)

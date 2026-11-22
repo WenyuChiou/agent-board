@@ -95,13 +95,20 @@ describe('L3 across agents and sessions', () => {
       // The opened window loads the page and keeps asking, as a real one does.
       await server.page()
       outputs.push(await keeping([['page-zero', '1']], serving))
-      for (const output of outputs) assert.ok(output.includes(server.url), 'The same isolated server address must be reused')
+      for (const output of outputs) {
+        assert.doesNotMatch(output, /\?t=|http:\/\/127\.0\.0\.1:/)
+        assert.ok(!output.includes(server.url), 'window open output must not leak the server address')
+      }
+      assert.ok(outputs[0].includes('Opened Agent Board in your browser.'), outputs[0])
+      assert.ok(outputs[1].includes('Opened Agent Board in your browser.'), outputs[1])
+      assert.ok(outputs[2].includes('already open in your browser.'), outputs[2])
       assert.equal(windows(outputs[0]), 1)
       assert.equal(windows(outputs[2]), 0, outputs[2])
       // The agent's own way to open the page (--html, the same code /agent-board uses) points at the open window too.
       const html = await keeping([['page-zero', '1']], () => command(world, ['--html']))
       assert.equal(windows(html), 0, html)
-      assert.ok(html.includes(server.url), html)
+      assert.doesNotMatch(html, /\?t=|http:\/\/127\.0\.0\.1:/)
+      assert.ok(html.includes('already open in your browser.'), html)
       // A page that says it is leaving is no longer an open window: the next open starts one.
       assert.equal((await leave('page-zero')).status, 200)
       assert.equal(windows(await serving()), 1)

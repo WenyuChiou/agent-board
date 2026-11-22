@@ -55,11 +55,14 @@ export const readPageState = (text: string, previous: PageState = { inboxDone: {
 // The page /progress hands out, read from the script's output. Only a last line that is this
 // language's address line, with a local address, is a link; any other output is data. `isKept`
 // says the script kept an open page because a reply may still be on its way.
-export const liveBoardPage = (stdout: string, s: Pick<Strings, 'serveAt' | 'serveKept'>): { url: string; isKept: boolean } | null => {
+export const liveBoardPage = (stdout: string, s: Pick<Strings, 'serveAt' | 'serveKept'> & Partial<Pick<Strings, 'boardPageWindowOpened' | 'boardPageAlreadyOpen'>>): { url: string; isKept: boolean; opened?: 'window' | 'already' } | null => {
   const lines = stdout.trimEnd().split(/\r?\n/)
   const line = lines.at(-1) ?? ''
-  const match = /http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/\?t=[A-Za-z0-9_-]+$/.exec(line)
+  const isKept = lines.slice(0, -1).includes(s.serveKept)
+  if (typeof s.boardPageWindowOpened === 'string' && line === s.boardPageWindowOpened) return { url: '', isKept, opened: 'window' }
+  if (typeof s.boardPageAlreadyOpen === 'string' && line === s.boardPageAlreadyOpen) return { url: '', isKept, opened: 'already' }
+  const match = /http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/(?:open\/[A-Za-z0-9_-]+|\?t=[A-Za-z0-9_-]+)$/.exec(line)
   const url = match?.[0]
   if (url === undefined || Number(match?.[1]) > 65535 || line !== s.serveAt(url)) return null
-  return { url, isKept: lines.slice(0, -1).includes(s.serveKept) }
+  return { url, isKept }
 }

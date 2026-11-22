@@ -1569,7 +1569,7 @@ const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; t
 
 let isInteractiveSession = true
 
-const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean } | null; needsInstall: boolean; reason?: string }> => {
+const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean; opened?: 'window' | 'already' } | null; needsInstall: boolean; reason?: string }> => {
   // Use the connector's installed file so sessions and agents share the same script
   // and the CLI's existing running-page check.
   const script = liveBoardScript(path)
@@ -1609,6 +1609,7 @@ const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, h
       live = await openLiveBoard($, progress, s, isInteractive)
     }
     const { page, needsInstall, reason } = live
+    if (page !== null && page.url === '') return { text: `${page.opened === 'already' ? s.boardPageAlreadyOpen : s.boardPageWindowOpened}${page.isKept ? `\n${s.serveKept}` : ''}` }
     if (page !== null) return { text: `${headline}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
     return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : `${s.serveFailed(reason ?? s.serveNotStarted)}\n`}${s.livePageCommand(boardRun(liveBoardScript(progress), ['--serve']))}` }
   } finally {

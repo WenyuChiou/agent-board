@@ -51,3 +51,33 @@ test('the progress open command and the pane page button request a browser and r
     expect(JSON.stringify(await ui.drawn())).toContain(url)
   } finally { await ui.unmount() }
 })
+
+test('when a browser window opens or is already open, /progress open and the pane page button omit URLs and ?t= while /open/ fallback keeps only the one-use link', async ($, on) => {
+  const { EN } = await import('../hooks/strings-en')
+  const { LIVE_SCRIPT, installedBoard } = await import('./pane-helpers')
+  const world: World = {
+    files: new Map([[FILE, '## demo\n### Synthetic task\n- [ ] Continue\n'], [LIVE_SCRIPT, installedBoard()]]),
+    mtime: 1, hasTasks: true, liveCalls: [], liveOutput: `${EN.boardPageWindowOpened}\n`,
+    store: { autoConnectOff: true, lang: 'en', inboxDone: {} },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+
+  const opened = await $.command.run({ ...TIDY, args: 'open' })
+  expect(opened.text).toBe(EN.boardPageWindowOpened)
+  expect(opened.text).not.toContain('http://')
+  expect(opened.text).not.toContain('?t=')
+
+  world.liveOutput = `${EN.boardPageAlreadyOpen}\n`
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  try {
+    await ui.press({ key: 'page' })
+    expect(JSON.stringify(await ui.drawn())).not.toContain('?t=')
+  } finally { await ui.unmount() }
+
+  const openUrl = 'http://127.0.0.1:34567/open/synthetic-one-use-code'
+  world.liveOutput = `${EN.serveAt(openUrl)}\n`
+  const fallback = await $.command.run({ ...TIDY, args: 'open' })
+  expect(fallback.text).toContain(`<${openUrl}>`)
+  expect(fallback.text).not.toContain('?t=')
+})

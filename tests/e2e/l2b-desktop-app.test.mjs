@@ -32,20 +32,24 @@ describe('L2 desktop app', () => {
 
       const first = await progress(world, 'en')
       assert.equal(first.status, 0, first.stderr || first.stdout)
+      assert.doesNotMatch(first.stdout, /\?t=/)
       const link = progressLink(first.stdout, EN)
-      assert.ok(link, first.stdout)
+      assert.match(link ?? '', /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/, first.stdout)
       // A quiet start: the reply carries the link, never the board itself.
       for (const words of ['Release the gateway', 'Ship the gateway', 'Publish the docs']) assert.ok(!first.stdout.includes(words), first.stdout)
       noMachineIds(first.stdout, world, { allow: [link] })
 
       server = await serve.start(world)
-      assert.equal(server.url, link, 'The harness attaches to the page /progress started')
+      assert.equal(new URL(link).origin, new URL(server.url).origin, 'The harness attaches to the page /progress started')
 
       // /progress again, from this or another session in any language, reuses the running page.
       for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
         const again = await progress(world, lang)
         assert.equal(again.status, 0, again.stderr || again.stdout)
-        assert.equal(progressLink(again.stdout, words), link, `${lang}: ${again.stdout}`)
+        assert.doesNotMatch(again.stdout, /\?t=/)
+        const againLink = progressLink(again.stdout, words)
+        assert.match(againLink ?? '', /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/, `${lang}: ${again.stdout}`)
+        assert.equal(new URL(againLink).origin, new URL(server.url).origin, `${lang}: ${again.stdout}`)
       }
 
       assert.equal((await server.get('/api/board')).json().model.counts.waiting, 1)

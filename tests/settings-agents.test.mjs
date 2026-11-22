@@ -270,9 +270,12 @@ test('Settings sets up an agent in the home and data folder a normal --serve sta
   mkdirSync(otherData)
   writeFileSync(otherProgress, '# Progress\n\n## Synthetic project\n')
   const out = await new Promise((done, fail) => execFile(process.execPath, [f.script, '--serve', '--no-open', '--home', other, '--data-dir', otherData, '--progress-file', otherProgress, '--lang', 'en'], { env: f.env, encoding: 'utf8', timeout: 20_000, windowsHide: true }, (error, stdout) => (error ? fail(error) : done(stdout))))
-  const address = out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
+  assert.doesNotMatch(out, /\?t=/)
+  const address = out.match(/http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)?.[0]
   assert.ok(address, out)
-  const url = new URL(address)
+  const pageHtml = await (await fetch(address)).text()
+  const pageSession = JSON.parse(pageHtml.match(/<script type="application\/json" id="page-session">([^<]+)<\/script>/)[1])
+  const url = new URL(`/?t=${pageSession}`, address)
   try {
     const added = await transport(url, 'POST', '/api/agents/setup', { agent: 'cursor' })
     assert.equal(added.status, 200, added.text)
