@@ -189,9 +189,9 @@ const settleWake = (one: Message, now: number): Message | undefined => {
 
 export const FINISHED_KEEP_MS = 24 * 60 * 60 * 1000
 export const OPEN_LIMIT_MS = 30 * 60 * 1000
-// The receivers whose `unsent` keeps the message's clock instead of starting a fresh claim's 30 minutes (#1578): the Codex
-// desktop app refuses a second writer for as long as it is open, so each refusal is the same wait, counted by the board from
-// the first one, whatever its receiver remembers (#557).
+// The receivers that may say `held`, which keeps the message's clock instead of starting a fresh claim's 30 minutes (#1578):
+// the Codex desktop app refuses a second writer for as long as it is open, so each refusal is the same wait, counted by the
+// board from the first one, whatever its receiver remembers (#557). Any other give-back is `unsent` and starts no clock.
 const HELD_CLOCK_SURFACES: readonly string[] = [SURFACE_IDS.codexApp]
 export const isHeldTooLong = (one: Pick<Message, 'heldSince'>, now: number): boolean => one.heldSince !== undefined && now - one.heldSince >= OPEN_LIMIT_MS
 export const HOP_LIMIT = 2
@@ -422,8 +422,11 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   // unsent: the connection that holds a claim says it never asked for any of it to be sent, so the message goes back to the
   // queue with its text and the next claim gets its own 30 minutes (#1578). Only a claim nothing else was said of (no accept,
   // no error) and only from the connection the board handed it to; a receiver that cannot tell whether it was sent says uncertain.
-  if (input.status === 'unsent' || input.status === 'starting') {
+  if (input.status === 'unsent' || input.status === 'starting' || input.status === 'held') {
     if (one.status !== 'uncertain' || one.error !== '' || one.hasAccepted === true || one.target !== target.id || isMailboxTarget(one.target) || input.reply !== undefined || input.error !== undefined) throw new Error('INVALID_RECEIPT')
+    // held: an unsent the Codex desktop app's receiver says when Codex refused the writer, and the only receipt that starts the
+    // message's clock; later ones keep the first time, and a plain unsent neither starts nor clears it (#557).
+    if (input.status === 'held' && !HELD_CLOCK_SURFACES.includes(target.surface)) throw new Error('INVALID_RECEIPT')
     const { awaitsStart: _awaitsStart, ...rest } = one
     // starting: the receiver is about to ask its host for the message, so from now on a connection that ends leaves it in doubt.
     // Said twice it changes nothing. It changes nothing else either: the claim still waits for its accept. A reply the Codex
@@ -432,7 +435,7 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
       if (isHeldTooLong(one, now)) throw new Error('APP_STILL_OPEN')
       return one.awaitsStart === true ? { ...state, messages: state.messages.map(message => message === one ? rest : message) } : state
     }
-    const heldSince = HELD_CLOCK_SURFACES.includes(target.surface) ? { heldSince: one.heldSince ?? now } : {}
+    const heldSince = input.status === 'held' ? { heldSince: one.heldSince ?? now } : {}
     return { ...state, messages: state.messages.map(message => message === one ? { ...rest, status: 'queued' as const, claimed: 0, updated: now, ...heldSince } : message) }
   }
   if (!['uncertain', 'accepted', 'acknowledged', 'rejected'].includes(String(input.status))) throw new Error('INVALID_RECEIPT')
@@ -484,5 +487,7 @@ export const rebindMessages = (state: MessageState, target: Connection, isLive: 
   const to = address(target.agent, target.session)
   const isLeft = (one: Message): boolean => one.status === 'queued' && one.to === to && !isMailboxTarget(one.target) && !isLive(one.target)
     && (one.surface === undefined || one.surface === target.surface)
-  return state.messages.some(isLeft) ? { ...state, messages: state.messages.map(one => { if (!isLeft(one)) return one; const { leftAt: _leftAt, ...rest } = one; return { ...rest, target: target.id, turn: target.turn } }) } : state
+  // The app's clock goes with the app: a receiver of another surface that takes the message over starts none (#557, #1578).
+  const isClockKept = HELD_CLOCK_SURFACES.includes(target.surface)
+  return state.messages.some(isLeft) ? { ...state, messages: state.messages.map(one => { if (!isLeft(one)) return one; const { leftAt: _leftAt, heldSince, ...rest } = one; return { ...rest, ...(isClockKept && heldSince !== undefined ? { heldSince } : {}), target: target.id, turn: target.turn } }) } : state
 }

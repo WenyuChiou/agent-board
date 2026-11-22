@@ -160,6 +160,10 @@ export type ProcessResult = {
   spawnErrorMessage: string | null
   stdout: string
   stderr: string
+  // The kept output is its last part only: whether anything but blanks was ever printed, and whether the error output
+  // was longer than the part kept, so a check that needs all of it can tell (#557).
+  hasStdout: boolean
+  isStderrCut: boolean
 }
 
 export const runBackgroundProcess = (
@@ -171,15 +175,17 @@ export const runBackgroundProcess = (
     const killWaitMs = options.killWaitMs ?? KILL_RESUME_WAIT
     let out = ''
     let err = ''
+    let hasStdout = false
+    let isStderrCut = false
     let timer: ReturnType<typeof setTimeout> | undefined
     let isTimedOut = false
     let isDone = false
     let isStarted = false
-    const finish = (partial: Omit<ProcessResult, 'stdout' | 'stderr'>): void => {
+    const finish = (partial: Omit<ProcessResult, 'stdout' | 'stderr' | 'hasStdout' | 'isStderrCut'>): void => {
       if (isDone) return
       isDone = true
       if (timer !== undefined) clearTimeout(timer)
-      resolve({ ...partial, stdout: out, stderr: err })
+      resolve({ ...partial, stdout: out, stderr: err, hasStdout, isStderrCut })
     }
     // The current folder is never searched for a program a shell or script starts by name.
     const spawnOptions = {
@@ -204,10 +210,14 @@ export const runBackgroundProcess = (
       timer = setTimeout(() => finish({ started: isStarted, exitCode: null, timedOut: true, spawnErrorCode: null, spawnErrorMessage: null }), killWaitMs)
     }, maxWaitMs)
     child.stdout?.on('data', (chunk: Buffer) => {
-      out = (out + chunk.toString('utf8')).slice(-8000)
+      const text = chunk.toString('utf8')
+      if (text.trim() !== '') hasStdout = true
+      out = (out + text).slice(-8000)
     })
     child.stderr?.on('data', (chunk: Buffer) => {
-      err = (err + chunk.toString('utf8')).slice(-2000)
+      const all = err + chunk.toString('utf8')
+      if (all.length > 2000) isStderrCut = true
+      err = all.slice(-2000)
     })
     child.on('error', (error: NodeJS.ErrnoException) => {
       finish({ started: false, exitCode: null, timedOut: false, spawnErrorCode: error.code ?? null, spawnErrorMessage: error.message })

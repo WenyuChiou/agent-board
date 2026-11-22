@@ -3,9 +3,10 @@
 // next turn in the background with Codex's own resume command, `codex exec resume <id> -`, once the app has let go of it.
 // Codex itself decides that: while the app has the conversation loaded (shown, or another chat in view), any second writer
 // is refused before anything is written ("thread-store conflict ... already has an active writer"), so no turn of the board
-// can clash with one of the app's. Such a refusal sent nothing: the message goes back to the board's queue and is tried
-// again `retryMs` later. The board counts its time from the first refusal (hooks/messaging.ts, `heldSince`): once an open
-// message's limit (30 minutes) has passed, it is never handed out or begun again, and is refused as not sent.
+// can clash with one of the app's. Such a refusal sent nothing: the receiver gives the message back as `held`, and it is
+// tried again `retryMs` later. Only `held` starts the board's count (hooks/messaging.ts, `heldSince`), and every other
+// give-back is `unsent`: once an open message's limit (30 minutes) has passed since the first refusal, it is never handed out
+// or begun again, and is refused as not sent.
 // Every other outcome follows the shared background-resume rules (scripts/background-resume.ts and
 // docs/MESSAGING.md, "Background resume"): the local board only, the person's default permission mode (no flags), never
 // while the board reads a turn running, a dated live record before Send, and card wording that says the turn runs in the
@@ -31,11 +32,13 @@ const RETRY_MS = 30_000
 const writerLine = (id: string): RegExp => new RegExp(`^(?:Error: )?(?:thread-store conflict: )?thread ${id} already has an active writer\\.?$`)
 
 // Whether a finished run is Codex refusing a second writer, which wrote nothing and asked the model nothing: it failed, it
-// printed no reply at all, and the last line of its error is that sentence for this conversation, whole. Anything else (a
-// reply, an ACK, a timeout, any other error or wording) may have reached the model and is never read as unsent.
+// printed nothing at all (not only in the part of its output kept), its error output was kept whole, and that output's last
+// line is that sentence for this conversation, whole. Anything else (a reply, an ACK, a timeout, any other error or
+// wording, an output too long to read whole) may have reached the model and is never read as unsent.
 export const isWriterHeld = (result: ProcessResult, id: string): boolean => {
   const last = result.stderr.split(/\r?\n/).map(line => line.trim()).filter(line => line !== '').at(-1) ?? ''
-  return result.started && !result.timedOut && result.exitCode !== null && result.exitCode !== 0 && result.stdout.trim() === '' && THREAD.test(id) && writerLine(id).test(last)
+  return result.started && !result.timedOut && result.exitCode !== null && result.exitCode !== 0 && result.hasStdout === false && result.isStderrCut === false
+    && result.stdout.trim() === '' && THREAD.test(id) && writerLine(id).test(last)
 }
 
 // The board's address and token live only in this process, and the app's own name is not passed on: the resumed turn is the
@@ -87,13 +90,19 @@ export const startCodexAppReceiver = ({
   // Conversations with a run in flight, and when one Codex refused may be tried again.
   const running = new Set<string>()
   const heldUntil = new Map<string, number>()
+  // Connections this receiver let go of (a lost connection, the list, a stopped board) while a delivery's receipt was still on
+  // its way: they count for their conversation until it is sent, so a new connection takes nothing meanwhile.
+  const draining = new Map<string, Attached[]>()
   let listed = new Map<string, string>(), isClosed = false, isTicking = false
 
   const isWanted = (id: string): boolean => !isClosed && listed.has(id) && !isTaken(id)
   // A conversation with a run in flight keeps its connection until the run's receipt is in, whatever the list says meanwhile:
   // closing it would leave the board a claim it lost the connection of (`uncertain`) for a turn that may well have run. The
   // board client counts a delivery as sending until its receipt has been sent, which is after the run is over.
-  const isSending = (id: string): boolean => attached.get(id)?.isSending?.() === true
+  const isSending = (id: string): boolean => attached.get(id)?.isSending?.() === true || (draining.get(id) ?? []).some(one => one.isSending?.() === true)
+  const letGo = (id: string, one: Attached): void => {
+    if (one.isSending?.() === true) draining.set(id, [...(draining.get(id) ?? []), one])
+  }
   const isKept = (id: string): boolean => !isClosed && (running.has(id) || isSending(id)) || isWanted(id)
   const giveBack = async (unsent: () => Promise<unknown>): Promise<undefined> => {
     try { await unsent() } catch (error) { onError(error) }
@@ -106,7 +115,7 @@ export const startCodexAppReceiver = ({
       verify: async () => isKept(id),
       // One reply at a time: none while a run lasts, or while the last one's receipt is still on its way.
       canReceive: async () => !running.has(id) && !isSending(id) && now() >= (heldUntil.get(id) ?? 0) && stateOf(id) === 'idle' && isWanted(id),
-      deliver: async (message: { id: string; nonce?: string; prompt?: string }, _accept: () => Promise<unknown>, begin: () => void, unsent: () => Promise<unknown>, starting: () => Promise<unknown>) => {
+      deliver: async (message: { id: string; nonce?: string; prompt?: string }, _accept: () => Promise<unknown>, begin: () => void, unsent: () => Promise<unknown>, starting: () => Promise<unknown>, held: () => Promise<unknown>) => {
         const dir = listed.get(id)
         // Never mid-turn (limit 3): a conversation the board no longer reads as idle, or one this receiver is running, gets
         // nothing, and the claim goes back to the queue with its text.
@@ -126,11 +135,11 @@ export const startCodexAppReceiver = ({
           const result = await run(programFor(executable, args), { cwd: dir, stdin: prompt, maxWaitMs, env: childEnvironment(env) })
           // Nothing ran: the claim is refused with the reason, and nothing reached Codex.
           if (!result.started) throw new Error(result.spawnErrorCode === 'ENOENT' ? 'COMMAND_MISSING' : 'SPAWN_FAILED')
-          // Nothing was sent: back to the queue. The board keeps the time of the first refusal, so an app left open does not
-          // keep the message queued for ever.
+          // Nothing was sent: back to the queue as `held`. The board keeps the time of the first refusal, so an app left open
+          // does not keep the message queued for ever.
           if (isWriterHeld(result, id)) {
             heldUntil.set(id, now() + retryMs)
-            return await giveBack(unsent)
+            return await giveBack(held)
           }
           // From here the turn may have reached the model: any failure is uncertain, and nothing runs it again.
           begin()
@@ -157,10 +166,16 @@ export const startCodexAppReceiver = ({
       for (const [id, one] of [...attached]) {
         if (one.isClosed() || !isKept(id)) {
           attached.delete(id)
+          letGo(id, one)
           if (!one.isClosed()) await one.close().catch(onError)
         }
       }
       for (const id of [...heldUntil.keys()]) if (!listed.has(id)) heldUntil.delete(id)
+      for (const [id, left] of [...draining]) {
+        const still = left.filter(one => one.isSending?.() === true)
+        if (still.length > 0) draining.set(id, still)
+        else draining.delete(id)
+      }
       for (const id of listed.keys()) {
         if (attached.has(id) || attaching.has(id) || !isWanted(id)) continue
         attaching.add(id)
@@ -177,12 +192,15 @@ export const startCodexAppReceiver = ({
     attached: () => [...attached.keys()],
     // How many background turns it is running now, or still sending the receipt of: the board does not stop for being
     // idle while one does.
-    sending: () => new Set([...running, ...[...attached.keys()].filter(isSending)]).size,
+    sending: () => new Set([...running, ...[...attached.keys(), ...draining.keys()].filter(isSending)]).size,
     kill: () => {
       if (isClosed) return
       isClosed = true
       clearInterval(timer)
-      for (const one of attached.values()) void one.close().catch(onError)
+      for (const [id, one] of attached) {
+        letGo(id, one)
+        void one.close().catch(onError)
+      }
       attached.clear()
     },
   }
