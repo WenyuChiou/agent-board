@@ -8851,13 +8851,14 @@ test('a page whose process runs and whose port takes the connection but says not
   const stale = `http://127.0.0.1:${port}/?t=quiet`
   addressFixture(board.served, JSON.stringify({ pid: process.pid, port, url: stale, path: board.path, built: '' }))
   try {
-    const out = await board.serve()
+    const { status, out } = await board.serveFailing()
+    assert.equal(status, 1, out)
     assert.equal(board.urlOf(out), null, out)
     assert.equal(board.openUrlOf(out), null, out)
     assert.doesNotMatch(out, /\?t=/)
     assert.ok(!out.includes(stale), out)
     assert.ok(out.includes('A reply may still be on its way to an agent, so the board page that is already open is kept'), out)
-    assert.equal(out.trim().split(/\r?\n/).at(-1), EN.boardPageAlreadyOpen, out)
+    assert.equal(out.trim().split(/\r?\n/).at(-1), EN.serveKeptNoLink, out)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, stale)
   } finally {
     for (const socket of sockets) socket.destroy()
