@@ -234,8 +234,8 @@ from another release and you open the board in a terminal, `agent-board` first r
 `setup --update` for the same agents and data folder: it updates in one line, or asks its one
 question when something it must ask about changed. Answer anything but `y` and nothing
 changes; the board then opens on the copy that is there (Ctrl-C stops both). Outside a
-terminal, or with `--json`
-or a management command, `agent-board` says on stderr that the copy is from another release
+terminal, for anything but opening the board (`stop`, `--json`, a management command), or
+when setup cannot start, `agent-board` says on stderr that the copy is from another release
 and names the command that updates it: a setup preview for the same agents and data folder;
 add `--apply` to update it, which still leaves files you edited alone. For the Claude Code
 plugin's copy, it is updating the plugin, then `/progress connect`. Installing runs nothing: the package has no

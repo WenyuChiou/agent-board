@@ -6,6 +6,7 @@ import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
+import { setupAgents } from '../scripts/setup-discovery.mjs'
 
 const pkg = fileURLToPath(new URL('..', import.meta.url))
 const { name, version: v } = JSON.parse(readFileSync(join(pkg, 'package.json'), 'utf8'))
@@ -286,20 +287,26 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
       const path = shown(installed)
       if (old && typeof prelude.codexRoot === 'string') {
         let root = resolve(prelude.codexRoot)
-        // The agents scripts/setup-agent.mjs knows; another install-*.json (a backup copy) is not one.
-        const targets = ['codex', 'cursor', 'opencode', 'gemini', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
-        const listed = folder => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => targets.includes(agent)).sort() } catch { return undefined } }
+        // The agents setup installs: another install-*.json (a backup copy, or a retired agent's record, which setup
+        // refuses by name) is not one (#1783).
+        const listed = folder => { try { return readdirSync(folder, { withFileTypes: true }).filter(entry => entry.isFile() && /^install-.+\.json$/.test(entry.name)).map(entry => entry.name.slice(8, -5)).filter(agent => setupAgents.includes(agent)).sort() } catch { return undefined } }
         let agents = listed(root)
         // A moved data folder: the board script's own folder is where the board is now.
         if (!agents) { root = dirname(installed); agents = listed(root) ?? [] }
         const folder = shown(root)
         const opts = (agents.length ? ` --agent ${agents.join(',')}` : '') + (root !== join(home, '.agent-board') ? ` --data-dir ${/[^\w.:\\/~@+,=-]/.test(folder) ? `"${folder}"` : folder}` : '')
+        const notice = message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`)
         // A person opening the board in a terminal gets the update itself, with setup's one question, in the install root
-        // the script names (#1314). Declined or failed, the board still opens on the script that is there.
-        if (process.stdin.isTTY && process.stdout.isTTY && !args.includes('--json') && !args.some(arg => managing.includes(arg))) {
+        // the script names (#1314). Declined or failed, the board still opens on the script that is there. Only opening
+        // the board does this: stop, reports, hook events and management commands run as they are, with the notice (#1783).
+        const viewing = ['--print', '--watch', '--html', '--serve', '--all', '--plain', '--no-color', '--no-open', '--stopped', '--unsent']
+        const isOpening = passArgs.every((arg, i) => viewing.includes(arg) || arg === '--lang' || passArgs[i - 1] === '--lang')
+        if (process.stdin.isTTY && process.stdout.isTTY && isOpening) {
           const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : []), ...(flag('--lang') ? ['--lang', flag('--lang')] : [])], { stdio: 'inherit', env: { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name}@${v} setup` }, windowsHide: true })
           if (update.signal) { process.kill(process.pid, update.signal); process.exit(1) }
-        } else console.error(message(`agent-board ${v}: the board script at ${path} is from ${old}. To update it, preview: npx ${name}@${v} setup${opts}, then add --apply.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版。更新前先預覽：npx ${name}@${v} setup${opts}，再加上 --apply。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版。更新前先预览：npx ${name}@${v} setup${opts}，再加上 --apply。`))
+          // A setup that could not start printed nothing, so the notice names the command instead (#1783).
+          if (update.error) console.error(notice)
+        } else console.error(notice)
       } else {
         console.error(old
           ? message(`agent-board ${v}: the board script at ${path} is from ${old}; the Claude Code plugin wrote it. To update it, update the agent-board plugin in Claude Code, then run /progress connect.`, `agent-board ${v}：${path} 的看板程式是 ${old} 版，由 Claude Code 外掛寫入。更新：先在 Claude Code 更新 agent-board 外掛，再執行 /progress connect。`, `agent-board ${v}：${path} 的看板程序是 ${old} 版，由 Claude Code 插件写入。更新：先在 Claude Code 更新 agent-board 插件，再运行 /progress connect。`)
