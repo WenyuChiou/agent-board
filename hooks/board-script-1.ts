@@ -10065,7 +10065,7 @@ export const LINES = [
 "  }",
 "  return seen;",
 "};",
-"var isReleaseHermesOptions = (options, matcher) => options !== undefined && options.size === (matcher === undefined ? 1 : 2) && Number(options.get(\"timeout\")) === hostHookTimeout(\"hermes\") && (matcher === undefined || options.get(\"matcher\") === matcher);",
+"var isReleaseHermesOptions = (options, matcher) => options !== undefined && options.size === (matcher === undefined ? 1 : 2) && options.get(\"timeout\") === String(hostHookTimeout(\"hermes\")) && (matcher === undefined || options.get(\"matcher\") === matcher);",
 "var hermesSetupItemOf = (lines) => {",
 "  const first = lines[0];",
 "  if (first === undefined)",

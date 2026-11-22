@@ -444,10 +444,11 @@ const hermesOptionsOf = (options: readonly string[]): ReadonlyMap<string, string
   return seen
 }
 
-// Exactly the options this release writes for an event: its timeout, and its matcher when it has one.
+// Exactly the options this release writes for an event: its timeout, and its matcher when it has one. The
+// timeout is compared as text: Hermes reads `010` as 8 (a leading zero is octal to PyYAML), not 10.
 const isReleaseHermesOptions = (options: ReadonlyMap<string, string> | undefined, matcher: string | undefined): boolean =>
   options !== undefined && options.size === (matcher === undefined ? 1 : 2) &&
-  Number(options.get('timeout')) === hostHookTimeout('hermes') && (matcher === undefined || options.get('matcher') === matcher)
+  options.get('timeout') === String(hostHookTimeout('hermes')) && (matcher === undefined || options.get('matcher') === matcher)
 
 type HermesSetupItem = { command: string; isSimple: boolean; options?: ReadonlyMap<string, string> }
 
