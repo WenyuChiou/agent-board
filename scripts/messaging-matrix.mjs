@@ -1,7 +1,7 @@
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { isNote, isRoute, routeRecord, SURFACE_IDS } from '../hooks/messaging.ts'
+import { isNote, isRoute, routeLine, routeRecord, SURFACE_IDS } from '../hooks/messaging.ts'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const start = '<!-- messaging-matrix:start -->'
@@ -135,12 +135,12 @@ const link = (path, file) => `[${cell(path)}](${file.startsWith('docs/') ? '../'
 
 // A route's line, and the note that showed it live when the file is there.
 // A route recorded for some surfaces only shows its note on those rows, and a surface's own note on that route
-// (routeRecord, the note the send gate reads) where it names one.
+// (routeRecord, the note the send gate reads) where it names one, and a surface's own line (routeLine) the same way.
 const routeCell = (route, file, directory, s, surface) => {
   if (!route) return s.none
-  const note = routeRecord(route, surface)
-  if (note === null || !route.surfaces.includes(surface)) return `${route.line} · ${s.noRecord}`
-  return `${route.line} · ${hasEarlierRun(directory, note) ? link(note, file) : s.noRecord}`
+  const note = routeRecord(route, surface), line = routeLine(route, surface)
+  if (note === null || !route.surfaces.includes(surface)) return `${line} · ${s.noRecord}`
+  return `${line} · ${hasEarlierRun(directory, note) ? link(note, file) : s.noRecord}`
 }
 
 export const renderMatrix = (records, file, directory = root) => {

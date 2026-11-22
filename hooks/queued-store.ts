@@ -1,5 +1,5 @@
 import { expireMailboxes, MAILBOX_CAP, mailboxId } from './hook-messages'
-import { FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageId, messageText, OPEN_CAP, pruneMessages, ROUTE_LINES, shownMessage, textHash } from './messaging'
+import { FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageId, messageText, OPEN_CAP, pruneMessages, ROUTE_LINES, shownMessage, SURFACE_IDS, textHash } from './messaging'
 import type { Connection, MessageState } from './messaging'
 import { addressKey } from './receiver'
 import { sha256 } from './sha256'
@@ -25,7 +25,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean' || one.awaitsStart !== undefined && one.awaitsStart !== true) throw new Error('INVALID_MESSAGE_STORE')
-    if (one.leftAt !== undefined && !Number.isFinite(one.leftAt)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.leftAt !== undefined && !Number.isFinite(one.leftAt) || one.heldSince !== undefined && !Number.isFinite(one.heldSince)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.line !== undefined && !ROUTE_LINES.includes(one.line)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.surface !== undefined && (typeof one.surface !== 'string' || one.surface === '' || /[\r\n]/.test(one.surface))) throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
@@ -54,8 +54,10 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
 
 // The answers waiting for a session's next turn, in the shape the page's model reads: no connection (only the
 // running page has those), the mailboxes still open at `now`, and each message as anyone but its receiver sees it.
+// The surface itself stays off the page; a message to a Codex desktop app conversation is marked, since it runs only once the
+// app has let go of the conversation and the page says so while it waits (#557).
 export const shownMessages = (state: Pick<MessageState, 'messages' | 'mailboxes'>) =>
-  state.messages.map(one => ({ ...shownMessage(one), ...(isMailboxSurfaceLost(one, state.mailboxes) ? { isSurfaceLost: true as const } : {}) }))
+  state.messages.map(one => ({ ...shownMessage(one), ...(isMailboxSurfaceLost(one, state.mailboxes) ? { isSurfaceLost: true as const } : {}), ...(one.surface === SURFACE_IDS.codexApp ? { isAfterAppQuit: true as const } : {}) }))
 export const queuedMessagingOf = (text: string, now: number) => {
   const state = expireMailboxes(parseMessageStore(text, now), now)
   return { connections: [] as Connection[], mailboxes: state.mailboxes ?? [], messages: shownMessages(state) }

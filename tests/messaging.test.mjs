@@ -1,7 +1,7 @@
 import childProcess, { execFileSync, spawn, spawnSync } from 'node:child_process'
 import fs, { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, join, sep } from 'node:path'
 import { createServer, request } from 'node:http'
 import { createHash } from 'node:crypto'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
@@ -12,7 +12,7 @@ import { partTest } from '../scripts/ci-impact.mjs'
 import { turnOrDeferred } from './helpers/deferred-turn.mjs'
 import { ACK_MAX, FINISHED_KEEP_COUNT, FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, OPEN_CAP, OPEN_LIMIT_MS, address, agentOf, claimMessages, deliveryText, disconnectMessages, dismissMessage, messageReceipt, pruneMessages, queueMessage, rebindMessages } from '../hooks/messaging.ts'
 import { boardClient, connectionPrompt, deliveryPrompt } from '../scripts/message-client.mjs'
-import { isNote, observeSession, routeRecord } from '../hooks/messaging.ts'
+import { isNote, observeSession, routeLine, routeRecord } from '../hooks/messaging.ts'
 import { connectCodexProxy } from '../scripts/codex-message-connector.mjs'
 import { attachCodexSession } from '../scripts/codex-session-connector.mjs'
 import { explicitCodexExecutable, hasUnloadDelay, resolveCodexExecutable, startCodexReceiver, testUnloadMs } from '../scripts/codex-receiver.mjs'
@@ -1150,7 +1150,8 @@ const startTrace = file => {
   const read = line => { try { return JSON.parse(line) } catch { return { phase: 'unreadable line' } } }
   return text.split('\n').map(read).map(one => one.ms === undefined ? `${one.phase}@${one.at}` : `${one.phase} ${one.ms}ms@${one.at}`).join(', ')
 }
-const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messages')], routes = testUnitRoutes) => {
+// env: variables this board gets over the folder's own (a test that names its own CODEX_HOME).
+const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messages')], routes = testUnitRoutes, env = {}) => {
   // The board uses XDG_RUNTIME_DIR only when no other account can open it.
   const runtime = join(dir, 'runtime'); mkdirSync(runtime, { recursive: true, mode: 0o700 })
   // `--serve` makes this folder private before it starts the page (runningPage reads its address
@@ -1174,7 +1175,7 @@ const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messa
   const startedAt = performance.now()
   // The boards these tests start take every route as shown live, like the page tests; the real records are tested apart.
   const routesFile = join(dir, 'routes.json'); writeFileSync(routesFile, JSON.stringify(routes))
-  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, AGENT_BOARD_CODEX_BIN: process.env.AGENT_BOARD_CODEX_BIN ?? '', CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_ROUTES: routesFile, HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }) }, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, AGENT_BOARD_CODEX_BIN: process.env.AGENT_BOARD_CODEX_BIN ?? '', CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_ROUTES: routesFile, HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }), ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
   const exited = new Promise(done => child.once('exit', done))
   let address
   try { address = await new Promise((done, fail) => {
@@ -5213,6 +5214,130 @@ test('an unsent receipt from the connection that holds a claim puts the message 
   assert.throws(() => messageReceipt(queued, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2), /CLAIM_REQUIRED/)
 })
 
+test('a reply the app keeps refusing until the message\'s 30-minute limit is refused as not sent, not kept waiting for ever', () => {
+  // The Codex desktop app's receiver gives a claim back as held each time the app refuses it (#557). The board stamps the first
+  // refusal and keeps that stamp, so the limit counts from it, whatever the receiver remembers, and across a restart.
+  const now = Date.now()
+  const app = { id: 'synthetic-app-binding', agent: 'codex', session: 'held-session', turn: 'session', surface: SURFACE_IDS.codexApp, expires: now + 2 * OPEN_LIMIT_MS }
+  const held = (state, id = 'held-one') => state.messages.find(one => one.id === id)
+  const refuse = (state, at, id = 'held-one') => {
+    const claimed = claimMessages(state, app, at, 'abcdef')
+    assert.deepEqual(claimed.messages.map(one => one.id), [id], `handed out ${at - now} ms on`)
+    return messageReceipt(claimed.state, app, { id, nonce: claimed.messages[0].nonce, status: 'held' }, at + 1)
+  }
+  const queued = queueMessage({ messages: [] }, { id: 'held-one', target: app.id, turn: app.turn, text: 'Check the build.' }, 'board', app, now).state
+  const once = refuse(queued, now + 1)
+  assert.deepEqual([held(once).status, held(once).text, held(once).heldSince], ['queued', 'Check the build.', now + 2])
+  const twice = refuse(once, now + 30_000)
+  assert.equal(held(twice).heldSince, now + 2, 'a later refusal keeps the first one\'s time')
+  // A restarted board reads the stamp back, and refuses a store whose stamp is not a time.
+  assert.equal(held(parseMessageStore(JSON.stringify({ version: 2, ...twice }), now + 60_000)).heldSince, now + 2)
+  assert.throws(() => parseMessageStore(JSON.stringify({ version: 2, messages: [{ ...held(twice), heldSince: 'soon' }] }), now + 60_000), /INVALID_MESSAGE_STORE/)
+  const limit = now + 2 + OPEN_LIMIT_MS
+  // Just inside the limit it is handed out, and a run begun then stands, even when its ACK comes after the limit.
+  const late = claimMessages(twice, app, limit - 1, 'abcdef')
+  assert.equal(late.messages.length, 1)
+  const begun = messageReceipt(late.state, app, { id: 'held-one', nonce: 'abcdef', status: 'starting' }, limit - 1)
+  assert.equal(held(messageReceipt(begun, app, { id: 'held-one', nonce: 'abcdef', status: 'acknowledged', reply: 'ACK abcdef' }, limit + 60_000)).status, 'acknowledged')
+  assert.equal(held(pruneMessages(twice, limit - 1)).status, 'queued')
+  // From the limit on, it is never handed out, a claim taken before is never begun, and the board refuses it as not sent by
+  // itself, with no receiver to ask.
+  assert.equal(claimMessages(twice, app, limit, 'abcdef').messages.length, 0)
+  assert.throws(() => messageReceipt(late.state, app, { id: 'held-one', nonce: 'abcdef', status: 'starting' }, limit), /APP_STILL_OPEN/)
+  const refused = held(pruneMessages(twice, limit))
+  assert.deepEqual([refused.status, refused.error, refused.text], ['rejected', 'APP_STILL_OPEN', ''])
+  // Another message starts its own time.
+  const next = queueMessage(dismissMessage(twice, 'held-one', now + 60_000), { id: 'held-two', target: app.id, turn: app.turn, text: 'Check the docs.' }, 'board', app, now + 60_000).state
+  assert.equal(held(next, 'held-two').heldSince, undefined)
+  assert.equal(held(refuse(next, now + 61_000, 'held-two'), 'held-two').heldSince, now + 61_001)
+  // Any other receiver's unsent receipt keeps its fresh claim's 30 minutes, as before (#1578): no stamp, and no refusal.
+  const daemon = { ...app, id: 'synthetic-daemon-binding', surface: SURFACE_IDS.codexDaemon }
+  const other = queueMessage({ messages: [] }, { id: 'other-one', target: daemon.id, turn: daemon.turn, text: 'Check the build.' }, 'board', daemon, now).state
+  const otherClaim = claimMessages(other, daemon, now + 1, 'abcdef')
+  const otherBack = messageReceipt(otherClaim.state, daemon, { id: 'other-one', nonce: 'abcdef', status: 'unsent' }, now + 2)
+  assert.equal(held(otherBack, 'other-one').heldSince, undefined)
+  assert.equal(held(pruneMessages(otherBack, limit + 60_000), 'other-one').status, 'queued')
+})
+
+// The Codex desktop app's receiver and a connection of the same session, for the held-receipt tests below (#557).
+const appConnection = (session, now, id = `synthetic-app-${session}`) => ({ id, agent: 'codex', session, turn: 'session', surface: SURFACE_IDS.codexApp, expires: now + 3 * OPEN_LIMIT_MS })
+const messageIn = (state, id) => state.messages.find(one => one.id === id)
+const queuedFor = (target, id, now) => queueMessage({ messages: [] }, { id, target: target.id, turn: target.turn, text: 'Check the build.' }, 'board', target, now).state
+const givenBack = (state, target, id, at, status) => {
+  const claimed = claimMessages(state, target, at, 'abcdef')
+  assert.deepEqual(claimed.messages.map(one => one.id), [id], `handed out to ${target.id} for ${status}`)
+  return messageReceipt(claimed.state, target, { id, nonce: claimed.messages[0].nonce, status }, at + 1)
+}
+
+test('only Codex\'s writer refusal starts the 30-minute limit; any other give-back does not', () => {
+  const now = Date.now()
+  const app = appConnection('held-start', now)
+  // A give-back that is not Codex's refusal (a turn began, or the receiver let go of the conversation) starts no clock.
+  const other = givenBack(queuedFor(app, 'start-one', now), app, 'start-one', now + 1, 'unsent')
+  assert.equal(messageIn(other, 'start-one').heldSince, undefined)
+  // Codex refuses the writer for the first time 20 minutes on: the limit counts from there.
+  const first = now + 20 * 60_000
+  const refused = givenBack(other, app, 'start-one', first, 'held')
+  assert.equal(messageIn(refused, 'start-one').heldSince, first + 1)
+  const again = givenBack(refused, app, 'start-one', first + 60_000, 'unsent')
+  assert.equal(messageIn(again, 'start-one').heldSince, first + 1, 'another kind of give-back neither restarts nor clears it')
+  // Thirty minutes after the message was first handed out it is still handed out; thirty after the refusal, it is refused.
+  const early = now + OPEN_LIMIT_MS + 60_000
+  assert.equal(claimMessages(again, app, early, 'abcdef').messages.length, 1)
+  assert.equal(messageIn(pruneMessages(again, early), 'start-one').status, 'queued')
+  const limit = first + 1 + OPEN_LIMIT_MS
+  assert.equal(messageIn(pruneMessages(again, limit - 1), 'start-one').status, 'queued')
+  assert.deepEqual(['status', 'error'].map(key => messageIn(pruneMessages(again, limit), 'start-one')[key]), ['rejected', 'APP_STILL_OPEN'])
+})
+
+test('a held receipt is taken only from the app\'s receiver, for a claim nothing was said of', () => {
+  const now = Date.now()
+  const app = appConnection('held-only', now)
+  const held = (state, target, extra = {}) => messageReceipt(state, target, { id: 'only-one', nonce: 'abcdef', status: 'held', ...extra }, now + 2)
+  const queued = queuedFor(app, 'only-one', now)
+  const claimed = claimMessages(queued, app, now + 1, 'abcdef').state
+  assert.throws(() => held(queued, app), /CLAIM_REQUIRED/)
+  assert.throws(() => held(claimed, { ...app, id: 'synthetic-app-held-only-2' }), /INVALID_RECEIPT/, 'another connection of the session')
+  assert.throws(() => held(claimed, app, { error: 'BUSY' }), /INVALID_RECEIPT/)
+  assert.throws(() => held(claimed, app, { reply: 'ACK abcdef' }), /INVALID_RECEIPT/)
+  const accepted = messageReceipt(claimed, app, { id: 'only-one', nonce: 'abcdef', status: 'accepted' }, now + 2)
+  assert.throws(() => held(accepted, app), /INVALID_RECEIPT/, 'after an accept')
+  // Any other receiver says unsent: only the app's refusal is a wait the board counts.
+  const daemon = { ...appConnection('held-only', now, 'synthetic-daemon-held-only'), surface: SURFACE_IDS.codexDaemon }
+  const daemonClaimed = claimMessages(queuedFor(daemon, 'only-one', now), daemon, now + 1, 'abcdef').state
+  assert.throws(() => held(daemonClaimed, daemon), /INVALID_RECEIPT/, 'from the daemon receiver')
+  const taken = messageIn(held(claimed, app), 'only-one')
+  assert.deepEqual([taken.status, taken.text, taken.heldSince], ['queued', 'Check the build.', now + 2])
+})
+
+test('a message the daemon takes over drops the app\'s limit', () => {
+  const now = Date.now()
+  const app = appConnection('handed-session', now)
+  const daemon = { ...appConnection('handed-session', now, 'synthetic-daemon-handed'), surface: SURFACE_IDS.codexDaemon }
+  // A message that names no surface, as a peer's does, may go to either receiver of the session.
+  const held = givenBack(queuedFor(app, 'handed-one', now), app, 'handed-one', now + 1, 'held')
+  assert.equal(messageIn(held, 'handed-one').heldSince, now + 2)
+  // The app's receiver lets go 29 minutes on (not ended), and the daemon's receiver of the session takes the message over.
+  const left = disconnectMessages(held, app.id, now + 29 * 60_000, true)
+  const taken = rebindMessages(left, daemon, id => id === daemon.id)
+  assert.deepEqual(['target', 'heldSince', 'leftAt'].map(key => messageIn(taken, 'handed-one')[key]), [daemon.id, undefined, undefined])
+  const back = givenBack(taken, daemon, 'handed-one', now + 29 * 60_000 + 1000, 'unsent')
+  assert.equal(messageIn(pruneMessages(back, now + 2 + OPEN_LIMIT_MS + 60_000), 'handed-one').status, 'queued', 'as any message the daemon gives back (#1578)')
+  // The app's own next receiver keeps the limit.
+  const appAgain = appConnection('handed-session', now, 'synthetic-app-handed-2')
+  assert.equal(messageIn(rebindMessages(left, appAgain, id => id === appAgain.id), 'handed-one').heldSince, now + 2)
+})
+
+test('a reply queued for the app keeps its leave stamp and its limit when the receiver lets go', () => {
+  const now = Date.now()
+  const app = appConnection('left-session', now)
+  const held = givenBack(queuedFor(app, 'left-one', now), app, 'left-one', now + 1, 'held')
+  // The receiver closes without `ended` (#318): the reply stays queued with its text, the time it was left and its limit.
+  const left = disconnectMessages(held, app.id, now + 60_000, true)
+  assert.deepEqual(['status', 'text', 'leftAt', 'heldSince'].map(key => messageIn(left, 'left-one')[key]), ['queued', 'Check the build.', now + 60_000, now + 2])
+  assert.equal(messageIn(disconnectMessages(left, app.id, now + 120_000, true), 'left-one').leftAt, now + 60_000, 'left again, it keeps the first time')
+})
+
 // The claim meets the person's turn, which ends right after the receiver leaves again. A whole wait is 2 s here and the claim's time
 // 4 s, so the receiver gives the claim back while it watches the idle thread again (with less than 2.2 s left, about 1.8 s in), and the
 // thread reads as a person's about 2 s after the turn ended, well inside the claim's time.
@@ -6776,6 +6901,168 @@ test('a page that stops, is replaced, or reaches idle while a Codex delivery is 
   }
 })
 
+test('a page that stops, is replaced, or reaches idle while a Codex desktop app turn runs in the background waits for it to settle (#557)', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-app-close-'))
+  const app = '99999999-8888-4777-8666-555555555555'
+  writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${app} dir=${encodeURIComponent(dir)} state=waiting updated=${new Date().toISOString()} -->\n### A Codex app task\n- [?] Orange or teal?\n<!-- /auto session=abcdef01 -->\n`)
+  // The board's Codex home is the test folder (start sets CODEX_HOME): the history names the desktop app as where it began.
+  const day = join(dir, 'sessions', '2026', '11', '22')
+  mkdirSync(day, { recursive: true })
+  writeFileSync(join(day, `rollout-2026-11-22T00-00-00-${app}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: app, originator: 'Codex Desktop', cwd: dir } }) + '\n')
+  const log = join(dir, 'exec.log'), release = join(dir, 'release-run'), stub = join(dir, 'exec-stub.json')
+  writeFileSync(stub, JSON.stringify({ log, release }))
+  process.env.AGENT_BOARD_CODEX_BIN = fileURLToPath(new URL('./helpers/codex-exec-stub.mjs', import.meta.url))
+  process.env.CODEX_EXEC_STUB = stub
+  codexShortWait()
+  let board
+  try {
+    // The tests' route table with the app's own surface and line added, as the shipped Codex route has them.
+    const appRoutes = testUnitRoutes.map(one => one.agent === 'codex' && one.kind === 'live'
+      ? { ...one, routes: { ...one.routes, idle: { ...one.routes.idle, surfaces: [...one.routes.idle.surfaces, SURFACE_IDS.codexApp], surfaceLines: { [SURFACE_IDS.codexApp]: 'reopen' } } } }
+      : one)
+    board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send', '--idle-minutes', '0.03'], appRoutes)
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === app && one.surface === SURFACE_IDS.codexApp))
+    const send = await board.call('/api/messages/send', { id: 'AB-APP-001', target: connection.id, turn: 'session', text: 'Teal.' })
+    assert.equal(send.status, 200, JSON.stringify(send.body))
+    const sent = async () => (await board.call('/api/board')).body.messaging.messages.find(one => one.id === 'AB-APP-001')
+
+    // The turn runs in the background, held until the release file is there: the page counts it, refuses to close and
+    // does not stop for being idle.
+    await waitFor(async () => (readFileSyncSafe(log) ?? '').includes('"resume"'))
+    assert.deepEqual(JSON.parse((readFileSyncSafe(log) ?? '').split('\n')[0]).args, ['exec', 'resume', '--skip-git-repo-check', app, '-'])
+    assert.equal((await board.call('/api/ping')).body.sending, 1)
+    assert.equal((await board.call('/api/close', {})).status, 409)
+    assert.equal((await board.call('/api/close', { moved: true })).status, 409)
+    await pause(2100)
+    assert.equal((await board.call('/api/ping')).body.sending, 1)
+    assert.equal((await board.call('/api/close', {})).status, 409)
+
+    // The turn answers with its ACK: the receipt is in, nothing is sending, and the page stops cleanly.
+    writeFileSync(release, '')
+    await waitFor(async () => (await sent())?.status === 'acknowledged')
+    await waitFor(async () => (await board.call('/api/ping')).body.sending === 0)
+    assert.equal((await board.call('/api/close', {})).status, 200)
+    await board.exited
+    board = undefined
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_EXEC_STUB; codexShortWait(false)
+    writeFileSync(release, '')
+    await board?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
+  }
+})
+
+test('a reply the Codex desktop app refuses goes back to the board\'s queue with its text and the time of the first refusal', async () => {
+  // The board, its client and the app's receiver as shipped, with a stand-in Codex that refuses as Codex does while the app
+  // holds the conversation: the receiver's `held` receipt reaches the board through the client (#557).
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-app-held-'))
+  const app = '99999999-8888-4777-8666-444444444444'
+  writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef02 agent=codex resume=${app} dir=${encodeURIComponent(dir)} state=waiting updated=${new Date().toISOString()} -->\n### A Codex app task\n- [?] Orange or teal?\n<!-- /auto session=abcdef02 -->\n`)
+  const day = join(dir, 'sessions', '2026', '11', '22')
+  mkdirSync(day, { recursive: true })
+  writeFileSync(join(day, `rollout-2026-11-22T00-00-00-${app}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: app, originator: 'Codex Desktop', cwd: dir } }) + '\n')
+  const log = join(dir, 'exec.log'), release = join(dir, 'release-run'), stub = join(dir, 'exec-stub.json')
+  writeFileSync(stub, JSON.stringify({ log, release, refuse: true }))
+  process.env.AGENT_BOARD_CODEX_BIN = fileURLToPath(new URL('./helpers/codex-exec-stub.mjs', import.meta.url))
+  process.env.CODEX_EXEC_STUB = stub
+  codexShortWait()
+  let board
+  try {
+    const appRoutes = testUnitRoutes.map(one => one.agent === 'codex' && one.kind === 'live'
+      ? { ...one, routes: { ...one.routes, idle: { ...one.routes.idle, surfaces: [...one.routes.idle.surfaces, SURFACE_IDS.codexApp], surfaceLines: { [SURFACE_IDS.codexApp]: 'reopen' } } } }
+      : one)
+    board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send'], appRoutes)
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === app && one.surface === SURFACE_IDS.codexApp))
+    const sentAt = Date.now()
+    const send = await board.call('/api/messages/send', { id: 'AB-APP-002', target: connection.id, turn: 'session', text: 'Teal.' })
+    assert.equal(send.status, 200, JSON.stringify(send.body))
+    const stored = () => JSON.parse(readFileSyncSafe(join(dir, 'messages', 'messages.json')) ?? '{"messages":[]}').messages.find(one => one.id === 'AB-APP-002')
+    const back = await waitFor(async () => { const one = stored(); return one?.status === 'queued' && typeof one.heldSince === 'number' ? one : undefined })
+    assert.equal(back.text, 'Teal.')
+    assert.ok(back.heldSince >= sentAt && back.heldSince <= Date.now(), 'stamped at the refusal')
+    const runs = (readFileSyncSafe(log) ?? '').split('\n').filter(Boolean)
+    assert.equal(runs.length, 1, 'one run, refused')
+    assert.deepEqual(JSON.parse(runs[0]).args, ['exec', 'resume', '--skip-git-repo-check', app, '-'])
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_EXEC_STUB; codexShortWait(false)
+    writeFileSync(release, '')
+    await board?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
+  }
+})
+
+test('a Codex desktop app conversation found in the Codex home --codex-dir names is run in that home', async () => {
+  // The board, as shipped, started with `--codex-dir` while CODEX_HOME names another folder: the board finds the conversation
+  // in the named home, and the run that resumes it has to read the same one (after round 5 of #1771).
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-app-home-'))
+  const home = join(dir, 'chosen-codex')
+  const app = '99999999-8888-4777-8666-555555555555'
+  writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef03 agent=codex resume=${app} dir=${encodeURIComponent(dir)} state=waiting updated=${new Date().toISOString()} -->\n### A Codex app task\n- [?] Orange or teal?\n<!-- /auto session=abcdef03 -->\n`)
+  const day = join(home, 'sessions', '2026', '11', '22')
+  mkdirSync(day, { recursive: true })
+  writeFileSync(join(day, `rollout-2026-11-22T00-00-00-${app}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: app, originator: 'Codex Desktop', cwd: dir } }) + '\n')
+  const log = join(dir, 'exec.log'), release = join(dir, 'release-run'), stub = join(dir, 'exec-stub.json')
+  writeFileSync(stub, JSON.stringify({ log, release, refuse: true }))
+  process.env.AGENT_BOARD_CODEX_BIN = fileURLToPath(new URL('./helpers/codex-exec-stub.mjs', import.meta.url))
+  process.env.CODEX_EXEC_STUB = stub
+  codexShortWait()
+  let board
+  try {
+    const appRoutes = testUnitRoutes.map(one => one.agent === 'codex' && one.kind === 'live'
+      ? { ...one, routes: { ...one.routes, idle: { ...one.routes.idle, surfaces: [...one.routes.idle.surfaces, SURFACE_IDS.codexApp], surfaceLines: { [SURFACE_IDS.codexApp]: 'reopen' } } } }
+      : one)
+    board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send', '--codex-dir', home], appRoutes)
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === app && one.surface === SURFACE_IDS.codexApp))
+    const send = await board.call('/api/messages/send', { id: 'AB-APP-003', target: connection.id, turn: 'session', text: 'Teal.' })
+    assert.equal(send.status, 200, JSON.stringify(send.body))
+    const runs = await waitFor(async () => { const lines = (readFileSyncSafe(log) ?? '').split('\n').filter(Boolean); return lines.length > 0 ? lines : undefined })
+    assert.equal(JSON.parse(runs[0]).codexHome, home, 'the named home, not the CODEX_HOME the board was started with')
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_EXEC_STUB; codexShortWait(false)
+    writeFileSync(release, '')
+    await board?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
+  }
+})
+
+test('a Codex desktop app conversation found through CODEX_HOME, with no --codex-dir, runs with CODEX_HOME exactly as the board was given it', async () => {
+  // The board, as shipped, started without `--codex-dir`: the run that resumes the conversation keeps the CODEX_HOME the
+  // board's own environment holds, unchanged, as before #1771 (codex_653). A trailing separator shows it is not rewritten.
+  const dir = mkdtempSync(join(tmpdir(), 'board-codex-app-own-home-'))
+  const given = `${dir}${sep}`
+  const app = '99999999-8888-4777-8666-666666666666'
+  writeFileSync(join(dir, 'progress.md'), `## Synthetic\n<!-- auto session=abcdef04 agent=codex resume=${app} dir=${encodeURIComponent(dir)} state=waiting updated=${new Date().toISOString()} -->\n### A Codex app task\n- [?] Orange or teal?\n<!-- /auto session=abcdef04 -->\n`)
+  const day = join(dir, 'sessions', '2026', '11', '22')
+  mkdirSync(day, { recursive: true })
+  writeFileSync(join(day, `rollout-2026-11-22T00-00-00-${app}.jsonl`), JSON.stringify({ type: 'session_meta', payload: { id: app, originator: 'Codex Desktop', cwd: dir } }) + '\n')
+  const log = join(dir, 'exec.log'), release = join(dir, 'release-run'), stub = join(dir, 'exec-stub.json')
+  writeFileSync(stub, JSON.stringify({ log, release, refuse: true }))
+  process.env.AGENT_BOARD_CODEX_BIN = fileURLToPath(new URL('./helpers/codex-exec-stub.mjs', import.meta.url))
+  process.env.CODEX_EXEC_STUB = stub
+  codexShortWait()
+  let board
+  try {
+    const appRoutes = testUnitRoutes.map(one => one.agent === 'codex' && one.kind === 'live'
+      ? { ...one, routes: { ...one.routes, idle: { ...one.routes.idle, surfaces: [...one.routes.idle.surfaces, SURFACE_IDS.codexApp], surfaceLines: { [SURFACE_IDS.codexApp]: 'reopen' } } } }
+      : one)
+    board = await start(dir, '', ['--messages-dir', join(dir, 'messages'), '--codex-send'], appRoutes, { CODEX_HOME: given })
+    delete process.env.AGENT_BOARD_CODEX_BIN
+    const connection = await waitFor(async () => (await board.call('/api/board')).body.messaging.connections.find(one => one.session === app && one.surface === SURFACE_IDS.codexApp))
+    const send = await board.call('/api/messages/send', { id: 'AB-APP-004', target: connection.id, turn: 'session', text: 'Teal.' })
+    assert.equal(send.status, 200, JSON.stringify(send.body))
+    const runs = await waitFor(async () => { const lines = (readFileSyncSafe(log) ?? '').split('\n').filter(Boolean); return lines.length > 0 ? lines : undefined })
+    assert.equal(JSON.parse(runs[0]).codexHome, given, 'the board\'s own CODEX_HOME, not one the board wrote for the run')
+  } finally {
+    delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_EXEC_STUB; codexShortWait(false)
+    writeFileSync(release, '')
+    await board?.close().catch(() => undefined)
+    await removeKilledPageFolder(dir)
+  }
+})
+
 test('1139 both ACK parsers accept the same complete lines', async () => {
   const { ackLine: clientAck } = await import('../scripts/message-client.mjs')
   const { ackLine: claudeAck } = await import('../hooks/receiver.ts')
@@ -7719,19 +8006,22 @@ test('each receiver record names a validation note that exists, and the table th
       assert.ok(!(route.line === 'none' && route.record !== null), `${record.source} ${state} names a note for a route that does not exist`)
     }
     const shipped = RECEIVER_ROUTES.find(one => one.agent === record.agent && one.kind === record.kind)
-    // Two adapters can share an agent and kind (the Codex owner connector and the daemon receiver): a note covers only the
-    // surfaces it names, so each record must match the shipped entry on its own surfaces.
+    // Three adapters can share an agent and kind (the Codex owner connector, the daemon receiver and the desktop app
+    // receiver): a note and a line cover only the surfaces they name, so each record must match the shipped entry on its
+    // own surfaces, read the way the send gate reads them (routeLine, routeRecord, #557).
     const ids = record.surfaces.map(surface => surface.id)
     const own = route => {
       const surfaces = route.surfaces.filter(id => ids.includes(id))
-      const notes = Object.entries(route.surfaceRecords ?? {}).filter(([id]) => ids.includes(id))
-      return { line: route.line, record: surfaces.length > 0 ? route.record : null, surfaces, ...(notes.length > 0 ? { surfaceRecords: Object.fromEntries(notes) } : {}) }
+      return { surfaces, each: surfaces.map(id => [id, routeLine(route, id), routeRecord(route, id)]) }
     }
-    assert.deepEqual(shipped && Object.fromEntries(states.map(state => [state, own(shipped.routes[state])])), record.routes, `${record.source} differs from hooks/receiver-routes.ts`)
+    assert.deepEqual(shipped && Object.fromEntries(states.map(state => [state, own(shipped.routes[state])])), Object.fromEntries(states.map(state => [state, own(record.routes[state])])), `${record.source} differs from hooks/receiver-routes.ts`)
+    // A state no surface of the record covers still names the same line, the one its card shows without a note.
+    for (const state of states) if (record.routes[state].surfaces.length === 0) assert.equal(shipped.routes[state].line, record.routes[state].line, `${record.source} ${state}`)
   }
-  // And every surface a shipped note covers is one a record names for that same note.
+  // And every surface a shipped note covers is one a record names for that same note and line.
   for (const shipped of RECEIVER_ROUTES) for (const state of states) for (const id of shipped.routes[state].surfaces) {
-    assert.ok(records.some(record => record.agent === shipped.agent && record.kind === shipped.kind && record.routes[state].record === shipped.routes[state].record && record.routes[state].surfaces.includes(id)), `${shipped.agent} ${shipped.kind} ${state}: ${id}`)
+    const route = shipped.routes[state]
+    assert.ok(records.some(record => record.agent === shipped.agent && record.kind === shipped.kind && record.routes[state].surfaces.includes(id) && routeRecord(record.routes[state], id) === routeRecord(route, id) && routeLine(record.routes[state], id) === routeLine(route, id)), `${shipped.agent} ${shipped.kind} ${state}: ${id}`)
   }
   // The stand-in the page tests and the e2e worlds use is the shipped table with a note named on every route that exists.
   // Except that a running-turn adapter takes a message while idle too: tests register connections without a scope, which is a turn.
@@ -7767,6 +8057,22 @@ test('with the receivers\' own records, a Claude card sends and a Codex card tha
   assert.equal((await board.call('/api/act', { ...request(cl), session: CLAUDE_SESSION, connection: claudeConnection.id, turn: 'session' })).status, 200)
   // A recorded route is not refused by the table (a second message to the same session is held back by the usual busy rule).
   assert.notEqual((await board.call('/api/messages/send', { id: 'AB-DIRECT-claude', target: claudeConnection.id, turn: 'session', text: 'Again' })).body.error, 'NO_RECORDED_ROUTE')
+}, '', undefined, RECEIVER_ROUTES))
+
+// Live run 2026-11-22 (#557): a Codex app conversation's message waits for the app to be quit, so the press says so, not "running".
+test('a board reply to a Codex desktop app conversation is answered with the wait for the app to quit, not a running turn (#557)', () => fixture(async (board, dir) => {
+  const codex = '33333333-4444-4555-8666-777777777777'
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n<!-- auto session=abcdef02 agent=codex resume=${codex} state=waiting updated=${new Date().toISOString()} -->\n### Codex app card\n- [?] Orange or teal?\n<!-- /auto session=abcdef02 -->\n`)
+  const app = (await board.call('/api/messages/register', { agent: 'codex', session: codex, turn: 'session', scope: 'session', surface: 'Codex desktop app' })).body
+  const ask = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  assert.equal(ask.canSend, true); assert.equal(ask.line, 'reopen'); assert.equal(ask.delivery.isAfterAppQuit, true)
+  const sent = await board.call('/api/act', { key: ask.key, type: 'message', id: 'AB-APP-QUIT', text: 'Teal', session: codex, asked: ask.text, fp: ask.fp, connection: app.id, turn: 'session' })
+  assert.equal(sent.status, 200)
+  assert.equal(sent.body.receipt.status, 'queued')
+  assert.equal(sent.body.note, EN.serveReopenWaitingCodexApp)
+  // The card's receipt after a redraw keeps the same wait.
+  const after = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  assert.equal(after.receipt.status, 'queued'); assert.equal(after.receipt.isAfterAppQuit, true)
 }, '', undefined, RECEIVER_ROUTES))
 
 test('the routes the tests hand the board are checked whole: a missing record key, an unknown line or a non-list is refused, and only a non-empty string is a record (#1351)', async () => {
@@ -8062,7 +8368,7 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     if (!(record.kind === 'mailbox' && state === 'ended')) {
       const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
       const isCodexCopy = record.agent === 'codex' && route.line === 'nextTurn' && !canSend
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface.id === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: isCodexCopy ? s.serveCodexCopyHint : s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: s.serveLineReopen(name), none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface.id === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: isCodexCopy ? s.serveCodexCopyHint : s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: surface.id === SURFACE_IDS.codexApp ? s.serveLineReopenCodexApp : s.serveLineReopen(name), none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
       assert.equal(card.line, route.line, `${record.source}/${surface.id}/${state}`)
       assert.ok(card.lineText.includes(words), `${record.source}/${surface.id}/${state}: ${card.lineText}`)
     }

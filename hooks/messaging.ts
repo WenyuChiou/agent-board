@@ -49,6 +49,9 @@ export type Message = {
   // When an automatic receiver left with this message still queued. The board refuses the message a fixed time after
   // this, working from the store alone; the next receiver of the session takes it over and clears the stamp (#318).
   leftAt?: number
+  // When the Codex desktop app first refused this message, with nothing sent, because it held the conversation (#557).
+  // Later refusals keep it: from the open limit after it, the message is never handed out or begun, and is refused as not sent.
+  heldSince?: number
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
@@ -60,7 +63,7 @@ export const ROUTE_LINES: readonly RouteLine[] = ['now', 'stepEnd', 'nextTurn', 
 export type RowState = 'idle' | 'working' | 'ended'
 export type RouteKind = 'live' | 'mailbox' | 'turn'
 export const SURFACE_IDS = {
-  claude: 'Claude Code', codexProxy: 'Codex local proxy', codexSession: 'Codex owned session', codexDaemon: 'Codex daemon',
+  claude: 'Claude Code', codexProxy: 'Codex local proxy', codexSession: 'Codex owned session', codexDaemon: 'Codex daemon', codexApp: 'Codex desktop app',
   antigravityStream: 'Antigravity owned CLI stream', antigravityTui: 'agy TUI', antigravityIde: 'IDE',
   cursor: 'IDE (Composer)', cli: 'CLI', web: 'Web', tui: 'TUI', unknown: 'unknown',
 } as const
@@ -68,13 +71,18 @@ export const SURFACE_IDS = {
 export const MCP_SURFACE = 'mcp'
 // A note covers only the surfaces on which its route was recorded. One route can be recorded by a different
 // note on each surface it covers: `surfaceRecords` names a surface's own note, and `record` covers the rest.
-export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[]; surfaceRecords?: Readonly<Record<string, string>> }
+// Likewise a surface can have its own line (`surfaceLines`), when two receivers of one agent and kind reach a session
+// differently: the Codex daemon starts a turn at once, the Codex desktop app receiver reopens the conversation (#557).
+export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[]; surfaceRecords?: Readonly<Record<string, string>>; surfaceLines?: Readonly<Record<string, RouteLine>> }
 // A note names a file: text on one line that is not only spaces, the same test the matrix applies.
 export const isNote = (value: unknown): value is string => typeof value === 'string' && value.trim() !== '' && !/[\r\n]/.test(value)
 // The note that covers a route on one surface. Only the route's own keys count, so a surface named like a
 // property every object inherits reads the route's note.
 export const routeRecord = (route: Route, surface: string): string | null =>
   route.surfaceRecords !== undefined && Object.hasOwn(route.surfaceRecords, surface) ? route.surfaceRecords[surface] ?? null : route.record
+// The line of a route on one surface, read the same way: only the route's own keys count.
+export const routeLine = (route: Route, surface: string): RouteLine =>
+  route.surfaceLines !== undefined && Object.hasOwn(route.surfaceLines, surface) ? route.surfaceLines[surface] ?? route.line : route.line
 export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route> }
 type SendRefusal = 'NO_TARGET' | 'SHADOWED' | 'CONTESTED' | 'OFFLINE' | 'STATE_UNKNOWN' | 'SURFACE_UNKNOWN' | 'NO_RECORD' | 'TURN_RUNNING'
 export type SendDecision =
@@ -88,7 +96,7 @@ const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteK
 export const isRecordedRoute = (one: Connection, stateOfSession: (agent: string, session: string) => RowState | undefined, routes: readonly ReceiverRoutes[]): boolean => {
   const state = stateOfSession(one.agent, one.session)
   const route = state === undefined ? undefined : routeOf(routes, one.agent, routeKind(one.scope), state)
-  return route !== undefined && route.line !== 'none' && isNote(routeRecord(route, one.surface)) && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface)
+  return route !== undefined && routeLine(route, one.surface) !== 'none' && isNote(routeRecord(route, one.surface)) && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface)
 }
 
 export const sendDecision = (
@@ -107,27 +115,30 @@ export const sendDecision = (
   if (state === undefined) return { canSend: false, line: 'none', reason: 'STATE_UNKNOWN' }
   const route = routeOf(routes, target.agent, routeKind(target.scope), state)
   if (route === undefined) return { canSend: false, line: 'none', reason: 'NO_RECORD' }
+  const line = routeLine(route, target.surface)
   // Background resume cannot run while a turn is already active in that conversation.
-  if (route.line === 'reopen' && state === 'working') return { canSend: false, line: 'none', reason: 'TURN_RUNNING' }
+  if (line === 'reopen' && state === 'working') return { canSend: false, line: 'none', reason: 'TURN_RUNNING' }
   const record = routeRecord(route, target.surface)
-  if (route.line === 'none' || !isNote(record)) return { canSend: false, line: route.line, reason: 'NO_RECORD' }
-  if (target.surface === SURFACE_IDS.unknown || !Object.values(SURFACE_IDS).some(surface => surface === target.surface) || !Array.isArray(route.surfaces) || !route.surfaces.includes(target.surface)) return { canSend: false, line: route.line, reason: 'SURFACE_UNKNOWN' }
-  return { canSend: true, line: route.line, target, state }
+  if (line === 'none' || !isNote(record)) return { canSend: false, line, reason: 'NO_RECORD' }
+  if (target.surface === SURFACE_IDS.unknown || !Object.values(SURFACE_IDS).some(surface => surface === target.surface) || !Array.isArray(route.surfaces) || !route.surfaces.includes(target.surface)) return { canSend: false, line, reason: 'SURFACE_UNKNOWN' }
+  return { canSend: true, line, target, state }
 }
 // A well-formed route: a known line; a record that is a note (`isNote`) or null; surfaces that are notes, at least
 // one when there is a record; and a surface's own notes, if any, in a plain object whose keys are surfaces the
-// route covers and whose values are notes. The board's routes file and the matrix's receiver records
+// route covers and whose values are notes; and a surface's own lines, if any, the same way with known lines for values. The board's routes file and the matrix's receiver records
 // (scripts/messaging-matrix.mjs) are checked by this one function, so the two cannot accept different routes.
 // A plain object: what routeRecord reads a surface's note from (a Map or a class instance would pass `typeof` and be ignored).
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(value))
 export const isRoute = (value: unknown): value is Route => {
   if (value === null || typeof value !== 'object') return false
-  const { line, record, surfaces, surfaceRecords } = value as Record<string, unknown>
+  const { line, record, surfaces, surfaceRecords, surfaceLines } = value as Record<string, unknown>
   return ROUTE_LINES.includes(line as RouteLine) && (record === null || isNote(record))
     && Array.isArray(surfaces) && surfaces.every(isNote) && (record === null || surfaces.length > 0)
     && (surfaceRecords === undefined || isPlainObject(surfaceRecords)
       && Object.entries(surfaceRecords).every(([name, note]) => surfaces.includes(name) && isNote(note)))
+    && (surfaceLines === undefined || isPlainObject(surfaceLines)
+      && Object.entries(surfaceLines).every(([name, own]) => surfaces.includes(name) && ROUTE_LINES.includes(own as RouteLine)))
 }
 // Whether a list read from outside (the tests' stand-in file) holds well-formed receiver routes: every entry
 // names an agent (a note) and a kind, and every state has a route `isRoute` takes. Anything else is refused
@@ -178,6 +189,11 @@ const settleWake = (one: Message, now: number): Message | undefined => {
 
 export const FINISHED_KEEP_MS = 24 * 60 * 60 * 1000
 export const OPEN_LIMIT_MS = 30 * 60 * 1000
+// The receivers that may say `held`, which keeps the message's clock instead of starting a fresh claim's 30 minutes (#1578):
+// the Codex desktop app refuses a second writer for as long as it is open, so each refusal is the same wait, counted by the
+// board from the first one, whatever its receiver remembers (#557). Any other give-back is `unsent` and starts no clock.
+const HELD_CLOCK_SURFACES: readonly string[] = [SURFACE_IDS.codexApp]
+export const isHeldTooLong = (one: Pick<Message, 'heldSince'>, now: number): boolean => one.heldSince !== undefined && now - one.heldSince >= OPEN_LIMIT_MS
 export const HOP_LIMIT = 2
 export const PEER_PAIR_BUDGET = 6
 export const TARGET_OPEN_CAP = 3
@@ -249,6 +265,8 @@ export const pruneMessages = (state: MessageState, now: number): MessageState =>
   const kept = state.messages.filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(one => {
     const wake = settleWake(one, now)
     if (wake !== undefined) return wake
+    // A reply the Codex desktop app held for the whole open limit is refused as not sent, with no receiver to ask (#557).
+    if (one.status === 'queued' && isHeldTooLong(one, now)) return settled({ ...one, status: 'rejected' as const, error: 'APP_STILL_OPEN', updated: now })
     return settled((one.status === 'uncertain' || one.status === 'accepted' && (one.error !== '' || isMailboxTarget(one.target))) && !isFinished(one) && now - one.updated > OPEN_LIMIT_MS
       ? { ...one, status: 'uncertain' as const, error: 'EXPIRED', updated: now, ...(one.status === 'accepted' ? { hasAccepted: true } : {}) } : one)
   })
@@ -377,7 +395,7 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   // only when every one is this binding's and can be taken again, and only on a surface that message allows. A wake
   // that reads "sent, not confirmed" or a confirmed turn-ended uncertain delivery no longer holds the session (`isHolding`).
   const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isHolding(one) && !isHookDelivered(one))
-  const canTake = (one: Message): boolean => one.status === 'queued' && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
+  const canTake = (one: Message): boolean => one.status === 'queued' && !isHeldTooLong(one, now) && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
   const pick = held.length === 0 ? state.messages.find(canTake) : held.every(isRetaken) ? held.find(canReach) : undefined
   const messages = pick === undefined ? [] : [pick]
   if (messages.length === 0) return { state, messages }
@@ -404,13 +422,21 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   // unsent: the connection that holds a claim says it never asked for any of it to be sent, so the message goes back to the
   // queue with its text and the next claim gets its own 30 minutes (#1578). Only a claim nothing else was said of (no accept,
   // no error) and only from the connection the board handed it to; a receiver that cannot tell whether it was sent says uncertain.
-  if (input.status === 'unsent' || input.status === 'starting') {
+  if (input.status === 'unsent' || input.status === 'starting' || input.status === 'held') {
     if (one.status !== 'uncertain' || one.error !== '' || one.hasAccepted === true || one.target !== target.id || isMailboxTarget(one.target) || input.reply !== undefined || input.error !== undefined) throw new Error('INVALID_RECEIPT')
+    // held: an unsent the Codex desktop app's receiver says when Codex refused the writer, and the only receipt that starts the
+    // message's clock; later ones keep the first time, and a plain unsent neither starts nor clears it (#557).
+    if (input.status === 'held' && !HELD_CLOCK_SURFACES.includes(target.surface)) throw new Error('INVALID_RECEIPT')
     const { awaitsStart: _awaitsStart, ...rest } = one
     // starting: the receiver is about to ask its host for the message, so from now on a connection that ends leaves it in doubt.
-    // Said twice it changes nothing. It changes nothing else either: the claim still waits for its accept.
-    if (input.status === 'starting') return one.awaitsStart === true ? { ...state, messages: state.messages.map(message => message === one ? rest : message) } : state
-    return { ...state, messages: state.messages.map(message => message === one ? { ...rest, status: 'queued' as const, claimed: 0, updated: now } : message) }
+    // Said twice it changes nothing. It changes nothing else either: the claim still waits for its accept. A reply the Codex
+    // desktop app has held for the open limit is not begun: its receiver runs nothing when this is refused (#557).
+    if (input.status === 'starting') {
+      if (isHeldTooLong(one, now)) throw new Error('APP_STILL_OPEN')
+      return one.awaitsStart === true ? { ...state, messages: state.messages.map(message => message === one ? rest : message) } : state
+    }
+    const heldSince = input.status === 'held' ? { heldSince: one.heldSince ?? now } : {}
+    return { ...state, messages: state.messages.map(message => message === one ? { ...rest, status: 'queued' as const, claimed: 0, updated: now, ...heldSince } : message) }
   }
   if (!['uncertain', 'accepted', 'acknowledged', 'rejected'].includes(String(input.status))) throw new Error('INVALID_RECEIPT')
   const status = input.status as Message['status']
@@ -461,5 +487,7 @@ export const rebindMessages = (state: MessageState, target: Connection, isLive: 
   const to = address(target.agent, target.session)
   const isLeft = (one: Message): boolean => one.status === 'queued' && one.to === to && !isMailboxTarget(one.target) && !isLive(one.target)
     && (one.surface === undefined || one.surface === target.surface)
-  return state.messages.some(isLeft) ? { ...state, messages: state.messages.map(one => { if (!isLeft(one)) return one; const { leftAt: _leftAt, ...rest } = one; return { ...rest, target: target.id, turn: target.turn } }) } : state
+  // The app's clock goes with the app: a receiver of another surface that takes the message over starts none (#557, #1578).
+  const isClockKept = HELD_CLOCK_SURFACES.includes(target.surface)
+  return state.messages.some(isLeft) ? { ...state, messages: state.messages.map(one => { if (!isLeft(one)) return one; const { leftAt: _leftAt, heldSince, ...rest } = one; return { ...rest, ...(isClockKept && heldSince !== undefined ? { heldSince } : {}), target: target.id, turn: target.turn } }) } : state
 }
