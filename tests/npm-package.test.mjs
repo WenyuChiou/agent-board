@@ -577,6 +577,43 @@ test('a launcher whose update is stopped by a signal stops with it and opens no 
   assert.equal(readFileSync(script, 'utf8'), text, 'the older script is left as it was')
 }))
 
+// #1783: Gemini CLI is retired and setup refuses it by name. A Gemini record an earlier release left in the install
+// root must not stop the launcher's update of the agents setup still installs.
+test('an older install that keeps a Gemini record from an earlier release still updates its other agents from the launcher', () => fixture(f => {
+  const { pkg, root, script, record } = olderInstall(f)
+  const gemini = join(root, 'install-gemini.json')
+  save(gemini, '{"files":{}}\n')
+  const result = f.run(pkg, ['--data-dir', root, '--print'], terminalLauncher(f), 'y\n')
+  success(result)
+  assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), `the update wrote this package's board script\n${result.stdout}\n${result.stderr}`)
+  assert.equal(typeof JSON.parse(readFileSync(record, 'utf8')).version, 'string', 'the record names the version')
+  assert.equal(readFileSync(gemini, 'utf8'), '{"files":{}}\n', 'the Gemini record stays for a removal')
+}))
+
+// #1783: only opening the board starts setup. `stop` stops as before, with the notice; a setup that cannot start
+// leaves the notice and the board opens; opening the board afterwards updates it.
+test('in a terminal, stop and a setup that cannot start keep the older script with the notice, and opening the board updates it', () => fixture(f => {
+  const { pkg, root, script, text } = olderInstall(f)
+  const terminal = terminalLauncher(f)
+  const stopped = f.run(pkg, ['stop', '--data-dir', root], terminal, 'y\n')
+  assert.ifError(stopped.error)
+  assert.equal(stopped.stdout.includes('[y/N]'), false, `stop asked setup's question\n${stopped.stdout}`)
+  assert.ok(stopped.stderr.includes('To update it, preview'), stopped.stderr)
+  assert.equal(readFileSync(script, 'utf8'), text, 'stop left the older script as it was')
+  // A stand-in for a system that cannot start one more process (EAGAIN) when the launcher starts setup.
+  const failing = join(f.box, 'no-setup.cjs')
+  save(failing, `if (/[\\\\/]bin[\\\\/]agent-board\\.mjs$/.test(process.argv[1] || '')) { const cp = require('node:child_process'); const real = cp.spawnSync; cp.spawnSync = (file, list, options) => /setup-agent\\.mjs$/.test((list || [])[0] || '') ? { pid: 0, output: null, stdout: null, stderr: null, status: null, signal: null, error: Object.assign(new Error('spawnSync EAGAIN'), { code: 'EAGAIN' }) } : real(file, list, options); require('node:module').syncBuiltinESMExports() }\n`)
+  const blocked = f.run(pkg, ['--data-dir', root, '--print'], { ...terminal, NODE_OPTIONS: `${terminal.NODE_OPTIONS} --require ${JSON.stringify(failing)}` }, 'y\n')
+  success(blocked)
+  assert.ok(blocked.stderr.includes('To update it, preview'), `no notice after setup could not start\n${blocked.stderr}`)
+  assert.ok(blocked.stdout.trim(), 'the board opened')
+  assert.equal(readFileSync(script, 'utf8'), text, 'the older script is left as it was')
+  const opened = f.run(pkg, ['--data-dir', root, '--print'], terminal, 'y\n')
+  success(opened)
+  assert.equal(opened.stdout.split('[y/N]').length - 1, 1, opened.stdout)
+  assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), "opening the board wrote this package's board script")
+}))
+
 test('--json through an older script prints the notice on stderr and exits 1', () => fixture(f => {
   const pkg = packed(f)
   // An older installed script that prints the text board, as a released 0.24.2 script would:
