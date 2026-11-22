@@ -1006,7 +1006,7 @@ const PAGE_WORDS = [
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
   'archiveNow', 'cleanUp', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
-  'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
+  'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveSessionLost', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
@@ -1759,6 +1759,18 @@ const PAGE_SCRIPT = String.raw`
     var movedMain = document.querySelector('main');
     movedMain.textContent = '';
     add(movedMain, el('p', '', w('serveMoved')));
+    document.getElementById('side').hidden = true;
+  }
+  function showSessionLost() {
+    isClosed = true;
+    approveSecret = '';
+    clearTimeout(timer);
+    if (drawerOpen) setDrawer(false, true);
+    paintLight();
+    offline.textContent = '';
+    var lostMain = document.querySelector('main');
+    lostMain.textContent = '';
+    add(lostMain, el('p', '', w('serveSessionLost')));
     document.getElementById('side').hidden = true;
   }
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
@@ -3681,6 +3693,7 @@ const PAGE_SCRIPT = String.raw`
   // isNow: the answer is wanted at once (a tab coming back), not when the board next changes.
   function refresh(isNow) {
     if (isClosed) return;
+    if (!token) { showSessionLost(); return; }
     clearTimeout(timer);
     var pollPage = pageId;
     // One open board request at a time: a refresh after a press replaces the waiting one, so held requests never

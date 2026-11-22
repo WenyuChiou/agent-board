@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { request as httpRequest } from 'node:http'
+import { createServer as createHttpServer, request as httpRequest } from 'node:http'
 import { createServer as createNetServer } from 'node:net'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
@@ -411,8 +411,24 @@ test('--no-open and SSH fallbacks print only a one-use link with no reusable tok
       assert.ok(sshUrl2 && sshUrl2 !== sshUrl1, againSsh.stdout)
       assert.equal(againLines.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', sshUrl2))
       assert.equal(againLines.at(-1), EN.boardPageAlreadyOpen)
-      assert.equal((await fetch(sshUrl2)).status, 200)
+      const res2 = await fetch(sshUrl2)
+      assert.equal(res2.status, 200)
       assert.equal((await fetch(sshUrl2)).status, 403)
+
+      // Make the remote browser visibly open, then run --serve over SSH: still prints a one-use link instead of "already open".
+      const sshSession2 = sessionFromHtml(await res2.text())
+      assert.equal((await fetch(new URL('/api/board', sshUrl2), {
+        headers: { 'x-board-token': sshSession2, 'x-board-page': 'p-ssh-visible', 'x-board-visible': '1' },
+      })).status, 200)
+      const serveSshOpen = await runCli(script, ['--serve'], sshEnv)
+      assert.equal(serveSshOpen.status, 0, serveSshOpen.stderr)
+      assert.doesNotMatch(serveSshOpen.stdout, REUSABLE_LINK_RE)
+      assert.equal(serveSshOpen.stdout.includes(EN.boardPageAlreadyOpen), false, serveSshOpen.stdout)
+      const serveSshUrl = OPEN_LINK_RE.exec(serveSshOpen.stdout)?.[0]
+      assert.ok(serveSshUrl && serveSshUrl !== sshUrl2, serveSshOpen.stdout)
+      assert.ok(serveSshOpen.stdout.includes(EN.serveAt(serveSshUrl)), serveSshOpen.stdout)
+      assert.equal((await fetch(serveSshUrl)).status, 200)
+      assert.equal((await fetch(serveSshUrl)).status, 403)
     }),
   ])
 })
@@ -427,7 +443,9 @@ test('concurrent and non-GET requests against a one-use link consume it at most 
     assert.match(minted.body.url, /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
     const oneUseUrl = minted.body.url
 
-    assert.equal((await fetch(oneUseUrl, { method: 'HEAD' })).status, 405)
+    for (const method of ['POST', 'HEAD', 'PUT', 'DELETE']) {
+      assert.equal((await fetch(oneUseUrl, { method })).status, 405, `${method} must be refused without consuming link`)
+    }
     assert.equal((await fetch(oneUseUrl, { headers: { 'sec-purpose': 'prefetch' } })).status, 403)
 
     // Invalid Host header gets 421 and must not consume the code (use node:http to send custom Host header).
@@ -442,8 +460,8 @@ test('concurrent and non-GET requests against a one-use link consume it at most 
     })
     assert.equal(badHostStatus, 421)
 
-    const [a, b] = await Promise.all([fetch(oneUseUrl), fetch(oneUseUrl)])
-    assert.deepEqual([a.status, b.status].sort((x, y) => x - y), [200, 403])
+    const concurrent = await Promise.all(Array.from({ length: 8 }, () => fetch(oneUseUrl)))
+    assert.deepEqual(concurrent.map(res => res.status).sort((x, y) => x - y), [200, 403, 403, 403, 403, 403, 403, 403])
   } catch (error) {
     failed = true
     throw error
@@ -641,8 +659,9 @@ test('kept silent server never falls back to printing the reusable ?t= address',
     let failed = false
     try {
       const res = await runCli(script, args, env)
-      assert.equal(res.status, 0, `${args.join(' ')}: ${res.stderr}`)
-      assert.ok(res.stdout.includes('already open is kept'), `${args.join(' ')} kept note:\n${res.stdout}`)
+      assert.equal(res.status, 1, `${args.join(' ')} must exit non-zero when kept server cannot mint link: ${res.stderr}`)
+      assert.ok(res.stdout.includes(EN.serveKeptNoLink), `${args.join(' ')} actionable recovery note:\n${res.stdout}`)
+      assert.equal(res.stdout.includes(EN.boardPageAlreadyOpen), false, `${args.join(' ')} must not say already open:\n${res.stdout}`)
       assert.doesNotMatch(res.stdout, REUSABLE_LINK_RE)
       assert.equal(res.stdout.includes('synthetic-quiet'), false)
     } catch (error) {
@@ -658,9 +677,69 @@ test('kept silent server never falls back to printing the reusable ?t= address',
       }
     }
   }
+  const runLegacyKeptCase = async args => {
+    const root = mkdtempSync(join(tmpdir(), 'board-one-use-legacy-kept-'))
+    const run = join(root, 'run')
+    const env = isolatedEnv(root, run)
+    const progress = join(root, 'progress.md')
+    const script = join(root, 'agent-board.mjs')
+    writeFileSync(progress, '# Progress\n## Demo\n### Synthetic task\n- [ ] Task 1\n')
+    writeFileSync(script, patchedBoardScript({ progress, openResult: false }))
+
+    const legacy = createHttpServer((req, res) => {
+      if (req.url === '/api/ping') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true, path: progress, built: '0', pageAgo: null }))
+        return
+      }
+      if (req.url === '/api/close') {
+        res.writeHead(409, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: false }))
+        return
+      }
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ ok: false }))
+    })
+    await new Promise(done => legacy.listen(0, '127.0.0.1', done))
+    const { port } = legacy.address()
+
+    const runtimeSubdir = process.platform === 'win32' ? join(run, 'agent-board') : run
+    const addressFile = join(runtimeSubdir, `agent-board-${createHash('sha256').update(progress).digest('hex').slice(0, 16)}.json`)
+    const stale = `http://127.0.0.1:${port}/?t=synthetic-quiet`
+    const payload = JSON.stringify({ pid: process.pid, port, url: stale, path: progress, built: '0' })
+    if (process.platform === 'win32') {
+      privateRuntimeFolder(runtimeSubdir)
+      writePrivateRuntimeFile(addressFile, payload)
+    } else {
+      writeFileSync(addressFile, payload, { mode: 0o600 })
+    }
+
+    let failed = false
+    try {
+      const res = await runCli(script, args, env)
+      assert.equal(res.status, 1, `${args.join(' ')} must exit non-zero when legacy kept server cannot mint link: ${res.stderr}`)
+      assert.ok(res.stdout.includes(EN.serveKeptNoLink), `${args.join(' ')} actionable recovery note:\n${res.stdout}`)
+      assert.equal(res.stdout.includes(EN.boardPageAlreadyOpen), false, `${args.join(' ')} must not say already open:\n${res.stdout}`)
+      assert.doesNotMatch(res.stdout, REUSABLE_LINK_RE)
+      assert.equal(res.stdout.includes('synthetic-quiet'), false)
+    } catch (error) {
+      failed = true
+      throw error
+    } finally {
+      try {
+        await new Promise(done => legacy.close(done))
+        await removeDir(root)
+      } catch (cleanupError) {
+        if (!failed) throw cleanupError
+      }
+    }
+  }
   await Promise.all([
     runSilentCase(['--serve', '--no-open']),
     runSilentCase(['--html', '--no-open']),
+    runLegacyKeptCase(['--serve']),
+    runLegacyKeptCase(['--serve', '--no-open']),
+    runLegacyKeptCase(['--html', '--no-open']),
   ])
 })
 
@@ -720,7 +799,9 @@ const runServedPageInOrigin = async (html, pageUrl, originStores, { throwStorage
     style: {},
     className: '',
     value: '',
-    textContent: '',
+    _text: '',
+    set textContent(v) { this._text = v; if (v === '') this.childNodes = [] },
+    get textContent() { return this._text },
     set id(v) { this.attributes.id = v; nodes.set(v, this) },
     get id() { return this.attributes.id ?? '' },
     appendChild(c) { c.parentNode = this; this.childNodes.push(c); return c },
@@ -734,6 +815,8 @@ const runServedPageInOrigin = async (html, pageUrl, originStores, { throwStorage
     querySelectorAll() { return [] },
     querySelector() { return makeEl('div') },
   })
+  const mainEl = makeEl('main')
+  const textOf = el => el.textContent + el.childNodes.map(textOf).join('')
   const get = id => {
     if (!nodes.has(id)) nodes.set(id, makeEl('div'))
     return nodes.get(id)
@@ -756,13 +839,14 @@ const runServedPageInOrigin = async (html, pageUrl, originStores, { throwStorage
   }
   let currentPath = url.pathname + url.search + url.hash
   let boardPollResolve
+  let polled = false
   const firstBoardPoll = new Promise(resolve => { boardPollResolve = resolve })
   const document = {
     body: get('body'),
     getElementById: id => nodes.get(id) ?? get(id),
     createElement: makeEl,
     createTextNode: () => makeEl('text'),
-    querySelector: () => makeEl('main'),
+    querySelector: selector => selector === 'main' ? mainEl : makeEl('div'),
     querySelectorAll: () => [],
     addEventListener() {},
     title: '',
@@ -782,7 +866,10 @@ const runServedPageInOrigin = async (html, pageUrl, originStores, { throwStorage
         ...init,
         headers: { ...(init.headers ?? {}), origin: url.origin },
       })
-      if (String(target).startsWith('/api/board')) boardPollResolve({ status: res.status, tokenSent: init.headers?.['x-board-token'] ?? '' })
+      if (String(target).startsWith('/api/board')) {
+        polled = true
+        boardPollResolve({ status: res.status, tokenSent: init.headers?.['x-board-token'] ?? '' })
+      }
       return res
     },
   }
@@ -796,7 +883,13 @@ const runServedPageInOrigin = async (html, pageUrl, originStores, { throwStorage
     vmContext.sessionStorage = sessionStorage
   }
   runInNewContext(script, vmContext, { timeout: 1000 })
-  return { firstBoardPoll, currentPath: () => currentPath }
+  return {
+    firstBoardPoll,
+    polled: () => polled,
+    currentPath: () => currentPath,
+    offlineText: () => textOf(get('offline')),
+    mainText: () => textOf(mainEl),
+  }
 }
 
 test('two local boards on different ports issue no cookies, reload independently via origin-scoped sessionStorage, and reject each other sessions', { timeout: 25_000 }, async () => {
@@ -864,6 +957,15 @@ test('two local boards on different ports issue no cookies, reload independently
     const blockedPage = await runServedPageInOrigin(blockedHtml, blockedLink, originStores, { throwStorage: true })
     assert.equal(blockedPage.currentPath(), '/')
     assert.deepEqual(await blockedPage.firstBoardPoll, { status: 200, tokenSent: blockedSession })
+
+    // Reloading bare GET / when sessionStorage is blocked shows session-lost guidance rather than offline.
+    const blockedBare = await fetch(new URL('/', boardA.origin))
+    assert.equal(blockedBare.status, 200)
+    const blockedReload = await runServedPageInOrigin(await blockedBare.text(), `${boardA.origin}/`, originStores, { throwStorage: true })
+    assert.equal(blockedReload.polled(), false, 'reload without token stops before polling with empty credentials')
+    assert.equal(blockedReload.offlineText(), '')
+    assert.ok(blockedReload.mainText().includes(EN.serveSessionLost))
+    assert.equal(blockedReload.mainText().includes(EN.serveOffline), false)
   } catch (error) {
     failed = true
     throw error

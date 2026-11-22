@@ -761,6 +761,7 @@ export const ZH_CN: Strings = {
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以点的看板（勾完成、归档、回答）：${url}`,
   serveKept: '可能还有一句正在发给 agent，所以先保留已经打开的看板网页；回复到了它会自己更新。之后再运行一次，就会换成最新的看板。',
+  serveKeptNoLink: '这个保留中的看板无法生成一次性链接。请等回复送完后运行 agent-board --stop，再重新打开看板。',
   serveAlreadyRunning: '看板网页已经在运行中。',
   serveStopped: '已停止看板网页。',
   serveNotStopped: '看板网页没有停止，可能正在发送回复。稍后再运行一次 stop。',
@@ -844,6 +845,7 @@ export const ZH_CN: Strings = {
               : `看板无法打开消息文件夹（${code}）：${folder}。消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。`,
   serveOffline: '连不上看板。请再运行一次 agent-board；新页面会自动打开，这个标签页可以关闭。',
   serveOfflineLan: '连不上看板。请在电脑上再运行一次 agent-board --lan，再打开新地址。',
+  serveSessionLost: '这个标签页已没有看板连接会话（例如刷新且浏览器未保留存储空间）。请再运行一次 agent-board 重新打开看板。',
   barStyleInk: '墨',
   barStyleBlue: '蓝',
   barStyleGreen: '绿',

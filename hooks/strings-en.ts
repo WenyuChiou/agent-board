@@ -767,6 +767,7 @@ export const EN: Strings = {
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `The board you can click (tick, archive, answer): ${url}`,
   serveKept: 'A reply may still be on its way to an agent, so the board page that is already open is kept; it updates when the reply arrives. Run this again after that for the newest page.',
+  serveKeptNoLink: 'The kept board server cannot create a one-use link. Once any reply finishes, run agent-board --stop and open the board again.',
   serveAlreadyRunning: 'The board page is already running.',
   serveStopped: 'Stopped the board page.',
   serveNotStopped: 'The board page did not stop; it may be sending a reply. Run stop again in a moment.',
@@ -851,6 +852,7 @@ export const EN: Strings = {
               : `The board could not open its message folder (${code}): ${folder}. Its message file may be damaged. Move messages.json out of that folder, then try again.`,
   serveOffline: "Can't reach the board. Run agent-board again; it opens a new page, and you can close this one.",
   serveOfflineLan: "Can't reach the board. On the computer, run agent-board --lan again and open the new address.",
+  serveSessionLost: 'This tab no longer has its board session (for example after reload with browser storage blocked). Run agent-board again to open the board.',
   barStyleInk: 'Ink',
   barStyleBlue: 'Blue',
   barStyleGreen: 'Green',

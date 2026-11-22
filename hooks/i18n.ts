@@ -805,6 +805,7 @@ export const ZH_TW = {
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以點的看板（勾完成、封存、回答）：${url}`,
   serveKept: '可能還有一句正在傳給 agent，所以先保留已經開著的看板網頁；回覆到了它會自己更新。之後再執行一次，就會換成最新的看板。',
+  serveKeptNoLink: '這個保留中的看板無法產生一次性連結。請等回覆送完後執行 agent-board --stop，再重新開啟看板。',
   serveAlreadyRunning: '看板網頁已經在執行中。',
   serveStopped: '已停止看板網頁。',
   serveNotStopped: '看板網頁沒有停止，可能正在送出回覆。稍後再執行一次 stop。',
@@ -888,6 +889,7 @@ export const ZH_TW = {
               : `看板無法開啟訊息資料夾（${code}）：${folder}。訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。`,
   serveOffline: '連不上看板。請再執行一次 agent-board；新的頁面會自動開啟，這個分頁可以關閉。',
   serveOfflineLan: '連不上看板。請在電腦上再執行一次 agent-board --lan，再開啟新的網址。',
+  serveSessionLost: '這個分頁已沒有看板連線工作階段（例如重新整理且瀏覽器未保留儲存空間）。請再執行一次 agent-board 重新開啟看板。',
   // The progress bar's styles (#1085): the theme button's menu, `/progress style` and the terminal board's `s` key.
   barStyleInk: '墨',
   barStyleBlue: '藍',

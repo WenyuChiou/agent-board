@@ -2895,10 +2895,11 @@ const serveBoard = async (): Promise<void> => {
   const show = async (url: string, isKept = false, actualIdle?: number, page: PageState = 'none'): Promise<void> => {
     const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60_000)}\n` : ''
     const prefix = `\n${isKept ? `${s.serveKept}\n` : ''}${idleNote}`
+    const isSsh = Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY)
     const isShape = !args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url)
-    let isWindow = page === 'open'
-    let isAlready = page === 'open'
-    if (isShape && page !== 'open') {
+    let isWindow = !isSsh && page === 'open'
+    let isAlready = !isSsh && page === 'open'
+    if (isShape && !isSsh && page !== 'open') {
       const isOpen = await openThroughBoard(url, true, page === 'none')
       if (isOpen) isWindow = true
       else if (page === 'unkeyed') { isWindow = true; isAlready = true }
@@ -2909,9 +2910,10 @@ const serveBoard = async (): Promise<void> => {
       const openUrl = await requestOpenLink(url)
       if (openUrl !== null) {
         process.stdout.write(`${prefix}${s.serveAt(openUrl)}\n`)
-        if (isShape && page === 'none' && !isNoWindowHere()) process.stderr.write(`${s.serveBrowserNone(openUrl)}\n`)
+        if (isShape && !isSsh && page === 'none' && !isNoWindowHere()) process.stderr.write(`${s.serveBrowserNone(openUrl)}\n`)
       } else if (isKept) {
-        process.stdout.write(`${prefix}${s.boardPageAlreadyOpen}\n`)
+        process.exitCode = 1
+        process.stdout.write(`${prefix}${s.serveKeptNoLink}\n`)
       } else {
         process.exitCode = 1
         process.stdout.write(`${prefix}${s.serveFailed(s.serveOffline)}\n`)
@@ -2949,7 +2951,10 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
   if (isOpen) return { note: s.boardPageWindowOpened, isOpen: true, url: address }
   const openUrl = await requestOpenLink(address)
   if (openUrl === null) {
-    if (server.isKept) return { note: s.serveKept, isOpen: false, url: address }
+    if (server.isKept) {
+      process.exitCode = 1
+      return { note: `${s.serveKept}\n${s.serveKeptNoLink}`, isOpen: false }
+    }
     process.exitCode = 1
     return { note: serveFailureNote(failure), isOpen: false }
   }
@@ -2967,7 +2972,12 @@ const openPageSurface = async (): Promise<void> => {
   // an agent shows (#1283). The terminal board's own `o` keeps one-line notes.
   if (opened.url !== undefined && (process.env.SSH_CONNECTION || process.env.SSH_TTY)) {
     const sshUrl = opened.openUrl ?? (await requestOpenLink(opened.url))
-    if (sshUrl !== null) process.stdout.write(`${s.serveSshHint(pagePortOf(sshUrl), sshTargetOf(process.env), sshUrl)}\n`)
+    if (sshUrl === null) {
+      process.exitCode = 1
+      process.stdout.write(`${s.serveKeptNoLink}\n`)
+      return
+    }
+    process.stdout.write(`${s.serveSshHint(pagePortOf(sshUrl), sshTargetOf(process.env), sshUrl)}\n`)
   }
   process.stdout.write(`${opened.note}\n`)
   // `--lan` without `--serve`: the page opens here and the phone's address follows it (#868).
