@@ -1,10 +1,11 @@
 import { spawnSync } from 'node:child_process'
-import { appendFileSync, chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { join, resolve } from 'node:path'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, insideHome, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, tempFolder } from './e2e/lib/host-journey.mjs'
+import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, insideHome, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, snapshot, tempFolder } from './e2e/lib/host-journey.mjs'
 import { spawnIsolated } from './e2e/lib/spawn.mjs'
 
 // The upgrade journey of #466. It reads the 0.24.0 files from the release tag, so it stays in
@@ -600,10 +601,11 @@ test('Codex 0.25.0 upgrade keeps every hook group in its original slot', async t
 // A stand-in Codex that answers hooks/list from the hooks.json as it is when asked, with the
 // trust state from a file the test flips. It reads hooks.json on each call, so an upgrade that
 // rewrites the hooks does not stale its answers (the mock in codex-local.test.mjs reads them
-// once when it is made).
+// once when it is made). An approval write trusts every hook and is counted in its own file.
 const mockCodex = f => {
   const hooksJson = join(f.home, '.codex', 'hooks.json')
   const stateFile = join(f.home, 'mock-codex-state.json')
+  const writesFile = join(f.home, 'mock-codex-writes.log')
   writeFileSync(stateFile, JSON.stringify({ trusted: true }))
   const script = `#!/usr/bin/env node
 const fs = require('fs');
@@ -631,6 +633,10 @@ rl.on('line', line => {
         trustStatus: state.trusted ? 'trusted' : 'untrusted'
       }));
       process.stdout.write(JSON.stringify({ id: msg.id, result: { data: [{ hooks, errors: [] }] } }) + '\\n');
+    } else if (msg.method === 'config/batchWrite') {
+      fs.writeFileSync(${JSON.stringify(stateFile)}, JSON.stringify({ trusted: true }));
+      fs.appendFileSync(${JSON.stringify(writesFile)}, 'config/batchWrite\\n');
+      process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + '\\n');
     }
   } catch {}
 });
@@ -638,7 +644,7 @@ rl.on('line', line => {
   const executable = join(f.home, 'bin', 'codex-mock.js')
   mkdirSync(join(f.home, 'bin'), { recursive: true })
   writeFileSync(executable, script, { mode: 0o755 })
-  return { executable, stateFile }
+  return { executable, stateFile, writesFile }
 }
 
 // A home the 0.25.0 tag's own setup made for Codex alone.
@@ -823,4 +829,306 @@ test('J11a: a 0.25.0 to this release upgrade in an explicit Codex directory that
   assert.ok(output.includes('--codex-dir') && (output.includes(`--codex-dir ${alt}`) || output.includes(`--codex-dir '${alt}'`)), `the trust command names the selected directory\n${output}`)
   assert.equal(upgradeSteps(output), 3, 'three steps: the upgrade, the trust preview, the trust apply')
   assertReadBackHome(mock, alt)
+})
+
+// setup --update of #1314 (milestone M2), rows 1 to 14 and 25 of the issue's Cases. An update asks one question only
+// when a hook's command changes, code a host loads changes, the host's trust needs the person, or the release starts a
+// new use of the network or of files; otherwise it updates and prints one line. Nothing is written before the yes.
+// J11b updates to a locally built next version: this tree with a higher package version, so the installed files are
+// current and only the version moves (state S1). Each case then changes one thing an earlier build would have left.
+let nextFolder
+const nextBuild = () => {
+  if (nextFolder) return nextFolder
+  const folder = tempFolder()
+  for (const part of ['scripts', 'hooks', 'bin']) cpSync(join(repoRoot, part), join(folder, part), { recursive: true })
+  writeFileSync(join(folder, 'package.json'), JSON.stringify({ ...JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf8')), version: '99.0.0' }, null, 2))
+  nextFolder = folder
+  return folder
+}
+// setup --update from a release's files, in a terminal (setup's test seam with piped input) unless told otherwise.
+const update = (f, args = [], { source = nextBuild(), input = '', terminal = true, env = {} } = {}) => run(f, [join(source, 'scripts', 'setup-agent.mjs'), ...isolatedArgs(f), '--lang', 'en', '--update', ...args], { input, timeoutMs: 180000, env: { ...(terminal ? { AGENT_BOARD_SETUP_TTY: '1' } : {}), ...env } })
+// The steps an update costs the person (moment 1 of the 0.25.1 plan): each question answered, plus the trust preview and
+// apply whenever a trust command is printed. 0.25.0 has no version check, so from it learning of the release and typing the
+// command count too (J11a); from 0.25.1 on the board starts the update itself (M3), so J11b counts neither.
+const updateSteps = (output, isFrom025 = false) => (isFrom025 ? 2 : 0) + output.split('[y/N]').length - 1 + (output.includes('--codex-trust') ? 2 : 0)
+const questions = output => output.split('[y/N]').length - 1
+const sha256 = text => createHash('sha256').update(text).digest('hex')
+const recordOf = (f, agent) => join(f.home, '.agent-board', `install-${agent}.json`)
+const readRecord = (f, agent) => JSON.parse(readFileSync(recordOf(f, agent), 'utf8'))
+const editRecord = (f, agent, change) => {
+  const record = readRecord(f, agent)
+  change(record)
+  writeFileSync(recordOf(f, agent), `${JSON.stringify(record, null, 2)}\n`)
+}
+const installedAgents = f => readdirSync(join(f.home, '.agent-board')).map(name => /^install-([a-z]+)\.json$/.exec(name)?.[1]).filter(Boolean)
+const writesOf = mock => existsSync(mock.writesFile) ? readFileSync(mock.writesFile, 'utf8').split('\n').filter(Boolean).length : 0
+// S2: an earlier build wrote another command for one of the board's hooks, in the host's config and in setup's record.
+const olderHook = (f, agent, config, index = 0) => {
+  const file = join(f.home, config), hooks = JSON.parse(readFileSync(file, 'utf8'))
+  let changed
+  editRecord(f, agent, record => {
+    const event = Object.keys(record.groups)[index], group = record.groups[event]
+    const at = hooks.hooks[event].findIndex(entry => JSON.stringify(entry) === JSON.stringify(group))
+    assert.ok(at >= 0, `${agent}: the record's ${event} group is in ${config}`)
+    const now = group.command ?? group.hooks[0].command, older = `${now} --older-hook`
+    const aged = group.command === undefined ? { ...group, hooks: [{ ...group.hooks[0], command: older }] } : { ...group, command: older }
+    hooks.hooks[event][at] = aged
+    record.groups[event] = aged
+    changed = { event, now, older }
+  })
+  writeFileSync(file, `${JSON.stringify(hooks, null, 2)}\n`)
+  return changed
+}
+// S3: the board script an earlier build wrote, still recorded as setup's own, so an update replaces it.
+const olderScript = f => {
+  const text = `${readFileSync(f.script, 'utf8')}\n// an earlier build\n`
+  writeFileSync(f.script, text)
+  for (const agent of installedAgents(f)) editRecord(f, agent, record => {
+    for (const file of Object.keys(record.files)) if (resolve(file) === resolve(f.script)) record.files[file] = sha256(text)
+  })
+}
+// S4: records from before the release that added the new uses, so the update names each one.
+const beforeUses = f => { for (const agent of installedAgents(f)) editRecord(f, agent, record => { delete record.version }) }
+
+test('J11b: an update with nothing to ask counts 0 steps and prints one line', async () => {
+  const f = fixture(['.codex', '.config/opencode'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex', 'opencode'])
+  const output = checked(await update(f, ['--codex-bin', mock.executable]), 'setup --update')
+  assert.equal(output, 'Agent Board updated to 99.0.0.\n')
+  assert.equal(updateSteps(output), 0, 'no step: nothing to ask')
+  for (const agent of ['codex', 'opencode']) assert.equal(readRecord(f, agent).version, '99.0.0', `${agent}: the record names the new version`)
+})
+
+test('a second update of a current home writes nothing and asks nothing', async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  checked(await update(f, ['--codex-bin', mock.executable]), 'first update')
+  const before = snapshot(f.home)
+  const output = checked(await update(f, ['--codex-bin', mock.executable]), 'second update')
+  assert.equal(output, 'Agent Board is up to date (99.0.0).\n')
+  assert.deepEqual(snapshot(f.home), before, 'the second update writes nothing')
+})
+
+test('J11b: a changed hook command asks once and shows the exact commands', async () => {
+  const f = fixture(['.codex', '.cursor'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex', 'cursor'])
+  const changed = { codex: olderHook(f, 'codex', '.codex/hooks.json'), cursor: olderHook(f, 'cursor', '.cursor/hooks.json') }
+  const output = checked(await update(f, ['--codex-bin', mock.executable], { input: 'y\n' }), 'setup --update')
+  assert.equal(questions(output), 1, output)
+  for (const [agent, one] of Object.entries(changed)) {
+    assert.ok(output.includes(`Now: ${one.older}`), `${agent}: the question shows the old command\n${output}`)
+    assert.ok(output.includes(`New: ${one.now}`), `${agent}: the question shows the new command\n${output}`)
+    const hooks = readFileSync(join(f.home, agent === 'codex' ? '.codex' : '.cursor', 'hooks.json'), 'utf8')
+    assert.ok(hooks.includes(JSON.stringify(one.now)) && !hooks.includes(JSON.stringify(one.older)), `${agent}: the yes wrote the new command`)
+  }
+  assert.ok(output.includes('Agent Board updated to 99.0.0.'), output)
+  assert.equal(updateSteps(output), 1, 'one step: the yes')
+})
+
+test('a changed host-loaded file asks once and names the file', async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  olderScript(f)
+  const output = checked(await update(f, ['--codex-bin', mock.executable], { input: 'y\n' }), 'setup --update')
+  assert.equal(questions(output), 1, output)
+  assert.match(output, /Code your agents run changes: .*agent-board\.mjs/, output)
+  assert.ok(!readFileSync(f.script, 'utf8').includes('// an earlier build'), 'the yes wrote the new board script')
+  assert.equal(updateSteps(output), 1, 'one step: the yes')
+})
+
+test('J11a: 0.25.0 to 0.25.1 asks one question that names the version check and the session list, in 3 steps', async t => {
+  const old = taggedRelease(t, 'agent-board--v0.25.0', '0.25.0')
+  if (!old) return
+  const f = await oldCodexHome(old)
+  const mock = mockCodex(f)
+  const output = checked(await update(f, ['--codex-bin', mock.executable], { source: repoRoot, input: 'y\n' }), 'setup --update')
+  assert.equal(questions(output), 1, output)
+  for (const words of ['Once a day, the board asks npm for the newest version number.', '"Check for new versions"', 'the list of your Codex sessions', '"Show Codex sessions"']) {
+    assert.ok(output.includes(words), `the question names ${words}\n${output}`)
+  }
+  assert.match(output, /Agent Board updated to /, output)
+  assert.equal(updateSteps(output, true), 3, `three steps: learn of it, the command, the yes\n${output}`)
+})
+
+test('several ask conditions at once make one question', async () => {
+  const f = fixture(['.codex', '.cursor'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex', 'cursor'])
+  const changed = olderHook(f, 'cursor', '.cursor/hooks.json')
+  olderScript(f)
+  beforeUses(f)
+  const output = checked(await update(f, ['--codex-bin', mock.executable], { input: 'y\n' }), 'setup --update')
+  assert.equal(questions(output), 1, output)
+  assert.ok(output.includes(`Now: ${changed.older}`), output)
+  assert.match(output, /Code your agents run changes: .*agent-board\.mjs/, output)
+  assert.match(output, /Check for new versions/, output)
+  assert.equal(updateSteps(output), 1, 'one step: the yes')
+})
+
+test('an update from a Node in another folder asks nothing', async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  const config = join(f.home, '.codex', 'hooks.json'), before = readFileSync(config, 'utf8')
+  const node = copyNode(f, 'moved-node')
+  const result = await runWith(f, node, [join(nextBuild(), 'scripts', 'setup-agent.mjs'), ...isolatedArgs(f), '--lang', 'en', '--update', '--codex-bin', mock.executable], { input: '', timeoutMs: 180000, env: { AGENT_BOARD_SETUP_TTY: '1' } })
+  assert.equal(checked(result, 'setup --update from another Node'), 'Agent Board updated to 99.0.0.\n')
+  assert.equal(readFileSync(config, 'utf8'), before, 'the hook commands stay as written')
+})
+
+test("an update asks when the host has never approved the board's hooks", async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  writeFileSync(mock.stateFile, JSON.stringify({ trusted: false }))
+  await apply(f, ['codex'])
+  const output = checked(await update(f, ['--codex-bin', mock.executable], { input: 'y\n' }), 'setup --update')
+  assert.equal(questions(output), 1, output)
+  assert.match(output, /- Approve the board's hooks in Codex\n/, output)
+  assert.match(output, /Approve the board's hooks in Codex: done\./, output)
+  assert.equal(writesOf(mock), 1, 'the trust step wrote the approval once')
+  assert.equal(JSON.parse(readFileSync(mock.stateFile, 'utf8')).trusted, true, 'Codex reads the hooks as trusted afterwards')
+  assert.equal(readRecord(f, 'codex').approved, true, 'the record says the board approved them')
+})
+
+test('J11b: a revoked approval is still revoked after an update', async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  writeFileSync(mock.stateFile, JSON.stringify({ trusted: false }))
+  await apply(f, ['codex'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'codex', '--codex-trust', '--apply', '--json', '--codex-bin', mock.executable], { timeoutMs: 60000 }), 'the board approves its hooks')
+  assert.equal(readRecord(f, 'codex').approved, true, 'the record says the board approved them')
+  // The person revokes the approval in Codex.
+  writeFileSync(mock.stateFile, JSON.stringify({ trusted: false }))
+  const writes = writesOf(mock)
+  const output = checked(await update(f, ['--codex-bin', mock.executable]), 'setup --update')
+  assert.equal(questions(output), 0, output)
+  assert.ok(output.startsWith('Agent Board updated to 99.0.0.\n'), output)
+  assert.match(output, /Codex: the board's hooks are not approved now.*--codex-trust/, output)
+  assert.equal(writesOf(mock), writes, 'the update wrote no approval')
+  assert.equal(JSON.parse(readFileSync(mock.stateFile, 'utf8')).trusted, false, 'still revoked')
+})
+
+test("an update that cannot read the host's trust asks and does not claim it", async () => {
+  const f = fixture(['.codex'])
+  await apply(f, ['codex'])
+  // This VM has a real Codex on PATH, so the update runs with a PATH that has no codex on it.
+  const result = await update(f, [], { input: 'y\n', env: { PATH: '/usr/bin:/bin' } })
+  assert.equal(result.status, 1, `a failed trust step fails the run\n${result.stderr}`)
+  assert.equal(questions(result.stdout), 1, result.stdout)
+  assert.match(result.stdout, /- Approve the board's hooks in Codex\n/, result.stdout)
+  assert.doesNotMatch(result.stdout, /still trusted|in Codex: done/, result.stdout)
+  assert.match(result.stdout, /Approve the board's hooks in Codex: failed\. Run: .*--codex-trust/, result.stdout)
+})
+
+test('an update the person declines changes no file and the old hooks still report', async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  olderScript(f)
+  beforeUses(f)
+  const before = snapshot(f.home)
+  // A no, and an input closed while the question is open.
+  for (const input of ['n\n', '']) {
+    const result = await update(f, ['--codex-bin', mock.executable], { input })
+    assert.equal(result.status, 1, `${JSON.stringify(input)}: ${result.stderr}`)
+    assert.equal(questions(result.stdout), 1, result.stdout)
+    assert.match(result.stdout, /Nothing changed\. To update, run this in a terminal and answer y: .*--update/, result.stdout)
+    assert.deepEqual(snapshot(f.home), before, `${JSON.stringify(input)}: no file changed`)
+  }
+  await report(f, 'codex', 'waiting')
+  assertWaiting(await board(f, '--chat'), 'codex')
+})
+
+test('an update with no terminal and something to ask writes nothing and prints the question', async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  const changed = olderHook(f, 'codex', '.codex/hooks.json')
+  olderScript(f)
+  const before = snapshot(f.home)
+  const plain = await update(f, ['--codex-bin', mock.executable], { terminal: false })
+  assert.equal(plain.status, 3, `${plain.stderr}\n${plain.stdout}`)
+  assert.ok(plain.stdout.includes(`Now: ${changed.older}`) && plain.stdout.includes(`New: ${changed.now}`), plain.stdout)
+  assert.match(plain.stdout, /Code your agents run changes: .*agent-board\.mjs/, plain.stdout)
+  assert.match(plain.stdout, /To update, run this in a terminal and answer y: .*--update/, plain.stdout)
+  assert.deepEqual(snapshot(f.home), before, 'no file changed')
+  const json = await update(f, ['--codex-bin', mock.executable, '--json'], { terminal: false })
+  assert.equal(json.status, 3, json.stderr)
+  const answer = JSON.parse(json.stdout)
+  assert.equal(answer.applied, false)
+  assert.deepEqual(answer.question.hooks, [{ agent: 'codex', event: changed.event, before: [changed.older], after: [changed.now] }])
+  assert.ok(answer.question.files.some(file => resolve(file) === resolve(f.script)), json.stdout)
+  assert.match(answer.question.command, /--update/)
+  assert.deepEqual(snapshot(f.home), before, 'no file changed')
+})
+
+test('an update keeps a removed hook group removed and an agent turned off', async () => {
+  const f = fixture(['.cursor', '.config/opencode'])
+  await apply(f, ['cursor', 'opencode'])
+  checked(await run(f, [join(repoRoot, 'scripts', 'setup-agent.mjs'), ...isolatedArgs(f), '--lang', 'en', '--remove', '--agent', 'opencode', '--apply'], { timeoutMs: 120000 }), 'turn OpenCode off')
+  const config = join(f.home, '.cursor', 'hooks.json'), hooks = JSON.parse(readFileSync(config, 'utf8'))
+  const removed = Object.keys(readRecord(f, 'cursor').groups)[0], removedCommand = hooks.hooks[removed][0].command
+  delete hooks.hooks[removed]
+  writeFileSync(config, `${JSON.stringify(hooks, null, 2)}\n`)
+  const changed = olderHook(f, 'cursor', '.cursor/hooks.json', 1)
+  const output = checked(await update(f, [], { input: 'y\n' }), 'setup --update')
+  assert.equal(questions(output), 1, output)
+  assert.ok(output.includes(`New: ${changed.now}`), output)
+  assert.ok(!output.includes(removedCommand), `the removed hook is not in the question\n${output}`)
+  assert.doesNotMatch(output, /OpenCode/, output)
+  assert.equal(JSON.parse(readFileSync(config, 'utf8')).hooks[removed], undefined, 'the removed hook group stays removed')
+  assert.ok(!existsSync(recordOf(f, 'opencode')) && !existsSync(join(f.home, '.config', 'opencode', 'plugins', 'agent-board-local.js')), 'OpenCode stays off')
+  assert.equal(checked(await update(f), 'a second update'), 'Agent Board is up to date (99.0.0).\n')
+  assert.equal(JSON.parse(readFileSync(config, 'utf8')).hooks[removed], undefined, 'a second update leaves it removed too')
+})
+
+test('an update keeps a removed Codex hook group removed and reads the approval of the hooks still there', async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'codex', '--codex-trust', '--apply', '--json', '--codex-bin', mock.executable], { timeoutMs: 60000 }), 'the board approves its hooks')
+  const config = join(f.home, '.codex', 'hooks.json'), hooks = JSON.parse(readFileSync(config, 'utf8'))
+  const removed = Object.keys(readRecord(f, 'codex').groups)[0]
+  delete hooks.hooks[removed]
+  writeFileSync(config, `${JSON.stringify(hooks, null, 2)}\n`)
+  const output = checked(await update(f, ['--codex-bin', mock.executable]), 'setup --update')
+  assert.equal(output, 'Agent Board updated to 99.0.0.\n', 'the hooks still there are approved: no question and no line about approval')
+  assert.equal(JSON.parse(readFileSync(config, 'utf8')).hooks[removed], undefined, 'the removed hook group stays removed')
+  assert.equal(readRecord(f, 'codex').approved, true)
+})
+
+test('an update keeps an edited hook runner with its hooks and still updates the other agents', async () => {
+  const f = fixture(['.codex', '.config/opencode'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex', 'opencode'])
+  const worker = join(f.home, '.agent-board', 'agent-board-hook.mjs'), config = join(f.home, '.codex', 'hooks.json')
+  olderScript(f)
+  appendFileSync(worker, '\n// my own note\n')
+  const mine = readFileSync(worker, 'utf8'), hooks = readFileSync(config, 'utf8')
+  const output = checked(await update(f, ['--codex-bin', mock.executable], { input: 'y\n' }), 'setup --update')
+  assert.equal(questions(output), 1, output)
+  assert.equal(readFileSync(worker, 'utf8'), mine, 'the edited runner stays')
+  assert.equal(readFileSync(config, 'utf8'), hooks, 'the hooks written for it stay')
+  assert.ok(output.includes('you edited it and the agent runs it'), output)
+  const script = readFileSync(f.script, 'utf8')
+  assert.ok(!script.includes('// an earlier build'), 'the shared board script still updates')
+  for (const agent of ['codex', 'opencode']) {
+    const [, hash] = Object.entries(readRecord(f, agent).files).find(([file]) => resolve(file) === resolve(f.script))
+    assert.equal(hash, sha256(script), `${agent}: the record names the new board script`)
+  }
+})
+
+test('an update leaves a plugin-written script alone and names the plugin update', async () => {
+  const f = fixture(['.claude'])
+  const progress = join(f.home, '.claude', 'progress.md')
+  writeFileSync(join(f.home, '.claude', 'agent-board.mjs'), `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n// the plugin's board\n`)
+  const before = snapshot(f.home)
+  const output = checked(await update(f, [], { env: { CLAUDE_PROGRESS_FILE: progress } }), 'setup --update')
+  assert.equal(output.trim().split('\n').length, 1, output)
+  assert.match(output, /claude plugin update agent-board@agent-board/, output)
+  assert.deepEqual(snapshot(f.home), before, 'nothing written')
 })
