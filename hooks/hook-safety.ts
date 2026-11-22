@@ -3,9 +3,13 @@ import { hookRecoverySource } from './hook-recovery.ts'
 // Milliseconds internally; Gemini stores milliseconds, the other command hosts seconds.
 // Keep the existing per-event host floors until the host descriptors own this table.
 export const HOOK_VERSION = 1
-// Only GROK_SESSION_ID for Grok is read by replayed lifecycle events.
+// The board's own background turn of a Codex desktop app conversation (#557): the board sets this to 1 for that `codex exec`
+// run only, whose SessionEnd ends the run and not the conversation.
+export const BACKGROUND_TURN_ENV = 'AGENT_BOARD_BACKGROUND_TURN'
+// Replayed lifecycle events read only these: GROK_SESSION_ID for Grok, and the background-turn mark above for Codex.
 // Other lifecycle identities come from stdin; configuration and credentials stay out.
 export const HOOK_SESSION_ENV: Record<string, string[]> = {
+  codex: [BACKGROUND_TURN_ENV],
   grok: ['GROK_SESSION_ID'],
 }
 // Let the worker reap its reporter before an SDK caller applies its outer backstop.

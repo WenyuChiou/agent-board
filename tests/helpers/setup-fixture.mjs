@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { removeTree } from './remove-tree.mjs'
 import { setupPrograms } from './setup-programs.mjs'
 
 const installer = fileURLToPath(new URL('../../scripts/setup-agent.mjs', import.meta.url))
@@ -13,7 +14,9 @@ const start = source.indexOf('const summaries = ') + 'const summaries = '.length
 export const bootstrap = JSON.parse(source.slice(start, source.indexOf('\nconst summary = ', start)))
 export const locales = ['en', 'zh-TW', 'zh-CN']
 
-export const fixture = run => {
+// A child the setup started can still hold the folder for a moment on Windows, so the
+// folder is removed with removeTree, which retries EPERM and EBUSY (#1766).
+export const fixture = (run, { removeFolder = rmSync } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'agent-board-setup-guidance-'))
   const env = { ...process.env }
   for (const name of ['HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'OPENCODE_CONFIG_DIR', 'HERMES_HOME', 'GROK_HOME', 'OPENCLAW_STATE_DIR', 'DSH_HOME', 'TMP', 'TEMP', 'TMPDIR']) {
@@ -33,7 +36,7 @@ export const fixture = run => {
   }
   const setup = (...args) => runCommand(installer, [], args)
   const launch = (...args) => runCommand(launcher, ['setup'], args)
-  try { return run(setup, { launch, env, root, invoke: (args, input = '\n') => invoke(installer, [], args, input) }) } finally { rmSync(root, { recursive: true, force: true }) }
+  try { return run(setup, { launch, env, root, invoke: (args, input = '\n') => invoke(installer, [], args, input) }) } finally { removeTree(root, { remove: removeFolder }) }
 }
 
 export const terminal = (run, programs) => fixture((setup, f) => {

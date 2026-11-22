@@ -1,6 +1,6 @@
 import { closeSync, openSync, readSync, readdirSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
-import { basename, join } from 'node:path'
+import { basename, isAbsolute, join } from 'node:path'
 import { RESUME } from '../hooks/parse'
 import type { CodexMeta } from '../hooks/runs'
 
@@ -14,12 +14,13 @@ const object = (value: unknown): Record<string, unknown> => {
 // with exactly this session's id after the time, so another session's file, or any other file a
 // hook names, is never read. The file is read in pieces of 4 KiB until the piece that holds the
 // first line break, so up to 4 KiB after that break is read into memory with it; only the bytes
-// before the break are decoded, and of that record only four fields are kept: the first record is
-// decoded whole and everything but those four fields is dropped, and no text from the rest of the
+// before the break are decoded, and of that record only four fields are kept (readSessionMeta), or only
+// its folder (readSessionFolder): the first record is decoded whole and everything else is dropped, and no text from the rest of the
 // file is ever decoded, looked at or kept. A path that is not the session's history file, or a
 // record that is not readable, gives null and the session keeps its default.
 const SESSION_FILE_TIME = /^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-/
-export const readSessionMeta = (path: string, session: string): CodexMeta | null => {
+// The first record's payload, read as above; only the two readers below look at it, and each keeps only its own fields.
+const firstPayload = (path: string, session: string): Record<string, unknown> | null => {
   const name = basename(path)
   if (!SESSION_FILE_TIME.test(name) || name.replace(SESSION_FILE_TIME, '') !== `${session}.jsonl`) return null
   let fd: number | undefined
@@ -42,7 +43,15 @@ export const readSessionMeta = (path: string, session: string): CodexMeta | null
     }
     const first = object(JSON.parse(Buffer.concat(line).toString('utf8')))
     if (first.type !== 'session_meta') return null
-    const meta = object(first.payload)
+    return object(first.payload)
+  } catch { return null } finally {
+    if (fd !== undefined) try { closeSync(fd) } catch {}
+  }
+}
+export const readSessionMeta = (path: string, session: string): CodexMeta | null => {
+  try {
+    const meta = firstPayload(path, session)
+    if (meta === null) return null
     const source = meta.source
 
     return {
@@ -52,9 +61,15 @@ export const readSessionMeta = (path: string, session: string): CodexMeta | null
       thread_source: typeof meta.thread_source === 'string' ? meta.thread_source.slice(0, 64) : undefined,
       parent_thread_id: typeof meta.parent_thread_id === 'string' ? meta.parent_thread_id.slice(0, 128) : undefined,
     }
-  } catch { return null } finally {
-    if (fd !== undefined) try { closeSync(fd) } catch {}
-  }
+  } catch { return null }
+}
+// The folder a Codex session runs in (`cwd` of the same first record), for the Codex desktop app receiver, which runs the
+// session's next turn there (#557): an absolute path of at most 1024 characters, else null. Nothing else of the record is kept.
+export const readSessionFolder = (path: string, session: string): string | null => {
+  try {
+    const cwd = firstPayload(path, session)?.cwd
+    return typeof cwd === 'string' && cwd.length <= 1024 && isAbsolute(cwd) ? cwd : null
+  } catch { return null }
 }
 
 // Bound directory reads across the whole walk, including empty months and years.

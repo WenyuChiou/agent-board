@@ -1,12 +1,25 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { copyFileSync, rmSync } from 'node:fs'
+import { copyFileSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { bootstrap, locales, fixture, terminal } from './helpers/setup-fixture.mjs'
 import { setupPrograms } from './helpers/setup-programs.mjs'
 
 const boardCheck = (f, args) => spawnSync(process.execPath, [join(f.root, 'data', 'agent-board.mjs'), '--home', f.env.HOME, '--data-dir', join(f.root, 'data'), '--progress-file', f.env.CLAUDE_PROGRESS_FILE, ...args], { env: f.env, encoding: 'utf8', windowsHide: true, timeout: 30_000 })
+
+test('the setup fixture removes its folder again when Windows still holds it once (#1766)', () => {
+  let calls = 0
+  let folder
+  const removeFolder = (path, options) => {
+    calls++
+    if (calls === 1) throw Object.assign(new Error('synthetic busy folder'), { code: 'EPERM' })
+    return rmSync(path, options)
+  }
+  fixture((setup, f) => { folder = f.root }, { removeFolder })
+  assert.equal(calls, 2)
+  assert.equal(existsSync(folder), false)
+})
 
 test('an unreachable detected Codex retains locate advice instead of a failing doctor command in every language', () => {
   for (const lang of locales) fixture((setup, f) => {
