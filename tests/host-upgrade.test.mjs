@@ -1137,6 +1137,42 @@ test('an update keeps a removed Codex hook group removed and reads the approval 
   assert.equal(readRecord(f, 'codex').approved, true)
 })
 
+test('an update keeps what the person removed from the Antigravity, OpenClaw, DeepSeek and Hermes configs removed', async () => {
+  const f = fixture(['.gemini/antigravity-cli', '.hermes', '.openclaw', '.dsh'])
+  await apply(f, ['hermes', 'openclaw', 'antigravity', 'deepseek'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'hermes', '--hermes-trust', '--apply', '--json'], { timeoutMs: 60000 }), 'the board approves its Hermes hooks')
+  // Antigravity: the board's hook group.
+  const antigravity = join(f.home, '.gemini', 'config', 'hooks.json'), groups = JSON.parse(readFileSync(antigravity, 'utf8'))
+  assert.ok(groups['agent-board-local'], 'setup wrote the Antigravity group')
+  delete groups['agent-board-local']
+  writeFileSync(antigravity, `${JSON.stringify(groups, null, 2)}\n`)
+  // OpenClaw: the plugin entry and the path that loads it.
+  const openclaw = join(f.home, '.openclaw', 'openclaw.json'), claw = JSON.parse(readFileSync(openclaw, 'utf8'))
+  assert.ok(claw.plugins.entries['agent-board-local'], 'setup wrote the OpenClaw entry')
+  delete claw.plugins.entries['agent-board-local']
+  claw.plugins.load.paths = claw.plugins.load.paths.filter(path => !path.includes('agent-board-local'))
+  writeFileSync(openclaw, `${JSON.stringify(claw, null, 2)}\n`)
+  // DeepSeek: the marked block, with a line of the person's own left in its place.
+  const deepseek = join(f.home, '.dsh', 'cordis.patch.yml'), patch = readRecord(f, 'deepseek').groups.patch
+  assert.ok(readFileSync(deepseek, 'utf8').includes(patch), 'setup wrote the DeepSeek block')
+  writeFileSync(deepseek, readFileSync(deepseek, 'utf8').replace(patch, '# mine\n'))
+  // Hermes: one event's entry and its approval; the other events and theirs stay.
+  const hermes = join(f.home, '.hermes', 'config.yaml'), allowlist = join(f.home, '.hermes', 'shell-hooks-allowlist.json')
+  const removed = Object.keys(readRecord(f, 'hermes').groups.hooks)[0]
+  const lines = readFileSync(hermes, 'utf8').split('\n'), at = lines.indexOf(`  ${removed}:`)
+  assert.ok(at > 0, `setup wrote the Hermes ${removed} entry`)
+  lines.splice(at, lines.findIndex((line, index) => index > at && !line.startsWith('    ')) - at)
+  writeFileSync(hermes, lines.join('\n'))
+  const trust = JSON.parse(readFileSync(allowlist, 'utf8'))
+  trust.approvals = trust.approvals.filter(entry => entry.event !== removed)
+  writeFileSync(allowlist, `${JSON.stringify(trust, null, 2)}\n`)
+  const kept = [antigravity, openclaw, deepseek, hermes].map(file => [file, readFileSync(file, 'utf8')])
+  assert.equal(checked(await update(f), 'setup --update'), 'Agent Board updated to 99.0.0.\n', 'nothing to ask, and no line about approval')
+  for (const [file, text] of kept) assert.equal(readFileSync(file, 'utf8'), text, `${file} keeps what the person removed removed`)
+  assert.equal(checked(await update(f), 'a second update'), 'Agent Board is up to date (99.0.0).\n')
+  for (const [file, text] of kept) assert.equal(readFileSync(file, 'utf8'), text, `${file}: a second update leaves it removed too`)
+})
+
 test('an update keeps an edited hook runner with its hooks and still updates the other agents', async () => {
   const f = fixture(['.codex', '.config/opencode'])
   const mock = mockCodex(f)
