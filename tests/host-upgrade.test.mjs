@@ -1204,6 +1204,22 @@ test('an update leaves a Hermes hook whose timeout or matcher the person changed
   }
 })
 
+test("an update reads the board's Hermes hook written with quoted option names as the board's own", async () => {
+  const f = fixture(['.hermes'])
+  await apply(f, ['hermes'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'hermes', '--hermes-trust', '--apply', '--json'], { timeoutMs: 60000 }), 'the board approves its Hermes hooks')
+  const hermes = join(f.home, '.hermes', 'config.yaml'), written = readFileSync(hermes, 'utf8')
+  assert.match(written, /timeout: 10\b/, 'setup wrote the Hermes timeout')
+  assert.match(written, /matcher: todo\b/, 'setup wrote the Hermes matcher')
+  // The same values, with the option names quoted as YAML allows.
+  const quoted = written.replace(/timeout: 10\b/g, '"timeout": 10').replace(/matcher: todo\b/, "'matcher': todo")
+  writeFileSync(hermes, quoted)
+  const result = await update(f)
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
+  assert.doesNotMatch(result.stdout, /skipped/, result.stdout)
+  assert.equal(readFileSync(hermes, 'utf8'), quoted, 'nothing to change: the update leaves the file as it is')
+})
+
 test('an update keeps an edited hook runner with its hooks and still updates the other agents', async () => {
   const f = fixture(['.codex', '.config/opencode'])
   const mock = mockCodex(f)
