@@ -1250,7 +1250,8 @@ const hermesHome = async () => {
 }
 
 test("an update that must rewrite the board's Hermes hook leaves a timeout the person raised or a matcher they added as it is and names it", async () => {
-  for (const [edit, change] of [['a raised timeout', line => line.replace('timeout: 10}', 'timeout: 20}')], ['an added matcher', line => line.replace('timeout: 10}', 'timeout: 10, matcher: other}')]]) {
+  // `010` is 8 to Hermes (PyYAML reads a leading zero as octal), though it reads as 10 to Number().
+  for (const [edit, change] of [['a raised timeout', line => line.replace('timeout: 10}', 'timeout: 20}')], ['an added matcher', line => line.replace('timeout: 10}', 'timeout: 10, matcher: other}')], ['a timeout with a leading zero', line => line.replace('timeout: 10}', 'timeout: 010}')]]) {
     const f = await hermesHome()
     const { config, older } = olderHermes(f, 'pre_llm_call')
     const edited = editHermesItem(config, older, change)
