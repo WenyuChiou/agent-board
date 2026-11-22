@@ -6709,7 +6709,8 @@ test('over SSH with a config folder variable set, plain agent-board opens the pa
       const sshOpenUrl = board.openUrlOf(openOut)
       assert.ok(sshOpenUrl && new URL(sshOpenUrl).origin === new URL(openUrl).origin, openOut)
       const open = openOut.trim().split('\n')
-      assert.equal(open.at(-1), EN.boardPageAlreadyOpen, `${name}: the page counts as open`)
+      assert.equal(open.at(-1), sshOpenUrl, `${name}: over SSH the second run still ends with a fresh one-use link`)
+      assert.equal(openOut.includes(EN.boardPageAlreadyOpen), false, openOut)
       assert.equal(open.at(-2), EN.serveSshHint(port, '203.0.113.9', sshOpenUrl), `${name}: the forward is still offered`)
       // The terminal board's `o` keeps its note to the address alone, so no two addresses run together.
       const keys = spawnSync(process.execPath, [board.script, '--keys', 'o', '--no-open'], { env, encoding: 'utf8', timeout: 20_000, windowsHide: true })
