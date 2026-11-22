@@ -194,6 +194,7 @@ export const ZH_CN: Strings = {
     "updated": "Agent Board 已更新到 {version}。",
     "updateCurrent": "Agent Board 已是最新版（{version}）。",
     "updateRevoked": "{host}：看板的 hooks 现在没有被批准，这次更新也没有替你批准。要批准它们：先运行 {command} 预览，再加上 --apply 重新运行同一命令。",
+    "updateTrustUnread": "{host}：这次更新读不到看板的 hooks 是否已被批准，所以没有更改任何批准。要确认，先运行 {command} 预览；要批准它们，再加上 --apply 重新运行同一命令。",
     "updateLater": "没有任何更改。要更新，请在终端运行这个命令并回答 y：{command}",
     "updatePlugin": "这个看板来自 Claude Code 插件，setup 不会动它。请用 claude plugin update agent-board@agent-board 更新插件，再开一个新的 Claude Code 会话。",
     "updateNone": "这里还没设置 Agent Board，所以没有可更新的东西。设置它：{command}",

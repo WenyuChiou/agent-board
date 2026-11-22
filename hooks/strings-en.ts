@@ -194,6 +194,7 @@ export const EN: Strings = {
     "updated": "Agent Board updated to {version}.",
     "updateCurrent": "Agent Board is up to date ({version}).",
     "updateRevoked": "{host}: the board's hooks are not approved now, so the update left them unapproved. To approve them, preview {command}, then run it again with --apply.",
+    "updateTrustUnread": "{host}: the update could not read whether the board's hooks are approved, so it changed no approval. To check, preview {command}; to approve them, run it again with --apply.",
     "updateLater": "Nothing changed. To update, run this in a terminal and answer y: {command}",
     "updatePlugin": "This board comes from the Claude Code plugin, so setup leaves it alone. Update the plugin with claude plugin update agent-board@agent-board, then start a new Claude Code session.",
     "updateNone": "Agent Board is not set up here, so there is nothing to update. Set it up: {command}",
