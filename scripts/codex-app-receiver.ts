@@ -44,7 +44,8 @@ const writerLine = (id: string): RegExp => new RegExp(`^(?:(?:Error: )?(?:thread
 // ACK, a timeout, any other error or wording, an output too long to read whole or read while a program the run started still
 // held it) may have reached the model and is never read as unsent.
 export const isWriterHeld = (result: ProcessResult, id: string): boolean => {
-  const last = result.stderr.split(/\r?\n/).map(line => line.trim()).filter(line => line !== '').at(-1) ?? ''
+  // The last line as Codex printed it: blank lines after it are skipped, and nothing is trimmed from it.
+  const last = result.stderr.split(/\r?\n/).filter(line => line.trim() !== '').at(-1) ?? ''
   return result.started && !result.timedOut && result.exitCode !== null && result.exitCode !== 0 && result.hasStdout === false && result.isStderrCut === false
     && result.isOutputOpen === false
     && result.stdout.trim() === '' && THREAD.test(id) && writerLine(id).test(last)
@@ -54,8 +55,10 @@ export const isWriterHeld = (result: ProcessResult, id: string): boolean => {
 // board's, not the app's. Everything else, the person's Codex home included, is what their own Codex reads. One mark is
 // added, for the board's hooks in that run: its SessionEnd ends the run, not the conversation, which keeps waiting for the
 // person (hooks/codex.ts; live run: without it the conversation read as ended after one background turn).
-const childEnvironment = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({
-  ...Object.fromEntries(Object.entries(env).filter(([name, value]) => typeof value === 'string' && !/^AGENT_BOARD_/i.test(name) && name.toUpperCase() !== 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE')),
+// The Codex home the board found the conversation in, when it names one (`--codex-dir`), so Codex resumes it from there.
+const childEnvironment = (env: NodeJS.ProcessEnv, codexHome: string | undefined): NodeJS.ProcessEnv => ({
+  ...Object.fromEntries(Object.entries(env).filter(([name, value]) => typeof value === 'string' && !/^AGENT_BOARD_/i.test(name) && name.toUpperCase() !== 'CODEX_INTERNAL_ORIGINATOR_OVERRIDE' && (codexHome === undefined || name.toUpperCase() !== 'CODEX_HOME'))),
+  ...(codexHome === undefined ? {} : { CODEX_HOME: codexHome }),
   [BACKGROUND_TURN_ENV]: '1',
 })
 
@@ -71,7 +74,7 @@ export const startCodexAppReceiver = ({
   boardUrl, sessions, stateOf, isTaken = () => false, executable, client,
   tickMs = TICK_MS, retryMs = RETRY_MS, pollMs = 2000, maxWaitMs = MAX_RESUME_WAIT, giveBackWaitMs = GIVE_BACK_WAIT_MS,
   // A clock that never goes back, as the daemon receiver's.
-  now = () => performance.now(), run = runBackgroundProcess, env = process.env, onError = () => undefined,
+  now = () => performance.now(), run = runBackgroundProcess, env = process.env, codexHome, onError = () => undefined,
 }: {
   boardUrl: string
   // The Codex desktop app conversations the board lists and has not read as ended, each with its own folder.
@@ -90,6 +93,8 @@ export const startCodexAppReceiver = ({
   now?: () => number
   run?: typeof runBackgroundProcess
   env?: NodeJS.ProcessEnv
+  // The Codex home the board lists the conversations from; none keeps the board's own environment's.
+  codexHome?: string
   onError?: (error: unknown) => void
 }) => {
   if (!isAbsolute(executable ?? '')) throw new Error('EXPLICIT_EXECUTABLE_REQUIRED')
@@ -150,7 +155,7 @@ export const startCodexAppReceiver = ({
           try { await starting() } catch (error) { onError(error); return await giveBack(unsent) }
           // A turn that began while the board took that receipt, or a conversation it let go of meanwhile, gets nothing.
           if (stateOf(id) !== 'idle' || !isWanted(id)) return await giveBack(unsent)
-          const result = await run(programFor(executable, args), { cwd: dir, stdin: prompt, maxWaitMs, env: childEnvironment(env) })
+          const result = await run(programFor(executable, args), { cwd: dir, stdin: prompt, maxWaitMs, env: childEnvironment(env, codexHome) })
           // Nothing ran: the claim is refused with the reason, and nothing reached Codex.
           if (!result.started) throw new Error(result.spawnErrorCode === 'ENOENT' ? 'COMMAND_MISSING' : 'SPAWN_FAILED')
           // Nothing was sent: back to the queue as `held`. The board keeps the time of the first refusal, so an app left open

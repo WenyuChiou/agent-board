@@ -2329,6 +2329,7 @@ const serveChild = (): void => {
         // names a shorter wait for its stand-in daemon (`testUnloadMs`).
         unloadMs: testUnloadMs(process.env, process.ppid),
         appSessions: codexAppSessions(path),
+        ...(appCodexHome() === null ? {} : { appHome: appCodexHome() as string }),
       },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests
