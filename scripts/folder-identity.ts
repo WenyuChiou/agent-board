@@ -17,6 +17,11 @@ export const folderIdentity = (cwd: unknown, platform = process.platform, canoni
   return identity
 }
 
+export const workspaceDigest = (cwd: unknown, platform = process.platform, canonicalize: (path: string) => string = realpathSync): string | undefined => {
+  const identity = folderIdentity(cwd, platform, canonicalize)
+  return identity?.folderCanonicalDigest ?? identity?.folderDigest
+}
+
 export const matchesFolderIdentity = (record: FolderBinding, current: FolderIdentity): boolean => {
   if (!isDigest(record.folderDigest)) return false
   // A present canonical binding must match; never fall back after a symlink

@@ -819,7 +819,7 @@ export const startServer = (o: ServeOptions): void => {
         // Before closeNonServer() closes messaging, let codexReceiver disconnect and any in-flight receipt finish cleanly (#1335).
         if (!isLan && !movedReleased && url.pathname.startsWith('/api/messages/')) {
           const action = url.pathname.slice('/api/messages/'.length)
-          if (['disconnect', 'receipt', 'mailbox-accept', 'mailbox-ack'].includes(action)) {
+          if (['disconnect', 'receipt', 'mailbox-accept', 'mailbox-ack', 'peer-ack'].includes(action)) {
             return replyMessage(action, body)
           }
         }

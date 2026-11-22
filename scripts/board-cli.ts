@@ -16,7 +16,7 @@ import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
 import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
-import { folderIdentity } from './folder-identity'
+import { workspaceDigest } from './folder-identity'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
@@ -3301,7 +3301,7 @@ const connectionMeta = (projects: readonly ProgressProject[]): Map<string, Conne
   for (const project of projects) {
     for (const task of project.tasks) {
       if (task.auto === null) continue
-      const digest = task.auto.dir ? folderIdentity(task.auto.dir)?.folderDigest : undefined
+      const digest = task.auto.dir ? workspaceDigest(task.auto.dir) : undefined
       const entry: ConnectionMeta = {
         project: project.name || s.uncategorized,
         title: task.title || s.unnamed,
@@ -3456,7 +3456,7 @@ const runCliSend = async (): Promise<void> => {
       return
     }
     const target = resolution.candidate.connection
-    const senderDigest = sender?.box.folderDigest ?? folderIdentity(process.cwd())?.folderDigest
+    const senderDigest = sender?.box.folderDigest ?? workspaceDigest(process.cwd())
     if (!isSameWorkspaceAllowed(senderDigest, target.folderDigest, isCrossProject)) {
       process.stderr.write(`${s.cliSendCrossProject}\n`)
       process.exitCode = 1
@@ -3543,7 +3543,7 @@ const runCliMessageAck = async (): Promise<void> => {
     const targetAgent = agentOf(found.to)
     const targetSession = sessionOfAddress(found.to)
     if (serverUrl !== null) {
-      const error = await postMessageAction(serverUrl, 'mailbox-ack', {
+      const error = await postMessageAction(serverUrl, 'peer-ack', {
         agent: targetAgent,
         session: targetSession,
         id: found.id,
@@ -3551,7 +3551,7 @@ const runCliMessageAck = async (): Promise<void> => {
         reply,
       })
       if (error !== null) {
-        process.stderr.write(`${peerSendFailureNote(error)}\n`)
+        process.stderr.write(`${['TARGET_MISMATCH', 'NOT_FOUND'].includes(error) ? s.cliSendAckNotFound : peerSendFailureNote(error)}\n`)
         process.exitCode = 1
         return
       }

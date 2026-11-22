@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { registerHooks } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,7 +25,7 @@ const { parseMessageStore, queuedMessagingOf } = await import('../hooks/queued-s
 const { ZH_TW } = await import('../hooks/i18n.ts')
 const { EN } = await import('../hooks/strings-en.ts')
 const { agentLabel } = await import('../hooks/strings.ts')
-const { folderIdentity } = await import('../scripts/folder-identity.ts')
+const { workspaceDigest } = await import('../scripts/folder-identity.ts')
 const { defaultMessagesDirectory } = await import('../scripts/runtime-folder.ts')
 
 const MACHINE_ENV_KEYS = ['PATH', 'SystemRoot', 'ComSpec', 'PATHEXT', 'WINDIR', 'NUMBER_OF_PROCESSORS', 'OS']
@@ -72,11 +72,11 @@ const readStore = (messagesDir, now = Date.now()) => parseMessageStore(readFileS
 
 const makeMailbox = (state, agent, session, dir, now) => {
   const next = enrollMailbox(state, agent, session, 'CLI', now, 600_000)
-  const id = folderIdentity(dir)
+  const digest = workspaceDigest(dir)
   return {
     ...next,
-    mailboxes: (next.mailboxes ?? []).map(box => box.id === mailboxId(agent, session) && id
-      ? { ...box, folderDigest: id.folderDigest, ...(id.folderCanonicalDigest ? { folderCanonicalDigest: id.folderCanonicalDigest } : {}) }
+    mailboxes: (next.mailboxes ?? []).map(box => box.id === mailboxId(agent, session) && digest
+      ? { ...box, folderDigest: digest }
       : box),
   }
 }
@@ -481,6 +481,15 @@ test('--send resolves and delivers to a live receiver connection through a runni
     const delivered = deliveryText(polled.messages[0], EN)
     assert.ok(delivered.includes('Message from Codex (task "Ordinary hook sender"), not from you'), delivered)
 
+    // Live-only recipient can confirm its claimed message via --message-ack while --serve is running.
+    const nonce = polled.messages[0].nonce
+    assert.match(nonce, /^[0-9a-f]{6}$/)
+    const liveAck = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--message-ack', nonce, 'Live reply confirmed'], { CLAUDE_SESSION_ID: 'sess-live-777' }, workspace)
+    assert.equal(liveAck.status, 0, `${liveAck.stdout}\n${liveAck.stderr}`)
+    const savedAck = readStore(messagesDir).messages.find(m => m.id === polled.messages[0].id)
+    assert.equal(savedAck?.status, 'acknowledged')
+    assert.equal(savedAck?.reply, `ACK ${nonce} Live reply confirmed`)
+
     // Cross-project send to live connection is refused unless --cross-project is passed.
     const blocked = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'claude', 'Cross blocked'], {}, otherWorkspace)
     assert.equal(blocked.status, 1, `${blocked.stdout}\n${blocked.stderr}`)
@@ -493,6 +502,88 @@ test('--send resolves and delivers to a live receiver connection through a runni
     assert.equal(toOrdinary.status, 0, `${toOrdinary.stdout}\n${toOrdinary.stderr}`)
   } finally {
     await runCli(root, ['--progress-file', progress, '--stop'], {}, workspace).catch(() => {})
+    if (owner?.pid) {
+      const deadline = Date.now() + 5_000
+      while (Date.now() < deadline) {
+        try { process.kill(owner.pid, 0); await new Promise(r => setTimeout(r, 100)) } catch { break }
+      }
+    }
+    await removeDir(root)
+  }
+})
+
+test('--send matches same-workspace MCP mailbox alongside a live connection and across symlinked paths', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'cli-send-symlink-'))
+  const realWorkspace = join(root, 'real-workspace')
+  const aliasWorkspace = join(root, 'alias-workspace')
+  const otherWorkspace = join(root, 'other-workspace')
+  mkdirSync(realWorkspace, { recursive: true })
+  mkdirSync(otherWorkspace, { recursive: true })
+  symlinkSync(realWorkspace, aliasWorkspace, process.platform === 'win32' ? 'junction' : 'dir')
+  const progress = join(root, 'progress.md')
+  const env = cleanEnv(root)
+  const messagesDir = defaultMessagesDirectory(progress, env.HOME, env, process.platform)
+  const now = Date.now()
+  // Only codex is in progress.md (bound to the symlink path); gemini has no progress entry at all.
+  writeFileSync(progress, [
+    '# Progress',
+    block('sess-symlink-codex', 'codex', 'working', 'LinkProj', 'Symlink sender', aliasWorkspace, now),
+  ].join('\n'))
+  writeStore(messagesDir, enrollMailbox({ messages: [], mailboxes: [] }, 'codex', 'sess-symlink-codex', 'CLI', now, 600_000))
+
+  let owner = null
+  try {
+    const served = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--serve', '--no-open'], {}, realWorkspace)
+    assert.equal(served.status, 0, `${served.stdout}\n${served.stderr}`)
+    owner = JSON.parse(readFileSync(join(messagesDir, 'server.owner'), 'utf8'))
+    const origin = new URL(owner.url).origin
+    const token = new URL(owner.url).searchParams.get('t')
+
+    const mcpRes = await fetch(`${origin}/api/messages/mcp-enroll`, {
+      method: 'POST',
+      headers: { 'x-board-token': token, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        agent: 'gemini',
+        session: 'sess-dual-888',
+        surface: 'MCP',
+        owner: `${process.pid}:test-start`,
+        folderDigest: workspaceDigest(realWorkspace),
+        until: Date.now() + 600_000,
+      }),
+    })
+    assert.equal(mcpRes.status, 200)
+
+    const regRes = await fetch(`${origin}/api/messages/register`, {
+      method: 'POST',
+      headers: { 'x-board-token': token, 'content-type': 'application/json' },
+      body: JSON.stringify({ agent: 'gemini', session: 'sess-dual-888', surface: 'Gemini CLI', turn: 'session', scope: 'session' }),
+    })
+    assert.equal(regRes.status, 200)
+    const reg = await regRes.json()
+
+    // Dual live + MCP mailbox session (no progress.md entry) accepts same-workspace send from symlinked cwd.
+    const sentDual = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'gemini', 'Dual live and MCP'], { CODEX_THREAD_ID: 'sess-symlink-codex' }, aliasWorkspace)
+    assert.equal(sentDual.status, 0, `${sentDual.stdout}\n${sentDual.stderr}`)
+
+    const pollRes = await fetch(`${origin}/api/messages/poll`, {
+      method: 'POST',
+      headers: { 'x-board-token': token, 'content-type': 'application/json' },
+      body: JSON.stringify({ connection: reg.id, secret: reg.secret, turn: 'session', receive: true }),
+    })
+    assert.equal(pollRes.status, 200)
+    const polled = await pollRes.json()
+    assert.equal(polled.messages.length, 1)
+    assert.equal(polled.messages[0].from, 'codex:sess-symlink-codex')
+    assert.ok(polled.messages[0].text.includes('Dual live and MCP'))
+
+    // Real workspace cwd matches codex progress dir (aliasWorkspace) via canonical digest.
+    const sentSymlink = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'codex', 'Real to symlink'], {}, realWorkspace)
+    assert.equal(sentSymlink.status, 0, `${sentSymlink.stdout}\n${sentSymlink.stderr}`)
+
+    const wrongWorkspace = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'gemini', 'Wrong workspace'], {}, otherWorkspace)
+    assert.equal(wrongWorkspace.status, 1, `${wrongWorkspace.stdout}\n${wrongWorkspace.stderr}`)
+  } finally {
+    await runCli(root, ['--progress-file', progress, '--stop'], {}, realWorkspace).catch(() => {})
     if (owner?.pid) {
       const deadline = Date.now() + 5_000
       while (Date.now() < deadline) {
