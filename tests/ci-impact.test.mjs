@@ -881,6 +881,8 @@ test('the time check passes the Windows times that failed pull requests after #1
   slowest['tests/setup-sidecar.test.mjs'] = 49_000
   // #1730: host-upgrade's Windows Node 24 time with its three copied-Node setup tests (run 44681768984).
   slowest['tests/host-upgrade.test.mjs'] = 109_100
+  // #1778: host-upgrade's Windows Node 24 time with the `setup --update` tests of #1314 (run 45073388887, attempt 2).
+  slowest['tests/host-upgrade.test.mjs'] = 170_800
   for (const [path, ms] of Object.entries(slowest)) assert.ok(budgetOf(path) * 7 / 10 >= ms * 13 / 10, path + ': ' + budgetOf(path))
 })
 
@@ -1137,8 +1139,8 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
     const matrix = group === 'board' || group === 'journeys' || group === 'messaging' ? `${group}_matrix` : 'node_matrix'
     assert.ok(block.includes(`include: \${{ fromJSON(needs.impact.outputs.${matrix}) }}`), group)
     if (group === 'board' || group === 'journeys' || group === 'messaging') {
-      // A Windows board job has two more minutes, one for each of the sampler's two steps (#1249).
-      const minutes = group === 'board' ? "timeout-minutes: ${{ matrix.os == 'windows-latest' && 12 || 10 }}" : 'timeout-minutes: 10'
+      // Each Windows job has two more minutes, one for each of the sampler's two steps (#1249).
+      const minutes = "timeout-minutes: ${{ matrix.os == 'windows-latest' && 12 || 10 }}"
       assert.ok(block.includes('CI_TEST_PART: ${{ matrix.part }}') && block.includes(minutes), group)
     }
     if (group === 'board' || group === 'journeys') {
@@ -1160,6 +1162,15 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
     assert.ok(steps.startsWith('      # Real-time scanning'), group)
     const first = steps.split('\n      - ')[1] ?? ''
     assert.ok(first.includes("if: runner.os == 'Windows'") && first.includes('Set-MpPreference -DisableRealtimeMonitoring $true'), group)
+    const allSteps = steps.split('\n      - ').slice(1)
+    const checkout = allSteps.findIndex(step => step.startsWith('uses: actions/checkout@'))
+    const start = checkout + 1
+    assert.ok(checkout >= 0 && allSteps[start]?.startsWith('name: Windows runner sampler\n'), group)
+    assert.ok(allSteps[start].includes("if: runner.os == 'Windows'") && allSteps[start].includes('continue-on-error: true') && allSteps[start].includes('timeout-minutes: 1') && allSteps[start].includes('run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"'), group)
+    const setup = allSteps.findIndex(step => step.startsWith('uses: actions/setup-node@'))
+    assert.ok(group === 'remote' ? setup === -1 || setup > start : setup > start, group)
+    const last = allSteps.at(-1) ?? ''
+    assert.ok(last.startsWith('name: Windows runner sampler record\n') && last.includes("if: always() && runner.os == 'Windows'") && last.includes('run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"'), group)
   }
 })
 

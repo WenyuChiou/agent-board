@@ -232,6 +232,7 @@ export const ZH_TW = {
     "updated": "Agent Board 已更新到 {version}。",
     "updateCurrent": "Agent Board 已是最新版（{version}）。",
     "updateRevoked": "{host}：看板的 hooks 現在沒有被批准，這次更新也沒有替你批准。要批准它們：先執行 {command} 預覽，再加上 --apply 重新執行同一命令。",
+    "updateTrustUnread": "{host}：這次更新讀不到看板的 hooks 是否已被批准，所以沒有更動任何批准。要確認，先執行 {command} 預覽；要批准它們，再加上 --apply 重新執行同一命令。",
     "updateLater": "沒有任何變更。要更新，請在終端機執行這個命令並回答 y：{command}",
     "updatePlugin": "這個看板來自 Claude Code 外掛，setup 不會動它。請用 claude plugin update agent-board@agent-board 更新外掛，再開一個新的 Claude Code 工作階段。",
     "updateNone": "這裡還沒設定 Agent Board，所以沒有可更新的東西。設定它：{command}",

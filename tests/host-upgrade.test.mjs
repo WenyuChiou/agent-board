@@ -7,6 +7,7 @@ import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, insideHome, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, snapshot, tempFolder } from './e2e/lib/host-journey.mjs'
 import { spawnIsolated } from './e2e/lib/spawn.mjs'
+import { newestUse } from '../scripts/setup-discovery.mjs'
 
 // The upgrade journey of #466. It reads the 0.24.0 files from the release tag, so it stays in
 // the board group, whose CI job fetches the tags; the other host journeys are in tests/e2e/.
@@ -887,6 +888,15 @@ const olderScript = f => {
     for (const file of Object.keys(record.files)) if (resolve(file) === resolve(f.script)) record.files[file] = sha256(text)
   })
 }
+// A text file an earlier build wrote: an update replaces it without a question, since no host loads it as code.
+const olderSkill = f => {
+  const file = sharedSkill(f), text = `${readFileSync(file, 'utf8')}\n<!-- an earlier build -->\n`
+  writeFileSync(file, text)
+  for (const agent of installedAgents(f)) editRecord(f, agent, record => {
+    for (const one of Object.keys(record.files)) if (resolve(one) === resolve(file)) record.files[one] = sha256(text)
+  })
+  return file
+}
 // S4: records from before the release that added the new uses, so the update names each one.
 const beforeUses = f => { for (const agent of installedAgents(f)) editRecord(f, agent, record => { delete record.version }) }
 
@@ -897,7 +907,7 @@ test('J11b: an update with nothing to ask counts 0 steps and prints one line', a
   const output = checked(await update(f, ['--codex-bin', mock.executable]), 'setup --update')
   assert.equal(output, 'Agent Board updated to 99.0.0.\n')
   assert.equal(updateSteps(output), 0, 'no step: nothing to ask')
-  for (const agent of ['codex', 'opencode']) assert.equal(readRecord(f, agent).version, '99.0.0', `${agent}: the record names the new version`)
+  for (const agent of ['codex', 'opencode']) assert.equal(readRecord(f, agent).version, newestUse, `${agent}: the record names the newest use's version`)
 })
 
 test('a second update of a current home writes nothing and asks nothing', async () => {
@@ -989,6 +999,7 @@ test("an update asks when the host has never approved the board's hooks", async 
   assert.equal(questions(output), 1, output)
   assert.match(output, /- Approve the board's hooks in Codex\n/, output)
   assert.match(output, /Approve the board's hooks in Codex: done\./, output)
+  assert.ok(output.includes('Agent Board updated to 99.0.0.\n') && !output.includes('up to date'), `the trust step wrote, so the update is not "up to date"\n${output}`)
   assert.equal(writesOf(mock), 1, 'the trust step wrote the approval once')
   assert.equal(JSON.parse(readFileSync(mock.stateFile, 'utf8')).trusted, true, 'Codex reads the hooks as trusted afterwards')
   assert.equal(readRecord(f, 'codex').approved, true, 'the record says the board approved them')
@@ -1003,13 +1014,18 @@ test('J11b: a revoked approval is still revoked after an update', async () => {
   assert.equal(readRecord(f, 'codex').approved, true, 'the record says the board approved them')
   // The person revokes the approval in Codex.
   writeFileSync(mock.stateFile, JSON.stringify({ trusted: false }))
+  // An earlier build wrote the skill, so the update has a file to write.
+  const skill = olderSkill(f)
   const writes = writesOf(mock)
   const output = checked(await update(f, ['--codex-bin', mock.executable]), 'setup --update')
   assert.equal(questions(output), 0, output)
   assert.ok(output.startsWith('Agent Board updated to 99.0.0.\n'), output)
+  assert.ok(!readFileSync(skill, 'utf8').includes('an earlier build'), 'the update wrote the current skill')
   assert.match(output, /Codex: the board's hooks are not approved now.*--codex-trust/, output)
   assert.equal(writesOf(mock), writes, 'the update wrote no approval')
   assert.equal(JSON.parse(readFileSync(mock.stateFile, 'utf8')).trusted, false, 'still revoked')
+  const json = JSON.parse(checked(await update(f, ['--codex-bin', mock.executable, '--json']), 'setup --update --json'))
+  assert.deepEqual([json.revoked, json.unread], [['codex'], []], 'a refused approval is listed as revoked, not as unread')
 })
 
 test("an update that cannot read the host's trust asks and does not claim it", async () => {
@@ -1022,6 +1038,23 @@ test("an update that cannot read the host's trust asks and does not claim it", a
   assert.match(result.stdout, /- Approve the board's hooks in Codex\n/, result.stdout)
   assert.doesNotMatch(result.stdout, /still trusted|in Codex: done/, result.stdout)
   assert.match(result.stdout, /Approve the board's hooks in Codex: failed\. Run: .*--codex-trust/, result.stdout)
+})
+
+test("an update that cannot read an approval the board gave before says it could not read it and changes no approval", async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  writeFileSync(mock.stateFile, JSON.stringify({ trusted: false }))
+  await apply(f, ['codex'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'codex', '--codex-trust', '--apply', '--json', '--codex-bin', mock.executable], { timeoutMs: 60000 }), 'the board approves its hooks')
+  assert.equal(readRecord(f, 'codex').approved, true, 'the record says the board approved them')
+  // No codex on PATH and none named: the update cannot read whether Codex still trusts the hooks.
+  const output = checked(await update(f, [], { env: { PATH: '/usr/bin:/bin' } }), 'setup --update')
+  assert.equal(questions(output), 0, output)
+  assert.match(output, /Codex: the update could not read whether the board's hooks are approved.*--codex-trust/, output)
+  assert.doesNotMatch(output, /not approved now|still trusted/, output)
+  assert.equal(readRecord(f, 'codex').approved, true, 'the record keeps the approval the board gave')
+  const json = JSON.parse(checked(await update(f, ['--json'], { env: { PATH: '/usr/bin:/bin' } }), 'setup --update --json'))
+  assert.deepEqual([json.unread, json.revoked], [['codex'], []], 'an approval that cannot be read is listed as unread, not as revoked')
 })
 
 test('an update the person declines changes no file and the old hooks still report', async () => {
@@ -1066,6 +1099,23 @@ test('an update with no terminal and something to ask writes nothing and prints 
   assert.deepEqual(snapshot(f.home), before, 'no file changed')
 })
 
+test('an update given --apply still asks first and writes nothing without a yes', async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  olderHook(f, 'codex', '.codex/hooks.json')
+  olderScript(f)
+  const before = snapshot(f.home)
+  // --apply is no yes for --update: with no terminal it prints the question, and in a terminal a no still writes nothing.
+  const plain = await update(f, ['--codex-bin', mock.executable, '--apply'], { terminal: false })
+  assert.equal(plain.status, 3, `${plain.stderr}\n${plain.stdout}`)
+  assert.deepEqual(snapshot(f.home), before, 'no file changed with no terminal')
+  const declined = await update(f, ['--codex-bin', mock.executable, '--apply'], { input: 'n\n' })
+  assert.equal(declined.status, 1, declined.stderr)
+  assert.equal(questions(declined.stdout), 1, declined.stdout)
+  assert.deepEqual(snapshot(f.home), before, 'no file changed on a no')
+})
+
 test('an update keeps a removed hook group removed and an agent turned off', async () => {
   const f = fixture(['.cursor', '.config/opencode'])
   await apply(f, ['cursor', 'opencode'])
@@ -1096,9 +1146,140 @@ test('an update keeps a removed Codex hook group removed and reads the approval 
   delete hooks.hooks[removed]
   writeFileSync(config, `${JSON.stringify(hooks, null, 2)}\n`)
   const output = checked(await update(f, ['--codex-bin', mock.executable]), 'setup --update')
-  assert.equal(output, 'Agent Board updated to 99.0.0.\n', 'the hooks still there are approved: no question and no line about approval')
+  assert.equal(output, 'Agent Board is up to date (99.0.0).\n', 'the hooks still there are approved: no question, no line about approval, nothing written')
   assert.equal(JSON.parse(readFileSync(config, 'utf8')).hooks[removed], undefined, 'the removed hook group stays removed')
   assert.equal(readRecord(f, 'codex').approved, true)
+})
+
+test('an update keeps what the person removed from the Antigravity, OpenClaw, DeepSeek and Hermes configs removed', async () => {
+  const f = fixture(['.gemini/antigravity-cli', '.hermes', '.openclaw', '.dsh'])
+  await apply(f, ['hermes', 'openclaw', 'antigravity', 'deepseek'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'hermes', '--hermes-trust', '--apply', '--json'], { timeoutMs: 60000 }), 'the board approves its Hermes hooks')
+  // Antigravity: the board's hook group.
+  const antigravity = join(f.home, '.gemini', 'config', 'hooks.json'), groups = JSON.parse(readFileSync(antigravity, 'utf8'))
+  assert.ok(groups['agent-board-local'], 'setup wrote the Antigravity group')
+  delete groups['agent-board-local']
+  writeFileSync(antigravity, `${JSON.stringify(groups, null, 2)}\n`)
+  // OpenClaw: the plugin entry and the path that loads it.
+  const openclaw = join(f.home, '.openclaw', 'openclaw.json'), claw = JSON.parse(readFileSync(openclaw, 'utf8'))
+  assert.ok(claw.plugins.entries['agent-board-local'], 'setup wrote the OpenClaw entry')
+  delete claw.plugins.entries['agent-board-local']
+  claw.plugins.load.paths = claw.plugins.load.paths.filter(path => !path.includes('agent-board-local'))
+  writeFileSync(openclaw, `${JSON.stringify(claw, null, 2)}\n`)
+  // DeepSeek: the marked block, with a line of the person's own left in its place.
+  const deepseek = join(f.home, '.dsh', 'cordis.patch.yml'), patch = readRecord(f, 'deepseek').groups.patch
+  assert.ok(readFileSync(deepseek, 'utf8').includes(patch), 'setup wrote the DeepSeek block')
+  writeFileSync(deepseek, readFileSync(deepseek, 'utf8').replace(patch, '# mine\n'))
+  // Hermes: one event's entry and its approval; the other events and theirs stay.
+  const hermes = join(f.home, '.hermes', 'config.yaml'), allowlist = join(f.home, '.hermes', 'shell-hooks-allowlist.json')
+  const removed = Object.keys(readRecord(f, 'hermes').groups.hooks)[0]
+  const lines = readFileSync(hermes, 'utf8').split('\n'), at = lines.indexOf(`  ${removed}:`)
+  assert.ok(at > 0, `setup wrote the Hermes ${removed} entry`)
+  lines.splice(at, lines.findIndex((line, index) => index > at && !line.startsWith('    ')) - at)
+  writeFileSync(hermes, lines.join('\n'))
+  const trust = JSON.parse(readFileSync(allowlist, 'utf8'))
+  trust.approvals = trust.approvals.filter(entry => entry.event !== removed)
+  writeFileSync(allowlist, `${JSON.stringify(trust, null, 2)}\n`)
+  const kept = [antigravity, openclaw, deepseek, hermes].map(file => [file, readFileSync(file, 'utf8')])
+  assert.equal(checked(await update(f), 'setup --update'), 'Agent Board is up to date (99.0.0).\n', 'nothing to ask, no line about approval, nothing written')
+  for (const [file, text] of kept) assert.equal(readFileSync(file, 'utf8'), text, `${file} keeps what the person removed removed`)
+  assert.equal(checked(await update(f), 'a second update'), 'Agent Board is up to date (99.0.0).\n')
+  for (const [file, text] of kept) assert.equal(readFileSync(file, 'utf8'), text, `${file}: a second update leaves it removed too`)
+})
+
+test('an update leaves a Hermes hook whose timeout or matcher the person changed as it is and names it', async () => {
+  const f = fixture(['.hermes'])
+  await apply(f, ['hermes'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'hermes', '--hermes-trust', '--apply', '--json'], { timeoutMs: 60000 }), 'the board approves its Hermes hooks')
+  const hermes = join(f.home, '.hermes', 'config.yaml'), written = readFileSync(hermes, 'utf8')
+  for (const [edit, from, to] of [['timeout', /timeout: 10\b/, 'timeout: 1'], ['matcher', /matcher: todo\b/, 'matcher: other']]) {
+    assert.match(written, from, `setup wrote the Hermes ${edit}`)
+    const edited = written.replace(from, to)
+    writeFileSync(hermes, edited)
+    const result = await update(f)
+    assert.equal(result.status, 1, `${edit}: ${result.stderr}\n${result.stdout}`)
+    assert.match(result.stdout, /skipped: setup cannot safely update .*config\.yaml/, `${edit}: the update names the Hermes config\n${result.stdout}`)
+    assert.equal(readFileSync(hermes, 'utf8'), edited, `${edit}: the person's ${edit} stays as they set it`)
+    writeFileSync(hermes, written)
+  }
+})
+
+test("an update reads the board's Hermes hook written with quoted option names as the board's own", async () => {
+  const f = fixture(['.hermes'])
+  await apply(f, ['hermes'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'hermes', '--hermes-trust', '--apply', '--json'], { timeoutMs: 60000 }), 'the board approves its Hermes hooks')
+  const hermes = join(f.home, '.hermes', 'config.yaml'), written = readFileSync(hermes, 'utf8')
+  assert.match(written, /timeout: 10\b/, 'setup wrote the Hermes timeout')
+  assert.match(written, /matcher: todo\b/, 'setup wrote the Hermes matcher')
+  // The same values, with the option names quoted as YAML allows.
+  const quoted = written.replace(/timeout: 10\b/g, '"timeout": 10').replace(/matcher: todo\b/, "'matcher': todo")
+  writeFileSync(hermes, quoted)
+  const result = await update(f)
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
+  assert.doesNotMatch(result.stdout, /skipped/, result.stdout)
+  assert.equal(readFileSync(hermes, 'utf8'), quoted, 'nothing to change: the update leaves the file as it is')
+})
+
+// An earlier build wrote another command for one of the board's Hermes hooks: in config.yaml, in setup's record and in
+// the approval Hermes keeps for it, so an update must rewrite that entry.
+const olderHermes = (f, event) => {
+  const config = join(f.home, '.hermes', 'config.yaml'), allowlist = join(f.home, '.hermes', 'shell-hooks-allowlist.json')
+  const now = readRecord(f, 'hermes').groups.hooks[event], older = `${now} --older-hook`
+  const text = readFileSync(config, 'utf8')
+  assert.equal(text.split(JSON.stringify(now)).length, 2, `setup wrote the Hermes ${event} command once`)
+  writeFileSync(config, text.replace(JSON.stringify(now), JSON.stringify(older)))
+  editRecord(f, 'hermes', record => { record.groups.hooks[event] = older })
+  const trust = JSON.parse(readFileSync(allowlist, 'utf8'))
+  for (const entry of trust.approvals) if (entry.event === event && entry.command === now) entry.command = older
+  writeFileSync(allowlist, `${JSON.stringify(trust, null, 2)}\n`)
+  return { config, now, older }
+}
+// Rewrites the line of the Hermes entry that runs `command`.
+const editHermesItem = (config, command, change) => {
+  const lines = readFileSync(config, 'utf8').split('\n'), at = lines.findIndex(line => line.includes(JSON.stringify(command)))
+  assert.ok(at > 0, 'the entry is in config.yaml')
+  lines[at] = change(lines[at])
+  writeFileSync(config, lines.join('\n'))
+  return lines.join('\n')
+}
+const hermesHome = async () => {
+  const f = fixture(['.hermes'])
+  await apply(f, ['hermes'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'hermes', '--hermes-trust', '--apply', '--json'], { timeoutMs: 60000 }), 'the board approves its Hermes hooks')
+  return f
+}
+
+test("an update that must rewrite the board's Hermes hook leaves a timeout the person raised or a matcher they added as it is and names it", async () => {
+  // `010` is 8 to Hermes (PyYAML reads a leading zero as octal), though it reads as 10 to Number().
+  for (const [edit, change] of [['a raised timeout', line => line.replace('timeout: 10}', 'timeout: 20}')], ['an added matcher', line => line.replace('timeout: 10}', 'timeout: 10, matcher: other}')], ['a timeout with a leading zero', line => line.replace('timeout: 10}', 'timeout: 010}')]]) {
+    const f = await hermesHome()
+    const { config, older } = olderHermes(f, 'pre_llm_call')
+    const edited = editHermesItem(config, older, change)
+    const result = await update(f, [], { input: 'y\n' })
+    assert.equal(result.status, 1, `${edit}: ${result.stderr}\n${result.stdout}`)
+    assert.match(result.stdout, /skipped: setup cannot safely update .*config\.yaml/, `${edit}: the update names the Hermes config\n${result.stdout}`)
+    assert.equal(readFileSync(config, 'utf8'), edited, `${edit}: the person's change stays as they set it`)
+  }
+})
+
+test("an update rewrites the board's Hermes hook for a new command when its options are the release's, written in block style", async () => {
+  const f = await hermesHome()
+  const { config, now, older } = olderHermes(f, 'pre_llm_call')
+  editHermesItem(config, older, line => {
+    const indent = /^\s*/.exec(line)[0]
+    return `${indent}- command: ${JSON.stringify(older)}\n${indent}  timeout: 10`
+  })
+  checked(await update(f, [], { input: 'y\n' }), 'setup --update')
+  const after = readFileSync(config, 'utf8')
+  assert.ok(after.includes(JSON.stringify(now)) && !after.includes(JSON.stringify(older)), `the update wrote the new command\n${after}`)
+})
+
+test("an update keeps a timeout the person raised on the board's current Hermes hook and writes nothing", async () => {
+  const f = await hermesHome()
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const edited = editHermesItem(config, readRecord(f, 'hermes').groups.hooks.pre_llm_call, line => line.replace('timeout: 10}', 'timeout: 20}'))
+  assert.equal(checked(await update(f), 'setup --update'), 'Agent Board is up to date (99.0.0).\n')
+  assert.equal(readFileSync(config, 'utf8'), edited, 'the raised timeout stays')
 })
 
 test('an update keeps an edited hook runner with its hooks and still updates the other agents', async () => {
