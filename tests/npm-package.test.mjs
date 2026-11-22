@@ -520,6 +520,33 @@ test('an older plugin copy is told to update the plugin, and an older independen
   assert.equal(moved.stderr.trim().split('\n').length, 1)
 }))
 
+// #1314: a person who opens the board in a terminal through an older setup-installed script gets the update itself,
+// with setup's one question, in the install root the script names; no command to copy.
+test('the launcher finds an older installed script and starts setup --update with its roots', () => fixture(f => {
+  const pkg = packed(f)
+  const root = join(f.home, 'data dir')
+  success(f.run(pkg, ['setup', '--agent', 'opencode', '--data-dir', root, '--apply']))
+  const script = join(root, 'agent-board.mjs'), record = join(root, 'install-opencode.json')
+  const text = `${readFileSync(script, 'utf8')}\n// older\n`
+  save(script, text)
+  // An earlier release wrote that script and recorded it as setup's own, before the release that added the new uses.
+  const owned = JSON.parse(readFileSync(record, 'utf8'))
+  for (const file of Object.keys(owned.files)) if (resolve(file) === resolve(script)) owned.files[file] = createHash('sha256').update(text).digest('hex')
+  delete owned.version
+  save(record, `${JSON.stringify(owned, null, 2)}\n`)
+  save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.0.1', board: ['${bodyHash(text)}'] }]\n`)
+  const result = f.run(pkg, ['--data-dir', root, '--print'], terminalLauncher(f), 'y\n')
+  success(result)
+  assert.equal(result.stdout.split('[y/N]').length - 1, 1, result.stdout)
+  for (const words of ['"Check for new versions"', 'the list of your Codex sessions']) assert.ok(result.stdout.includes(words), result.stdout)
+  assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), "the update wrote this package's board script")
+  assert.equal(typeof JSON.parse(readFileSync(record, 'utf8')).version, 'string', 'the record names the version')
+  assert.ok(result.stdout.split('Agent Board updated to')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the update\n${result.stdout}`)
+  assert.equal(result.stderr.includes('To update it, preview'), false, result.stderr)
+  // The install lock always sits in ~/.agent-board; no file of the install goes there.
+  assert.deepEqual(existsSync(join(f.home, '.agent-board')) ? filesUnder(join(f.home, '.agent-board')) : [], [], 'the update stayed in the install root')
+}))
+
 test('--json through an older script prints the notice on stderr and exits 1', () => fixture(f => {
   const pkg = packed(f)
   // An older installed script that prints the text board, as a released 0.24.2 script would:
