@@ -18,8 +18,10 @@ replays a claimed message. If a poll response is lost after claiming, the messag
 uncertain until reconciled; a later heartbeat cannot turn it into an ACK.
 Temporary store locks (`EPERM`, `EBUSY`, `EAGAIN`) report HTTP 503 so polling can
 recover within that deadline. Idle polls do not rewrite the message file. Sending
-and receipts are never automatically retried, including after a store lock. The one exception is the Codex daemon receiver's
-`unsent` give-back after a busy store (#1625): the store saved nothing, so asking again a tick later cannot repeat it.
+and receipts are never automatically retried, including after a store lock. The exceptions are the Codex daemon receiver's
+`unsent` give-back after a busy store (#1625), and the Codex desktop app receiver's `unsent` and `held` give-backs after one,
+asked at most five times a quarter-second apart (#557): the store saved nothing, so asking again cannot repeat it. A
+give-back still unsaved after that is left to the board's limit, as any claim with no receipt.
 
 Use the existing reply box on the session's card. A matching receiver enables Send or
 Queue only when the route for its session state and the surface it registered or enrolled as has a live

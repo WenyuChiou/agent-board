@@ -26,18 +26,27 @@ export const CODEX_APP_ORIGINATOR = 'Codex Desktop'
 const THREAD = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i
 const TICK_MS = 3000
 const RETRY_MS = 30_000
+// A give-back the board answered with a busy store saved nothing, so it is asked again, a short wait apart, as the Codex
+// daemon receiver's is (#1625): asking again cannot repeat it. Any other failure may have been saved, and is never asked again.
+const GIVE_BACK_ASKS = 5
+const GIVE_BACK_WAIT_MS = 250
 // Codex's own words when another client holds the conversation, as Codex 0.167's program writes them: `thread <id> already
-// has an active writer`, inside a thread-store conflict, after `Error: `. A wrong "unsent" would run a turn twice, and a wrong
-// "uncertain" only asks the person to send again, so only that sentence, naming this conversation, counts.
-const writerLine = (id: string): RegExp => new RegExp(`^(?:Error: )?(?:thread-store conflict: )?thread ${id} already has an active writer\\.?$`)
+// has an active writer`. Live, with an app-server holding the conversation as the desktop app does, `exec resume` ends on
+// `Error: thread/resume: thread/resume failed: thread <id> already has an active writer (code -32600)`; the program also
+// has the sentence inside a thread-store conflict, after `Error: `. A wrong "unsent" would run a turn twice, and a wrong
+// "uncertain" only asks the person to send again, so only that sentence in one of those wrappings, naming this conversation,
+// counts.
+const writerLine = (id: string): RegExp => new RegExp(`^(?:Error: )?(?:thread/resume: thread/resume failed: )?(?:thread-store conflict: )?thread ${id} already has an active writer(?: \\(code -32600\\))?\\.?$`)
 
 // Whether a finished run is Codex refusing a second writer, which wrote nothing and asked the model nothing: it failed, it
-// printed nothing at all (not only in the part of its output kept), its error output was kept whole, and that output's last
-// line is that sentence for this conversation, whole. Anything else (a reply, an ACK, a timeout, any other error or
-// wording, an output too long to read whole) may have reached the model and is never read as unsent.
+// printed nothing at all (not only in the part of its output kept), its error output was kept whole, its output had closed
+// when it was read, and that output's last line is that sentence for this conversation, whole. Anything else (a reply, an
+// ACK, a timeout, any other error or wording, an output too long to read whole or read while a program the run started still
+// held it) may have reached the model and is never read as unsent.
 export const isWriterHeld = (result: ProcessResult, id: string): boolean => {
   const last = result.stderr.split(/\r?\n/).map(line => line.trim()).filter(line => line !== '').at(-1) ?? ''
   return result.started && !result.timedOut && result.exitCode !== null && result.exitCode !== 0 && result.hasStdout === false && result.isStderrCut === false
+    && result.isOutputOpen === false
     && result.stdout.trim() === '' && THREAD.test(id) && writerLine(id).test(last)
 }
 
@@ -60,7 +69,7 @@ type Attached = Awaited<ReturnType<ReturnType<typeof boardClient>['attach']>>
 
 export const startCodexAppReceiver = ({
   boardUrl, sessions, stateOf, isTaken = () => false, executable, client,
-  tickMs = TICK_MS, retryMs = RETRY_MS, pollMs = 2000, maxWaitMs = MAX_RESUME_WAIT,
+  tickMs = TICK_MS, retryMs = RETRY_MS, pollMs = 2000, maxWaitMs = MAX_RESUME_WAIT, giveBackWaitMs = GIVE_BACK_WAIT_MS,
   // A clock that never goes back, as the daemon receiver's.
   now = () => performance.now(), run = runBackgroundProcess, env = process.env, onError = () => undefined,
 }: {
@@ -77,6 +86,7 @@ export const startCodexAppReceiver = ({
   retryMs?: number
   pollMs?: number
   maxWaitMs?: number
+  giveBackWaitMs?: number
   now?: () => number
   run?: typeof runBackgroundProcess
   env?: NodeJS.ProcessEnv
@@ -104,9 +114,17 @@ export const startCodexAppReceiver = ({
     if (one.isSending?.() === true) draining.set(id, [...(draining.get(id) ?? []), one])
   }
   const isKept = (id: string): boolean => !isClosed && (running.has(id) || isSending(id)) || isWanted(id)
-  const giveBack = async (unsent: () => Promise<unknown>): Promise<undefined> => {
-    try { await unsent() } catch (error) { onError(error) }
-    return undefined
+  // A store that stays busy is reported once, not on every ask. The asks happen inside the delivery, so the conversation
+  // takes nothing else meanwhile; once they run out, the claim is left to the board's limit, as any claim with no receipt.
+  const giveBack = async (send: () => Promise<unknown>): Promise<undefined> => {
+    for (let ask = 1; ; ask += 1) {
+      try { await send(); return undefined } catch (error) {
+        const isBusy = (error as { isBusy?: unknown } | null)?.isBusy === true
+        if (!isBusy || ask === 1) onError(error)
+        if (!isBusy || ask >= GIVE_BACK_ASKS) return undefined
+        await new Promise(done => setTimeout(done, giveBackWaitMs))
+      }
+    }
   }
 
   const attach = async (id: string): Promise<void> => {

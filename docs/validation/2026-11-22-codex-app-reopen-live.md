@@ -42,6 +42,31 @@ in that conversation (`codex exec resume <id> -`), the turn's ACK is the receipt
 | The card said the turn was running while the reply waited for the app | A wait line for Codex app conversations, in all three string tables | `a Codex app card says a sent reply waits here until the app is fully quit, and that the turn runs only once it is taken, in every language` |
 | The page never learned that a queued message was for the app, so the receipt fell back to the running line | Messages to a Codex app conversation carry that mark onto the page | `a board reply to a Codex desktop app conversation is answered with the wait for the app to quit, not a running turn (#557)` |
 
+## A second check: the refusal as Codex prints it (review round 5)
+
+Same test home and versions, later on 11-22. A `codex app-server` started by the check held a new synthetic conversation
+(`thread/resume`), as the app holds one, and the board's own runner (`runBackgroundProcess`) ran the receiver's
+`codex exec resume --skip-git-repo-check <id> -` in it three times.
+
+- Each run ended within 1.3 seconds with exit 1, printed nothing, and left an error output of 509 characters, kept
+  whole. The output had closed when it was read: Codex refuses before it starts the MCP server the test home configures.
+- The error output, with the times and the conversation's id left out:
+
+  ```
+  <time> ERROR codex_core::session::session: failed to initialize thread persistence: thread-store conflict: thread <id> already has an active writer
+  <time> ERROR codex_core::session: Failed to create session: thread-store conflict: thread <id> already has an active writer
+  Error: thread/resume: thread/resume failed: thread <id> already has an active writer (code -32600)
+  ```
+
+- The receiver's check of that sentence, as review round 2 had narrowed it, did not take this last line, so each refusal
+  read as a failed run: a reply sent while the app was open would have failed instead of waiting. The run above (step 1)
+  used the receiver of review round 1, whose check was looser. Round 5 makes the check take this wrapping, and the tests
+  use this text (`Codex's refusal as it prints it while the app holds the conversation reads as nothing sent`). With the
+  fix, all three refusals read as held.
+- With the app-server stopped, the same run went through (exit 0, a reply printed).
+- Not shown in this check: the desktop app itself holding the conversation. An app-server the check started held it
+  instead; the app runs its own.
+
 ## Limits
 
 - The app has to be quit, not closed. The card says this.

@@ -164,6 +164,9 @@ export type ProcessResult = {
   // was longer than the part kept, so a check that needs all of it can tell (#557).
   hasStdout: boolean
   isStderrCut: boolean
+  // Read before the output had closed: the program exited and a program it started still held its output, so the run was
+  // read two seconds after the exit (below), and more may have come after it (#557).
+  isOutputOpen: boolean
 }
 
 export const runBackgroundProcess = (
@@ -177,15 +180,16 @@ export const runBackgroundProcess = (
     let err = ''
     let hasStdout = false
     let isStderrCut = false
+    let isOutputOpen = false
     let timer: ReturnType<typeof setTimeout> | undefined
     let isTimedOut = false
     let isDone = false
     let isStarted = false
-    const finish = (partial: Omit<ProcessResult, 'stdout' | 'stderr' | 'hasStdout' | 'isStderrCut'>): void => {
+    const finish = (partial: Omit<ProcessResult, 'stdout' | 'stderr' | 'hasStdout' | 'isStderrCut' | 'isOutputOpen'>): void => {
       if (isDone) return
       isDone = true
       if (timer !== undefined) clearTimeout(timer)
-      resolve({ ...partial, stdout: out, stderr: err, hasStdout, isStderrCut })
+      resolve({ ...partial, stdout: out, stderr: err, hasStdout, isStderrCut, isOutputOpen })
     }
     // The current folder is never searched for a program a shell or script starts by name.
     const spawnOptions = {
@@ -232,7 +236,10 @@ export const runBackgroundProcess = (
     child.on('close', settle)
     // A child started by the agent (e.g. an MCP server) can hold stdio open after the agent exits.
     child.on('exit', code => {
-      setTimeout(() => settle(code), 2000)
+      setTimeout(() => {
+        if (!isDone) isOutputOpen = true
+        settle(code)
+      }, 2000)
     })
     child.stdin?.on('error', () => undefined)
     child.stdin?.end(options.stdin ?? '')
