@@ -520,21 +520,27 @@ test('an older plugin copy is told to update the plugin, and an older independen
   assert.equal(moved.stderr.trim().split('\n').length, 1)
 }))
 
-// #1314: a person who opens the board in a terminal through an older setup-installed script gets the update itself,
-// with setup's one question, in the install root the script names; no command to copy.
-test('the launcher finds an older installed script and starts setup --update with its roots', () => fixture(f => {
+// #1314: an install that setup wrote in a data folder, whose board script an earlier release wrote and recorded as
+// setup's own, before the release that added the new uses.
+const olderInstall = f => {
   const pkg = packed(f)
   const root = join(f.home, 'data dir')
   success(f.run(pkg, ['setup', '--agent', 'opencode', '--data-dir', root, '--apply']))
   const script = join(root, 'agent-board.mjs'), record = join(root, 'install-opencode.json')
   const text = `${readFileSync(script, 'utf8')}\n// older\n`
   save(script, text)
-  // An earlier release wrote that script and recorded it as setup's own, before the release that added the new uses.
   const owned = JSON.parse(readFileSync(record, 'utf8'))
   for (const file of Object.keys(owned.files)) if (resolve(file) === resolve(script)) owned.files[file] = createHash('sha256').update(text).digest('hex')
   delete owned.version
   save(record, `${JSON.stringify(owned, null, 2)}\n`)
   save(join(pkg, 'hooks/released.ts'), `export const RELEASED = [{ version: '0.0.1', board: ['${bodyHash(text)}'] }]\n`)
+  return { pkg, root, script, record, text }
+}
+
+// #1314: a person who opens the board in a terminal through an older setup-installed script gets the update itself,
+// with setup's one question, in the install root the script names; no command to copy.
+test('the launcher finds an older installed script and starts setup --update with its roots', () => fixture(f => {
+  const { pkg, root, script, record } = olderInstall(f)
   const result = f.run(pkg, ['--data-dir', root, '--print'], terminalLauncher(f), 'y\n')
   success(result)
   assert.equal(result.stdout.split('[y/N]').length - 1, 1, result.stdout)
@@ -545,6 +551,18 @@ test('the launcher finds an older installed script and starts setup --update wit
   assert.equal(result.stderr.includes('To update it, preview'), false, result.stderr)
   // The install lock always sits in ~/.agent-board; no file of the install goes there.
   assert.deepEqual(existsSync(join(f.home, '.agent-board')) ? filesUnder(join(f.home, '.agent-board')) : [], [], 'the update stayed in the install root')
+}))
+
+// #1314: declining is not an error for the board: the script stays as it was and the board opens on it.
+test('a person who declines the launcher\'s update keeps the older script and the board still opens', () => fixture(f => {
+  const { pkg, root, script, record, text } = olderInstall(f)
+  const result = f.run(pkg, ['--data-dir', root, '--print'], terminalLauncher(f), 'n\n')
+  success(result)
+  assert.equal(result.stdout.split('[y/N]').length - 1, 1, result.stdout)
+  assert.equal(readFileSync(script, 'utf8'), text, 'the older script is left as it was')
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).version, undefined, 'the record is left as it was')
+  assert.ok(result.stdout.includes('Nothing changed. To update, run this in a terminal and answer y:'), result.stdout)
+  assert.ok(result.stdout.split('Nothing changed.')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the answer\n${result.stdout}`)
 }))
 
 test('--json through an older script prints the notice on stderr and exits 1', () => fixture(f => {
