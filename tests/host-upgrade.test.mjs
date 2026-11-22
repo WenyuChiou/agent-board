@@ -1220,6 +1220,67 @@ test("an update reads the board's Hermes hook written with quoted option names a
   assert.equal(readFileSync(hermes, 'utf8'), quoted, 'nothing to change: the update leaves the file as it is')
 })
 
+// An earlier build wrote another command for one of the board's Hermes hooks: in config.yaml, in setup's record and in
+// the approval Hermes keeps for it, so an update must rewrite that entry.
+const olderHermes = (f, event) => {
+  const config = join(f.home, '.hermes', 'config.yaml'), allowlist = join(f.home, '.hermes', 'shell-hooks-allowlist.json')
+  const now = readRecord(f, 'hermes').groups.hooks[event], older = `${now} --older-hook`
+  const text = readFileSync(config, 'utf8')
+  assert.equal(text.split(JSON.stringify(now)).length, 2, `setup wrote the Hermes ${event} command once`)
+  writeFileSync(config, text.replace(JSON.stringify(now), JSON.stringify(older)))
+  editRecord(f, 'hermes', record => { record.groups.hooks[event] = older })
+  const trust = JSON.parse(readFileSync(allowlist, 'utf8'))
+  for (const entry of trust.approvals) if (entry.event === event && entry.command === now) entry.command = older
+  writeFileSync(allowlist, `${JSON.stringify(trust, null, 2)}\n`)
+  return { config, now, older }
+}
+// Rewrites the line of the Hermes entry that runs `command`.
+const editHermesItem = (config, command, change) => {
+  const lines = readFileSync(config, 'utf8').split('\n'), at = lines.findIndex(line => line.includes(JSON.stringify(command)))
+  assert.ok(at > 0, 'the entry is in config.yaml')
+  lines[at] = change(lines[at])
+  writeFileSync(config, lines.join('\n'))
+  return lines.join('\n')
+}
+const hermesHome = async () => {
+  const f = fixture(['.hermes'])
+  await apply(f, ['hermes'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'hermes', '--hermes-trust', '--apply', '--json'], { timeoutMs: 60000 }), 'the board approves its Hermes hooks')
+  return f
+}
+
+test("an update that must rewrite the board's Hermes hook leaves a timeout the person raised or a matcher they added as it is and names it", async () => {
+  for (const [edit, change] of [['a raised timeout', line => line.replace('timeout: 10}', 'timeout: 20}')], ['an added matcher', line => line.replace('timeout: 10}', 'timeout: 10, matcher: other}')]]) {
+    const f = await hermesHome()
+    const { config, older } = olderHermes(f, 'pre_llm_call')
+    const edited = editHermesItem(config, older, change)
+    const result = await update(f, [], { input: 'y\n' })
+    assert.equal(result.status, 1, `${edit}: ${result.stderr}\n${result.stdout}`)
+    assert.match(result.stdout, /skipped: setup cannot safely update .*config\.yaml/, `${edit}: the update names the Hermes config\n${result.stdout}`)
+    assert.equal(readFileSync(config, 'utf8'), edited, `${edit}: the person's change stays as they set it`)
+  }
+})
+
+test("an update rewrites the board's Hermes hook for a new command when its options are the release's, written in block style", async () => {
+  const f = await hermesHome()
+  const { config, now, older } = olderHermes(f, 'pre_llm_call')
+  editHermesItem(config, older, line => {
+    const indent = /^\s*/.exec(line)[0]
+    return `${indent}- command: ${JSON.stringify(older)}\n${indent}  timeout: 10`
+  })
+  checked(await update(f, [], { input: 'y\n' }), 'setup --update')
+  const after = readFileSync(config, 'utf8')
+  assert.ok(after.includes(JSON.stringify(now)) && !after.includes(JSON.stringify(older)), `the update wrote the new command\n${after}`)
+})
+
+test("an update keeps a timeout the person raised on the board's current Hermes hook and writes nothing", async () => {
+  const f = await hermesHome()
+  const config = join(f.home, '.hermes', 'config.yaml')
+  const edited = editHermesItem(config, readRecord(f, 'hermes').groups.hooks.pre_llm_call, line => line.replace('timeout: 10}', 'timeout: 20}'))
+  assert.equal(checked(await update(f), 'setup --update'), 'Agent Board is up to date (99.0.0).\n')
+  assert.equal(readFileSync(config, 'utf8'), edited, 'the raised timeout stays')
+})
+
 test('an update keeps an edited hook runner with its hooks and still updates the other agents', async () => {
   const f = fixture(['.codex', '.config/opencode'])
   const mock = mockCodex(f)
