@@ -28,6 +28,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     if (one.leftAt !== undefined && !Number.isFinite(one.leftAt) || one.heldSince !== undefined && !Number.isFinite(one.heldSince)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.line !== undefined && !ROUTE_LINES.includes(one.line)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.surface !== undefined && (typeof one.surface !== 'string' || one.surface === '' || /[\r\n]/.test(one.surface))) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.senderTitle !== undefined && (typeof one.senderTitle !== 'string' || one.senderTitle === '' || one.senderTitle.length > 120 || /[\r\n\0]/.test(one.senderTitle))) throw new Error('INVALID_MESSAGE_STORE')
     messageId(one.target)
     messageId(one.turn)
     messageText(one.from, 300)

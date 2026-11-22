@@ -1,4 +1,4 @@
-import { ZH_TW, type Strings } from './i18n'
+import { type Strings } from './i18n'
 import { EN } from './strings-en'
 import { agentLabel } from './strings'
 import { address, type Connection, type Message } from './messaging'
@@ -15,7 +15,7 @@ export type TargetResolution =
   | { kind: 'ambiguous'; candidates: SendCandidate[] }
   | { kind: 'none' }
 
-export type RowMessage = Pick<Message, 'to' | 'status' | 'updated' | 'error'>
+export type RowMessage = Pick<Message, 'from' | 'to' | 'status' | 'updated' | 'error'>
 
 const MESSAGE_LABEL: Record<Message['status'], (s: Strings) => string> = {
   queued: s => s.messagesQueued,
@@ -26,7 +26,21 @@ const MESSAGE_LABEL: Record<Message['status'], (s: Strings) => string> = {
 }
 
 const cleanOneLine = (text: string): string =>
-  text.replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
+  text.replace(/[\r\n\t\0]+/g, ' ').replace(/\s+/g, ' ').trim()
+
+export const stripFilePaths = (text: string): string =>
+  text
+    .replace(/(?<![\w.-])[A-Za-z]:[\\/][^\s"'`<>|]+/g, '[path]')
+    .replace(/\\\\[^\s"'`<>|]+/g, '[path]')
+    .replace(/(?<![\w.-])~[\\/][^\s"'`<>|]+/g, '[path]')
+    .replace(/(?<![\w.-])\.\.?[\\/][^\s"'`<>|]+/g, '[path]')
+    .replace(/(?<![\w.:/])\/(?:(?:tmp|var|etc|opt|usr|home|Users|mnt|root|private)(?:[\\/][^\s"'`<>|]*)?|[^\s"'`<>|/]+\/[^\s"'`<>|]+)/g, '[path]')
+
+export const sanitizeSenderTitle = (title: string, scrub: (text: string) => string = text => text): string =>
+  cleanOneLine(stripFilePaths(scrub(title))
+    .replace(/^\s*agent board message\b|reply first with this line alone|<<<\s*AB-|AB-[0-9a-f]{6,32}\s*>>>/gi, ' ')
+    .replace(/"/g, "'"))
+    .slice(0, 120)
 
 const tokenize = (text: string): string[] =>
   text.toLowerCase().split(/[^a-z0-9\u4e00-\u9fff]+/i).filter(Boolean)
@@ -81,8 +95,12 @@ export const resolveSendTarget = (
   return winners.length === 1 ? { kind: 'unique', candidate: winners[0]! } : { kind: 'ambiguous', candidates: scored.map(entry => entry.candidate) }
 }
 
-export const formatSendCandidate = (candidate: SendCandidate, s: Strings): string =>
-  [agentLabel(candidate.connection.agent, s), candidate.project, candidate.title]
+export const formatSendCandidate = (
+  candidate: SendCandidate,
+  s: Strings,
+  scrub: (text: string) => string = text => text,
+): string =>
+  [agentLabel(candidate.connection.agent, s), stripFilePaths(scrub(candidate.project)), stripFilePaths(scrub(candidate.title))]
     .map(cleanOneLine)
     .filter(Boolean)
     .join(' · ')
@@ -92,22 +110,6 @@ export const isSameWorkspaceAllowed = (
   targetDigest: string | undefined,
   isCrossProject: boolean,
 ): boolean => isCrossProject || (typeof senderDigest === 'string' && senderDigest !== '' && senderDigest === targetDigest)
-
-export const formatPeerDeliveryHeader = (sender: { agent: string; title: string } | null, s: Strings = ZH_TW): string => {
-  if (sender === null) return s.cliSendDeliveryUnverified
-  const cleanTitle = sender.title
-    .replace(/^\s*agent board message\b|reply first with this line alone|<<<\s*AB-|AB-[0-9a-f]{6,32}\s*>>>/gi, ' ')
-    .replace(/[\r\n\t]+/g, ' ')
-    .replace(/"/g, "'")
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 120)
-  const name = agentLabel(sender.agent, s)
-  return cleanTitle === '' ? s.cliSendDeliveryFromNoTitle(name) : s.cliSendDeliveryFrom(name, cleanTitle)
-}
-
-export const buildPeerMessageText = (sender: { agent: string; title: string } | null, body: string, s: Strings = ZH_TW): string =>
-  `${formatPeerDeliveryHeader(sender, s)}\n\n${body.trim()}`
 
 export const rowSessionAddresses = (row: Pick<TaskRow, 'agent' | 'nativeSession' | 'target'>): string[] => {
   const agent = row.agent || 'claude'
@@ -123,7 +125,7 @@ export const latestRowMessage = (
   if (addrs.length === 0) return undefined
   let latest: RowMessage | undefined
   for (const one of messages) {
-    if (!addrs.includes(one.to)) continue
+    if (!addrs.includes(one.to) && !addrs.includes(one.from)) continue
     if (latest === undefined || one.updated >= latest.updated) latest = one
   }
   return latest

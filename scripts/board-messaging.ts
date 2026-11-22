@@ -8,6 +8,7 @@ import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
 import { isClaimRef, parseMessageStore, queuedMessagingOf, shownMessages } from '../hooks/queued-store'
+import { sanitizeSenderTitle } from '../hooks/cli-send'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
 import { workspaceDigest } from './folder-identity'
 import { claimMessageStore } from './message-store-claim'
@@ -365,10 +366,18 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         }
       }
       if (action === 'peer-send') {
-        messageFields(body, ['agent', 'session', 'text', 'id', 'from', 'folderDigest', 'crossProject'])
+        messageFields(body, ['agent', 'session', 'text', 'id', 'from', 'source', 'secret', 'senderTitle', 'folderDigest', 'crossProject'])
         const agent = messageId(body.agent), session = messageId(body.session)
         if (body.crossProject !== undefined && typeof body.crossProject !== 'boolean') throw new Error('INVALID_CROSS_PROJECT')
-        const from = peerSender(body.from)
+        let from: string
+        if (body.source !== undefined || body.secret !== undefined) {
+          const sender = authenticated(body.source, body.secret, now)
+          from = address(sender.agent, sender.session)
+          if (body.from !== undefined && body.from !== from) throw new Error('INVALID_SENDER')
+        } else {
+          from = peerSender(body.from)
+        }
+        const senderTitle = from !== 'unverified' && typeof body.senderTitle === 'string' ? sanitizeSenderTitle(body.senderTitle) || undefined : undefined
         const live = [...connections.values()].filter(one => one.agent === agent && one.session === session && one.expires > now)
         const mailbox = state.mailboxes?.find(one => one.agent === agent && one.session === session)
         const target = live.length > 1 ? { ...live[0]!, contested: true } : live[0] ?? mailbox
@@ -380,33 +389,9 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
           if (!targetDigest) throw new Error('WORKSPACE_UNKNOWN')
           if (targetDigest !== body.folderDigest) throw new Error('WORKSPACE_MISMATCH')
         }
-        const queued = queueMessage(state, { id: body.id, text: body.text, target: existing?.target ?? target?.id, turn: existing?.turn ?? target?.turn }, from, target, now, 'local', randomBytes(16).toString('hex'))
+        const queued = queueMessage(state, { id: body.id, text: body.text, target: existing?.target ?? target?.id, turn: existing?.turn ?? target?.turn }, from, target, now, 'local', randomBytes(16).toString('hex'), undefined, undefined, senderTitle)
         save(queued.state, now)
         return shownMessage(queued.message)
-      }
-      if (action === 'peer-ack') {
-        messageFields(body, ['agent', 'session', 'id', 'nonce', 'reply'])
-        const agent = messageId(body.agent), session = messageId(body.session)
-        const id = messageId(body.id)
-        const found = state.messages.find(one => one.id === id)
-        const to = address(agent, session)
-        if (!found || found.to !== to) throw new Error('TARGET_MISMATCH')
-        const live = [...connections.values()].filter(one => one.agent === agent && one.session === session && one.expires > now)
-        const mailbox = state.mailboxes?.find(one => one.id === mailboxId(agent, session))
-        const target: Connection = live.length > 1
-          ? { ...live[0]!, contested: true }
-          : live.find(one => one.id === found.target) ?? live[0] ?? mailbox ?? {
-            id: found.target,
-            agent,
-            session,
-            surface: found.surface ?? 'CLI',
-            turn: found.turn,
-            scope: 'session',
-            expires: now + LEASE_MS,
-          }
-        const next = messageReceipt(state, target, { id: body.id, nonce: body.nonce, reply: body.reply, status: 'acknowledged' }, now)
-        save(next, now)
-        return { ok: true }
       }
       if (action === 'expect') {
         messageFields(body, ['id', 'agent', 'session', 'surface', 'timeoutMs'])
