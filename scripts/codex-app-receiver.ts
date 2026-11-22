@@ -34,9 +34,9 @@ const GIVE_BACK_WAIT_MS = 250
 // has an active writer`. Live, with an app-server holding the conversation as the desktop app does, `exec resume` ends on
 // `Error: thread/resume: thread/resume failed: thread <id> already has an active writer (code -32600)`; the program also
 // has the sentence inside a thread-store conflict, after `Error: `. A wrong "unsent" would run a turn twice, and a wrong
-// "uncertain" only asks the person to send again, so only that sentence in one of those wrappings, naming this conversation,
-// counts.
-const writerLine = (id: string): RegExp => new RegExp(`^(?:Error: )?(?:thread/resume: thread/resume failed: )?(?:thread-store conflict: )?thread ${id} already has an active writer(?: \\(code -32600\\))?\\.?$`)
+// "uncertain" only asks the person to send again, so only those lines, exactly, naming this conversation, count: the
+// recorded one as it was printed, and the program's own as reviewed (#1774 for wordings not seen yet).
+const writerLine = (id: string): RegExp => new RegExp(`^(?:(?:Error: )?(?:thread-store conflict: )?thread ${id} already has an active writer\\.?|Error: thread/resume: thread/resume failed: thread ${id} already has an active writer \\(code -32600\\))$`)
 
 // Whether a finished run is Codex refusing a second writer, which wrote nothing and asked the model nothing: it failed, it
 // printed nothing at all (not only in the part of its output kept), its error output was kept whole, its output had closed

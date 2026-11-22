@@ -2767,7 +2767,7 @@ export const LINES = [
 "var RETRY_MS = 30000;",
 "var GIVE_BACK_ASKS = 5;",
 "var GIVE_BACK_WAIT_MS = 250;",
-"var writerLine = (id) => new RegExp(`^(?:Error: )?(?:thread/resume: thread/resume failed: )?(?:thread-store conflict: )?thread ${id} already has an active writer(?: \\\\(code -32600\\\\))?\\\\.?$`);",
+"var writerLine = (id) => new RegExp(`^(?:(?:Error: )?(?:thread-store conflict: )?thread ${id} already has an active writer\\\\.?|Error: thread/resume: thread/resume failed: thread ${id} already has an active writer \\\\(code -32600\\\\))$`);",
 "var isWriterHeld = (result, id) => {",
 "  const last = result.stderr.split(/\\r?\\n/).map((line) => line.trim()).filter((line) => line !== \"\").at(-1) ?? \"\";",
 "  return result.started && !result.timedOut && result.exitCode !== null && result.exitCode !== 0 && result.hasStdout === false && result.isStderrCut === false && result.isOutputOpen === false && result.stdout.trim() === \"\" && THREAD2.test(id) && writerLine(id).test(last);",
