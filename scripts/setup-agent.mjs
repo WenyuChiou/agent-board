@@ -464,12 +464,14 @@ const main = () => {
   const flag = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1] }
   // An update changes what setup installed, where it installed it: a host folder an earlier setup was given (--opencode-dir
   // and the like) comes back from that host's install record, unless this call names one, so the update does not plan
-  // the host's default folder and stop on a conflict (#1314). Codex and Grok keep their hooks in a config the record
-  // does not name by path; their folders still come from the flags and the environment. Only the agents this update
-  // covers get a flag, so another host's folder never shows up in their commands. A skill the person already had in that
-  // folder is recorded as the `.new` copy setup wrote beside it, which names the folder as well. Only what setup writes
-  // counts: it writes a `.new` copy only beside a text file (`isTextFile` in scripts/codex-local.ts), and Windows paths
-  // compare without case, as its file system does.
+  // the host's default folder and stop on a conflict (#1314). Codex and Grok are left to the flags and the environment
+  // here: their records name a config, not a file this reads (taking the folder from that config is a later change).
+  // Only the agents this update covers get a flag, so another host's folder never shows up in their commands. A skill
+  // the person already had in that folder is recorded as the `.new` copy setup wrote beside it, which names the folder as
+  // well. Only what setup writes counts: it writes a `.new` copy only beside a text file (`isTextFile` in
+  // scripts/codex-local.ts), and Windows paths compare without case, as its file system does. The flag goes in only
+  // when the record's entries name exactly one folder: a look-alike (the shared skill under another spelling of the home,
+  // as a junction or a short name gives) leaves the update to stop as it did before rather than print a wrong folder.
   if (isUpdate) {
     const same = (one, other) => process.platform === 'win32' ? one.toLowerCase() === other.toLowerCase() : one === other
     const covered = selector === 'auto' || selector === 'all' ? undefined : selector.split(',')
@@ -486,8 +488,10 @@ const main = () => {
       if (flag(`--${agent}-dir`) !== undefined || covered && !covered.includes(agent)) continue
       let files = []
       try { files = Object.keys(JSON.parse(readFileSync(join(recordRoot, `install-${agent}.json`), 'utf8')).files ?? {}) } catch { continue }
-      const file = files.map(one => resolve(one).replace(/(\.(?:toml|md))\.new$/, '$1')).find(one => !same(one, shared) && same(one.split(/[\\/]/).slice(-tail.length).join('/'), tail.join('/')))
-      const folder = file && resolve(file, ...tail.map(() => '..'))
+      const folders = files.map(one => resolve(one).replace(/(\.(?:toml|md))\.new$/, '$1'))
+        .filter(one => !same(one, shared) && same(one.split(/[\\/]/).slice(-tail.length).join('/'), tail.join('/')))
+        .map(one => resolve(one, ...tail.map(() => '..')))
+      const folder = folders.find(one => folders.every(other => same(one, other)))
       // The usual folder needs no flag, so the commands setup prints stay as they were for it.
       if (folder && !same(folder, resolve(usual))) args.push(`--${agent}-dir`, folder)
     }
