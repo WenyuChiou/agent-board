@@ -982,6 +982,18 @@ test('an update takes no host folder from a record entry setup never writes', as
   assert.equal(result.stdout.includes('--deepseek-dir'), false, result.stdout)
 })
 
+// #1314: a record whose entries name more than one folder (the shared skill under another spelling of the home, as a
+// junction or a short name gives) names none, so the update stops as it did before rather than print a wrong folder.
+test('an update adds no host folder when the record names more than one', async () => {
+  const f = fixture(['.dsh'])
+  await setup(f, ['--agent', 'deepseek', '--apply', '--json'])
+  editRecord(f, 'deepseek', record => { record.files = { [join(f.home, 'alias', '.agents', 'skills', 'agent-board', 'SKILL.md')]: sha256('shared'), ...record.files } })
+  olderScript(f)
+  const result = await update(f, [], { terminal: false })
+  assert.match(result.stdout, /(?:To update, run this in a terminal and answer y|Retry after fixing the conflicting files): .*--update/, `${result.stderr}\n${result.stdout}`)
+  assert.equal(result.stdout.includes('--deepseek-dir'), false, result.stdout)
+})
+
 test('J11b: a changed hook command asks once and shows the exact commands', async () => {
   const f = fixture(['.codex', '.cursor'])
   const mock = mockCodex(f)
