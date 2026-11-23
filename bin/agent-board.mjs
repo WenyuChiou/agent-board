@@ -23,6 +23,31 @@ const langOf = value => {
   if (/^en(?:\b|_)|english|英文|英語|英语/.test(text)) return 'en'
   return null
 }
+// The options that open the board, each with the value it takes, against the board's own grammar in
+// scripts/board-cli.ts (BOOL_FLAGS, VALUE_FLAGS, unknownFlag); tests/npm-package.test.mjs keeps the two in step. Every
+// other option picks a board, reads data, presses keys or manages something (#1783).
+const boardViews = new Map([
+  ['--print', 'none'], ['--watch', 'none'], ['--html', 'none'], ['--serve', 'none'], ['--all', 'none'], ['--plain', 'none'],
+  ['--no-color', 'none'], ['--no-open', 'none'],
+  ['--port', 'digits'], ['--idle-minutes', 'digits'],
+  ['--lan', 'address'],
+  ['--lang', 'language'],
+])
+// A value that is missing or starts with `-`, any other option, `--` and any other word make the list something else.
+const isBoardView = list => {
+  for (let i = 0; i < list.length; i++) {
+    const kind = boardViews.get(list[i])
+    const next = list[i + 1]
+    if (kind === undefined) return false
+    if (kind === 'none') continue
+    // `--lan` takes the next word only when it is an address, as the board reads it.
+    if (kind === 'address') { if (next !== undefined && /^[\d.]+$/.test(next)) i++; continue }
+    if (next === undefined || next.startsWith('-')) return false
+    if (kind === 'digits' ? !/^\d+$/.test(next) : langOf(next) === null) return false
+    i++
+  }
+  return true
+}
 // Windows usually has no LANG, so independent commands also check the system locale.
 const systemLang = env => {
   const language = langOf(env)
@@ -299,17 +324,14 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
         // A person opening the board in a terminal gets the update itself, with setup's one question, in the install root
         // the script names (#1314). Declined or failed, the board still opens on the script that is there. Only opening
         // the board does this: stop, reports, hook events and management commands run as they are, with the notice (#1783).
-        // The whole list must read as a board view, and `--lang` takes the next word only when it is a language: a flag
-        // after a bare `--lang` is still acted on by the board, so it must not count as the language (#1783).
-        const viewing = ['--print', '--watch', '--html', '--serve', '--all', '--plain', '--no-color', '--no-open']
-        let isOpening = true
-        for (let i = 0; i < passArgs.length && isOpening; i++) {
-          if (viewing.includes(passArgs[i])) continue
-          if (passArgs[i] === '--lang' && !String(passArgs[i + 1] ?? '-').startsWith('-') && langOf(passArgs[i + 1]) !== null) { i++; continue }
-          isOpening = false
-        }
-        if (process.stdin.isTTY && process.stdout.isTTY && isOpening) {
-          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : []), ...(flag('--lang') ? ['--lang', langOf(flag('--lang'))] : [])], { stdio: 'inherit', env: { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name}@${v} setup` }, windowsHide: true })
+        // The whole list must read as a board view (boardViews), each value option with its value: a flag after a value
+        // option is still acted on by the board, which reads it as that value too, so it must not count (#1783).
+        if (process.stdin.isTTY && process.stdout.isTTY && isBoardView(passArgs)) {
+          // The board is chosen already, so a progress file the environment names may be another board's: setup keeps
+          // the one the install's own record names (#1783).
+          const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name}@${v} setup` }
+          for (const key of Object.keys(setupEnv)) if (key.toUpperCase() === 'CLAUDE_PROGRESS_FILE') delete setupEnv[key]
+          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : []), ...(flag('--lang') ? ['--lang', langOf(flag('--lang'))] : [])], { stdio: 'inherit', env: setupEnv, windowsHide: true })
           if (update.signal) { process.kill(process.pid, update.signal); process.exit(1) }
           // A setup that could not start printed nothing, so the notice names the command instead (#1783).
           if (update.error) console.error(notice)
