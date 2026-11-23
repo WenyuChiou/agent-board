@@ -222,7 +222,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Split board and messaging so Windows keeps its existing ten-minute budget; messaging is split
     # in two on Ubuntu and in three on Windows (#1445).
-    timeout-minutes: 10
+    # A Windows messaging job has two minutes more, one for each of the sampler's two steps, so they never take time its tests had (#1249).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 12 || 10 }}
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
       # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
@@ -239,6 +240,13 @@ jobs:
           persist-credentials: false
           # The whole history with its tags, for the released files table below.
           fetch-depth: 0
+      # Records what the runner did when it stalls for over a second: a 250 ms ticker (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -263,6 +271,13 @@ jobs:
       - name: Exchange step time
         if: always() && steps.exchange.conclusion != 'skipped'
         run: node scripts/ci-impact.mjs summary 600
+      # A summary and the largest gaps, here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
 
   tooling:
     needs: impact
@@ -273,7 +288,8 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    # A Windows tooling job has two minutes more, one for each of the sampler's two steps, so they never take time its tests had (#1249).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 7 || 5 }}
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
       # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
@@ -288,6 +304,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the runner did when it stalls for over a second: a 250 ms ticker (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -295,6 +318,13 @@ jobs:
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.tooling_tests }}
         run: node scripts/ci-impact.mjs run
+      # A summary and the largest gaps, here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
 
   # The npm package in a job of its own: what `npm pack` would publish, the version in step
   # with plugin.json, and the launcher (setup, help, the installed board script) in a scratch home.
@@ -308,7 +338,8 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.impact.outputs.node_matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 5
+    # A Windows npm job has two minutes more, one for each of the sampler's two steps, so they never take time its tests had (#1249).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 7 || 5 }}
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
       # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
@@ -323,6 +354,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the runner did when it stalls for over a second: a 250 ms ticker (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -330,6 +368,13 @@ jobs:
         env:
           CI_TEST_FILES: ${{ needs.impact.outputs.npm_tests }}
         run: node scripts/ci-impact.mjs run
+      # A summary and the largest gaps, here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
 
   plugin:
     needs: impact
@@ -340,7 +385,8 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.impact.outputs.plugin_os) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # A Windows plugin job has two minutes more, one for each of the sampler's two steps, so they never take time its tests had (#1249).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 17 || 15 }}
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
       # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
@@ -356,6 +402,13 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      # Records what the runner did when it stalls for over a second: a 250 ms ticker (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -372,6 +425,13 @@ jobs:
 
       - name: Pane and hook tests
         run: node scripts/plugin-tests.mjs
+      # A summary and the largest gaps, here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
 
 
   installers:
@@ -383,7 +443,8 @@ jobs:
       matrix:
         os: ${{ fromJSON(needs.impact.outputs.installers_os) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # A Windows installers job has two minutes more, one for each of the sampler's two steps, so they never take time its tests had (#1249).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 12 || 10 }}
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
       # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
@@ -398,6 +459,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the runner did when it stalls for over a second: a 250 ms ticker (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 22
@@ -407,6 +475,13 @@ jobs:
       - name: Windows installer
         if: runner.os == 'Windows'
         run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/setup.check.ps1
+      # A summary and the largest gaps, here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
 
   remote:
     name: remote reporter (${{ matrix.os }})
@@ -417,7 +492,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # A Windows remote job has two minutes more, one for each of the sampler's two steps, so they never take time its tests had (#1249).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 12 || 10 }}
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
       # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
@@ -432,12 +508,26 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the runner did when it stalls for over a second: a 250 ms ticker (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - name: Unix reporter
         if: runner.os != 'Windows'
         run: python3 -B scripts/remote-reporter/test_pipeline.py
       - name: Windows reporter
         if: runner.os == 'Windows'
         run: python -B scripts/remote-reporter/test_pipeline.py
+      # A summary and the largest gaps, here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
 
   journeys:
     needs: impact
@@ -451,7 +541,8 @@ jobs:
         # fails here.
         include: ${{ fromJSON(needs.impact.outputs.journeys_matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    # A Windows journeys job has two minutes more, one for each of the sampler's two steps, so they never take time its tests had (#1249).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 12 || 10 }}
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
       # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
@@ -466,6 +557,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the runner did when it stalls for over a second: a 250 ms ticker (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
@@ -489,6 +587,13 @@ jobs:
           CI_TEST_PART: ${{ matrix.part }}
           CI_TEST_SERIAL: ${{ runner.os == 'Windows' && '1' || '' }}
         run: node scripts/ci-impact.mjs run
+      # A summary and the largest gaps, here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
 
   browser:
     needs: impact
@@ -499,7 +604,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    # A Windows browser job has two minutes more, one for each of the sampler's two steps, so they never take time its tests had (#1249).
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 17 || 15 }}
     steps:
       # Real-time scanning of every file the tests write and every process they start slows the
       # Windows runner; the product's own antivirus handling stays covered by its simulated tests.
@@ -514,6 +620,13 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      # Records what the runner did when it stalls for over a second: a 250 ms ticker (#1249).
+      - name: Windows runner sampler
+        if: runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 start "$env:RUNNER_TEMP/windows-sampler"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
@@ -550,6 +663,13 @@ jobs:
           path: ${{ runner.temp }}/agent-board-browser-artifacts/
           if-no-files-found: warn
           retention-days: 7
+      # A summary and the largest gaps, here in the log (#1249).
+      - name: Windows runner sampler record
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        continue-on-error: true
+        timeout-minutes: 1
+        run: scripts/ci-sampler.ps1 stop "$env:RUNNER_TEMP/windows-sampler"
 
   generated:
     name: generated files

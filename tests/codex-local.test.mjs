@@ -13198,11 +13198,13 @@ require('node:module').syncBuiltinESMExports()
   return { pidFile, attemptsFile, preload, lease, hooks, conversationId, payload, record }
 }
 
+// A message may be a function, so a failed wait can say what it saw when it gave up (#1781).
 const waitForAutomaticRecovery = async (condition, message, limit = 10000) => {
   const until = Date.now() + limit
   while (!condition() && Date.now() < until) await new Promise(done => setTimeout(done, 25))
-  assert.ok(condition(), message)
+  if (!condition()) assert.fail(typeof message === 'function' ? message() : message)
 }
+const recoverySeen = (f, recovery) => () => `pid file ${existsSync(recovery.pidFile) ? 'written' : 'missing'}, queued ${JSON.stringify(pendingFiles(f))}, hook log ends ${JSON.stringify(hookLog(f).split(/\r?\n/).filter(Boolean).slice(-3))}`
 
 test('automatic hook recovery applies a queued Antigravity Stop after the lock is released', { timeout: 30000 }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
@@ -13221,7 +13223,7 @@ test('automatic hook recovery applies a queued Antigravity Stop after the lock i
   try {
     const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
     assert.equal(stopped.status, 0, hookFailure(stopped))
-    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the installed Stop hook must queue once and launch its owned recovery helper')
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, () => 'the installed Stop hook must queue once and launch its owned recovery helper: ' + recoverySeen(f, recovery)())
     recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
     assert.ok(isReporterAlive(recoveryPid), 'the tracked automatic recovery helper must be live before the lock is released')
     const [queuedName] = pendingFiles(f)
@@ -13253,7 +13255,7 @@ test('automatic hook recovery gives up within its deadline while the lock is hel
   try {
     const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
     assert.equal(stopped.status, 0, hookFailure(stopped))
-    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the installed Stop hook must launch recovery for its queued metadata')
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, () => 'the installed Stop hook must launch recovery for its queued metadata: ' + recoverySeen(f, recovery)())
     recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
     await waitForAutomaticRecovery(() => !isReporterAlive(recoveryPid), 'the bounded automatic helper must exit while the synthetic lock remains held')
     // The helper has one 8 s deadline from the job's creation, gives each attempt up to 2 s and starts none with
@@ -13271,6 +13273,85 @@ test('automatic hook recovery gives up within its deadline while the lock is hel
     assert.deepEqual(JSON.parse(manual.stdout), { recoveryVersion: 1, processed: 1, pending: 0 })
     assert.deepEqual(pendingFiles(f), [])
     assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).state, 'waiting')
+  } finally {
+    rmSync(locked.marker, { force: true })
+    if (Number.isInteger(recoveryPid) && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
+  }
+}))
+
+// The board script queues its own copy of an event when the lock is busy. If the worker then stops it at the deadline, that
+// copy is the event's, and the worker must not save a second, raw one: recovery would hold two copies of one Stop (#1781).
+test('a Stop hook whose board script is stopped after it queued the event keeps that one queued copy and starts recovery (#1781)', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const started = await fireCommand(f, recovery.hooks.PreInvocation[0].command, recovery.payload)
+  assert.equal(started.status, 0, hookFailure(started))
+  const locked = lockedProgress(f)
+  // Once its queued copy is in place, the board script waits well past the worker's deadline, so the worker stops it.
+  const stall = join(f.home, 'stall-after-queue.cjs')
+  f.save(stall, `const fs = require('node:fs')
+const path = require('node:path')
+const rename = fs.renameSync
+fs.renameSync = (from, to) => {
+  const result = rename(from, to)
+  const name = String(to)
+  if (process.argv.includes('--hook-recovery-parent') && path.basename(path.dirname(name)) === 'pending' && name.endsWith('.json') && !name.endsWith('.raw.json')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000)
+  return result
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const env = { ...f.env, NODE_OPTIONS: `${locked.env.NODE_OPTIONS} --require ${JSON.stringify(recovery.preload)} --require ${JSON.stringify(stall)}` }
+  let recoveryPid
+  try {
+    const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
+    assert.equal(stopped.status, 0, hookFailure(stopped))
+    const queued = pendingFiles(f)
+    assert.equal(queued.length, 1, `queued: ${JSON.stringify(queued)}`)
+    assert.doesNotMatch(queued[0], /\.raw\.json$/, 'the copy kept is the one the board script queued')
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile), recoverySeen(f, recovery))
+    recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    unlinkSync(locked.marker)
+    await waitForAutomaticRecovery(() => pendingFiles(f).length === 0 && JSON.parse(readFileSync(recovery.record, 'utf8')).state === 'waiting', () => 'recovery must apply the one queued Stop once the lock is released: ' + recoverySeen(f, recovery)())
+  } finally {
+    rmSync(locked.marker, { force: true })
+    if (Number.isInteger(recoveryPid) && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
+  }
+}))
+
+// The same copy when the board script queued it and then failed before the deadline: the worker logs the failure and
+// starts recovery, and saves no second copy (#1781).
+test('a Stop hook whose board script failed after it queued the event keeps that one queued copy and logs the failure (#1781)', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const started = await fireCommand(f, recovery.hooks.PreInvocation[0].command, recovery.payload)
+  assert.equal(started.status, 0, hookFailure(started))
+  const locked = lockedProgress(f)
+  // Once its queued copy is in place, the board script ends with an error, well before the worker's deadline.
+  const broken = join(f.home, 'fail-after-queue.cjs')
+  f.save(broken, `const fs = require('node:fs')
+const path = require('node:path')
+const rename = fs.renameSync
+fs.renameSync = (from, to) => {
+  const result = rename(from, to)
+  const name = String(to)
+  if (process.argv.includes('--hook-recovery-parent') && path.basename(path.dirname(name)) === 'pending' && name.endsWith('.json') && !name.endsWith('.raw.json')) process.exit(1)
+  return result
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const env = { ...f.env, NODE_OPTIONS: `${locked.env.NODE_OPTIONS} --require ${JSON.stringify(recovery.preload)} --require ${JSON.stringify(broken)}` }
+  let recoveryPid
+  try {
+    const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
+    assert.equal(stopped.status, 0, hookFailure(stopped))
+    const queued = pendingFiles(f)
+    assert.equal(queued.length, 1, `queued: ${JSON.stringify(queued)}, hook log: ${JSON.stringify(hookLog(f))}`)
+    assert.doesNotMatch(queued[0], /\.raw\.json$/, 'the copy kept is the one the board script queued')
+    assert.match(hookLog(f), /antigravity REPORTER_FAILED\r?\n[^\n]* antigravity REPORTER_QUEUED\r?\n$/, 'the failure and the queued event are logged as on any queued failure')
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile), recoverySeen(f, recovery))
+    recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    unlinkSync(locked.marker)
+    await waitForAutomaticRecovery(() => pendingFiles(f).length === 0 && JSON.parse(readFileSync(recovery.record, 'utf8')).state === 'waiting', () => 'recovery must apply the one queued Stop once the lock is released: ' + recoverySeen(f, recovery)())
   } finally {
     rmSync(locked.marker, { force: true })
     if (Number.isInteger(recoveryPid) && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
