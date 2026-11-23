@@ -117,6 +117,8 @@ export type ServeOptions = {
   // Wall clock override and one-use open-link lifetime override for tests.
   now?: () => number
   openLinkMs?: number
+  // The tests' shorter wait for a window to load the page /api/open opened; the board uses OPEN_REDEEM_MS.
+  openRedeemMs?: number
 }
 
 type Result = { ok: boolean; note: string }
@@ -146,8 +148,12 @@ const REFUSAL_MAX_BYTES = 4096
 const REFUSAL_PROBE_MS = 5000
 const OPEN_LINK_MS = 10 * 60 * 1000
 const OPEN_LINK_MAX = 64
-const PAGE_SESSION_MS = 24 * 60 * 60 * 1000
+// The board keeps this many page sessions, the least recently used going first; a session has no
+// other lifetime, so a page left open for days keeps working while its board runs (#1650).
 const PAGE_SESSION_MAX = 64
+// After its opener says yes, /api/open waits this long for the window to load the page, so a board
+// command says "opened" only when the page really was (#1650).
+const OPEN_REDEEM_MS = 5000
 
 type RawRefusal = { reason: ApprovalRefusalReason; at: string } | 'unreadable' | null
 
@@ -559,6 +565,8 @@ export const startServer = (o: ServeOptions): void => {
   // One-use page open links and the non-URL sessions they mint (M8a, #1650).
   const openLinks = new Map<string, { until: number; used: boolean; pairKey: string }>()
   const pageSessions = new Map<string, number>()
+  // /api/open waits on these to learn whether the window it opened loaded its code.
+  const redeemWaiters = new Map<string, () => void>()
   const clockNow = o.now ?? Date.now
   const mintOpenLink = (now: number, pairKey = ''): string => {
     for (const [code, entry] of openLinks) if (entry.until < now) openLinks.delete(code)
@@ -574,7 +582,6 @@ export const startServer = (o: ServeOptions): void => {
     return code
   }
   const mintPageSession = (now: number): string => {
-    for (const [id, seen] of pageSessions) if (now - seen > PAGE_SESSION_MS) pageSessions.delete(id)
     if (pageSessions.size >= PAGE_SESSION_MAX) pageSessions.delete(pageSessions.keys().next().value as string)
     const id = randomBytes(24).toString('base64url')
     pageSessions.set(id, now)
@@ -582,12 +589,7 @@ export const startServer = (o: ServeOptions): void => {
   }
   const livePageSession = (candidate: string, now: number): string => {
     if (candidate === '') return ''
-    const seen = pageSessions.get(candidate)
-    if (seen === undefined) return ''
-    if (now - seen > PAGE_SESSION_MS) {
-      pageSessions.delete(candidate)
-      return ''
-    }
+    if (!pageSessions.has(candidate)) return ''
     pageSessions.delete(candidate)
     pageSessions.set(candidate, now)
     return candidate
@@ -811,21 +813,34 @@ export const startServer = (o: ServeOptions): void => {
       if (req.method !== 'GET') return json(res, 405, {})
       if (isMoved) return json(res, 410, { moved: true })
       if (/prefetch/i.test(text(req.headers['sec-purpose']) || text(req.headers.purpose))) return json(res, 403, {})
+      // A link used, expired or never made (one from scrollback, or a model's earlier reply) gets the
+      // page with no session, which says how to get a fresh link, not a bare refusal (#1650).
+      const deadLink = (): void => {
+        const nonce = randomBytes(16).toString('base64')
+        res.writeHead(403, {
+          ...HEADERS,
+          'content-type': 'text/html; charset=utf-8',
+          'content-security-policy': pagePolicy(nonce),
+          'x-frame-options': 'DENY',
+        })
+        res.end(servePage(o.s, nonce, false, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, ''))
+      }
       const code = url.pathname.slice('/open/'.length)
-      if (!/^[\w-]{16,128}$/.test(code)) return json(res, 403, {})
+      if (!/^[\w-]{16,128}$/.test(code)) return deadLink()
       const now = clockNow()
       const entry = openLinks.get(code)
-      if (entry === undefined) return json(res, 403, {})
+      if (entry === undefined) return deadLink()
       if (entry.until < now) {
         openLinks.delete(code)
-        return json(res, 403, {})
+        return deadLink()
       }
       if (entry.used) {
         if (entry.pairKey !== '') turnApprovalsOff()
-        return json(res, 403, {})
+        return deadLink()
       }
       if (entry.pairKey !== '') entry.used = true
       else openLinks.delete(code)
+      redeemWaiters.get(code)?.()
       const session = mintPageSession(now)
       loadedAt = Date.now()
       lastSeen = loadedAt
@@ -1139,8 +1154,18 @@ export const startServer = (o: ServeOptions): void => {
         const key = isApprovalOff || pairKeys.size >= 16 ? '' : randomBytes(24).toString('base64url')
         if (key !== '') pairKeys.set(key, { until: now + APPROVAL_KEY_MS, secret: '' })
         const openCode = mintOpenLink(clockNow(), key)
+        let isRedeemed = false
+        const redeemed = new Promise<void>(done => redeemWaiters.set(openCode, () => { isRedeemed = true; done() }))
         const tried = await o.open(`http://127.0.0.1:${port}/open/${openCode}${key === '' ? '' : `#k=${key}`}`, body.asApp === true).catch(() => false)
         const isOpen = tried === true
+        // A launcher that said yes is no proof of a window: the caller says "opened" only when this
+        // window loaded its page, and prints a link otherwise.
+        if (isOpen && !isRedeemed) {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          await Promise.race([redeemed, new Promise<void>(done => { timer = setTimeout(done, o.openRedeemMs ?? OPEN_REDEEM_MS) })])
+          clearTimeout(timer)
+        }
+        redeemWaiters.delete(openCode)
         if (!isOpen) {
           if (key !== '') {
             // No window opened, yet the key or link was used: whoever read it from the opener's command line
@@ -1152,7 +1177,7 @@ export const startServer = (o: ServeOptions): void => {
         }
         // `hasTried`: this computer's browsers were tried and none opened, so the caller does not
         // try them again (a second window when a launcher reported an error after all).
-        return json(res, 200, { isOpen, hasTried: tried !== null })
+        return json(res, 200, { isOpen, hasTried: tried !== null, isRedeemed })
       }
       // The rest are the page's own. The Origin check only turns away a careless caller, as any
       // program can send one: the one-time key and the page secret are what count.

@@ -1437,7 +1437,7 @@ ${settingsCss}
 </div>
 </div>
 ${settingsPanel(s, language, isLan, isLangOverridden)}
-<script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
+<script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan, serveSessionLost: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
 ${pageSession === '' ? '' : `<script type="application/json" id="page-session">${JSON.stringify(pageSession).replace(/</g, '\\u003c')}</script>\n`}<script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
 </html>
@@ -1725,6 +1725,11 @@ const PAGE_SCRIPT = String.raw`
     return fetch(path, init).then(function (res) {
       if (path === '/api/board' && res.status === 304) return { ok: true, unchanged: true };
       return res.json().catch(function () { return {}; }).then(function (data) {
+        // A refusal with no reason is the board no longer knowing this page's session (its link
+        // used, the board restarted, the session pushed out): whichever call meets it ends on the
+        // one screen that asks for a fresh link, and nothing after it runs (#1650). Approval
+        // refusals carry a note.
+        if (res.status === 403 && !data.note) { endSession(); return new Promise(function () {}); }
         data.status = res.status;
         data.ok = res.ok && data.ok !== false;
         if (requestPage === pageId && path === '/api/board') boardEtag = data.ok && data.model && res.headers ? res.headers.get('etag') || '' : '';
@@ -1770,6 +1775,11 @@ const PAGE_SCRIPT = String.raw`
     movedMain.textContent = '';
     add(movedMain, el('p', '', w('serveMoved')));
     document.getElementById('side').hidden = true;
+  }
+  function endSession() {
+    token = '';
+    try { if (typeof sessionStorage !== 'undefined' && typeof sessionStorage.removeItem === 'function') sessionStorage.removeItem('agent_board_session'); } catch (error) {}
+    showSessionLost();
   }
   function showSessionLost() {
     isClosed = true;
@@ -3720,12 +3730,6 @@ const PAGE_SCRIPT = String.raw`
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) { showMoved(); return; }
       if (data.unchanged) { reachable(); maybeShowAway(); return; }
-      if (data.status === 403 && !data.note) {
-        token = '';
-        try { if (typeof sessionStorage !== 'undefined' && typeof sessionStorage.removeItem === 'function') sessionStorage.removeItem('agent_board_session'); } catch (error) {}
-        showSessionLost();
-        return;
-      }
       if (!data.ok || !data.model) {
         if (data.note) { reachable(); say(data.note, 'alert'); }
         else unreachable();
