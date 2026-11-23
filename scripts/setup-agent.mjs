@@ -467,8 +467,11 @@ const main = () => {
   // the host's default folder and stop on a conflict (#1314). Codex and Grok keep their hooks in a config the record
   // does not name by path; their folders still come from the flags and the environment. Only the agents this update
   // covers get a flag, so another host's folder never shows up in their commands. A skill the person already had in that
-  // folder is recorded as the `.new` copy setup wrote beside it, which names the folder as well.
+  // folder is recorded as the `.new` copy setup wrote beside it, which names the folder as well. Only what setup writes
+  // counts: it writes a `.new` copy only beside a text file (`isTextFile` in scripts/codex-local.ts), and Windows paths
+  // compare without case, as its file system does.
   if (isUpdate) {
+    const same = (one, other) => process.platform === 'win32' ? one.toLowerCase() === other.toLowerCase() : one === other
     const covered = selector === 'auto' || selector === 'all' ? undefined : selector.split(',')
     const recordRoot = flag('--data-dir') || join(home, '.agent-board')
     const shared = resolve(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
@@ -483,10 +486,10 @@ const main = () => {
       if (flag(`--${agent}-dir`) !== undefined || covered && !covered.includes(agent)) continue
       let files = []
       try { files = Object.keys(JSON.parse(readFileSync(join(recordRoot, `install-${agent}.json`), 'utf8')).files ?? {}) } catch { continue }
-      const file = files.map(one => resolve(one).replace(/\.new$/, '')).find(one => one !== shared && one.split(/[\\/]/).slice(-tail.length).join('/') === tail.join('/'))
+      const file = files.map(one => resolve(one).replace(/(\.(?:toml|md))\.new$/, '$1')).find(one => !same(one, shared) && same(one.split(/[\\/]/).slice(-tail.length).join('/'), tail.join('/')))
       const folder = file && resolve(file, ...tail.map(() => '..'))
       // The usual folder needs no flag, so the commands setup prints stay as they were for it.
-      if (folder && folder !== resolve(usual)) args.push(`--${agent}-dir`, folder)
+      if (folder && !same(folder, resolve(usual))) args.push(`--${agent}-dir`, folder)
     }
   }
   const hostDirs = {
