@@ -921,6 +921,25 @@ test('a second update of a current home writes nothing and asks nothing', async 
   assert.deepEqual(snapshot(f.home), before, 'the second update writes nothing')
 })
 
+// #1314: a host folder an earlier setup was given comes back from the install record, so an update run without that flag,
+// and with the environment naming the host's usual folder, updates the install where it is instead of stopping on a conflict.
+test('an update of an OpenCode installed in a folder setup was given updates it there without the flag', async () => {
+  const f = fixture(['custom/opencode'])
+  const folder = join(f.home, 'custom', 'opencode')
+  await setup(f, ['--agent', 'opencode', '--opencode-dir', folder, '--apply', '--json'])
+  const plugin = join(folder, 'plugins', 'agent-board-local.js')
+  assert.ok(existsSync(plugin), 'setup wrote the plugin in the folder it was given')
+  olderScript(f)
+  const output = checked(await update(f, [], { input: 'y\n' }), 'setup --update')
+  assert.equal(questions(output), 1, output)
+  assert.ok(output.includes('Agent Board updated to 99.0.0'), output)
+  assert.equal(output.includes('conflict'), false, output)
+  assert.equal(readFileSync(f.script, 'utf8').includes('// an earlier build'), false, 'the board script was updated')
+  assert.equal(readRecord(f, 'opencode').version, newestUse, 'the record names the newest use\'s version')
+  assert.ok(existsSync(plugin), 'the plugin stays in the folder setup was given')
+  assert.equal(existsSync(join(f.home, '.config', 'opencode', 'plugins', 'agent-board-local.js')), false, 'nothing was written in the usual folder')
+})
+
 test('J11b: a changed hook command asks once and shows the exact commands', async () => {
   const f = fixture(['.codex', '.cursor'])
   const mock = mockCodex(f)
