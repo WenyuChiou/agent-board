@@ -600,6 +600,12 @@ test('in a terminal, stop and a setup that cannot start keep the older script wi
   assert.equal(stopped.stdout.includes('[y/N]'), false, `stop asked setup's question\n${stopped.stdout}`)
   assert.ok(stopped.stderr.includes('To update it, preview'), stopped.stderr)
   assert.equal(readFileSync(script, 'utf8'), text, 'stop left the older script as it was')
+  // A bare `--lang` does not make the next flag its language: `--lang --stop` still stops, without setup (#1783).
+  const bare = f.run(pkg, ['--lang', '--stop', '--data-dir', root], terminal, 'y\n')
+  assert.ifError(bare.error)
+  assert.equal(bare.stdout.includes('[y/N]'), false, `--lang --stop asked setup's question\n${bare.stdout}`)
+  assert.ok(bare.stderr.includes('To update it, preview'), bare.stderr)
+  assert.equal(readFileSync(script, 'utf8'), text, '--lang --stop left the older script as it was')
   // A stand-in for a system that cannot start one more process (EAGAIN) when the launcher starts setup.
   const failing = join(f.box, 'no-setup.cjs')
   save(failing, `if (/[\\\\/]bin[\\\\/]agent-board\\.mjs$/.test(process.argv[1] || '')) { const cp = require('node:child_process'); const real = cp.spawnSync; cp.spawnSync = (file, list, options) => /setup-agent\\.mjs$/.test((list || [])[0] || '') ? { pid: 0, output: null, stdout: null, stderr: null, status: null, signal: null, error: Object.assign(new Error('spawnSync EAGAIN'), { code: 'EAGAIN' }) } : real(file, list, options); require('node:module').syncBuiltinESMExports() }\n`)
