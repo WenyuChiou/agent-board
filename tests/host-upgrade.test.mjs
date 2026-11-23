@@ -966,32 +966,38 @@ test('an update of a DeepSeek installed in a folder that held its own skill upda
 })
 
 // #1314: only what setup writes names a folder. It writes a `.new` copy only beside a text file, so a plugin's `.new` names
-// none; and on Windows the shared skill's copy spelled in other case is still the shared skill.
-test('an update takes no host folder from a record entry setup never writes', async () => {
-  const f = fixture(['.config/opencode', '.dsh'])
+// none, and on Windows the shared skill's copy spelled in other case is still the shared skill; a DeepSeek installed in a
+// folder setup was given still gets that folder.
+test('an update takes a host folder only from what setup writes', async () => {
+  const f = fixture(['.config/opencode', 'custom/dsh'])
+  const folder = join(f.home, 'custom', 'dsh')
   await setup(f, ['--agent', 'opencode', '--apply', '--json'])
-  await setup(f, ['--agent', 'deepseek', '--apply', '--json'])
+  await setup(f, ['--agent', 'deepseek', '--deepseek-dir', folder, '--apply', '--json'])
   const first = (agent, file) => editRecord(f, agent, record => { record.files = { [file]: sha256('odd'), ...record.files } })
   first('opencode', join(f.home, 'elsewhere', 'plugins', 'agent-board-local.js.new'))
   if (process.platform === 'win32') first('deepseek', join(f.home.toUpperCase(), '.agents', 'skills', 'agent-board', 'SKILL.md.new'))
   olderScript(f)
   const result = await update(f, [], { terminal: false })
-  // The odd entries also stop each host on a conflict, as before this change, so the command printed is the retry.
+  // The odd entries also stop their hosts on a conflict, as before this change, so the command printed may be the retry.
   assert.match(result.stdout, /(?:To update, run this in a terminal and answer y|Retry after fixing the conflicting files): .*--update/, `${result.stderr}\n${result.stdout}`)
   assert.equal(result.stdout.includes('--opencode-dir'), false, result.stdout)
-  assert.equal(result.stdout.includes('--deepseek-dir'), false, result.stdout)
+  assert.ok(result.stdout.includes('--deepseek-dir') && result.stdout.includes(folder), result.stdout)
 })
 
 // #1314: a record whose entries name more than one folder (the shared skill under another spelling of the home, as a
-// junction or a short name gives) names none, so the update stops as it did before rather than print a wrong folder.
-test('an update adds no host folder when the record names more than one', async () => {
-  const f = fixture(['.dsh'])
+// junction or a short name gives) names none, so that update stops as it did before rather than print a wrong folder;
+// an OpenCode installed in a folder setup was given still gets that folder.
+test('an update adds a host folder only when the record names exactly one', async () => {
+  const f = fixture(['custom/opencode', '.dsh'])
+  const folder = join(f.home, 'custom', 'opencode')
+  await setup(f, ['--agent', 'opencode', '--opencode-dir', folder, '--apply', '--json'])
   await setup(f, ['--agent', 'deepseek', '--apply', '--json'])
   editRecord(f, 'deepseek', record => { record.files = { [join(f.home, 'alias', '.agents', 'skills', 'agent-board', 'SKILL.md')]: sha256('shared'), ...record.files } })
   olderScript(f)
   const result = await update(f, [], { terminal: false })
   assert.match(result.stdout, /(?:To update, run this in a terminal and answer y|Retry after fixing the conflicting files): .*--update/, `${result.stderr}\n${result.stdout}`)
   assert.equal(result.stdout.includes('--deepseek-dir'), false, result.stdout)
+  assert.ok(result.stdout.includes('--opencode-dir') && result.stdout.includes(folder), result.stdout)
 })
 
 test('J11b: a changed hook command asks once and shows the exact commands', async () => {
