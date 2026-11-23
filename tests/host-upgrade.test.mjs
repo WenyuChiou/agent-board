@@ -965,6 +965,23 @@ test('an update of a DeepSeek installed in a folder that held its own skill upda
   assert.equal(existsSync(join(f.home, '.dsh')), false, 'nothing was written in the usual folder')
 })
 
+// #1314: only what setup writes names a folder. It writes a `.new` copy only beside a text file, so a plugin's `.new` names
+// none; and on Windows the shared skill's copy spelled in other case is still the shared skill.
+test('an update takes no host folder from a record entry setup never writes', async () => {
+  const f = fixture(['.config/opencode', '.dsh'])
+  await setup(f, ['--agent', 'opencode', '--apply', '--json'])
+  await setup(f, ['--agent', 'deepseek', '--apply', '--json'])
+  const first = (agent, file) => editRecord(f, agent, record => { record.files = { [file]: sha256('odd'), ...record.files } })
+  first('opencode', join(f.home, 'elsewhere', 'plugins', 'agent-board-local.js.new'))
+  if (process.platform === 'win32') first('deepseek', join(f.home.toUpperCase(), '.agents', 'skills', 'agent-board', 'SKILL.md.new'))
+  olderScript(f)
+  const result = await update(f, [], { terminal: false })
+  // The odd entries also stop each host on a conflict, as before this change, so the command printed is the retry.
+  assert.match(result.stdout, /(?:To update, run this in a terminal and answer y|Retry after fixing the conflicting files): .*--update/, `${result.stderr}\n${result.stdout}`)
+  assert.equal(result.stdout.includes('--opencode-dir'), false, result.stdout)
+  assert.equal(result.stdout.includes('--deepseek-dir'), false, result.stdout)
+})
+
 test('J11b: a changed hook command asks once and shows the exact commands', async () => {
   const f = fixture(['.codex', '.cursor'])
   const mock = mockCodex(f)
