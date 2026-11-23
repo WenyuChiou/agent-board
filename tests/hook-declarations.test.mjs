@@ -212,13 +212,16 @@ test('#1658: 0.25.1 /progress connect generated hook declarations match 0.25.0 a
   if (!baseDir) return
   const baseConnect = await import(pathToFileURL(join(baseDir, 'hooks', 'connect-pure.ts')).href)
 
+  // `script` is the reporter in the data folder, as every connect passes it (connectContext in
+  // scripts/connect-transaction.ts, scripts/legacy-connect.ts, scripts/codex-local.ts): a removal
+  // knows our hooks by it, so another name would leave them in and compare no removal at all.
   const contexts = [
     {
       name: 'linux-with-board',
       home: '/home/syn-user',
       sep: '/',
       isWindows: false,
-      script: '/home/syn-user/.claude/agent-board.mjs',
+      script: '/home/syn-user/project/progress-report.sh',
       inbox: '/home/syn-user/.claude/inbox',
       codexHome: '/home/syn-user/.codex',
       grokHome: '/home/syn-user/.grok',
@@ -234,7 +237,7 @@ test('#1658: 0.25.1 /progress connect generated hook declarations match 0.25.0 a
       home: 'C:\\Users\\syn user',
       sep: '\\',
       isWindows: true,
-      script: 'C:\\Users\\syn user\\.claude\\agent-board.mjs',
+      script: 'C:\\Users\\syn user\\my proj\\progress-report.ps1',
       inbox: 'C:\\Users\\syn user\\.claude\\inbox',
       codexHome: 'C:\\Users\\syn user\\.codex',
       grokHome: 'C:\\Users\\syn user\\.grok',
@@ -250,7 +253,7 @@ test('#1658: 0.25.1 /progress connect generated hook declarations match 0.25.0 a
       home: 'C:\\Users\\syn',
       sep: '\\',
       isWindows: true,
-      script: 'C:\\Users\\syn\\.claude\\agent-board.mjs',
+      script: 'C:\\Users\\syn\\proj\\progress-report.ps1',
       inbox: 'C:\\Users\\syn\\.claude\\inbox',
       codexHome: 'C:\\Users\\syn\\.codex',
       grokHome: 'C:\\Users\\syn\\.grok',
@@ -267,7 +270,7 @@ test('#1658: 0.25.1 /progress connect generated hook declarations match 0.25.0 a
       home: '/home/syn-user',
       sep: '/',
       isWindows: false,
-      script: '/home/syn-user/.claude/agent-board.mjs',
+      script: '/home/syn-user/.agent-board/progress-report.sh',
       inbox: '/home/syn-user/.claude/inbox',
       codexHome: '/home/syn-user/.codex',
       grokHome: '/home/syn-user/.grok',
