@@ -228,10 +228,12 @@ test('a launcher that starts or exits cleanly is not represented as confirmed br
       env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
     assert.equal(result.status, 0, result.stderr)
-    // When newly launched, it reports "Opened Agent Board in your browser",
-    // NOT "Agent Board is already open in your browser" (which is reserved exclusively for confirmed pageIsOpen)
-    assert.match(result.stdout, /Opened Agent Board in your browser/)
-    assert.doesNotMatch(result.stdout, /already open in your browser|\?t=|http:\/\/127\.0\.0\.1:/)
+    // A launcher that said yes is no proof of a window: the window never loaded its page, so the
+    // command says a window was started and leaves a fresh one-use link for when none appears.
+    url = /http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/.exec(result.stdout)?.[0] ?? null
+    assert.ok(url, result.stdout)
+    assert.equal(result.stdout.trim(), EN.boardPageLaunchedLink(url))
+    assert.doesNotMatch(result.stdout, /Opened Agent Board in your browser|already open in your browser|\?t=/)
   } finally {
     await cleanup(root, url)
   }
@@ -259,7 +261,8 @@ test('--serve asks openInBrowser for the app window like the plain command and -
     const opening = BOARD_SCRIPT.indexOf('var openInBrowser =')
     const opened = BOARD_SCRIPT.indexOf('var isRegularFile =', opening)
     assert.ok(opening > 0 && opened > opening, 'locates openInBrowser')
-    const mockedScript = `${BOARD_SCRIPT.slice(0, opening)}var openInBrowser = (target, done, asApp = false) => { process.getBuiltinModule('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ asApp: asApp === true }) + '\\n'); done(true) }\n${BOARD_SCRIPT.slice(opened)}`
+    // The stand-in browser loads the page it is handed, as a window that opened does.
+    const mockedScript = `${BOARD_SCRIPT.slice(0, opening)}var openInBrowser = (target, done, asApp = false) => { process.getBuiltinModule('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ asApp: asApp === true }) + '\\n'); fetch(String(target).split('#')[0]).then(res => res.text()).catch(() => {}); done(true) }\n${BOARD_SCRIPT.slice(opened)}`
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${mockedScript}`)
 
     for (const mode of [['--serve'], ['--html'], []]) {

@@ -5061,9 +5061,12 @@ test('a browser that exits with an error at once is not reported as opened: the 
     assert.doesNotMatch(failed, /Opened Agent Board/)
     assert.deepEqual(readFileSync(log, 'utf8').trim().split('\n'), openers)
     fake('google-chrome', 0)
+    // A launcher that exits cleanly loads no page here, so the press says a window was started and
+    // still leaves a fresh one-use link.
     const opened = press()
-    assert.match(opened, /Opened Agent Board/)
-    assert.equal(board.openUrlOf(opened), null)
+    assert.doesNotMatch(opened, /Opened Agent Board/)
+    assert.match(opened, /A browser window was started/)
+    assert.ok(board.openUrlOf(opened), opened)
   } finally {
     await board.end(urls)
     rmSync(bin, { recursive: true, force: true })
@@ -6602,8 +6605,10 @@ require('node:module').syncBuiltinESMExports()
   try {
     const env = { ...board.env, AGENT_BOARD_TEST_PID: '', NODE_OPTIONS: `--require ${JSON.stringify(preload)}` }
     const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve'], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stdout}\n${stderr}`)) : done(stdout))))
-    assert.match(out, /Opened Agent Board in your browser/)
-    assert.doesNotMatch(out, /http:\/\/127\.0\.0\.1:/)
+    // The recorder opens no window, so nothing loads the page: the command prints a fresh one-use
+    // link, never the page's reusable address.
+    assert.doesNotMatch(out, /Opened Agent Board in your browser|\?t=/)
+    assert.match(out.trim().split(/\r?\n/).at(-1), /http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
     url = JSON.parse(readFileSync(board.served, 'utf8')).url
     const origin = new URL(url).origin
     for (let tries = 0; !existsSync(opened) && tries < 50; tries++) await delay(100)
@@ -6648,8 +6653,9 @@ test('Windows browser startup releases Cursor pipes while the browser stays runn
   await placeStandIn(fixture.chrome, SLEEPING_BROWSER)
   log.mark('stand-in browser placed')
   const result = await htmlThroughCursor(board, fixture, log, signal)
-  assert.doesNotMatch(result.stdout, /http:\/\/127\.0\.0\.1:/)
-  assert.match(result.stdout, /Opened Agent Board/, result.stdout)
+  // The stand-in browser starts but never loads the page, so a fresh one-use link comes with it.
+  assert.doesNotMatch(result.stdout, /\?t=|Opened Agent Board/)
+  assert.match(result.stdout, /A browser window was started\. If none appears, open this one-use link: http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/, result.stdout)
   assert.ok(result.pid() !== undefined, `the stand-in browser must start: ${result.stdout} ${result.stderr}`)
   assert.ok(processAlive(result.pid()), 'the browser must outlive the caller pipes')
   return result.pid()
@@ -6662,8 +6668,9 @@ test('a Windows browser that exits with an error at once gives way to the next b
   await placeStandIn(fixture.chrome, SLEEPING_BROWSER)
   log.mark('stand-in browsers placed')
   const result = await htmlThroughCursor(board, fixture, log, signal)
-  assert.doesNotMatch(result.stdout, /http:\/\/127\.0\.0\.1:/)
-  assert.match(result.stdout, /Opened Agent Board/, result.stdout)
+  // The stand-in browser starts but never loads the page, so a fresh one-use link comes with it.
+  assert.doesNotMatch(result.stdout, /\?t=|Opened Agent Board/)
+  assert.match(result.stdout, /A browser window was started\. If none appears, open this one-use link: http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/, result.stdout)
   assert.ok(existsSync(fixture.failed), 'the failing Edge stand-in must have been tried first')
   assert.equal(readFileSync(fixture.failed, 'utf8').trim().split('\n').length, 1, 'the failing Edge stand-in is tried once')
   assert.ok(result.pid() !== undefined, `the Chrome stand-in must start after Edge failed: ${result.stdout} ${result.stderr}`)
@@ -6974,8 +6981,13 @@ test('the SSH hint links to the page with its token', () => {
     assert.ok(hint.includes(`ssh -L ${port}:127.0.0.1:${port} ${host}`), hint)
     assert.ok(hint.includes(url), hint)
   }
-  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(server.port, sshTargetOf(process.env), sshUrl)'))
-  assert.ok(BOARD_SCRIPT.includes('s.serveSshHint(pagePortOf(sshUrl), sshTargetOf(process.env), sshUrl)'))
+  // The terminal board keeps its hint on screen for as long as it runs, so that one names the
+  // forward and the key, never a link that would be used up or expire meanwhile.
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    const forward = words.serveSshForwardKey(port, host)
+    assert.ok(forward.includes(`ssh -L ${port}:127.0.0.1:${port} ${host}`), forward)
+    assert.doesNotMatch(forward, /http|\?t=/, forward)
+  }
 })
 
 test('the SSH forwarding command names a valid non-22 SSH port and the page port a URL leaves out (#1283)', () => {
@@ -8989,7 +9001,9 @@ test('a page whose process runs and whose port takes the connection but says not
     assert.ok(!out.includes(stale), out)
     assert.ok(!out.includes(EN.serveKept), out)
     assert.ok(!out.includes('already open'), out)
-    assert.equal(out.trim().split(/\r?\n/).at(-1), EN.serveKeptNoLink, out)
+    // It never answers for a one-use link, so the command says the board is busy, as for any
+    // link request that fails.
+    assert.equal(out.trim().split(/\r?\n/).at(-1), EN.serveBusy, out)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, stale)
   } finally {
     for (const socket of sockets) socket.destroy()

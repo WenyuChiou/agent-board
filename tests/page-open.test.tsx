@@ -55,7 +55,7 @@ test('the progress open command and the pane page button request a browser and r
 })
 
 for (const [code, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]] as const) {
-  test(`when a browser window opens or is already open (${code}), /progress open and the pane page button omit URLs and ?t= while /open/ fallback keeps only the one-use link`, async ($, on) => {
+  test(`when a browser window opens (${code}), /progress open omits URLs and ?t= while the fallback keeps only the one-use link`, async ($, on) => {
     const world: World = {
       files: new Map([[FILE, '## demo\n### Synthetic task\n- [ ] Continue\n'], [LIVE_SCRIPT, installedBoard()]]),
       mtime: 1, hasTasks: true, liveCalls: [], liveOutput: `${s.boardPageWindowOpened}\n`,
@@ -69,23 +69,34 @@ for (const [code, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]] as cons
     expect(opened.text).not.toContain('http://')
     expect(opened.text).not.toContain('?t=')
 
-    world.liveOutput = `${s.boardPageAlreadyOpen}\n`
-    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
-    try {
-      await ui.press({ key: 'page' })
-      expect(JSON.stringify(await ui.drawn())).not.toContain('?t=')
-    } finally { await ui.unmount() }
-
     const openUrl = 'http://127.0.0.1:34567/open/synthetic-one-use-code'
     world.liveOutput = `${s.serveAt(openUrl)}\n`
     const fallback = await $.command.run({ ...TIDY, args: 'open' })
     expect(fallback.text).toContain(`<${openUrl}>`)
     expect(fallback.text).not.toContain('?t=')
-
-    world.liveFailure = 'exit'
-    world.liveOutput = `${s.serveKeptNoLink}\n`
-    const keptNoLink = await $.command.run({ ...TIDY, args: 'open' })
-    expect(keptNoLink.text).toBe(s.serveKeptNoLink)
-    expect(keptNoLink.text).not.toContain('--serve')
   })
 }
+
+test("the plugin repeats the board's refusal in each language", async ($, on) => {
+  const world: World = {
+    files: new Map([[FILE, '## demo\n### Synthetic task\n- [ ] Continue\n'], [LIVE_SCRIPT, installedBoard()]]),
+    mtime: 1, hasTasks: true, liveCalls: [], liveFailure: 'exit', liveOutput: '',
+    store: { autoConnectOff: true, lang: 'en', inboxDone: {} },
+  }
+  engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+  for (const [code, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]] as const) {
+    await $.command.run({ ...TIDY, args: `lang ${code}` })
+    // The board says what to do next (run it again in a moment, or close the older page); the pane
+    // passes that line on as it is, with nothing of its own about starting the page again.
+    for (const refusal of [s.serveBusy, s.serveKeptNoLink]) {
+      world.liveOutput = `${refusal}\n`
+      const reply = await $.command.run({ ...TIDY, args: 'open' })
+      expect(reply.text).toBe(refusal)
+      expect(reply.text).not.toContain('http')
+      expect(reply.text).not.toContain('/open/')
+      expect(reply.text).not.toContain('--serve')
+      expect(reply.text).not.toContain(s.livePageFallback)
+    }
+  }
+})

@@ -246,8 +246,9 @@ test('--lan with the board page already open still shows the network address (#8
     await new Promise((done, fail) => request(local, res => { res.resume(); res.on('end', done) }).on('error', fail).end())
     const result = await run(script, ['--lan'], env)
     assert.equal(result.stderr, '')
-    assert.match(result.stdout, /already open in your browser/)
-    assert.doesNotMatch(result.stdout, /http:\/\/127\.0\.0\.1:\d+/)
+    // "Already open" always comes with a fresh one-use link, never the page's reusable address.
+    assert.match(result.stdout, /already open in your browser\. If you do not see it, open this one-use link: http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)
+    assert.doesNotMatch(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
     assert.match(result.stdout, /open http:\/\/[\d.]+:\d+\/\?t=[\w-]+ or scan this code:|This computer has no address on a local network/)
   })
 })

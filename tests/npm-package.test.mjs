@@ -769,8 +769,8 @@ test('a later launcher that reuses a server without its address record still ref
       // surface: run the launcher as a non-CI call so it opens the page and prints its address.
       const second = f.run(pkg, [], { CI: '0' })
       success(second)
-      assert.doesNotMatch(second.stdout, /\?t=|http:\/\/127\.0\.0\.1:/)
-      assert.equal(second.stdout.trim(), 'Agent Board is already open in your browser.')
+      assert.doesNotMatch(second.stdout, /\?t=/)
+      assert.match(second.stdout.trim(), /^Agent Board is already open in your browser\. If you do not see it, open this one-use link: http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
       const after = await board()
       assert.equal(after.view.versions.package, manifest.version)
       // The package is the board's own version, so there is no update to name.
