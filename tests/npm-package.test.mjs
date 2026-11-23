@@ -620,6 +620,84 @@ test('in a terminal, stop and a setup that cannot start keep the older script wi
   assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), "opening the board wrote this package's board script")
 }))
 
+// #1783: every option that opens the board counts, with the value it takes; `--lan` takes the next word only when it
+// is an address, as the board reads it.
+test('the launcher\'s update runs for every view option that takes a value', () => fixture(f => {
+  const { pkg, root, script, record } = olderInstall(f)
+  const result = f.run(pkg, ['--data-dir', root, '--print', '--lan', '10.0.0.5', '--port', '8080', '--idle-minutes', '30', '--lang', 'en'], terminalLauncher(f), 'y\n')
+  success(result)
+  assert.equal(result.stdout.split('[y/N]').length - 1, 1, `${result.stdout}\n${result.stderr}`)
+  assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), "the update wrote this package's board script")
+  assert.equal(typeof JSON.parse(readFileSync(record, 'utf8')).version, 'string', 'the record names the version')
+  assert.equal(result.stderr.includes('To update it, preview'), false, result.stderr)
+}))
+
+// #1783: a value option with no value, any option that is not a view, `--` and any other word keep the notice: the
+// board acts on them, so they are not opening it. A plain view afterwards still updates.
+test('a value option followed by a flag, or any word that is not a view, keeps the notice and starts no setup', () => fixture(f => {
+  const { pkg, root, script, text } = olderInstall(f)
+  const terminal = terminalLauncher(f)
+  for (const list of [['--port', '--print'], ['--print', '--theme', 'dark'], ['--print', '--days', '3'], ['--print', '--']]) {
+    const result = f.run(pkg, ['--data-dir', root, ...list], terminal, 'y\n')
+    assert.ifError(result.error)
+    assert.equal(result.stdout.includes('[y/N]'), false, `${list.join(' ')} asked setup's question\n${result.stdout}`)
+    assert.ok(result.stderr.includes('To update it, preview'), `${list.join(' ')}: ${result.stderr}`)
+    assert.equal(readFileSync(script, 'utf8'), text, `${list.join(' ')} left the older script as it was`)
+  }
+  const opened = f.run(pkg, ['--data-dir', root, '--print'], terminal, 'y\n')
+  success(opened)
+  assert.equal(opened.stdout.split('[y/N]').length - 1, 1, opened.stdout)
+  assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), "the plain view wrote this package's board script")
+}))
+
+// #1783: the launcher's list of options that open the board is kept against the board's own option grammar, so an
+// option added to the board is classified here before it can start, or fail to start, the update.
+test('every board option is classified as a view or not, and the view list is pinned', () => {
+  const cli = readFileSync(join(repo, 'scripts/board-cli.ts'), 'utf8')
+  const set = name => {
+    const body = cli.match(new RegExp(`const ${name} = new Set\\(\\[([^\\]]*)\\]\\)`))?.[1]
+    assert.ok(body, `${name} in scripts/board-cli.ts`)
+    return [...body.matchAll(/'(-[^']+)'/g)].map(one => one[1])
+  }
+  const board = new Set([...set('BOOL_FLAGS'), ...set('VALUE_FLAGS'), '--days', '--lan'])
+  const table = readFileSync(join(repo, 'bin/agent-board.mjs'), 'utf8').match(/const boardViews = new Map\(\[([\s\S]*?)\]\)\n/)?.[1]
+  assert.ok(table, 'boardViews in bin/agent-board.mjs')
+  const views = [...table.matchAll(/\['(-[^']+)'/g)].map(one => one[1])
+  assert.deepEqual(views.sort(), ['--all', '--html', '--idle-minutes', '--lan', '--lang', '--no-color', '--no-open', '--plain', '--port', '--print', '--serve', '--watch'])
+  // Not views: data reads, scripted keys, page server behaviour, actions, reports, management and internal flags, the
+  // folders setup and the launcher choose, and `--progress-file`, which picks the board.
+  const notViews = [
+    '--json', '--days', '--project', '--keys', '--stale-ms', '--allow-resume', '--codex-send', '--no-codex-send', '--theme', '--cwd', '--home',
+    '--chat', '--status', '--tidy', '--mcp', '--report', '--stop', '--help', '-h', '--version', '-v', '--quiet-board', '--stopped', '--unsent',
+    '--agent-status', '--apply', '--awaits-ack', '--check-conflicts', '--remove', '--update', '--antigravity-sidecar', '--hooks-approved',
+    '--codex-doctor', '--codex-event', '--codex-remove', '--codex-report', '--codex-setup', '--codex-trust', '--hermes-trust', '--plan-event',
+    '--recover-hooks', '--hook-recovery-parent', '--serve-child', '--once',
+    '--agent', '--codex-bin', '--codex-dir', '--data-dir', '--deepseek-dir', '--event', '--grok-dir', '--hermes-dir', '--hook-deadline',
+    '--hook-event', '--hook-started', '--id', '--legacy-connect-request', '--mailbox', '--messages-dir', '--nonce', '--older', '--openclaw-dir',
+    '--opencode-dir', '--progress-file', '--ready-file', '--recovery-owner-created', '--recovery-owner-pid', '--recovery-owner-token',
+    '--recovery-previous-token', '--ref', '--removing', '--session', '--setup-version', '--state', '--summary-b64', '--surface',
+  ]
+  assert.deepEqual([...board].filter(option => !views.includes(option) && !notViews.includes(option)), [], 'every board option is a view or named as not one')
+  assert.deepEqual(views.filter(option => !board.has(option)), [], 'every view is a board option')
+})
+
+// #1783: the launcher has already chosen the board, so CLAUDE_PROGRESS_FILE, which may name another board, does not
+// reach the update: setup keeps the progress file the install's own record names.
+test('the launcher\'s update keeps the install\'s own progress file when CLAUDE_PROGRESS_FILE names another board', () => fixture(f => {
+  const { pkg, root, script, record } = olderInstall(f)
+  const own = JSON.parse(readFileSync(record, 'utf8')).progress
+  assert.equal(typeof own, 'string', 'the record names its progress file')
+  const other = join(f.home, 'other board', 'progress.md')
+  save(other, '')
+  const result = f.run(pkg, ['--data-dir', root, '--print'], { ...terminalLauncher(f), CLAUDE_PROGRESS_FILE: other }, 'y\n')
+  success(result)
+  assert.equal(result.stdout.split('[y/N]').length - 1, 1, `${result.stdout}\n${result.stderr}`)
+  assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), `the update wrote this package's board script\n${result.stdout}\n${result.stderr}`)
+  assert.equal(JSON.parse(readFileSync(record, 'utf8')).progress, own, 'the record keeps its own progress file')
+  assert.equal(readFileSync(script, 'utf8').includes(JSON.stringify(other).slice(1, -1)), false, 'the script does not name the other board')
+  assert.equal(readFileSync(other, 'utf8'), '', 'the other board is untouched')
+}))
+
 test('--json through an older script prints the notice on stderr and exits 1', () => fixture(f => {
   const pkg = packed(f)
   // An older installed script that prints the text board, as a released 0.24.2 script would:
