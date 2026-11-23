@@ -462,6 +462,30 @@ const main = () => {
   const home = homeAt < 0 ? homedir() : args[homeAt + 1]
   if (!home || home.startsWith('--') || !selector || selector.startsWith('--')) fail('MISSING_ARGUMENT', missingValue)
   const flag = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1] }
+  // An update changes what setup installed, where it installed it: a host folder an earlier setup was given (--opencode-dir
+  // and the like) comes back from that host's install record, unless this call names one, so the update does not plan
+  // the host's default folder and stop on a conflict (#1314). Codex and Grok keep their hooks in a config the record
+  // does not name by path; their folders still come from the flags and the environment.
+  if (isUpdate) {
+    const recordRoot = flag('--data-dir') || join(home, '.agent-board')
+    const shared = resolve(home, '.agents', 'skills', 'agent-board', 'SKILL.md')
+    const skillFile = ['skills', 'agent-board', 'SKILL.md']
+    const recorded = {
+      opencode: [['plugins', 'agent-board-local.js'], process.env.OPENCODE_CONFIG_DIR || join(process.env.XDG_CONFIG_HOME || join(home, '.config'), 'opencode')],
+      openclaw: [skillFile, process.env.OPENCLAW_STATE_DIR || join(home, '.openclaw')],
+      deepseek: [skillFile, process.env.DSH_HOME || join(home, '.dsh')],
+      hermes: [skillFile, hermesHome(home)],
+    }
+    for (const [agent, [tail, usual]] of Object.entries(recorded)) {
+      if (flag(`--${agent}-dir`) !== undefined) continue
+      let files = []
+      try { files = Object.keys(JSON.parse(readFileSync(join(recordRoot, `install-${agent}.json`), 'utf8')).files ?? {}) } catch { continue }
+      const file = files.map(one => resolve(one)).find(one => one !== shared && one.split(/[\\/]/).slice(-tail.length).join('/') === tail.join('/'))
+      const folder = file && resolve(file, ...tail.map(() => '..'))
+      // The usual folder needs no flag, so the commands setup prints stay as they were for it.
+      if (folder && folder !== resolve(usual)) args.push(`--${agent}-dir`, folder)
+    }
+  }
   const hostDirs = {
     codex: flag('--codex-dir') || process.env.CODEX_HOME,
     grok: flag('--grok-dir') || process.env.GROK_HOME,
