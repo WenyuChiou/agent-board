@@ -232,9 +232,11 @@ the board the Claude Code plugin's connector last connected, else
 the page the installed copy serves. When the installed copy of an independent install comes
 from another release and you open the board in a terminal (no options, or only the options that
 open it: `--print`, `--watch`, `--html`, `--serve`, `--all`, `--plain`, `--no-color`, `--no-open`,
-`--lan [address]`, `--port <port>`, `--idle-minutes <n>` and `--lang <language>`, with `--data-dir`),
+`--quiet-board`, `--lan [address]`, `--port <port>`, `--idle-minutes <minutes>` (a fraction too),
+`--lang <language>` (or `auto`) and `--theme <theme>`, with `--data-dir`),
 `agent-board` first runs `setup --update` for the same agents and data folder, with the progress
-file its install recorded: it updates in one line, or asks its one question when something it
+file its install recorded and, for Codex and Grok, the folder their record names (whatever
+`CODEX_HOME` or `GROK_HOME` says now): it updates in one line, or asks its one question when something it
 must ask about changed. Answer anything but `y` and nothing
 changes; the board then opens on the copy that is there (Ctrl-C stops both). Outside a
 terminal, for anything but opening the board (`stop`, `--json`, a management command), or

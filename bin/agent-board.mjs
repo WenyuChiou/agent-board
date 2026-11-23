@@ -28,11 +28,20 @@ const langOf = value => {
 // other option picks a board, reads data, presses keys or manages something (#1783).
 const boardViews = new Map([
   ['--print', 'none'], ['--watch', 'none'], ['--html', 'none'], ['--serve', 'none'], ['--all', 'none'], ['--plain', 'none'],
-  ['--no-color', 'none'], ['--no-open', 'none'],
-  ['--port', 'digits'], ['--idle-minutes', 'digits'],
+  ['--no-color', 'none'], ['--no-open', 'none'], ['--quiet-board', 'none'],
+  ['--port', 'digits'], ['--idle-minutes', 'minutes'],
   ['--lan', 'address'],
   ['--lang', 'language'],
+  ['--theme', 'word'],
 ])
+// Each value as the board reads it: minutes as `idleTimeout` in hooks/serve.ts takes them, a language `langOf` reads
+// or `auto`, and the colour theme as any word (an unknown one leaves the board's own choice).
+const viewValues = {
+  digits: value => /^\d+$/.test(value),
+  minutes: value => /^\d+(?:\.\d+)?$/.test(value) && Number(value) <= 525600,
+  language: value => value === 'auto' || langOf(value) !== null,
+  word: () => true,
+}
 // A value that is missing or starts with `-`, any other option, `--` and any other word make the list something else.
 const isBoardView = list => {
   for (let i = 0; i < list.length; i++) {
@@ -43,7 +52,7 @@ const isBoardView = list => {
     // `--lan` takes the next word only when it is an address, as the board reads it.
     if (kind === 'address') { if (next !== undefined && /^[\d.]+$/.test(next)) i++; continue }
     if (next === undefined || next.startsWith('-')) return false
-    if (kind === 'digits' ? !/^\d+$/.test(next) : langOf(next) === null) return false
+    if (!viewValues[kind](next)) return false
     i++
   }
   return true
@@ -331,7 +340,20 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
           // the one the install's own record names (#1783).
           const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name}@${v} setup` }
           for (const key of Object.keys(setupEnv)) if (key.toUpperCase() === 'CLAUDE_PROGRESS_FILE') delete setupEnv[key]
-          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : []), ...(flag('--lang') ? ['--lang', langOf(flag('--lang'))] : [])], { stdio: 'inherit', env: setupEnv, windowsHide: true })
+          // Codex and Grok keep their hooks in the folder setup was given, which their record names: a CODEX_HOME or
+          // GROK_HOME naming another folder now must not move the install there (#1783). The usual folder needs no flag.
+          const same = (one, other) => process.platform === 'win32' ? resolve(one).toLowerCase() === resolve(other).toLowerCase() : resolve(one) === resolve(other)
+          const hostFolders = [['codex', 'CODEX_HOME', '.codex', 1], ['grok', 'GROK_HOME', '.grok', 2]].flatMap(([agent, variable, usual, depth]) => {
+            if (!agents.includes(agent)) return []
+            let config
+            try { config = JSON.parse(readFileSync(join(root, `install-${agent}.json`), 'utf8')).config } catch { return [] }
+            if (typeof config !== 'string' || !isAbsolute(config)) return []
+            const folder = depth === 1 ? dirname(config) : dirname(dirname(config))
+            return same(folder, process.env[variable] || join(home, usual)) ? [] : [`--${agent}-dir`, folder]
+          })
+          // `--lang auto` keeps the board's own language choice, so setup gets no language for it.
+          const setupLang = langOf(flag('--lang'))
+          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : []), ...hostFolders, ...(setupLang ? ['--lang', setupLang] : [])], { stdio: 'inherit', env: setupEnv, windowsHide: true })
           if (update.signal) { process.kill(process.pid, update.signal); process.exit(1) }
           // A setup that could not start printed nothing, so the notice names the command instead (#1783).
           if (update.error) console.error(notice)
