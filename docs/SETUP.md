@@ -231,16 +231,16 @@ the board the Claude Code plugin's connector last connected, else
 `~/.claude/progress.md`. It never runs a second copy from the package, which would restart
 the page the installed copy serves. When the installed copy of an independent install comes
 from another release and you open the board in a terminal (no options, or only the options that
-open it: `--print`, `--watch`, `--html`, `--serve`, `--all`, `--plain`, `--no-color`, `--no-open`,
-`--quiet-board`, `--lan [address]`, `--port <port>`, `--idle-minutes <minutes>` (a fraction too),
-`--lang <language>` (or `auto`) and `--theme <theme>`, with `--data-dir`),
-`agent-board` first runs `setup --update` for the same agents and data folder, with the progress
-file its install recorded and, for Codex and Grok, the folder their record names (whatever
-`CODEX_HOME` or `GROK_HOME` says now): it updates in one line, or asks its one question when something it
-must ask about changed. Answer anything but `y` and nothing
+open it and take no value: `--print`, `--watch`, `--html`, `--serve`, `--all`, `--plain`, `--no-color`,
+`--no-open`, `--quiet-board` and `--lan`, with `--data-dir`), `agent-board` first runs `setup --update`
+for the same agents and data folder, with the progress file its install recorded: it updates in one
+line, or asks its one question when something it must ask about changed. It does this only for an
+install laid out the way setup lays it out now: every file it recorded in your home or the data
+folder, and Codex and Grok in the folder setup picks now (`CODEX_HOME` or `GROK_HOME`, else the
+usual one). Answer anything but `y` and nothing
 changes; the board then opens on the copy that is there (Ctrl-C stops both). Outside a
-terminal, for anything but opening the board (`stop`, `--json`, a management command), or
-when setup cannot start, `agent-board` says on stderr that the copy is from another release
+terminal, for anything but opening the board (`stop`, `--json`, a management command, an option
+that takes a value such as `--port`), for any other install, or when setup cannot start, `agent-board` says on stderr that the copy is from another release
 and names the command that updates it: a setup preview for the same agents and data folder;
 add `--apply` to update it, which still leaves files you edited alone. For the Claude Code
 plugin's copy, it is updating the plugin, then `/progress connect`. Installing runs nothing: the package has no

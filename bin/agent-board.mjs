@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { setupAgents } from '../scripts/setup-discovery.mjs'
@@ -23,40 +23,12 @@ const langOf = value => {
   if (/^en(?:\b|_)|english|英文|英語|英语/.test(text)) return 'en'
   return null
 }
-// The options that open the board, each with the value it takes, against the board's own grammar in
-// scripts/board-cli.ts (BOOL_FLAGS, VALUE_FLAGS, unknownFlag); tests/npm-package.test.mjs keeps the two in step. Every
-// other option picks a board, reads data, presses keys or manages something (#1783).
-const boardViews = new Map([
-  ['--print', 'none'], ['--watch', 'none'], ['--html', 'none'], ['--serve', 'none'], ['--all', 'none'], ['--plain', 'none'],
-  ['--no-color', 'none'], ['--no-open', 'none'], ['--quiet-board', 'none'],
-  ['--port', 'digits'], ['--idle-minutes', 'minutes'],
-  ['--lan', 'address'],
-  ['--lang', 'language'],
-  ['--theme', 'word'],
-])
-// Each value as the board reads it: minutes as `idleTimeout` in hooks/serve.ts takes them, a language `langOf` reads
-// or `auto`, and the colour theme as any word (an unknown one leaves the board's own choice).
-const viewValues = {
-  digits: value => /^\d+$/.test(value),
-  minutes: value => /^\d+(?:\.\d+)?$/.test(value) && Number(value) <= 525600,
-  language: value => value === 'auto' || langOf(value) !== null,
-  word: () => true,
-}
-// A value that is missing or starts with `-`, any other option, `--` and any other word make the list something else.
-const isBoardView = list => {
-  for (let i = 0; i < list.length; i++) {
-    const kind = boardViews.get(list[i])
-    const next = list[i + 1]
-    if (kind === undefined) return false
-    if (kind === 'none') continue
-    // `--lan` takes the next word only when it is an address, as the board reads it.
-    if (kind === 'address') { if (next !== undefined && /^[\d.]+$/.test(next)) i++; continue }
-    if (next === undefined || next.startsWith('-')) return false
-    if (!viewValues[kind](next)) return false
-    i++
-  }
-  return true
-}
+// The options that open the board and take no value, against the board's own grammar in scripts/board-cli.ts
+// (BOOL_FLAGS, VALUE_FLAGS); tests/npm-package.test.mjs keeps the two in step. A view option that takes a value, and
+// every other option, which picks a board, reads data, presses keys or manages something, is not one (#1783; #1789).
+const boardViews = new Set(['--print', '--watch', '--html', '--serve', '--all', '--plain', '--no-color', '--no-open', '--quiet-board', '--lan'])
+// Any other option, any value (an address after `--lan` too), `--` and any other word make the list something else.
+const isBoardView = list => list.every(word => boardViews.has(word))
 // Windows usually has no LANG, so independent commands also check the system locale.
 const systemLang = env => {
   const language = langOf(env)
@@ -333,27 +305,30 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
         // A person opening the board in a terminal gets the update itself, with setup's one question, in the install root
         // the script names (#1314). Declined or failed, the board still opens on the script that is there. Only opening
         // the board does this: stop, reports, hook events and management commands run as they are, with the notice (#1783).
-        // The whole list must read as a board view (boardViews), each value option with its value: a flag after a value
-        // option is still acted on by the board, which reads it as that value too, so it must not count (#1783).
-        if (process.stdin.isTTY && process.stdout.isTTY && isBoardView(passArgs)) {
+        // The whole list must read as a board view (boardViews) (#1783). The install must be laid out as setup lays it
+        // out now: every file its records name in this home or the data folder, and Codex and Grok in the folder setup
+        // picks now (CODEX_HOME or GROK_HOME, else the usual one). Any other install keeps the notice (#1790).
+        const same = (one, other) => process.platform === 'win32' ? resolve(one).toLowerCase() === resolve(other).toLowerCase() : resolve(one) === resolve(other)
+        const inside = (folder, path) => { const rest = relative(folder, path); return rest === '' || !rest.startsWith('..') && !isAbsolute(rest) }
+        const hosts = { codex: ['CODEX_HOME', '.codex', 1], grok: ['GROK_HOME', '.grok', 2] }
+        const isLaidOut = () => agents.every(agent => {
+          let owned
+          try { owned = JSON.parse(readFileSync(join(root, `install-${agent}.json`), 'utf8')) } catch { return false }
+          if (owned === null || typeof owned !== 'object') return false
+          const paths = [...Object.keys(owned.files ?? {}), ...(owned.config === undefined ? [] : [owned.config])]
+          if (!paths.every(path => typeof path === 'string' && isAbsolute(path) && (inside(home, path) || inside(root, path)))) return false
+          const host = hosts[agent]
+          if (host === undefined) return true
+          const [variable, usual, depth] = host
+          if (typeof owned.config !== 'string') return false
+          return same(depth === 1 ? dirname(owned.config) : dirname(dirname(owned.config)), process.env[variable] || join(home, usual))
+        })
+        if (process.stdin.isTTY && process.stdout.isTTY && isBoardView(passArgs) && isLaidOut()) {
           // The board is chosen already, so a progress file the environment names may be another board's: setup keeps
           // the one the install's own record names (#1783).
           const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name}@${v} setup` }
           for (const key of Object.keys(setupEnv)) if (key.toUpperCase() === 'CLAUDE_PROGRESS_FILE') delete setupEnv[key]
-          // Codex and Grok keep their hooks in the folder setup was given, which their record names: a CODEX_HOME or
-          // GROK_HOME naming another folder now must not move the install there (#1783). The usual folder needs no flag.
-          const same = (one, other) => process.platform === 'win32' ? resolve(one).toLowerCase() === resolve(other).toLowerCase() : resolve(one) === resolve(other)
-          const hostFolders = [['codex', 'CODEX_HOME', '.codex', 1], ['grok', 'GROK_HOME', '.grok', 2]].flatMap(([agent, variable, usual, depth]) => {
-            if (!agents.includes(agent)) return []
-            let config
-            try { config = JSON.parse(readFileSync(join(root, `install-${agent}.json`), 'utf8')).config } catch { return [] }
-            if (typeof config !== 'string' || !isAbsolute(config)) return []
-            const folder = depth === 1 ? dirname(config) : dirname(dirname(config))
-            return same(folder, process.env[variable] || join(home, usual)) ? [] : [`--${agent}-dir`, folder]
-          })
-          // `--lang auto` keeps the board's own language choice, so setup gets no language for it.
-          const setupLang = langOf(flag('--lang'))
-          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : []), ...hostFolders, ...(setupLang ? ['--lang', setupLang] : [])], { stdio: 'inherit', env: setupEnv, windowsHide: true })
+          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : [])], { stdio: 'inherit', env: setupEnv, windowsHide: true })
           if (update.signal) { process.kill(process.pid, update.signal); process.exit(1) }
           // A setup that could not start printed nothing, so the notice names the command instead (#1783).
           if (update.error) console.error(notice)
