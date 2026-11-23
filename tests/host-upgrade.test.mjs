@@ -940,6 +940,31 @@ test('an update of an OpenCode installed in a folder setup was given updates it 
   assert.equal(existsSync(join(f.home, '.config', 'opencode', 'plugins', 'agent-board-local.js')), false, 'nothing was written in the usual folder')
 })
 
+// #1314: a skill the person already had in that folder is recorded as the `.new` copy setup wrote beside it, which names the
+// folder too; and an update of one agent leaves another host's folder out of the command it prints.
+test('an update of a DeepSeek installed in a folder that held its own skill updates it there, and a Codex-only update leaves that folder out', async () => {
+  const f = fixture(['.codex', 'custom/dsh/skills/agent-board'])
+  const mock = mockCodex(f)
+  const folder = join(f.home, 'custom', 'dsh'), skill = join(folder, 'skills', 'agent-board', 'SKILL.md')
+  writeFileSync(skill, '# my own skill\n')
+  await setup(f, ['--agent', 'codex', '--apply', '--json'])
+  await setup(f, ['--agent', 'deepseek', '--deepseek-dir', folder, '--apply', '--json'])
+  assert.ok(Object.keys(readRecord(f, 'deepseek').files).some(file => resolve(file) === resolve(`${skill}.new`)), 'setup recorded the copy beside the person\'s skill')
+  olderScript(f)
+  const codexOnly = await update(f, ['--agent', 'codex', '--codex-bin', mock.executable], { terminal: false })
+  assert.equal(codexOnly.status, 3, `${codexOnly.stderr}\n${codexOnly.stdout}`)
+  assert.match(codexOnly.stdout, /To update, run this in a terminal and answer y: .*--update/, codexOnly.stdout)
+  assert.equal(codexOnly.stdout.includes('--deepseek-dir'), false, codexOnly.stdout)
+  const output = checked(await update(f, ['--codex-bin', mock.executable], { input: 'y\n' }), 'setup --update')
+  assert.equal(questions(output), 1, output)
+  assert.ok(output.includes('Agent Board updated to 99.0.0'), output)
+  assert.equal(output.includes('conflict'), false, output)
+  assert.equal(readFileSync(f.script, 'utf8').includes('// an earlier build'), false, 'the board script was updated')
+  assert.equal(readRecord(f, 'deepseek').version, newestUse, 'the record names the newest use\'s version')
+  assert.equal(readFileSync(skill, 'utf8'), '# my own skill\n', 'the person\'s skill stays as it was')
+  assert.equal(existsSync(join(f.home, '.dsh')), false, 'nothing was written in the usual folder')
+})
+
 test('J11b: a changed hook command asks once and shows the exact commands', async () => {
   const f = fixture(['.codex', '.cursor'])
   const mock = mockCodex(f)
