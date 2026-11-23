@@ -522,11 +522,11 @@ test('an older plugin copy is told to update the plugin, and an older independen
 
 // #1314: an install that setup wrote in a data folder, whose board script an earlier release wrote and recorded as
 // setup's own, before the release that added the new uses.
-const olderInstall = f => {
+const olderInstall = (f, agent = 'opencode', extra = []) => {
   const pkg = packed(f)
   const root = join(f.home, 'data dir')
-  success(f.run(pkg, ['setup', '--agent', 'opencode', '--data-dir', root, '--apply']))
-  const script = join(root, 'agent-board.mjs'), record = join(root, 'install-opencode.json')
+  success(f.run(pkg, ['setup', '--agent', agent, '--data-dir', root, ...extra, '--apply']))
+  const script = join(root, 'agent-board.mjs'), record = join(root, `install-${agent}.json`)
   const text = `${readFileSync(script, 'utf8')}\n// older\n`
   save(script, text)
   const owned = JSON.parse(readFileSync(record, 'utf8'))
@@ -623,13 +623,24 @@ test('in a terminal, stop and a setup that cannot start keep the older script wi
 // #1783: every option that opens the board counts, with the value it takes; `--lan` takes the next word only when it
 // is an address, as the board reads it.
 test('the launcher\'s update runs for every view option that takes a value', () => fixture(f => {
-  const { pkg, root, script, record } = olderInstall(f)
-  const result = f.run(pkg, ['--data-dir', root, '--print', '--lan', '10.0.0.5', '--port', '8080', '--idle-minutes', '30', '--lang', 'en'], terminalLauncher(f), 'y\n')
+  const { pkg, root, script, record, text } = olderInstall(f)
+  const terminal = terminalLauncher(f)
+  // Minutes as the board reads them (a fraction too), `--lang auto`, the colour theme and the no-op `--quiet-board`:
+  // each asks once; declined, the script stays as it was and the board opens on it.
+  for (const list of [['--print', '--idle-minutes', '0.02'], ['--print', '--lang', 'auto'], ['--print', '--theme', 'dark', '--quiet-board']]) {
+    const declined = f.run(pkg, ['--data-dir', root, ...list], terminal, 'n\n')
+    success(declined)
+    assert.equal(declined.stdout.split('[y/N]').length - 1, 1, `${list.join(' ')} did not ask once\n${declined.stdout}\n${declined.stderr}`)
+    assert.equal(readFileSync(script, 'utf8'), text, `${list.join(' ')}: declined, the older script is left as it was`)
+    assert.ok(declined.stdout.split('Nothing changed.')[1]?.split('\n').slice(1).join('\n').trim(), `${list.join(' ')}: the board opened after the answer\n${declined.stdout}`)
+  }
+  const result = f.run(pkg, ['--data-dir', root, '--print', '--lan', '10.0.0.5', '--port', '8080', '--idle-minutes', '30', '--lang', 'en'], terminal, 'y\n')
   success(result)
   assert.equal(result.stdout.split('[y/N]').length - 1, 1, `${result.stdout}\n${result.stderr}`)
   assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), "the update wrote this package's board script")
   assert.equal(typeof JSON.parse(readFileSync(record, 'utf8')).version, 'string', 'the record names the version')
   assert.equal(result.stderr.includes('To update it, preview'), false, result.stderr)
+  assert.ok(result.stdout.split('Agent Board updated to')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the update\n${result.stdout}`)
 }))
 
 // #1783: a value option with no value, any option that is not a view, `--` and any other word keep the notice: the
@@ -637,7 +648,7 @@ test('the launcher\'s update runs for every view option that takes a value', () 
 test('a value option followed by a flag, or any word that is not a view, keeps the notice and starts no setup', () => fixture(f => {
   const { pkg, root, script, text } = olderInstall(f)
   const terminal = terminalLauncher(f)
-  for (const list of [['--port', '--print'], ['--print', '--theme', 'dark'], ['--print', '--days', '3'], ['--print', '--']]) {
+  for (const list of [['--port', '--print'], ['--print', '--theme'], ['--print', '--idle-minutes', '-1'], ['--print', '--idle-minutes', '600000'], ['--print', '--days', '3'], ['--print', '--']]) {
     const result = f.run(pkg, ['--data-dir', root, ...list], terminal, 'y\n')
     assert.ifError(result.error)
     assert.equal(result.stdout.includes('[y/N]'), false, `${list.join(' ')} asked setup's question\n${result.stdout}`)
@@ -663,15 +674,15 @@ test('every board option is classified as a view or not, and the view list is pi
   const table = readFileSync(join(repo, 'bin/agent-board.mjs'), 'utf8').match(/const boardViews = new Map\(\[([\s\S]*?)\]\)\n/)?.[1]
   assert.ok(table, 'boardViews in bin/agent-board.mjs')
   const views = [...table.matchAll(/\['(-[^']+)'/g)].map(one => one[1])
-  assert.deepEqual(views.sort(), ['--all', '--html', '--idle-minutes', '--lan', '--lang', '--no-color', '--no-open', '--plain', '--port', '--print', '--serve', '--watch'])
+  assert.deepEqual(views.sort(), ['--all', '--html', '--idle-minutes', '--lan', '--lang', '--no-color', '--no-open', '--plain', '--port', '--print', '--quiet-board', '--serve', '--theme', '--watch'])
   // Not views: data reads, scripted keys, page server behaviour, actions, reports, management and internal flags, the
   // folders setup and the launcher choose, and `--progress-file`, which picks the board.
   const notViews = [
-    '--json', '--days', '--project', '--keys', '--stale-ms', '--allow-resume', '--codex-send', '--no-codex-send', '--theme', '--cwd', '--home',
-    '--chat', '--status', '--tidy', '--mcp', '--report', '--stop', '--help', '-h', '--version', '-v', '--quiet-board', '--stopped', '--unsent',
+    '--json', '--days', '--project', '--keys', '--stale-ms', '--allow-resume', '--codex-send', '--no-codex-send', '--cwd', '--home',
+    '--chat', '--status', '--tidy', '--mcp', '--report', '--stop', '--help', '-h', '--version', '-v', '--stopped', '--unsent',
     '--agent-status', '--apply', '--awaits-ack', '--check-conflicts', '--remove', '--update', '--antigravity-sidecar', '--hooks-approved',
     '--codex-doctor', '--codex-event', '--codex-remove', '--codex-report', '--codex-setup', '--codex-trust', '--hermes-trust', '--plan-event',
-    '--recover-hooks', '--hook-recovery-parent', '--serve-child', '--once',
+    '--recover-hooks', '--hook-recovery-parent', '--serve-child',
     '--agent', '--codex-bin', '--codex-dir', '--data-dir', '--deepseek-dir', '--event', '--grok-dir', '--hermes-dir', '--hook-deadline',
     '--hook-event', '--hook-started', '--id', '--legacy-connect-request', '--mailbox', '--messages-dir', '--nonce', '--older', '--openclaw-dir',
     '--opencode-dir', '--progress-file', '--ready-file', '--recovery-owner-created', '--recovery-owner-pid', '--recovery-owner-token',
@@ -679,6 +690,7 @@ test('every board option is classified as a view or not, and the view list is pi
   ]
   assert.deepEqual([...board].filter(option => !views.includes(option) && !notViews.includes(option)), [], 'every board option is a view or named as not one')
   assert.deepEqual(views.filter(option => !board.has(option)), [], 'every view is a board option')
+  assert.deepEqual(notViews.filter(option => !board.has(option)), [], 'every name in the not-a-view list is a board option')
 })
 
 // #1783: the launcher has already chosen the board, so CLAUDE_PROGRESS_FILE, which may name another board, does not
@@ -695,8 +707,30 @@ test('the launcher\'s update keeps the install\'s own progress file when CLAUDE_
   assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), `the update wrote this package's board script\n${result.stdout}\n${result.stderr}`)
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).progress, own, 'the record keeps its own progress file')
   assert.equal(readFileSync(script, 'utf8').includes(JSON.stringify(other).slice(1, -1)), false, 'the script does not name the other board')
+  assert.equal(JSON.parse(readFileSync(script, 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, '')).path, own, "the script's progress path is the install's own")
   assert.equal(readFileSync(other, 'utf8'), '', 'the other board is untouched')
+  assert.ok(result.stdout.split('Agent Board updated to')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the update\n${result.stdout}`)
 }))
+
+// #1783: Codex and Grok keep their hooks in the folder setup was given, and the record names it. A CODEX_HOME or
+// GROK_HOME that names another folder when the board is opened must not move the install there.
+const keptHostFolder = (f, agent, variable, tail) => {
+  const installed = join(f.home, `${agent} folder`), other = join(f.home, `another ${agent} folder`)
+  const { pkg, root, script, record } = olderInstall(f, agent, [`--${agent}-dir`, installed])
+  const config = join(installed, ...tail)
+  assert.equal(resolve(JSON.parse(readFileSync(record, 'utf8')).config), resolve(config), 'the record names the folder setup was given')
+  mkdirSync(other, { recursive: true })
+  const result = f.run(pkg, ['--data-dir', root, '--print'], { ...terminalLauncher(f), [variable]: other }, 'y\n')
+  success(result)
+  assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), `the update wrote this package's board script\n${result.stdout}\n${result.stderr}`)
+  assert.equal(resolve(JSON.parse(readFileSync(record, 'utf8')).config), resolve(config), 'the record still names that folder')
+  assert.ok(readFileSync(config, 'utf8').includes('agent-board'), 'the hooks stay in that folder')
+  assert.deepEqual(filesUnder(other), [], `nothing was written in the folder ${variable} names`)
+}
+
+test('the launcher\'s update keeps a Codex install in the folder its record names when CODEX_HOME names another', () => fixture(f => keptHostFolder(f, 'codex', 'CODEX_HOME', ['hooks.json'])))
+
+test('the launcher\'s update keeps a Grok install in the folder its record names when GROK_HOME names another', () => fixture(f => keptHostFolder(f, 'grok', 'GROK_HOME', ['hooks', 'agent-board-local.json'])))
 
 test('--json through an older script prints the notice on stderr and exits 1', () => fixture(f => {
   const pkg = packed(f)
