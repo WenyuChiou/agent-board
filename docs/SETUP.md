@@ -230,7 +230,8 @@ the board the Claude Code plugin's connector last connected, else
 `~/.agent-board/agent-board.mjs`, else the Claude Code plugin's beside
 `~/.claude/progress.md`. It never runs a second copy from the package, which would restart
 the page the installed copy serves. When the installed copy of an independent install comes
-from another release and you open the board in a terminal, `agent-board` first runs
+from another release and you open the board in a terminal (no options, or only views such as
+`--print` or `--watch`, and `--lang` with a language), `agent-board` first runs
 `setup --update` for the same agents and data folder: it updates in one line, or asks its one
 question when something it must ask about changed. Answer anything but `y` and nothing
 changes; the board then opens on the copy that is there (Ctrl-C stops both). Outside a

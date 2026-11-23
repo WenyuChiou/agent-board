@@ -299,10 +299,17 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
         // A person opening the board in a terminal gets the update itself, with setup's one question, in the install root
         // the script names (#1314). Declined or failed, the board still opens on the script that is there. Only opening
         // the board does this: stop, reports, hook events and management commands run as they are, with the notice (#1783).
-        const viewing = ['--print', '--watch', '--html', '--serve', '--all', '--plain', '--no-color', '--no-open', '--stopped', '--unsent']
-        const isOpening = passArgs.every((arg, i) => viewing.includes(arg) || arg === '--lang' || passArgs[i - 1] === '--lang')
+        // The whole list must read as a board view, and `--lang` takes the next word only when it is a language: a flag
+        // after a bare `--lang` is still acted on by the board, so it must not count as the language (#1783).
+        const viewing = ['--print', '--watch', '--html', '--serve', '--all', '--plain', '--no-color', '--no-open']
+        let isOpening = true
+        for (let i = 0; i < passArgs.length && isOpening; i++) {
+          if (viewing.includes(passArgs[i])) continue
+          if (passArgs[i] === '--lang' && !String(passArgs[i + 1] ?? '-').startsWith('-') && langOf(passArgs[i + 1]) !== null) { i++; continue }
+          isOpening = false
+        }
         if (process.stdin.isTTY && process.stdout.isTTY && isOpening) {
-          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : []), ...(flag('--lang') ? ['--lang', flag('--lang')] : [])], { stdio: 'inherit', env: { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name}@${v} setup` }, windowsHide: true })
+          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : []), ...(flag('--lang') ? ['--lang', langOf(flag('--lang'))] : [])], { stdio: 'inherit', env: { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name}@${v} setup` }, windowsHide: true })
           if (update.signal) { process.kill(process.pid, update.signal); process.exit(1) }
           // A setup that could not start printed nothing, so the notice names the command instead (#1783).
           if (update.error) console.error(notice)
