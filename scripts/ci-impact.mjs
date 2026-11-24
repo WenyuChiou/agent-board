@@ -558,7 +558,7 @@ export const testRuns = (files, { isSerial = false, isWindows = false, part = ''
   return share.length ? [testArgs(share, { isSerial, isWindows })] : []
 }
 
-export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform) => {
+export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform, write = writeFileSync) => {
   if (!Array.isArray(files) || !files.length || files.some(path => !/^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/.test(path) || !existsSync(path))) throw new Error('selected tests are empty, invalid or missing')
   // A self-parted file reads its part from CI_TEST_PART, so the child gets the part this run was given,
   // not whatever part the environment holds.
@@ -585,7 +585,7 @@ export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn
   const totalMs = Date.now() - started
   if (process.env.CI_TEST_TIMINGS || process.env.CI === 'true') {
     try {
-      writeFileSync(timingsPath(), JSON.stringify({ version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }, null, 2) + '\n')
+      write(timingsPath(), JSON.stringify({ version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }, null, 2) + '\n')
     } catch (error) {
       console.error('agent-board: could not record test timings: ' + error.message)
       // Remove any stale regular timings file so check cannot pass on earlier data (#1720).

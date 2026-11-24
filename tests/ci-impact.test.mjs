@@ -1049,6 +1049,18 @@ test('the time check command fails on CI when no test timings were recorded (#17
     assert.ifError(afterWriteFailure.error)
     assert.equal(afterWriteFailure.status, 1, afterWriteFailure.stdout + afterWriteFailure.stderr)
     assert.match(afterWriteFailure.stdout, /time budget: no test timings recorded on CI/)
+
+    const stale = join(dir, 'stale-timings.json')
+    await writeFile(stale, JSON.stringify({ version: 1, part: '1/4', serial: true, totalMs: 100_000, files: [{ path: 'tests/board.test.mjs', ms: 10_000 }] }))
+    process.env.CI_TEST_TIMINGS = stale
+    runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 0 }), 'linux', () => {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })
+    })
+    await assert.rejects(readFile(stale, 'utf8'), { code: 'ENOENT' })
+    const afterStaleCleanup = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI: 'true', CI_TEST_TIMINGS: stale } })
+    assert.ifError(afterStaleCleanup.error)
+    assert.equal(afterStaleCleanup.status, 1, afterStaleCleanup.stdout + afterStaleCleanup.stderr)
+    assert.match(afterStaleCleanup.stdout, /time budget: no test timings recorded on CI/)
   } finally {
     if (serial === undefined) delete process.env.CI_TEST_SERIAL
     else process.env.CI_TEST_SERIAL = serial
