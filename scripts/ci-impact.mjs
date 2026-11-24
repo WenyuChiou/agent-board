@@ -185,6 +185,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // Grew with #1680's eleven removal re-read tests: up to 49.0 s on Windows Node 24 (run 44650276536), over the 42 s
   // line of the 60 s default. By the rule of #1715: 49 x 1.3 / 0.7, rounded up to five seconds.
   'tests/setup-sidecar.test.mjs': 95_000, // slowest 49.0 s
+  // New with #1769 (M8a, #1650): 53.2 s on Windows Node 24 (run 45295627290) once round 4 added the case table's
+  // tests, over the 42 s line of the 60 s default. By the rule of #1715: 53.2 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/page-one-use-open.test.mjs': 100_000, // slowest 53.2 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs

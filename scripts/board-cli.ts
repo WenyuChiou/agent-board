@@ -3018,6 +3018,8 @@ const linkNote = (url: string, hint: LinkHint): string =>
 // an agent's command tool is not left waiting on the server.
 const serveBoard = async (): Promise<void> => {
   const requestedIdle = idleMs()
+  // A --stale-ms that is not a positive number stops here with INVALID_STALE_MS, before any page starts.
+  staleTimeoutMs()
   // `--serve` is what older command files and scripts still run: it opens the page like the plain
   // command and prints no text board before the address (#868). `--quiet-board` is now a no-op.
   const opened = await openBoard(mayLaunchHere())

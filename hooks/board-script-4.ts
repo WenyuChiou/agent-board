@@ -8811,6 +8811,7 @@ export const LINES = [
 "var linkNote = (url, hint) => isSshHere() ? sshHintOf(url) : hint === \"already\" ? s.boardPageAlreadyOpenLink(url) : hint === \"launched\" ? s.boardPageLaunchedLink(url) : hint === \"none\" ? s.serveBrowserNone(url) : s.boardPageLink(url);",
 "var serveBoard = async () => {",
 "  const requestedIdle = idleMs();",
+"  staleTimeoutMs();",
 "  const opened = await openBoard(mayLaunchHere());",
 "  const actualIdle = opened.server?.idleMs;",
 "  const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60000)}",
