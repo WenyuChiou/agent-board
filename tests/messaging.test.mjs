@@ -8496,10 +8496,10 @@ test('shape 27: a Codex live connection takes the mailbox\'s place only on its r
   assert.deepEqual([queued.status, queued.body.line], [200, 'nextTurn'])
   assert.equal((await w.remove('shape-i1-mailbox')).status, 200)
   assert.equal((await w.call('/api/messages/disconnect', { connection: owned.id, secret: owned.secret, turn: 'session' })).status, 200)
-  // The daemon receiver's idle route has its note: the card sends now, through the receiver.
+  // The daemon receiver's idle route has its note: the card sends afterWait, through the receiver.
   const daemon = (await w.call('/api/messages/register', { agent: 'codex', session: w.session, surface: SURFACE_IDS.codexDaemon, turn: 'session', scope: 'session', unclaimed: true })).body
   const live = await w.card()
-  assert.deepEqual([live.delivery?.id, live.line, live.canSend], [daemon.id, 'now', true])
+  assert.deepEqual([live.delivery?.id, live.line, live.canSend], [daemon.id, 'afterWait', true])
   // While the session works, the receiver's route has no note: the card is the one the mailbox gives without the receiver.
   shapeFile = stateFile('codex', 'working', w.session)
   const busy = await w.card()
