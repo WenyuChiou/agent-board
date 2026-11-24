@@ -13,6 +13,8 @@ const args = process.argv.slice(2)
 const isRemove = args.includes('--remove')
 // setup --update (#1314): update what setup installed, with one question only when the person must decide.
 const isUpdate = !isRemove && args.includes('--update')
+// Passed only by the launcher's update call (#1802); stripped before forwarding to any child process.
+const isFromLauncher = isUpdate && args.includes('--from-launcher')
 // The npm launcher supplies its package name for the setup command in guidance.
 const command = process.env.AGENT_BOARD_SETUP_COMMAND || ''
 const isJson = args.includes('--json')
@@ -522,7 +524,7 @@ const main = () => {
   const isPluginInstalled = hasClaude && hasPlugin(claudeDirectory)
   const hasDisabledPlugin = isPluginInstalled && isPluginDisabled(claudeDirectory)
   const isPluginNeeded = isAsking && !!claude && !isPluginInstalled
-  const common = args.filter(arg => arg !== '--apply' && arg !== '--json')
+  const common = args.filter(arg => arg !== '--apply' && arg !== '--json' && arg !== '--from-launcher')
   // PowerShell ends a single-quoted string at the curly single quotes too, so each is doubled like ' (#1303).
   // The curly double quotes (U+201C, U+201D) are literal inside single quotes, so doubling them would change the path.
   const quote = value => /^[\w./:@=,-]+$/.test(value) ? value : process.platform === 'win32'
@@ -802,9 +804,9 @@ const main = () => {
       const isYes = askYes('updateQuestion', false)
       process.stdout.write('\n')
       if (!isYes) {
-        // Direct `setup --update` keeps exit code 1 on a decline; the launcher asks with this flag so it knows
+        // Direct `setup --update` keeps exit code 1 on a decline; the launcher passes `--from-launcher` so it knows
         // setup already printed `updateLater` and skips the duplicate older-script notice (#1802).
-        process.exitCode = process.env.AGENT_BOARD_LAUNCHER_UPDATE === '1' ? 4 : 1
+        process.exitCode = isFromLauncher ? 4 : 1
         process.stdout.write(`${words('updateLater', { command: again })}\n`)
         return
       }

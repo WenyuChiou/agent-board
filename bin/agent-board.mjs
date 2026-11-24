@@ -355,9 +355,9 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
         if (process.stdin.isTTY && process.stdout.isTTY && isBoardView(args) && isLaidOut()) {
           // The board is chosen already, so a progress file the environment names may be another board's: setup keeps
           // the one the install's own record names (#1783).
-          const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name}@${v} setup`, AGENT_BOARD_LAUNCHER_UPDATE: '1' }
+          const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name}@${v} setup` }
           for (const key of Object.keys(setupEnv)) if (key.toUpperCase() === 'CLAUDE_PROGRESS_FILE') delete setupEnv[key]
-          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : [])], { stdio: 'inherit', env: setupEnv, windowsHide: true })
+          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', '--from-launcher', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : [])], { stdio: 'inherit', env: setupEnv, windowsHide: true })
           if (update.signal) { process.kill(process.pid, update.signal); process.exit(1) }
           // A setup that could not start printed nothing, and one that did not finish (a conflict, an install it does
           // not find from here) may leave the older script as it was: then the notice names the command too (#1783).
