@@ -240,7 +240,7 @@ folder, and Codex and Grok in the folder setup picks now (`CODEX_HOME` or `GROK_
 usual one). Answer anything but `y` and nothing
 changes; the board then opens on the copy that is there (Ctrl-C stops both). Outside a
 terminal, for anything but opening the board (`stop`, `--json`, a management command, an option
-that takes a value such as `--port`), for any other install, or when setup cannot start or does not finish (a no included), `agent-board` says on stderr that the copy is from another release
+that takes a value such as `--port`), for any other install, or when setup cannot start or leaves the board script as it was (a no included), `agent-board` says on stderr that the copy is from another release
 and names the command that updates it: a setup preview for the same agents and data folder;
 add `--apply` to update it, which still leaves files you edited alone. For the Claude Code
 plugin's copy, it is updating the plugin, then `/progress connect`. Installing runs nothing: the package has no
