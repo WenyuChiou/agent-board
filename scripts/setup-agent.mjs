@@ -626,7 +626,18 @@ const main = () => {
   // still trusted (#1303): the upgrade kept them when only the runner changed, and lost them
   // when a hook definition changed. The read-back is the trust preview without --apply, so it
   // writes nothing. A first install has only creates, so it keeps the trust step as before.
-  // The asking flow already re-approves on its yes, so this runs only for a plain --apply.
+  // This plain --apply reads back here; the asking flow reads back after its yes, for a Codex whose approval it did not
+  // list because the read before the question found the trust kept (#1806).
+  // The events whose hooks Codex does not trust, or undefined when Codex gave no answer.
+  const trustReadBack = (plan, codex) => {
+    const script = plan.script ?? join(plan.data, 'agent-board.mjs')
+    const read = spawnSync(process.execPath, [script, ...common, '--agent', 'codex', '--codex-trust', '--json', '--codex-bin', codex], { encoding: 'utf8', windowsHide: true })
+    try {
+      const observation = JSON.parse(read.stdout)
+      if (read.status === 0 && Array.isArray(observation.hooks)) return observation.hooks.filter(hook => hook.trust !== 'trusted').map(hook => hook.event)
+    } catch {}
+    return undefined
+  }
   const trustAfterApply = new Map()
   if (apply && !isAsking && !isRemove) {
     for (const [i, agent] of selected.entries()) {
@@ -634,12 +645,8 @@ const main = () => {
       if (!results[i].changes.some(change => change.action === 'update')) continue
       const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
       if (!codex) continue
-      const script = results[i].script ?? join(results[i].data, 'agent-board.mjs')
-      const read = spawnSync(process.execPath, [script, ...common, '--agent', 'codex', '--codex-trust', '--json', '--codex-bin', codex], { encoding: 'utf8', windowsHide: true })
-      try {
-        const observation = JSON.parse(read.stdout)
-        if (read.status === 0 && Array.isArray(observation.hooks)) trustAfterApply.set(agent, observation.hooks.filter(hook => hook.trust !== 'trusted').map(hook => hook.event))
-      } catch {}
+      const untrusted = trustReadBack(results[i], codex)
+      if (untrusted !== undefined) trustAfterApply.set(agent, untrusted)
     }
   }
   const shortPath = file => {
@@ -848,10 +855,14 @@ const main = () => {
   }
   if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
+    // A Codex whose trust the read before the question found kept is not asked about: its yes need not approve hooks
+    // Codex trusts (#1806). Any other read, or none, keeps the approval on the list; with a read, the doctor is not asked.
+    const isKept = agent => agent === 'codex' && plans[selected.indexOf(agent)].previewTrust === 'kept'
     const needsApproval = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
       const plan = plans[selected.indexOf(agent)]
       if (isRepair && !changedAgents.includes(agent)) return false
-      return plan.managedBy !== 'connector' && (plan.changes.length || !isTrusted(plan, agent, agent === 'codex' ? codex : undefined))
+      if (plan.managedBy === 'connector' || isKept(agent)) return false
+      return plan.changes.length || (agent === 'codex' && plan.previewTrust !== undefined) || !isTrusted(plan, agent, agent === 'codex' ? codex : undefined)
     })
     // With no Codex program found, setup cannot approve Codex's hooks: it promises no approval and names the command
     // the approval needs, with the program's path left to fill in (#1801).
@@ -926,13 +937,23 @@ const main = () => {
           report(words('trustPart', { host: names[agent] }), false, next)
           continue
         }
-        // A repair may restore the exact hooks the host already trusts; a yes need not trust them twice.
-        if (isRepair && isTrusted(plans[selected.indexOf(agent)], agent, agent === 'codex' ? codex : undefined)) {
-          report(words('trustPart', { host: names[agent] }), true, next)
-          continue
-        }
+        // The host says what the approval did (#1806): written, nothing left to write because it already trusts the
+        // hooks as they are after the applies, or no answer.
         const result = boardRun(plans[selected.indexOf(agent)], agent, extra)
-        report(words('trustPart', { host: names[agent] }), !result.error && result.status === 0, next)
+        let outcome = {}
+        try { outcome = !result.error && result.status === 0 ? JSON.parse(result.stdout) : {} } catch {}
+        if (!result.error && result.status === 0 && agent === 'codex' && outcome.applied === false && outcome.changes === 0) process.stdout.write(`${words('codexTrustHeld')}\n`)
+        else report(words('trustPart', { host: names[agent] }), !result.error && result.status === 0, next)
+      }
+      // A Codex left off the list as kept is asked once more, read-only, after the applies: another setup or a change in
+      // Codex while the question waited counts. Nothing is approved for the person; a trust step goes to the next steps.
+      const keptSteps = []
+      for (const agent of available.filter(agent => isKept(agent) && plans[selected.indexOf(agent)].changes.length && appliedPlans[agent] !== undefined)) {
+        const plan = appliedPlans[agent]
+        const untrusted = trustReadBack(plan, codex)
+        if (untrusted !== undefined && untrusted.length === 0) process.stdout.write(`${words('codexTrustHeld')}\n`)
+        else if (untrusted !== undefined) keptSteps.push(words('codexTrustNeeded', { command: boardStep(plan, agent, ['--codex-trust'], codex).text, events: untrusted.map(event => event[0].toUpperCase() + event.slice(1)).join(', ') }))
+        else keptSteps.push(words('codex', { command: boardStep(plan, agent, ['--codex-trust'], codex).text }))
       }
       let hasInstalledPlugin = hasPlugin(claudeDirectory)
       let isPluginReady = !!claude && hasInstalledPlugin && !isPluginDisabled(claudeDirectory)
@@ -956,7 +977,7 @@ const main = () => {
         }
       }
       if (completed.includes('antigravity')) offerSidecar()
-      const next = codexMissing && completed.includes('codex') ? [codexMissing] : []
+      const next = [...(codexMissing && completed.includes('codex') ? [codexMissing] : []), ...keptSteps]
       const sessions = []
       // How each agent opens the board (docs/SETUP.md, After setup): /agent-board, $agent-board in Codex, the skill in
       // Hermes Agent, and /board where /agent-board waits with an edited older board script. The plan names the way and
