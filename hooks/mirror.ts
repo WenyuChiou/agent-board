@@ -7,6 +7,8 @@ import { sha256 } from './sha256'
 import { normalizeTurnOrder } from './inbox'
 import { renewQuestion } from './step-words'
 export { renewQuestion } from './step-words'
+import { asData, dataBlock } from './data-block'
+export { asData, dataBlock } from './data-block'
 
 // Claude's own task list, mirrored from the calls it makes (TaskCreate, TaskUpdate,
 // TodoWrite). The list is the source of truth; the file is a view of it.
@@ -502,25 +504,6 @@ export const nameReply = (reply: string): { title: string; context: string } | n
 
   return { title, context: clip(context, 120) }
 }
-
-// Text from progress.md, which any program can write, made fit to show Claude as data: one
-// line, no backtick to close the fence it sits in, no comment or marker opening, at most
-// `limit` characters.
-export const asData = (text: string, limit = 120): string => {
-  const line = text
-    .replace(/`/g, "'")
-    .replace(/<!--|-->/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-  const chars = [...line]
-
-  return chars.length <= limit ? line : `${chars.slice(0, limit - 1).join('')}…`
-}
-
-// Lines of file text for Claude, inside a fence and after a sentence saying they are data,
-// not instructions; each line should already have been through asData.
-export const dataBlock = (lines: readonly string[], s: Strings = ZH_TW): string[] =>
-  lines.length === 0 ? [] : [s.dataNote, '```text', ...lines, '```']
 
 // The note the conversation gets after a compaction: where this session's task stands.
 export const resumeNote = (mirror: ProgressMirror, s: Strings = ZH_TW): string | null => {

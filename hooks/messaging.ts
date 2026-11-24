@@ -1,5 +1,5 @@
 import { type Strings, ZH_TW } from './i18n.ts'
-import { asData, dataBlock } from './mirror.ts'
+import { asData, dataBlock } from './data-block.ts'
 import { sha256 } from './sha256.ts'
 
 // Where a connection or a message comes from. Only this computer for now; the field is kept so
