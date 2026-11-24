@@ -558,7 +558,33 @@ export const testRuns = (files, { isSerial = false, isWindows = false, part = ''
   return share.length ? [testArgs(share, { isSerial, isWindows })] : []
 }
 
-export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform, write = writeFileSync) => {
+const cleanupStaleTimings = (target, writeError, remove, stat) => {
+  let cleanupProblem = null
+  let entry
+  try {
+    entry = stat(target)
+  } catch (statError) {
+    if (statError?.code !== 'ENOENT' && statError?.code !== 'ENOTDIR') {
+      cleanupProblem = 'could not inspect timings path: ' + statError.message
+    }
+  }
+  if (entry !== undefined) {
+    if (!entry.isFile()) {
+      cleanupProblem = 'timings path is not a regular file'
+    } else {
+      try {
+        remove(target)
+      } catch (removeError) {
+        if (removeError?.code !== 'ENOENT') {
+          cleanupProblem = 'could not remove stale timings file: ' + removeError.message
+        }
+      }
+    }
+  }
+  return cleanupProblem === null ? null : 'could not record test timings (' + writeError.message + '); ' + cleanupProblem
+}
+
+export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform, write = writeFileSync, remove = unlinkSync, stat = lstatSync) => {
   if (!Array.isArray(files) || !files.length || files.some(path => !/^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/.test(path) || !existsSync(path))) throw new Error('selected tests are empty, invalid or missing')
   // A self-parted file reads its part from CI_TEST_PART, so the child gets the part this run was given,
   // not whatever part the environment holds.
@@ -583,16 +609,23 @@ export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn
     if (result.status !== 0) failures.push(result.status ?? result.signal)
   }
   const totalMs = Date.now() - started
+  let timingsFailure = null
   if (process.env.CI_TEST_TIMINGS || process.env.CI === 'true') {
+    const target = timingsPath()
     try {
-      write(timingsPath(), JSON.stringify({ version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }, null, 2) + '\n')
+      write(target, JSON.stringify({ version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }, null, 2) + '\n')
     } catch (error) {
       console.error('agent-board: could not record test timings: ' + error.message)
-      // Remove any stale regular timings file so check cannot pass on earlier data (#1720).
-      try { unlinkSync(timingsPath()) } catch {}
+      // Remove any stale regular timings file via lstat so check cannot pass on earlier data and symlinks/dirs stay intact (#1720).
+      timingsFailure = cleanupStaleTimings(target, error, remove, stat)
     }
   }
-  if (failures.length) throw new Error('selected tests failed: ' + failures.join(', '))
+  if (failures.length || timingsFailure !== null) {
+    const parts = []
+    if (failures.length) parts.push('selected tests failed: ' + failures.join(', '))
+    if (timingsFailure !== null) parts.push(timingsFailure)
+    throw new Error(parts.join('; '))
+  }
 }
 
 const main = async () => {

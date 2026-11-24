@@ -1072,6 +1072,81 @@ test('the time check command fails on CI when no test timings were recorded (#17
   }
 })
 
+test('runTestFiles fails with both errors when removing a stale timings file throws EPERM (#1720)', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-eperm-'))
+  const serial = process.env.CI_TEST_SERIAL
+  const timings = process.env.CI_TEST_TIMINGS
+  const ci = process.env.CI
+  try {
+    const stale = join(dir, 'stale-timings.json')
+    await writeFile(stale, JSON.stringify({ version: 1, part: '1/4', serial: true, totalMs: 100_000, files: [{ path: 'tests/board.test.mjs', ms: 10_000 }] }))
+    delete process.env.CI_TEST_SERIAL
+    process.env.CI = 'true'
+    process.env.CI_TEST_TIMINGS = stale
+    const failingWrite = () => { throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }) }
+    const failingRemove = () => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }) }
+    assert.throws(
+      () => runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 0 }), 'linux', failingWrite, failingRemove),
+      error => /ENOSPC/.test(error.message) && /EPERM/.test(error.message),
+    )
+    assert.ok((await readFile(stale, 'utf8')).includes('tests/board.test.mjs'))
+    assert.throws(
+      () => runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 1 }), 'linux', failingWrite, failingRemove),
+      error => /selected tests failed: 1/.test(error.message) && /ENOSPC/.test(error.message) && /EPERM/.test(error.message),
+    )
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+    if (timings === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timings
+    if (ci === undefined) delete process.env.CI
+    else process.env.CI = ci
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('runTestFiles leaves a directory or symlink at the timings path in place and fails the run (#1720)', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-nonfile-'))
+  const serial = process.env.CI_TEST_SERIAL
+  const timings = process.env.CI_TEST_TIMINGS
+  const ci = process.env.CI
+  try {
+    delete process.env.CI_TEST_SERIAL
+    process.env.CI = 'true'
+    const dirPath = join(dir, 'timings-dir')
+    await mkdir(dirPath, { recursive: true })
+    await writeFile(join(dirPath, 'keep.txt'), 'keep\n')
+    process.env.CI_TEST_TIMINGS = dirPath
+    let removed = false
+    const trackRemove = () => { removed = true }
+    assert.throws(
+      () => runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 0 }), 'linux', () => { throw Object.assign(new Error('EISDIR: illegal operation on a directory'), { code: 'EISDIR' }) }, trackRemove),
+      error => /EISDIR/.test(error.message) && /not a regular file/.test(error.message),
+    )
+    assert.equal(removed, false)
+    assert.equal(await readFile(join(dirPath, 'keep.txt'), 'utf8'), 'keep\n')
+
+    const linkPath = join(dir, 'symlink-timings.json')
+    process.env.CI_TEST_TIMINGS = linkPath
+    removed = false
+    assert.throws(
+      () => runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 0 }), 'linux', () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }) }, trackRemove, () => ({ isFile: () => false, isSymbolicLink: () => true })),
+      error => /EACCES/.test(error.message) && /not a regular file/.test(error.message),
+    )
+    assert.equal(removed, false)
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+    if (timings === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timings
+    if (ci === undefined) delete process.env.CI
+    else process.env.CI = ci
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
 test('ci result validation rejects incomplete or non-boolean selection metadata', () => {
   const plan = makePlan([], options())
   const incomplete = structuredClone(plan)
