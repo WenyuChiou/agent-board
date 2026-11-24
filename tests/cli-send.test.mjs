@@ -19,6 +19,7 @@ const resolveLocal = (specifier, context, next) => {
 registerHooks({ resolve: resolveLocal })
 
 const { BOARD_SCRIPT } = await import('../hooks/board-script.ts')
+const { asData } = await import('../hooks/mirror.ts')
 const { EN } = await import('../hooks/strings-en.ts')
 const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
 const { ZH_TW } = await import('../hooks/i18n.ts')
@@ -456,7 +457,7 @@ test('--send from an authenticated receiver names its task', async () => {
     mkdirSync(ws, { recursive: true })
     const now = Date.now()
     const progressPath = join(root, 'progress.md')
-    const rawSenderTitle = `Fix "${join(homeDir, 'secret', 'file.ts')}"\u0007 now`
+    const rawSenderTitle = `Fix \`\`\` "${join(homeDir, 'secret', 'file.ts')}"\u0007 now`
     writeFileSync(progressPath, [
       autoBlock({ agent: 'codex', session: 'sess-auth-301', project: 'AuthProj', title: rawSenderTitle, dir: ws, updatedIso: isoAgo(now) }),
       autoBlock({ agent: 'claude', session: 'sess-auth-302', project: 'AuthProj', title: 'Run check', dir: ws, updatedIso: isoAgo(now) }),
@@ -484,10 +485,27 @@ test('--send from an authenticated receiver names its task', async () => {
     const deliveryEn = deliveryText(polled[0], EN)
     const deliveryTw = deliveryText(polled[0], ZH_TW)
     const linesEn = deliveryEn.split('\n')
-    assert.equal(linesEn[0], EN.messagesDeliveryAgent(EN.cliSendSenderWithTitle('Codex', polled[0].senderTitle)))
-    assert.equal(deliveryTw.split('\n')[0], ZH_TW.messagesDeliveryAgent(ZH_TW.cliSendSenderWithTitle('Codex', polled[0].senderTitle)))
+    const linesTw = deliveryTw.split('\n')
+    const safeTitle = asData(polled[0].senderTitle, 120)
+    assert.equal(linesEn[0], EN.messagesDeliveryAgent('Codex'))
+    assert.equal(linesTw[0], ZH_TW.messagesDeliveryAgent('Codex'))
+    assert.equal(linesEn[0].includes('Fix'), false)
     assert.equal(linesEn[2], EN.cliSendNoReplyLoop)
+    assert.deepEqual(linesEn.slice(3, 7), [
+      EN.dataNote,
+      '```text',
+      EN.cliSendSenderWithTitle('Codex', safeTitle),
+      '```',
+    ])
+    assert.deepEqual(linesTw.slice(3, 7), [
+      ZH_TW.dataNote,
+      '```text',
+      ZH_TW.cliSendSenderWithTitle('Codex', safeTitle),
+      '```',
+    ])
+    assert.equal(linesEn[5].includes('```'), false)
     assert.ok(linesEn.indexOf(EN.cliSendNoReplyLoop) < linesEn.findIndex(line => line.startsWith('<<<AB-')))
+    assert.ok(6 < linesEn.findIndex(line => line.startsWith('<<<AB-')))
 
     // Receiver credentials supplied while no hub is serving this folder must refuse cleanly.
     const offlineProgress = join(root, 'offline-progress.md')

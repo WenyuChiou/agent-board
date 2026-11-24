@@ -1,4 +1,5 @@
 import { type Strings, ZH_TW } from './i18n.ts'
+import { asData, dataBlock } from './mirror.ts'
 import { sha256 } from './sha256.ts'
 
 // Where a connection or a message comes from. Only this computer for now; the field is kept so
@@ -301,24 +302,28 @@ const deliveryAgentName = (agent: string, s: Strings): string => {
 
 const deliverySender = (message: Pick<Message, 'from' | 'framingNonce' | 'senderTitle'>, s: Strings): string => {
   if (message.from === 'unverified') return 'unverified'
-  if (message.senderTitle) return s.cliSendSenderWithTitle(deliveryAgentName(agentOf(message.from), s), message.senderTitle)
+  if (message.senderTitle) return deliveryAgentName(agentOf(message.from), s)
   return message.framingNonce ? senderLabel(message.from) : agentOf(message.from)
 }
 
-export const deliveryText = (message: Message, s: Strings = ZH_TW): string => [
-  message.from === 'board'
-    ? s.messagesDeliveryBoard
-    : s.messagesDeliveryAgent(deliverySender(message, s)),
-  s.messagesDeliveryWarning,
-  ...(message.from === 'board' ? [] : [s.cliSendNoReplyLoop]),
-  // A Codex thread has run one message twice (L2), so it is told what to do when it has answered already; a message
-  // sent again says that in its own line.
-  ...(message.redelivered ? [s.messagesDeliveryRepeat] : agentOf(message.to) === 'codex' ? [s.messagesDeliveryAnswered(message.nonce)] : []),
-  s.messagesDeliveryAck(message.nonce),
-  `<<<AB-${message.framingNonce ?? message.nonce}`,
-  message.text,
-  `AB-${message.framingNonce ?? message.nonce}>>>`,
-].join('\n')
+export const deliveryText = (message: Message, s: Strings = ZH_TW): string => {
+  const title = message.from !== 'board' && message.from !== 'unverified' && message.senderTitle ? asData(message.senderTitle, 120) : ''
+  return [
+    message.from === 'board'
+      ? s.messagesDeliveryBoard
+      : s.messagesDeliveryAgent(deliverySender(message, s)),
+    s.messagesDeliveryWarning,
+    ...(message.from === 'board' ? [] : [s.cliSendNoReplyLoop]),
+    ...(title === '' ? [] : dataBlock([s.cliSendSenderWithTitle(deliveryAgentName(agentOf(message.from), s), title)], s)),
+    // A Codex thread has run one message twice (L2), so it is told what to do when it has answered already; a message
+    // sent again says that in its own line.
+    ...(message.redelivered ? [s.messagesDeliveryRepeat] : agentOf(message.to) === 'codex' ? [s.messagesDeliveryAnswered(message.nonce)] : []),
+    s.messagesDeliveryAck(message.nonce),
+    `<<<AB-${message.framingNonce ?? message.nonce}`,
+    message.text,
+    `AB-${message.framingNonce ?? message.nonce}>>>`,
+  ].join('\n')
+}
 
 // Observation is not an authorization token. Only an exact, newer progress report
 // satisfies a handoff; a transport acceptance or even an ACK cannot do so.
