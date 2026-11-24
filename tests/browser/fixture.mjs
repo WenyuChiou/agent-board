@@ -309,11 +309,21 @@ export const writeProgress = (path, text) => {
 // reads it between writeFileSync's truncate and its write. That empty read draws a board without the task, and the board
 // with the change then comes only from the watch probe, about 2-3 s later (#1728). The temporary name starts with
 // progress.md's stem, which the server's folder watch counts (scripts/board-watch.ts).
+// While the page's server has progress.md open to read it, Windows refuses the rename onto it (EPERM, or EBUSY/EACCES);
+// the agents' writers wait and try again (scripts/codex-local.ts), and so does this, for up to 2 s.
 export const replaceProgress = (path, text) => {
   mkdirSync(dirname(path), { recursive: true })
   const temporary = `${path}.${process.pid}.tmp`
   writeFileSync(temporary, text)
-  renameSync(temporary, path)
+  for (let waited = 0; ; waited += 20) {
+    try {
+      renameSync(temporary, path)
+      return
+    } catch (error) {
+      if (process.platform !== 'win32' || !['EPERM', 'EBUSY', 'EACCES'].includes(error?.code) || waited >= 2000) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20)
+    }
+  }
 }
 
 export const monthlyArchive = progress => {
