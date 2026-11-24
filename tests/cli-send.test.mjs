@@ -126,24 +126,32 @@ const runCli = async (root, cliArgs, { cwd = root, env = {}, omit = [], timeoutM
     [scriptPath, ...cliArgs],
     { cwd, env: baseChildEnv(root, env, omit), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
   )
+  const exited = once(child, 'exit')
   let stdout = ''
   let stderr = ''
   child.stdout.on('data', chunk => { stdout += chunk })
   child.stderr.on('data', chunk => { stderr += chunk })
   const timer = setTimeout(() => {
-    try { child.kill() } catch {}
+    if (child.exitCode === null && child.signalCode === null) {
+      try { child.kill() } catch {}
+    }
   }, timeoutMs)
   try {
-    const [status] = await once(child, 'exit')
+    const [status] = await exited
     return { status: status ?? 1, stdout, stderr }
   } finally {
     clearTimeout(timer)
-    if (child.exitCode === null) {
+    if (child.exitCode === null && child.signalCode === null) {
       try { child.kill() } catch {}
-      await once(child, 'exit').catch(() => {})
     }
+    await exited.catch(() => {})
   }
 }
+
+const closeServer = server => new Promise(done => {
+  server.close(() => done())
+  server.closeAllConnections?.()
+})
 
 const postJson = async (url, token, action, payload) => {
   const base = new URL(url)
@@ -215,7 +223,7 @@ const startHub = async (root, {
     port,
     post: (action, payload) => postJson(url, token, action, payload),
     close: async () => {
-      await new Promise(done => server.close(() => done()))
+      await closeServer(server)
       store.close()
     },
   }
@@ -259,6 +267,7 @@ const startServeHub = async (root, {
     ],
     { cwd: dirname(root), env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
   )
+  const exited = once(child, 'exit').catch(() => {})
   let stderr = ''
   let stdout = ''
   child.stdout.on('data', chunk => { stdout += chunk })
@@ -266,7 +275,7 @@ const startServeHub = async (root, {
   const addrPath = join(addressFolderFor(runtimeDir), addressFileName(resolve(progressPath)))
   try {
     const info = await waitUntil(async () => {
-      if (child.exitCode !== null) throw new Error(`--serve-child exited early (${child.exitCode}): ${stderr}\n${stdout}`)
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`--serve-child exited early (${child.exitCode ?? child.signalCode}): ${stderr}\n${stdout}`)
       if (!existsSync(addrPath)) return null
       const parsed = JSON.parse(readFileSync(addrPath, 'utf8'))
       const res = await fetch(`http://127.0.0.1:${parsed.port}/api/ping`, {
@@ -290,21 +299,20 @@ const startServeHub = async (root, {
             signal: AbortSignal.timeout(3000),
           })
         } catch {}
-        if (child.exitCode === null) {
-          const exited = once(child, 'exit').catch(() => {})
+        if (child.exitCode === null && child.signalCode === null) {
           await Promise.race([exited, new Promise(done => setTimeout(done, 1500))])
-          if (child.exitCode === null) {
+          if (child.exitCode === null && child.signalCode === null) {
             try { child.kill() } catch {}
-            await once(child, 'exit').catch(() => {})
           }
+          await exited
         }
       },
     }
   } catch (error) {
-    if (child.exitCode === null) {
+    if (child.exitCode === null && child.signalCode === null) {
       try { child.kill() } catch {}
-      await once(child, 'exit').catch(() => {})
     }
+    await exited
     throw error
   }
 }
@@ -830,7 +838,7 @@ test('--send retried with the same --id delivers once', async () => {
       lostLockStore.close()
     }
   } finally {
-    if (lostServer) await new Promise(done => lostServer.close(() => done()))
+    if (lostServer) await closeServer(lostServer)
     if (hub) await hub.close()
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   }
@@ -880,7 +888,7 @@ test('--send refuses --id without a value', async () => {
     assert.equal(existsSync(uncreatedDir), false)
   } finally {
     if (trackerLockStore) trackerLockStore.close()
-    if (trackerServer) await new Promise(done => trackerServer.close(() => done()))
+    if (trackerServer) await closeServer(trackerServer)
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   }
 })
