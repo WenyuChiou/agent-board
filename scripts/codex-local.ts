@@ -299,15 +299,20 @@ const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), n
 // A root that is not a mapping (a list, a flow document) is not something to add a key to. Hermes saves config.yaml
 // with PyYAML, which writes a list's items at the left edge right under their key (`toolsets:` then `- hermes-cli`, #1588):
 // such an item belongs to the key above it, so the root is still a mapping. Under `hooks:` it is not one the board's
-// hooks can go into.
+// hooks can go into. The line editor reads keys as written, so a double-quoted key with an escape (`"ho\x6fks"` is
+// `hooks`) is refused, and so is a document end marker or a second document: hooks added at the end of the file would
+// land outside the one document Hermes reads.
 const YAML_TOP_KEY = /^(?:"([^"\n]*)"|'([^'\n]*)'|([^\s#{[!&*|>%@`"'-][^\n]*?))\s*:(?:\s|$)/
 const isYamlMapping = (text: string): boolean => {
   let listKey: string | undefined
+  let hasContent = false
   return text.split(/\r?\n/).every(line => {
-    if (!/^\S/.test(line) || /^(?:#|---|\.\.\.)/.test(line)) return true
+    if (!/^\S/.test(line) || line.startsWith('#')) return true
+    if (/^---\s*(?:#.*)?$/.test(line)) return !hasContent
+    hasContent = true
     if (/^-(?:\s|$)/.test(line)) return listKey !== undefined && listKey !== 'hooks'
     const key = YAML_TOP_KEY.exec(line)
-    if (key === null) return false
+    if (key === null || key[1]?.includes('\\')) return false
     const rest = line.slice(key[0].length).trim()
     listKey = rest === '' || rest.startsWith('#') ? key[1] ?? key[2] ?? key[3] : undefined
     return true
