@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { setupAgents } from '../scripts/setup-discovery.mjs'
@@ -309,7 +309,8 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
         // out now: every file its records name in this home or the data folder, and Codex and Grok in the folder setup
         // picks now (CODEX_HOME or GROK_HOME, else the usual one). Any other install keeps the notice (#1790).
         const same = (one, other) => process.platform === 'win32' ? resolve(one).toLowerCase() === resolve(other).toLowerCase() : resolve(one) === resolve(other)
-        const inside = (folder, path) => { const rest = relative(folder, path); return rest === '' || !rest.startsWith('..') && !isAbsolute(rest) }
+        // A folder whose name starts with `..` (`..codex`) is inside; only `..` itself, or `..` and a separator, leaves it.
+        const inside = (folder, path) => { const rest = relative(folder, path); return rest === '' || rest !== '..' && !rest.startsWith(`..${sep}`) && !isAbsolute(rest) }
         const hosts = { codex: ['CODEX_HOME', '.codex', 1], grok: ['GROK_HOME', '.grok', 2] }
         const isLaidOut = () => agents.every(agent => {
           let owned
@@ -330,8 +331,10 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
           for (const key of Object.keys(setupEnv)) if (key.toUpperCase() === 'CLAUDE_PROGRESS_FILE') delete setupEnv[key]
           const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : [])], { stdio: 'inherit', env: setupEnv, windowsHide: true })
           if (update.signal) { process.kill(process.pid, update.signal); process.exit(1) }
-          // A setup that could not start printed nothing, so the notice names the command instead (#1783).
-          if (update.error) console.error(notice)
+          // A setup that could not start printed nothing, and one that did not finish (a no, a conflict, an install it does
+          // not find from here) may leave the older script as it was: then the notice names the command too (#1783).
+          const stillOld = () => { try { return hash(readFileSync(installed, 'utf8')) === digest } catch { return true } }
+          if (update.error || stillOld()) console.error(notice)
         } else console.error(notice)
       } else {
         console.error(old
