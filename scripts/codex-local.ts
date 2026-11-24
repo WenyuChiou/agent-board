@@ -1007,6 +1007,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const now = Date.now(), supplied = Number(flag('--hook-started'))
     // Keep the source time even after a slow launch: re-dating an old Stop can replace a newer prompt.
     const started = Number.isSafeInteger(supplied) && supplied >= 0 && supplied <= now ? supplied : now
+    // The hook worker names the copy this run queues, so a worker that stops this run can tell the event is saved (#1781).
+    // Read once and taken out of the environment: no board run started from here names its own copy the same.
+    const suppliedQueueId = process.env.AGENT_BOARD_HOOK_QUEUE_ID
+    delete process.env.AGENT_BOARD_HOOK_QUEUE_ID
+    const queueId = typeof suppliedQueueId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(suppliedQueueId) ? suppliedQueueId : undefined
     const value = flag('--hook-deadline')
     const suppliedDeadline = value === undefined ? Infinity : Number(value)
     if (value !== undefined && !Number.isSafeInteger(suppliedDeadline)) throw new Error('INVALID_HOOK_DEADLINE')
@@ -1447,7 +1452,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (current === undefined || queuedFile !== undefined) return
       mkdirSync(pending, { recursive: true })
       if (pendingFiles().length >= 64) throw error
-      const file = join(pending, `${String(started).padStart(15, '0')}-${randomUUID()}.json`)
+      const file = join(pending, `${String(started).padStart(15, '0')}-${queueId ?? randomUUID()}.json`)
       atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
       queuedFile = file
     }
@@ -1924,9 +1929,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // The connect writes its board beside the progress file it connected: the default one, one a
   // CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names, or the one its own record keeps (#285).
   // Releases before de40dde wrote the command as node "<path>" for any path; later ones use boardRun.
-  const connected = ((): unknown => {
-    try { return object(JSON.parse(readFileSync(join(installControlRoot(home), 'legacy-connect.json'), 'utf8'))).connectedProgress } catch { return undefined }
+  const connectRecord = ((): Json => {
+    try { return object(JSON.parse(readFileSync(join(installControlRoot(home), 'legacy-connect.json'), 'utf8'))) } catch { return {} }
   })()
+  const connected = connectRecord.connectedProgress
+  // The folder Hermes' config still names when a connect's move did not reach it, or the one a
+  // session start's connect wrote there (#1664).
+  const hermesConnected = connectRecord.hermesProgress
   const legacyProgress = [join(home, '.claude', 'progress.md'), process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, 'progress.md') : '', process.env.CLAUDE_PROGRESS_FILE ?? '', typeof connected === 'string' ? connected : '']
   const legacyBoards = legacyProgress.filter(path => path !== '').flatMap(path => [path.replace(/[\\/][^\\/]*$/, '') + (process.platform === 'win32' ? '\\' : '/') + 'agent-board.mjs', join(dirname(path), 'agent-board.mjs')])
   const legacySkills = Object.values(STRINGS).flatMap(words => [...new Set(legacyBoards.flatMap(board => [boardRun(board), `node "${board}"`]))].map(run => `---\nname: agent-board\ndescription: ${JSON.stringify(words.boardCommandDescription)}\n---\n\n${words.boardSkillPrompt(run)}\n`))
@@ -2300,12 +2309,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       hooksTrusted = inspectCodexConfigToml(configToml)
     }
     // /progress connect may have hooked the host instead, or left only its skill (#285).
-    const connected = agentHooks({
-      home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32', script: '', inbox: '',
+    // Exact Hermes attribution needs the connection's actual data path even in this read-only check.
+    const connectorProgress = typeof connected === 'string' && isAbsolute(connected) ? connected : progress
+    const connectorFolder = dirname(connectorProgress)
+    const connectedHooks = agentHooks({
+      home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32',
+      script: join(connectorFolder, `progress-report.${process.platform === 'win32' ? 'ps1' : 'sh'}`), inbox: join(connectorFolder, 'progress-inbox'),
       codexHome: dirname(configs.codex!), grokHome: dirname(dirname(configs.grok!)), hermesHome: hermesDir,
-      openclawHome: openclawDir, opencodeHome: opencodeDir, board: script,
+      openclawHome: openclawDir, opencodeHome: opencodeDir, board: join(connectorFolder, 'agent-board.mjs'),
+      node: process.execPath, progress: connectorProgress,
+      ...(typeof hermesConnected === 'string' && isAbsolute(hermesConnected) ? { previousProgress: hermesConnected } : {}),
     })
-    const hasConnectHook = connected.some(one => {
+    const hasConnectHook = connectedHooks.some(one => {
       if (one.agent !== agent || one.label === '') return false
       const original = readLocal(one.file)
       if (original === null) return false
@@ -2315,7 +2330,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       return typeof removed === 'string' && removed !== text
     })
     // The board files this host reads: the shared skill only where it reads that one.
-    const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connected.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
+    const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connectedHooks.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
     const reportHook = installed ? 'installer' : hasConnectHook ? 'connect' : 'none'
     const isSkillOnly = reportHook === 'none' && skills.some(file => readLocal(file) !== null)
     const result = { ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor }

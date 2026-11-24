@@ -39,6 +39,9 @@ export type ConnectState = {
   setup?: SetupState
   codexApproval?: CodexApproval
   connectedProgress?: string
+  // The data folder Hermes' config still names when a connect or remove could not change it
+  // and it differs from connectedProgress (scripts/legacy-connect.ts).
+  hermesProgress?: string
   pending?: Pending
 }
 const hash = (text: string): string => createHash('sha256').update(text).digest('hex')
@@ -77,6 +80,7 @@ export class ConnectTransaction {
       const binary = state.codexApproval?.binary
       if (binary !== undefined && (binary === null || typeof binary !== 'object' || Array.isArray(binary) || typeof binary.path !== 'string' || !isAbsolute(binary.path) || !Number.isSafeInteger(binary.size) || binary.size < 0 || typeof binary.mtime !== 'number' || !Number.isFinite(binary.mtime))) throw new Error('INVALID_CONNECT_STATE')
       if (state.connectedProgress !== undefined && (typeof state.connectedProgress !== 'string' || !isAbsolute(state.connectedProgress))) throw new Error('INVALID_CONNECT_STATE')
+      if (state.hermesProgress !== undefined && (typeof state.hermesProgress !== 'string' || !isAbsolute(state.hermesProgress))) throw new Error('INVALID_CONNECT_STATE')
       if (state.version !== 1 || !Number.isSafeInteger(state.revision) || state.revision < 0 || typeof state.disabled !== 'boolean' || state.owned === null || typeof state.owned !== 'object' || Array.isArray(state.owned) || Object.entries(state.owned).some(([file, value]) => !isAbsolute(file) || typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) || !Array.isArray(state.notified) || state.notified.some(value => typeof value !== 'string') || state.boardLang !== undefined && langOf(state.boardLang) !== state.boardLang || state.setup !== undefined && !isSetupState(state.setup)) throw new Error('INVALID_CONNECT_STATE')
       if (state.pending !== undefined) {
         if (state.pending === null || typeof state.pending !== 'object' || typeof state.pending.bundle !== 'string' || !/^[a-f0-9]{64}$/.test(state.pending.bundle)) throw new Error('INVALID_CONNECT_STATE')

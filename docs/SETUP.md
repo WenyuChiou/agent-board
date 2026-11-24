@@ -229,11 +229,21 @@ These board calls run the board script setup installed: the one beside `$CLAUDE_
 the board the Claude Code plugin's connector last connected, else
 `~/.agent-board/agent-board.mjs`, else the Claude Code plugin's beside
 `~/.claude/progress.md`. It never runs a second copy from the package, which would restart
-the page the installed copy serves. When the installed copy comes from another release,
-`agent-board` says so on stderr and names the command that updates it. For an independent
-install, that is a setup preview for the same agents and data folder; add `--apply` to update
-it, which still leaves files you edited alone. For the Claude Code plugin's copy, it is
-updating the plugin, then `/progress connect`. Installing runs nothing: the package has no
+the page the installed copy serves. When the installed copy of an independent install comes
+from another release and you open the board in a terminal (no options, or only the options that
+open it and take no value: `--print`, `--watch`, `--html`, `--serve`, `--all`, `--plain`, `--no-color`,
+`--no-open`, `--quiet-board` and `--lan`, with `--data-dir`), `agent-board` first runs `setup --update`
+for the same agents and data folder, with the progress file its install recorded: it updates in one
+line, or asks its one question when something it must ask about changed. It does this only for an
+install laid out the way setup lays it out now: every file it recorded in your home or the data
+folder, and Codex and Grok in the folder setup picks now (`CODEX_HOME` or `GROK_HOME`, else the
+usual one). Answer anything but `y` and nothing
+changes; the board then opens on the copy that is there (Ctrl-C stops both). Outside a
+terminal, for anything but opening the board (`stop`, `--json`, a management command, an option
+that takes a value such as `--port`), for any other install, or when setup cannot start or leaves the board script as it was (a no included), `agent-board` says on stderr that the copy is from another release
+and names the command that updates it: a setup preview for the same agents and data folder;
+add `--apply` to update it, which still leaves files you edited alone. For the Claude Code
+plugin's copy, it is updating the plugin, then `/progress connect`. Installing runs nothing: the package has no
 dependencies and no install scripts. Pre-releases are on the `next` tag
 (`npx @wenyuchiou/agent-board@next setup`); what makes a release stable is in [RELEASING.md](RELEASING.md).
 
@@ -339,8 +349,9 @@ answered question closes; it prints nothing, because Hermes reads that hook's ou
 model), `post_llm_call` (its `extra.assistant_response` is the reply, so a closing question becomes a card)
 and `on_session_end` (which Hermes fires after every turn, so it only marks the session idle), and one
 `post_tool_call` entry with `matcher: todo`, which copies the whole list from the `todo` tool's result into
-the block's steps. Entries are found again by the installed worker's name; other keys and
-hooks are kept as they are. A `hooks:` written in flow style, or a root that is not a mapping, is a
+the block's steps. Entries are matched by event and complete decoded command; the plugin limits
+their paths to its selected or previously recorded data folder. Other keys and hooks are kept
+as they are. A `hooks:` written in flow style, or a root that is not a mapping, is a
 conflict and the file is left untouched. Each command is double-quoted for Hermes's `shlex` split
 (no shell), with forward slashes on Windows. Setup never sets `hooks_auto_accept` or passes
 `--accept-hooks`: Hermes asks once at a terminal, and a chat gateway cannot ask, so for that
