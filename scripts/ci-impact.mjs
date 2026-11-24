@@ -171,6 +171,10 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/host-upgrade.test.mjs': 320_000, // slowest 170.8 s
   // Re-derived by the same rule (#1715): 60.6-73.4 s on Windows Node 24 on #1709, which adds terminal setup tests here.
   'tests/setup-terminal.test.mjs': 140_000, // slowest 73.4 s
+  // New with #1806's case table: 16 terminal setup runs, 29.7 s on a Windows computer with Node 22. setup-terminal above
+  // runs about 1.33 times as long on CI's Windows as there (73.4 s against 55 s). An estimate until CI times it, by the
+  // rule of #1715: 29.7 x 1.33 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/setup-terminal-trust.test.mjs': 75_000, // estimate, about 40 s on CI
   // Over the 42 s line (70%) of the 60 s default: up to 47.1 s on Windows Node 24 on #1709, which does not touch it, and
   // 42.5 s on main (run 44464805292); main's Node 22 runs report up to 46.0 s (#1715).
   'tests/approvals.test.mjs': 90_000, // slowest 47.1 s
