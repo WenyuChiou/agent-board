@@ -1006,10 +1006,56 @@ test('the time check command fails on over-budget timings and passes on green on
     assert.equal(red.status, 1)
     assert.match(red.stdout, /tests\/board\.test\.mjs took 200s, over 70% of its 200s budget \(140s\)/)
     assert.match(red.stdout, /board part 1\/4 took 500s, over its 480s budget; slowest files: tests\/board\.test\.mjs 200s, tests\/codex-local\.test\.mjs 180s/)
-    const missing = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: join(dir, 'missing.json') } })
+    const localEnv = { ...process.env, CI_TEST_TIMINGS: join(dir, 'missing.json') }
+    delete localEnv.CI
+    const missing = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: localEnv })
     assert.equal(missing.status, 0)
     assert.match(missing.stdout, /no test timings recorded/)
   } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the time check command fails on CI when no test timings were recorded (#1720)', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-'))
+  const script = fileURLToPath(new URL('../scripts/ci-impact.mjs', import.meta.url))
+  const serial = process.env.CI_TEST_SERIAL
+  const timings = process.env.CI_TEST_TIMINGS
+  const ci = process.env.CI
+  try {
+    const missing = join(dir, 'missing.json')
+    const ciEnv = { ...process.env, CI: 'true', CI_TEST_TIMINGS: missing }
+    const onCi = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: ciEnv })
+    assert.ifError(onCi.error)
+    assert.equal(onCi.status, 1, onCi.stdout + onCi.stderr)
+    assert.match(onCi.stdout, /time budget: no test timings recorded on CI/)
+
+    const unsetEnv = { ...process.env, CI_TEST_TIMINGS: missing }
+    delete unsetEnv.CI
+    for (const env of [unsetEnv, { ...process.env, CI: 'false', CI_TEST_TIMINGS: missing }]) {
+      const local = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env })
+      assert.ifError(local.error)
+      assert.equal(local.status, 0, local.stdout + local.stderr)
+      assert.match(local.stdout, /no test timings recorded; nothing to check/)
+    }
+
+    const unwritable = join(dir, 'no-such-dir', 'timings.json')
+    delete process.env.CI_TEST_SERIAL
+    process.env.CI = 'true'
+    process.env.CI_TEST_TIMINGS = unwritable
+    runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 0 }), 'linux')
+    const afterWriteFailure = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI: 'true', CI_TEST_TIMINGS: unwritable } })
+    assert.ifError(afterWriteFailure.error)
+    assert.equal(afterWriteFailure.status, 1, afterWriteFailure.stdout + afterWriteFailure.stderr)
+    assert.match(afterWriteFailure.stdout, /time budget: no test timings recorded on CI/)
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+    if (timings === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timings
+    if (ci === undefined) delete process.env.CI
+    else process.env.CI = ci
     await rm(dir, { recursive: true, force: true })
   }
 })
