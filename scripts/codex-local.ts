@@ -296,8 +296,23 @@ const sortedKeys = (value: unknown): unknown => Array.isArray(value) ? value.map
 // Hermes writes this file as ASCII and reads it in the system code page, so a raw non-ASCII byte would stop
 // every shell hook from loading: escape it the way Python's json.dumps does.
 const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), null, 2).replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
-// A root that is not a mapping (a list, a flow document) is not something to add a key to.
-const isYamlMapping = (text: string): boolean => text.split(/\r?\n/).every(line => !/^\S/.test(line) || /^(?:#|---|\.\.\.)/.test(line) || /^(?:"[^"\n]*"|'[^'\n]*'|[^\s#{[!&*|>%@`"'-][^\n]*?)\s*:(?:\s|$)/.test(line))
+// A root that is not a mapping (a list, a flow document) is not something to add a key to. Hermes saves config.yaml
+// with PyYAML, which writes a list's items at the left edge right under their key (`toolsets:` then `- hermes-cli`, #1588):
+// such an item belongs to the key above it, so the root is still a mapping. Under `hooks:` it is not one the board's
+// hooks can go into.
+const YAML_TOP_KEY = /^(?:"([^"\n]*)"|'([^'\n]*)'|([^\s#{[!&*|>%@`"'-][^\n]*?))\s*:(?:\s|$)/
+const isYamlMapping = (text: string): boolean => {
+  let listKey: string | undefined
+  return text.split(/\r?\n/).every(line => {
+    if (!/^\S/.test(line) || /^(?:#|---|\.\.\.)/.test(line)) return true
+    if (/^-(?:\s|$)/.test(line)) return listKey !== undefined && listKey !== 'hooks'
+    const key = YAML_TOP_KEY.exec(line)
+    if (key === null) return false
+    const rest = line.slice(key[0].length).trim()
+    listKey = rest === '' || rest.startsWith('#') ? key[1] ?? key[2] ?? key[3] : undefined
+    return true
+  })
+}
 // A name that was free when setup planned (`isFresh`) is created, never written over (#1693): a rename would replace a
 // file that landed there after the last check. A hard link of the finished temporary file places it whole in one step
 // and fails when the name is taken, and setup then stops as busy. Where a link is refused for any other reason, as on a
