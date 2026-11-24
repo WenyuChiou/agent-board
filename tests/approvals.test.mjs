@@ -84,8 +84,10 @@ const startBoard = async ({ port = 0, drawMs = 3_000, pressMs = 8_000, secretMs 
       // A file watch as the shipped board has (#359), so no timer looks at the board while a request waits; its stand-in
       // never reports, and nothing in these tests writes the files, so only the board's own changes answer a request.
       ...(isWatched ? { watch: { progress: place.progress, inbox: join(dirname(place.progress), 'progress-inbox'), fs: watchFs ?? (() => Object.assign(new EventEmitter(), { close: () => {} })) } } : {}),
-      // The browser stand-in: the address the board would open, with its one-time key.
+      // The browser stand-in: the address the board would open, with its one-time key. It loads nothing, so /api/open
+      // does not wait the board's 5 s for that window to load its page (#1650).
       open: async url => { opened.push(url); return open === undefined ? true : open(url, self) },
+      openRedeemMs: 0,
       journal: entry => { journal.push(entry) },
       onReady: url => { resolve(url); return true },
       onListenError: reject,
