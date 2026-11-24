@@ -78,6 +78,8 @@ What changed for the person using Agent Board, one line per change, newest versi
 
 - An upgrade no longer skips Hermes when config.yaml holds an earlier release's board hooks (#1703).
 
+- Setup no longer skips a Hermes config.yaml whose lists sit at the left edge, as Hermes saves it (#1794).
+
 - An approval card shows its command and buttons at the card's full width (#1701).
 
 - The Claude Code hook sends a command only to a listener it has checked is the board (#1678).
