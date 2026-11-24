@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, wr
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { bootstrap, locales, terminal, succeeded, claudeCalls, pluginCommands, assertTrusted } from './helpers/setup-fixture.mjs'
+import { bootstrap, locales, terminal, succeeded, claudeCalls, pluginCommands, assertTrusted, invokeChanging } from './helpers/setup-fixture.mjs'
 
 // These behavioral cases retain fresh homes and the real setup command for every run.
 // They have their own CI file budget, away from the multi-language output/count cases (#1231).
@@ -53,17 +53,6 @@ const olderHome = (f, agents, { board = oldCommand, isEdited = true } = {}) => {
 }
 // The board skill an agent reads: Hermes Agent's and OpenClaw's own, else the shared one.
 const skillOf = (f, agent) => join(agent === 'hermes' ? f.env.HERMES_HOME : agent === 'openclaw' ? f.env.OPENCLAW_STATE_DIR : join(f.env.HOME, '.agents'), 'skills', 'agent-board', 'SKILL.md')
-// Runs setup and answers yes, with `change` (Node code, `fs` in scope) done once as setup reads the answer; `run` is how
-// setup is started, by default with the fixture's progress file.
-const invokeChanging = (f, args, change, run = f.invoke) => {
-  const preload = join(f.root, 'change-on-answer.cjs'), mark = join(f.root, 'changed')
-  writeFileSync(preload, `const fs = require('node:fs')\nconst read = fs.readSync\nfs.readSync = (fd, ...rest) => {\n  if (fd === 0 && !fs.existsSync(${JSON.stringify(mark)})) { fs.writeFileSync(${JSON.stringify(mark)}, ''); ${change} }\n  return read(fd, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
-  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
-  let result
-  try { result = run(args, 'yes\n') } finally { delete f.env.NODE_OPTIONS }
-  assert.ok(existsSync(mark), 'setup read the answer')
-  return result
-}
 // The connector's record of the agent it manages, in the home's .agent-board folder, with the progress file it connected.
 const connectorManages = (f, agent, label, progress) => {
   const control = join(realpathSync(f.env.HOME), '.agent-board')

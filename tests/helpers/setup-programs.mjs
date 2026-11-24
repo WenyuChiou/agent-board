@@ -19,7 +19,12 @@ require('node:readline').createInterface({ input: process.stdin }).on('line', li
   const message = JSON.parse(line)
   record({ program: 'codex', method: message.method, params: message.params })
   if (!message.id) return
-  if (process.env.AGENT_BOARD_TEST_CODEX_FAIL) {
+  // A file a test writes or removes between two runs of Codex: 'fail' answers each request with an error, 'exit' stops
+  // without an answer. AGENT_BOARD_TEST_CODEX_FAIL holds for a whole setup run, so it cannot tell the two runs apart.
+  const modeFile = path.join(process.env.CODEX_HOME, 'synthetic-codex-mode')
+  const mode = fs.existsSync(modeFile) ? fs.readFileSync(modeFile, 'utf8').trim() : ''
+  if (mode === 'exit') process.exit(3)
+  if (process.env.AGENT_BOARD_TEST_CODEX_FAIL || mode === 'fail') {
     process.stdout.write(JSON.stringify({ id: message.id, error: { code: -1, message: 'synthetic failure' } }) + '\\n')
     return
   }

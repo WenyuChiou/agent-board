@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -46,6 +46,18 @@ export const terminal = (run, programs) => fixture((setup, f) => {
   const commands = setupPrograms(f.root, f.env, programs)
   return run({ ...f, commands })
 })
+// Runs setup and answers yes (or `answer`), with `change` (Node code, `fs` in scope) done once as setup reads the answer:
+// after its plans and reads, before the answer. `run` is how setup is started, by default with the fixture's progress file.
+export const invokeChanging = (f, args, change, run = f.invoke, answer = 'yes\n') => {
+  const preload = join(f.root, 'change-on-answer.cjs'), mark = join(f.root, 'changed')
+  rmSync(mark, { force: true })
+  writeFileSync(preload, `const fs = require('node:fs')\nconst read = fs.readSync\nfs.readSync = (fd, ...rest) => {\n  if (fd === 0 && !fs.existsSync(${JSON.stringify(mark)})) { fs.writeFileSync(${JSON.stringify(mark)}, ''); ${change} }\n  return read(fd, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
+  f.env.NODE_OPTIONS = `--require ${JSON.stringify(preload)}`
+  let result
+  try { result = run(args, answer) } finally { delete f.env.NODE_OPTIONS }
+  assert.ok(existsSync(mark), 'setup read the answer')
+  return result
+}
 export const succeeded = result => {
   assert.ifError(result.error)
   assert.equal(result.status, 0, result.stderr)
