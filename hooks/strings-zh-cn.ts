@@ -61,6 +61,7 @@ export const ZH_CN: Strings = {
   codexLifecycle: "等待下一个工作指令",
   codexLifecycleWorking: "正在处理你的请求",
   codexApprovalStep: "Codex 请你批准命令",
+  codexApprovalCommand: (command: string, description: string): string => `Codex 请你批准命令：${command}${description === '' ? '' : `（${description}）`}`,
   codexTrust: 'Codex 安装不会自动信任 hooks。先查明实际 Codex 可执行文件，以 --codex-trust --codex-bin 加该完整路径与 --json 预览；主动列出七个当前定义、哈希与 config.toml 变更范围，请用户确认一次，再对同一命令加 --apply。此流程通过 Codex 设置 API 只信任指定哈希，保留其他设置，不使用全局略过。API 不支持时才引导 CLI /hooks，不假设桌面有相同入口。完成后读回信任并观察真实事件；未触发仍列未验收。',
   codexTrustPreview: (n: number, file: string): string => `Codex：将信任看板的 ${n} 个 hooks，在 ${file} 中写入它们的 [hooks.state] 信任项。加上 --apply 再运行同一命令。`,
   codexTrustApplied: (n: number, file: string): string => `Codex：已信任看板的 ${n} 个 hooks，它们的 [hooks.state] 信任项在 ${file} 中。开始新的 Codex 会话。`,

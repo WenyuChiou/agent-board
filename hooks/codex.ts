@@ -198,6 +198,13 @@ export const questionSteps = (
   return { steps, asked, askedRevision, askedOptions }
 }
 
+// One line of an approval's command or description: no comment markers, one space between words, cut to `max` characters.
+const cleanWords = (value: unknown, max: number): string => {
+  if (typeof value !== 'string') return ''
+  const chars = [...value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()]
+  return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : chars.join('')
+}
+
 // Hooks describe lifecycle, not task completion. Only an explicit report can say done.
 export const codexEvent = (previous: CodexReport | null, input: Record<string, unknown>, now: string, s: Strings, eventAt: string | number = now, timing: { lastAppliedAt?: number; observedAt?: number } = {}): CodexReport => {
   const session = line(input.session_id)
@@ -261,7 +268,11 @@ export const codexEvent = (previous: CodexReport | null, input: Record<string, u
   if (event === 'PermissionRequest') {
     approvalRevision = nextRevision(approvalRevision)
     if (approval === undefined) approval = steps.length
-    steps[approval] = `- [?] ${s.codexApprovalStep}`
+    // The command and its description the hook carried (#1798), already redacted by the reporter; none when it carried none.
+    // A step line is shown at 120 characters (limitReport), so the description keeps its place and the command takes the room left.
+    const description = cleanWords(input.approval_description, 40)
+    const command = cleanWords(input.approval_command, Math.max(20, 119 - [...s.codexApprovalCommand('', description)].length))
+    steps[approval] = `- [?] ${command === '' ? s.codexApprovalStep : s.codexApprovalCommand(command, description)}`
   }
 
   return {

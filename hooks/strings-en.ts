@@ -61,6 +61,7 @@ export const EN: Strings = {
   codexLifecycle: "Waiting for the next instruction",
   codexLifecycleWorking: "Working on your request",
   codexApprovalStep: "Codex asks to run a command",
+  codexApprovalCommand: (command: string, description: string): string => `Codex asks to run a command: ${command}${description === '' ? '' : ` (${description})`}`,
   codexTrust: 'Codex installation does not automatically trust hooks. Resolve the actual Codex executable and preview --codex-trust --codex-bin with its absolute path and --json. List the seven current definitions, hashes and config.toml changes, then ask the user to confirm once before adding --apply to that command. This uses the Codex config API to trust only those hashes, preserves other settings and never bypasses trust globally. Only fall back to CLI /hooks when the API is unsupported; do not assume a desktop entry. Read trust back and observe real events afterward; without execution keep acceptance unverified.',
   codexTrustPreview: (n: number, file: string): string => `Codex: would trust the board's ${n} hooks by writing their [hooks.state] entries in ${file}. Run the same command again with --apply.`,
   codexTrustApplied: (n: number, file: string): string => `Codex: trusted the board's ${n} hooks; their [hooks.state] entries are in ${file}. Start a new Codex session.`,
