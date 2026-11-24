@@ -299,10 +299,23 @@ const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), n
 // A root that is not a mapping (a list, a flow document) is not something to add a key to. Hermes saves config.yaml
 // with PyYAML, which writes a list's items at the left edge right under their key (`toolsets:` then `- hermes-cli`, #1588):
 // such an item belongs to the key above it, so the root is still a mapping. Under `hooks:` it is not one the board's
-// hooks can go into. The line editor reads keys as written, so a double-quoted key with an escape (`"ho\x6fks"` is
-// `hooks`) is refused, and so is a document end marker or a second document: hooks added at the end of the file would
-// land outside the one document Hermes reads.
+// hooks can go into. The line editor finds the hooks key only as written plain or quoted, so a double-quoted key whose
+// escapes spell `hooks` (`"ho\x6fks"`) is refused, as is one it cannot decode; PyYAML's escapes for a key that is not
+// ASCII (`"caf\xE9"`) are some other key and pass. A document end marker or a second document is refused too: hooks
+// added at the end of the file would land outside the one document Hermes reads.
 const YAML_TOP_KEY = /^(?:"([^"\n]*)"|'([^'\n]*)'|([^\s#{[!&*|>%@`"'-][^\n]*?))\s*:(?:\s|$)/
+const YAML_ESCAPES: Record<string, string> = { '0': '\0', a: '\x07', b: '\b', t: '\t', '\t': '\t', n: '\n', v: '\v', f: '\f', r: '\r', e: '\x1b', ' ': ' ', '"': '"', '/': '/', '\\': '\\', N: '\x85', _: '\xa0', L: ' ', P: ' ' }
+const yamlDoubleQuoted = (raw: string): string | undefined => {
+  let isBad = false
+  const text = raw.replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[\s\S]|$)/g, (_, escape: string) => {
+    const point = escape.length > 1 ? parseInt(escape.slice(1), 16) : undefined
+    if (point !== undefined && point <= 0x10ffff) return String.fromCodePoint(point)
+    const plain = point === undefined ? YAML_ESCAPES[escape] : undefined
+    if (plain === undefined) isBad = true
+    return plain ?? ''
+  })
+  return isBad ? undefined : text
+}
 const isYamlMapping = (text: string): boolean => {
   let listKey: string | undefined
   let hasContent = false
@@ -312,9 +325,11 @@ const isYamlMapping = (text: string): boolean => {
     hasContent = true
     if (/^-(?:\s|$)/.test(line)) return listKey !== undefined && listKey !== 'hooks'
     const key = YAML_TOP_KEY.exec(line)
-    if (key === null || key[1]?.includes('\\')) return false
+    if (key === null) return false
+    const name = key[1] === undefined ? key[2] ?? key[3] : yamlDoubleQuoted(key[1])
+    if (name === undefined || (name === 'hooks' && key[1] !== undefined && key[1] !== 'hooks')) return false
     const rest = line.slice(key[0].length).trim()
-    listKey = rest === '' || rest.startsWith('#') ? key[1] ?? key[2] ?? key[3] : undefined
+    listKey = rest === '' || rest.startsWith('#') ? name : undefined
     return true
   })
 }
