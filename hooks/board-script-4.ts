@@ -3521,7 +3521,7 @@ export const LINES = [
 "    for (const [code, entry] of openLinks)",
 "      if (entry.until < now)",
 "        openLinks.delete(code);",
-"    if (openLinks.size >= OPEN_LINK_MAX) {",
+"    if (openLinks.size >= (o.openLinkMax ?? OPEN_LINK_MAX)) {",
 "      let evictKey;",
 "      for (const [code, entry] of openLinks) {",
 "        if (entry.pairKey === \"\") {",

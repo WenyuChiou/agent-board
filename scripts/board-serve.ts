@@ -119,6 +119,8 @@ export type ServeOptions = {
   openLinkMs?: number
   // The tests' shorter wait for a window to load the page /api/open opened; the board uses OPEN_REDEEM_MS.
   openRedeemMs?: number
+  // The tests' smaller cap on one-use open links kept at once; the board keeps OPEN_LINK_MAX.
+  openLinkMax?: number
 }
 
 type Result = { ok: boolean; note: string }
@@ -570,7 +572,7 @@ export const startServer = (o: ServeOptions): void => {
   const clockNow = o.now ?? Date.now
   const mintOpenLink = (now: number, pairKey = ''): string => {
     for (const [code, entry] of openLinks) if (entry.until < now) openLinks.delete(code)
-    if (openLinks.size >= OPEN_LINK_MAX) {
+    if (openLinks.size >= (o.openLinkMax ?? OPEN_LINK_MAX)) {
       let evictKey: string | undefined
       for (const [code, entry] of openLinks) {
         if (entry.pairKey === '') { evictKey = code; break }

@@ -88,6 +88,8 @@ type World = {
   toolRefusal?: string
   debugLog?: Array<{ text: string; to: string | undefined }>
   liveOutput?: string
+  // The board command's stderr, where its note beside a link goes; a startup detail by default.
+  liveStderr?: string
   liveFailure?: 'exit' | 'timeout' | 'truncated'
   liveCalls?: Array<{ argv: string[]; init: unknown }>
   liveHold?: { reached: () => void; release: Promise<void> }
@@ -323,7 +325,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
       }
       if (world.node === null) return { deny: 'ENOENT' }
       if (world.liveFailure === 'timeout') return { deny: 'ETIMEDOUT' }
-      return { value: { exitCode: world.liveFailure === 'exit' ? 1 : 0, stdout: world.liveOutput ?? '', stderr: 'SYNTHETIC_STARTUP_DETAIL', isStdoutTruncated: world.liveFailure === 'truncated', isStderrTruncated: false } }
+      return { value: { exitCode: world.liveFailure === 'exit' ? 1 : 0, stdout: world.liveOutput ?? '', stderr: world.liveStderr ?? 'SYNTHETIC_STARTUP_DETAIL', isStdoutTruncated: world.liveFailure === 'truncated', isStderrTruncated: false } }
     }
     if (e.argv[0] === 'node' && e.argv[2] === SETTINGS_READ && e.argv[3] === '--') {
       const file = posix(e.argv[4] ?? '')

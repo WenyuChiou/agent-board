@@ -276,7 +276,7 @@ const withLegacyBoard = async ({ openResult = false, recordOpen = false, lan = f
   }
 }
 
-const startDirectBoard = async ({ now, openLinkMs, open, openRedeemMs = 200 } = {}) => {
+const startDirectBoard = async ({ now, openLinkMs, open, openRedeemMs = 200, openLinkMax } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'board-one-use-srv-'))
   const progress = join(root, 'progress.md')
   const messages = join(root, 'messages')
@@ -309,6 +309,7 @@ const startDirectBoard = async ({ now, openLinkMs, open, openRedeemMs = 200 } = 
       openRedeemMs,
       ...(now === undefined ? {} : { now }),
       ...(openLinkMs === undefined ? {} : { openLinkMs }),
+      ...(openLinkMax === undefined ? {} : { openLinkMax }),
       watch: { progress, inbox: join(root, 'inbox'), fs: () => Object.assign(new EventEmitter(), { close: () => {} }) },
       open: async url => { opened.push(url); return open ? open(url) : true },
       onReady: url => { resolve(url); return true },
@@ -882,6 +883,28 @@ test('expired one-use link and bounded open-link cap refuse stale or evicted cod
   }
 })
 
+test('a link the command minted first still works when windows that never loaded fill the cap', { timeout: 20_000 }, async () => {
+  // A cap of four stands for the board's 64: three keyed codes from windows that never loaded stay,
+  // then a command mints its link, and its own window's code reaches the cap.
+  const board = await startDirectBoard({ openLinkMax: 4, openRedeemMs: 0 })
+  let failed = false
+  try {
+    for (let i = 0; i < 3; i += 1) assert.equal((await board.call('/api/open', { asApp: true })).body.isRedeemed, false)
+    const fallback = (await board.call('/api/open-link', {})).body.url
+    const opened = await board.call('/api/open', { asApp: true })
+    assert.equal(opened.body.isRedeemed, false, 'this window never loaded either')
+    // The command now prints the link it minted first: it must still let the person in.
+    const res = await fetch(fallback)
+    assert.equal(res.status, 200, 'the printed link was pushed out by the window code minted after it')
+    assert.equal((await res.text()).includes('id="page-session"'), true)
+  } catch (error) {
+    failed = true
+    throw error
+  } finally {
+    try { await board.close() } catch (cleanupError) { if (!failed) throw cleanupError }
+  }
+})
+
 test('page session cannot call client-only control routes, and /api/open uses a one-use link that pairs the page secret for /api/approvals/switch', { timeout: 20_000 }, async () => {
   const board = await startDirectBoard()
   let failed = false
@@ -1254,6 +1277,17 @@ test('a used or expired link shows how to get a new one', { timeout: 25_000 }, a
       assert.equal(page.polled(), false, `${label}: nothing to poll with`)
       assert.equal(page.currentPath(), '/', `${label}: the dead code leaves the address bar`)
     }
+    // The same used link opened in a tab that still holds a live session (one from scrollback pasted
+    // into the board's own tab): the same screen, and the tab's session ends with it.
+    const live = (await board.call('/api/open-link', {})).body.url
+    const tab = new Map()
+    const first = await runServedPageInOrigin(await (await fetch(live)).text(), live, new Map([[board.origin, tab]]))
+    assert.equal((await first.firstBoardPoll).status, 200, 'the tab is signed in first')
+    assert.ok(tab.get('agent_board_session'), 'the tab keeps its session')
+    const again = await runServedPageInOrigin(await (await fetch(used)).text(), used, new Map([[board.origin, tab]]))
+    await waitUntil(() => again.mainText().includes(EN.serveSessionLost), `a used link in a signed-in tab: ${again.mainText()}`)
+    assertSessionLostScreen(again, tab, 'a used link in a signed-in tab')
+    assert.equal(again.polled(), false, 'a used link in a signed-in tab: no poll with the old session')
     const ping = await board.call('/api/board')
     assert.equal(ping.body.approvals?.isLockdown, true, 'the second use of a keyed link still turns approvals off')
   } catch (error) {

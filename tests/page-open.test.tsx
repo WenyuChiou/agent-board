@@ -68,12 +68,53 @@ for (const [code, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]] as cons
     expect(opened.text).toBe(s.boardPageWindowOpened)
     expect(opened.text).not.toContain('http://')
     expect(opened.text).not.toContain('?t=')
+    // The pane's page button says the same words, with no address of any kind.
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    try {
+      await ui.press({ key: 'page' })
+      const drawn = JSON.stringify(await ui.drawn())
+      expect(drawn).toContain(JSON.stringify(s.boardPageWindowOpened).slice(1, -1))
+      expect(drawn).not.toContain('127.0.0.1')
+      expect(drawn).not.toContain('/open/')
+      expect(drawn).not.toContain('?t=')
+    } finally { await ui.unmount() }
 
     const openUrl = 'http://127.0.0.1:34567/open/synthetic-one-use-code'
     world.liveOutput = `${s.serveAt(openUrl)}\n`
     const fallback = await $.command.run({ ...TIDY, args: 'open' })
     expect(fallback.text).toContain(`<${openUrl}>`)
     expect(fallback.text).not.toContain('?t=')
+  })
+
+  test(`/progress open and the pane page button show the board's note beside its one-use link (${code})`, async ($, on) => {
+    const openUrl = 'http://127.0.0.1:34567/open/synthetic-one-use-note'
+    const world: World = {
+      files: new Map([[FILE, '## demo\n### Synthetic task\n- [ ] Continue\n'], [LIVE_SCRIPT, installedBoard()]]),
+      mtime: 1, hasTasks: true, liveCalls: [], liveOutput: `${s.serveAt(openUrl)}\n`,
+      store: { autoConnectOff: true, lang: code, inboxDone: {} },
+    }
+    engineBeneath(on, world)
+    await $.session.start({ cwd: '/work/demo', surface: 'desktop', isInteractive: true })
+    // The board says on stderr what became of the window: started but not seen to load, a page
+    // already open, or no browser at all. The person reads that beside the link.
+    for (const note of [s.boardPageLaunchedLink, s.boardPageAlreadyOpenLink, s.serveBrowserNone]) {
+      world.liveStderr = `SYNTHETIC_STARTUP_DETAIL\n${note(openUrl)}\n`
+      const reply = await $.command.run({ ...TIDY, args: 'open' })
+      expect(reply.text).toBe(`${s.boardPageOpened}\n${note(openUrl).replace(openUrl, `<${openUrl}>`)}`)
+    }
+    // A note naming another link is not about this one: the link alone, as before.
+    world.liveStderr = `${s.boardPageLaunchedLink('http://127.0.0.1:34567/open/another-synthetic-code')}\n`
+    expect((await $.command.run({ ...TIDY, args: 'open' })).text).toBe(`${s.boardPageOpened}\n<${openUrl}>`)
+
+    world.liveStderr = `${s.boardPageLaunchedLink(openUrl)}\n`
+    const words = s.boardPageLaunchedLink(openUrl)
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+    try {
+      await ui.press({ key: 'page' })
+      const drawn = JSON.stringify(await ui.drawn())
+      expect(drawn).toContain(JSON.stringify(words.slice(0, words.indexOf(openUrl)).trim()).slice(1, -1))
+      expect(drawn).toContain(openUrl)
+    } finally { await ui.unmount() }
   })
 }
 
