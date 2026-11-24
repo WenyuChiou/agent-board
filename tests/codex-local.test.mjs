@@ -7864,6 +7864,30 @@ test('Codex lifecycle hooks never retain conversation and approval payloads, and
   assert.ok(!existsSync(transcript))
 }))
 
+test('a Codex PermissionRequest names its command and description on the approval step, hides secrets in it, and keeps no other tool input (#1798)', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  const other = 'DO-NOT-STORE-THIS-OTHER-FIELD'
+  const asked = f.event('PermissionRequest', 'turn-1', {
+    tool_name: 'Bash',
+    tool_input: { command: 'Remove-Item -Recurse -Force .\\synthetic-build --password hunter2', description: 'Remove the synthetic build folder', other },
+  })
+  assert.equal(asked.status, 0)
+  const text = readFileSync(f.progress, 'utf8')
+  const step = text.match(/- \[\?\] Codex [^\n]*/)?.[0]
+  assert.ok(step, text)
+  assert.ok(step.includes('Remove-Item -Recurse -Force .\\synthetic-build'), step)
+  assert.ok(step.includes('Remove the synthetic build folder'), step)
+  assert.ok(!step.includes('hunter2'), step)
+  assert.ok(!text.includes(other))
+  assert.match(text, /- \[\?\] Codex [^\n]*\n<!-- native=codex -->\n/)
+  // The board's own views read the same line.
+  const json = JSON.parse(f.command(['--json']).stdout)
+  assert.ok(JSON.stringify(json).includes('Remove the synthetic build folder'))
+  assert.equal(f.event('Stop', 'turn-1').status, 0)
+  assert.ok(readFileSync(f.progress, 'utf8').includes(step.replace('[?]', '[x]')))
+}))
+
 test('a Codex PermissionRequest adds a waiting approval step with a native line, and Stop closes it', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
