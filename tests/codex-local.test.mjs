@@ -7510,6 +7510,23 @@ test('Hermes setup leaves alone a config.yaml whose hooks key is written with es
   refusedWhole1588(f, [personal, `${personal}toolsets:\n- hermes-cli\n`])
 }))
 
+// PyYAML writes a key that is not ASCII double-quoted with escapes (`café` becomes `"caf\xE9"`): such a key is not the
+// hooks key, so the file is still one setup updates.
+test('Hermes setup installs and removes its hooks in a config.yaml where PyYAML wrote a key that is not ASCII with escapes (#1588)', () => fixture(f => {
+  const config = hermesConfig(f)
+  const escaped = '"caf\\xE9": synthetic-value\n"t\\u00E9st":\n- synthetic-item\ntoolsets:\n- hermes-cli\n'
+  f.save(config, escaped)
+  const installed = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.equal(installed.status, 0, `${installed.stdout}\n${installed.stderr}`)
+  assert.deepEqual(JSON.parse(installed.stdout).conflicts, [], 'no whole-file refusal')
+  const text = readFileSync(config, 'utf8')
+  assert.ok(text.startsWith(escaped), `the person's settings stay as they were\n${text}`)
+  assert.deepEqual(Object.keys(hermesHooksOf(text)).sort(), [...hermesEvents].sort(), 'every hook of the board is added')
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(config, 'utf8'), escaped, 'removal leaves only the person’s settings')
+}))
+
 test('Hermes setup leaves alone a config.yaml with a document end marker or a second document, instead of adding hooks after it (#1588)', () => fixture(f => {
   refusedWhole1588(f, ['toolsets:\n  - hermes-cli\n...\n', 'toolsets:\n- hermes-cli\n...\n', 'toolsets:\n  - hermes-cli\n---\nother: 1\n'])
 }))
