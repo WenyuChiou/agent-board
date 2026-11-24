@@ -346,3 +346,32 @@ test('the messaging matrix has no Gemini CLI row (#1327)', async () => {
   assert.ok(!receiverRows(records).some(row => row.host === 'Gemini CLI'))
   assert.ok(!/^\| Gemini CLI \|/m.test(read(join(root, 'docs/MESSAGING.md'))))
 })
+
+test('a send-to-<agent>-live validation note verifies that agent, Codex daemon idle prints afterWait, and Claude Code CLI prints 2026-11-16 Verified (#1814)', async () => {
+  await fixture(async directory => {
+    for (const file of ['2026-11-03-send-to-synthetic-live.md', '2026-11-03-send-to-codex-live.md', '2026-11-03-send-to-synthetic-hostile-live.md', '2026-11-03-send-to-synthetic.md']) {
+      writeFileSync(join(directory, 'docs/validation', file), '# Synthetic fixture\n')
+    }
+    const base = {
+      host: 'Synthetic Host', agent: 'synthetic', tier: 1, primitive: '[P1]', isImplemented: true,
+      surfaces: [
+        { name: 'CLI', evidence: 'docs/validation/2026-11-03-send-to-synthetic-live.md' },
+        { name: 'Other agent', evidence: 'docs/validation/2026-11-03-send-to-codex-live.md' },
+        { name: 'Longer agent', evidence: 'docs/validation/2026-11-03-send-to-synthetic-hostile-live.md' },
+        { name: 'Not live', evidence: 'docs/validation/2026-11-03-send-to-synthetic.md' },
+      ],
+    }
+    assert.deepEqual(receiverRows([{ ...base, source: 'scripts/synthetic.mjs' }], directory).map(row => row.status), ['Verified', 'Implemented', 'Implemented', 'Implemented'])
+    // Omitting `agent` falls back to host slug matching only.
+    const noAgent = { ...base, agent: undefined, source: 'scripts/synthetic-no-agent.mjs' }
+    assert.deepEqual(receiverRows([noAgent], directory).map(row => row.status), ['Implemented', 'Implemented', 'Implemented', 'Implemented'])
+  })
+  const records = await readReceiverRecords(root)
+  const doc = read(join(root, 'docs/MESSAGING.md'))
+  assert.ok(doc.includes('`afterWait` (after a wait of about 10 minutes)'), 'docs/MESSAGING.md intro documents afterWait')
+  for (const file of ['docs/MESSAGING.md', 'docs/MESSAGING.zh-TW.md', 'docs/MESSAGING.zh-CN.md']) {
+    assert.ok(renderMatrix(records, file, root).includes('`afterWait`'), `${file} intro includes afterWait`)
+  }
+  assert.ok(doc.includes('| Codex | Daemon | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | [scripts/codex-receiver.mjs](../scripts/codex-receiver.mjs) | afterWait · [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | stepEnd · no live note | none · no live note |'))
+  assert.ok(doc.includes('| Claude Code | CLI | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | stepEnd · [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | none · no live note |'))
+})

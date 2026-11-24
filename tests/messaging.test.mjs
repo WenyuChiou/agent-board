@@ -4486,7 +4486,7 @@ let codexCurrent = codexThread, codexSuffix = ''
 // itself still waits for idle), and a Codex row in progress.md for each thread they use. The CLI surface is for the tests'
 // own stand-in holder of a session.
 const codexRoutes = testUnitRoutes.map(one => one.agent === 'codex' && one.kind === 'live'
-  ? { ...one, routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.codexDaemon, SURFACE_IDS.cli] }, working: { line: 'stepEnd', record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.codexDaemon, SURFACE_IDS.cli] }, ended: { line: 'none', record: null, surfaces: [] } } }
+  ? { ...one, routes: { idle: { line: 'now', record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.codexDaemon, SURFACE_IDS.cli], surfaceLines: { [SURFACE_IDS.codexDaemon]: 'afterWait' } }, working: { line: 'stepEnd', record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.codexDaemon, SURFACE_IDS.cli] }, ended: { line: 'none', record: null, surfaces: [] } } }
   : one)
 const codexRows = threads => ['## Synthetic', ...threads.flatMap((thread, i) => {
   const id = 'abcd' + String(i).padStart(4, '0')
@@ -7856,8 +7856,9 @@ test('every receiver record against idle, working and ended shows its line, with
     const label = `${record.agent}/${record.kind}/${state}/${s.pgCopyAnswer}`
     // A closed chat has no mailbox, so a mailbox card for an ended session has no route at all.
     const isGone = record.kind === 'mailbox' && state === 'ended'
-    assert.equal(card.line, isGone ? 'none' : route.line, label)
-    const canSend = !isGone && route.line !== 'none' && isNote(routeRecord(route, surface))
+    const line = routeLine(route, surface)
+    assert.equal(card.line, isGone ? 'none' : line, label)
+    const canSend = !isGone && line !== 'none' && isNote(routeRecord(route, surface))
     assert.equal(card.canSend, canSend, label)
     const page = await pageDom(servePage(s, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
     page.cards().flatMap(one => page.buttons(one)).find(one => one.textContent === s.pgWriteOwn)?.click()
@@ -7867,10 +7868,10 @@ test('every receiver record against idle, working and ended shows its line, with
     assert.equal(card.send === 'connected' || card.send === 'mailbox', canSend, label)
     if (!canSend && state !== 'ended') assert.ok(labels.includes(s.pgCopyAnswer), label + ' ' + labels.join(' | '))
     if (!isGone) {
-      const isCodexCopy = record.agent === 'codex' && route.line === 'nextTurn' && !canSend
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: isCodexCopy ? s.serveCodexCopyHint : s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
+      const isCodexCopy = record.agent === 'codex' && line === 'nextTurn' && !canSend
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), afterWait: s.serveLineSoon(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: isCodexCopy ? s.serveCodexCopyHint : s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[line]
       assert.ok(page.text().includes(words), label + ' ' + words)
-      assert.equal(page.text().includes(s.serveLineUnrecorded), !canSend && route.line !== 'none' && !isCodexCopy, label)
+      assert.equal(page.text().includes(s.serveLineUnrecorded), !canSend && line !== 'none' && !isCodexCopy, label)
     }
     if (canSend) sendable += 1; else copyOnly += 1
   }
@@ -8033,6 +8034,53 @@ test('each receiver record names a validation note that exists, and the table th
     const line = one.kind === 'turn' && state === 'idle' ? 'now' : route.line
     return [state, { line, record: line === 'none' ? null : 'docs/validation/synthetic.md', surfaces: line === 'none' ? [] : surfaces }]
   })) })))
+})
+
+test('each route line in the support table agrees with its card words, Codex daemon idle uses afterWait, and Claude Code names its 2026-11-16 real-model live run (#1814)', async () => {
+  const { routeText } = await import('../hooks/serve.ts')
+  const { agentLabel } = await import('../hooks/strings.ts')
+  const { readReceiverRecords, renderMatrix } = await import('../scripts/messaging-matrix.mjs')
+  const { messagingReceiver: codexDaemonRecord } = await import('../scripts/codex-receiver.mjs')
+  const { messagingReceiver: claudeRecord } = await import('../hooks/receiver-record.ts')
+  const root = join(import.meta.dirname, '..')
+  const assertLineMatchesCard = (line, text, agent, state, s) => {
+    const name = agent === 'claude' ? 'Claude' : agentLabel(agent, s)
+    if (line === 'now') {
+      const immediate = agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name)
+      assert.ok(text.startsWith(immediate), `${agent}/${state}: route line 'now' disagreed with card text: ${text}`)
+      assert.ok(!text.includes(s.serveLineSoon(name)), `${agent}/${state}: route line 'now' must not say ~10 minutes: ${text}`)
+    } else if (line === 'afterWait') {
+      assert.ok(text.startsWith(s.serveLineSoon(name)), `${agent}/${state}: route line 'afterWait' must say ~10 minutes: ${text}`)
+      assert.ok(!text.includes(s.serveLineNow(name)), `${agent}/${state}: route line 'afterWait' must not say right away: ${text}`)
+    }
+  }
+  assert.throws(() => assertLineMatchesCard('now', EN.serveLineSoon('Codex'), 'codex', 'idle', EN))
+  assert.throws(() => assertLineMatchesCard('afterWait', EN.serveLineNow('Codex'), 'codex', 'idle', EN))
+  const records = (await readReceiverRecords(root)).filter(one => one.routes !== undefined)
+  for (const record of records) for (const surface of record.surfaces) for (const state of ['idle', 'working', 'ended']) for (const s of [EN, ZH_TW, ZH_CN]) {
+    const route = record.routes[state]
+    const line = routeLine(route, surface.id)
+    const canSend = state !== 'ended' && line !== 'none' && isNote(routeRecord(route, surface.id)) && route.surfaces.includes(surface.id)
+    const text = routeText(line, canSend, record.agent, s, state, undefined, surface.id)
+    assertLineMatchesCard(line, text, record.agent, state, s)
+  }
+  assert.equal(codexDaemonRecord.routes.idle.line, 'afterWait')
+  const codexLive = RECEIVER_ROUTES.find(one => one.agent === 'codex' && one.kind === 'live')
+  assert.equal(routeLine(codexLive.routes.idle, SURFACE_IDS.codexDaemon), 'afterWait')
+  assert.equal(routeLine(codexLive.routes.idle, SURFACE_IDS.codexSession), 'now')
+  assert.equal(routeLine(codexLive.routes.idle, SURFACE_IDS.codexApp), 'reopen')
+  const claudeLiveNote = 'docs/validation/2026-11-16-send-to-claude-live.md'
+  assert.equal(claudeRecord.surfaces[0].evidence, claudeLiveNote)
+  assert.equal(claudeRecord.routes.idle.record, claudeLiveNote)
+  assert.equal(claudeRecord.routes.working.record, claudeLiveNote)
+  const doc = readFileSync(join(root, 'docs/MESSAGING.md'), 'utf8')
+  const rows = renderMatrix(await readReceiverRecords(root), 'docs/MESSAGING.md', root).split('\n')
+  const codexDaemonRow = rows.find(line => line.startsWith('| Codex | Daemon |'))
+  assert.ok(codexDaemonRow && codexDaemonRow.includes('afterWait · [docs/validation/2026-11-13-codex-cli-wake-live.md]'), codexDaemonRow)
+  assert.ok(doc.includes(codexDaemonRow), 'docs/MESSAGING.md must match rendered Codex Daemon row')
+  const claudeCliRow = rows.find(line => line.startsWith('| Claude Code | CLI |'))
+  assert.ok(claudeCliRow && claudeCliRow.includes('| Verified | [docs/validation/2026-11-16-send-to-claude-live.md]') && claudeCliRow.includes('now · [docs/validation/2026-11-16-send-to-claude-live.md]') && claudeCliRow.includes('stepEnd · [docs/validation/2026-11-16-send-to-claude-live.md]'), claudeCliRow)
+  assert.ok(doc.includes(claudeCliRow), 'docs/MESSAGING.md must match rendered Claude Code CLI row')
 })
 
 test('with the receivers\' own records, a Claude card sends and a Codex card that no live note covers is refused in its own words (#1351)', () => fixture(async (board, dir) => {
@@ -8364,13 +8412,14 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
     const model = realServeModel(view, [], s, new Set(), false, target, false, group, RECEIVER_ROUTES)
     const card = model.asks[0] ?? [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)].find(one => one.title === 'Route table')
-    const canSend = state !== 'ended' && route.line !== 'none' && isNote(routeRecord(route, surface.id)) && route.surfaces.includes(surface.id)
+    const line = routeLine(route, surface.id)
+    const canSend = state !== 'ended' && line !== 'none' && isNote(routeRecord(route, surface.id)) && route.surfaces.includes(surface.id)
     assert.equal(card.delivery !== undefined, canSend, `${record.source}/${surface.id}/${state}`)
     if (!(record.kind === 'mailbox' && state === 'ended')) {
       const name = record.agent === 'claude' ? 'Claude' : agentLabel(record.agent, s)
-      const isCodexCopy = record.agent === 'codex' && route.line === 'nextTurn' && !canSend
-      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : record.agent === 'codex' && surface.id === SURFACE_IDS.codexDaemon ? s.serveLineSoon(name) : s.serveLineNow(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: isCodexCopy ? s.serveCodexCopyHint : s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: surface.id === SURFACE_IDS.codexApp ? s.serveLineReopenCodexApp : s.serveLineReopen(name), none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[route.line]
-      assert.equal(card.line, route.line, `${record.source}/${surface.id}/${state}`)
+      const isCodexCopy = record.agent === 'codex' && line === 'nextTurn' && !canSend
+      const words = { now: record.agent === 'claude' ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name), afterWait: s.serveLineSoon(name), stepEnd: record.agent === 'claude' ? s.claudeSendWorking : s.serveLineStepEnd(name), nextTurn: isCodexCopy ? s.serveCodexCopyHint : s.serveNextTurnHint(name), chatOpen: s.serveNextOpenHint, reopen: surface.id === SURFACE_IDS.codexApp ? s.serveLineReopenCodexApp : s.serveLineReopen(name), none: record.agent === 'codex' && state === 'ended' ? s.serveCodexResumePrompt : s.serveLineNone(name) }[line]
+      assert.equal(card.line, line, `${record.source}/${surface.id}/${state}`)
       assert.ok(card.lineText.includes(words), `${record.source}/${surface.id}/${state}: ${card.lineText}`)
     }
     checked++

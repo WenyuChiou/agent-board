@@ -363,9 +363,11 @@ if (args.at(-1)?.includes('SLOW_TURN')) {
 test('an idle Codex card says its message starts within about 10 minutes, not right away, in EN, ZH_TW and ZH_CN (#1506, #1578)', async () => {
   const { agentLabel } = await import('../hooks/strings.ts')
   for (const s of [EN, ZH_TW, ZH_CN]) {
-    // Codex's daemon receiver watches a thread for about 10 minutes, or a longer configured delay, before it starts a message.
-    assert.equal(routeText('now', true, 'codex', s, 'idle', undefined, SURFACE_IDS.codexDaemon), s.serveLineSoon('Codex'))
+    // Codex's daemon receiver takes `afterWait` on idle because it watches a thread for about 10 minutes, or longer if configured (#1814).
+    assert.equal(routeText('afterWait', true, 'codex', s, 'idle', undefined, SURFACE_IDS.codexDaemon), s.serveLineSoon('Codex'))
     assert.notEqual(s.serveLineSoon('Codex'), s.serveLineNow('Codex'))
+    // Route line `now` keeps its immediate meaning on every surface, never silently reading as ~10 minutes.
+    assert.equal(routeText('now', true, 'codex', s, 'idle', undefined, SURFACE_IDS.codexDaemon), s.serveLineNow('Codex'))
     // Another Codex surface has no such watch, also when only Copy is offered (codex_389).
     assert.equal(routeText('now', true, 'codex', s, 'idle', undefined, SURFACE_IDS.codexSession), s.serveLineNow('Codex'))
     assert.equal(routeText('now', false, 'codex', s, 'idle', 'SURFACE_UNKNOWN', 'Synthetic Codex'), `${s.serveLineNow('Codex')} ${s.serveLineUnrecorded}`)
