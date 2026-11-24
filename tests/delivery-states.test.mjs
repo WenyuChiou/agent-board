@@ -138,6 +138,18 @@ test('combined flag shapes predict both card and transitions when independent fl
   assert.equal('acceptedBefore+onWake' in shapesOf('expired'), false)
 })
 
+test('the delivery table held shape for the Codex desktop app keeps claim queued and rejects at the limits (#1775)', () => {
+  assert.ok('appHeld' in shapesOf('queued'), 'queued defines the appHeld shape')
+  assert.ok(DELIVERY_TABLE.queued.shapes && 'appHeld' in DELIVERY_TABLE.queued.shapes, 'DELIVERY_TABLE.queued.shapes defines appHeld')
+  const row = rowOf('queued', 'appHeld')
+  assert.equal(row.on.claim, 'queued')
+  assert.equal(row.on.openLimit, 'rejected')
+  assert.equal(row.on.dayLimit, 'rejected')
+  assert.equal(observe('queued', 'claim', 'appHeld'), 'queued')
+  assert.equal(observe('queued', 'openLimit', 'appHeld'), 'rejected')
+  assert.equal(observe('queued', 'dayLimit', 'appHeld'), 'rejected')
+})
+
 // A small seeded generator, so every run plays the same orders.
 const generator = seed => () => {
   seed = (seed + 0x6d2b79f5) | 0

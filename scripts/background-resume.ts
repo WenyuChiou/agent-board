@@ -171,11 +171,12 @@ export type ProcessResult = {
 
 export const runBackgroundProcess = (
   program: Program,
-  options: { cwd?: string | null; stdin?: string | null; maxWaitMs?: number; killWaitMs?: number; env?: NodeJS.ProcessEnv } = {},
+  options: { cwd?: string | null; stdin?: string | null; maxWaitMs?: number; killWaitMs?: number; env?: NodeJS.ProcessEnv; spawnProcess?: typeof spawn } = {},
 ): Promise<ProcessResult> =>
   new Promise(resolve => {
     const maxWaitMs = options.maxWaitMs ?? MAX_RESUME_WAIT
     const killWaitMs = options.killWaitMs ?? KILL_RESUME_WAIT
+    const spawnProcess = options.spawnProcess ?? spawn
     let out = ''
     let err = ''
     let hasStdout = false
@@ -201,7 +202,7 @@ export const runBackgroundProcess = (
     }
     let child: ChildProcess
     try {
-      child = program.isShell ? spawn(program.command, { ...spawnOptions, shell: true }) : spawn(program.command, program.args, spawnOptions)
+      child = program.isShell ? spawnProcess(program.command, { ...spawnOptions, shell: true }) : spawnProcess(program.command, program.args, spawnOptions)
       isStarted = child.pid !== undefined
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | null)?.code ?? null
@@ -223,8 +224,11 @@ export const runBackgroundProcess = (
       if (all.length > 2000) isStderrCut = true
       err = all.slice(-2000)
     })
+    child.on('spawn', () => {
+      isStarted = true
+    })
     child.on('error', (error: NodeJS.ErrnoException) => {
-      finish({ started: false, exitCode: null, timedOut: false, spawnErrorCode: error.code ?? null, spawnErrorMessage: error.message })
+      finish({ started: isStarted, exitCode: null, timedOut: isTimedOut, spawnErrorCode: error.code ?? null, spawnErrorMessage: error.message })
     })
     const settle = (code: number | null): void => {
       if (isTimedOut) {

@@ -2,6 +2,7 @@
 // turn in the background with Codex's own resume command, once the app no longer holds it. Synthetic data only: a stand-in
 // board client and a stand-in run, so no Codex program, Codex home or board server is touched.
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { registerHooks } from 'node:module'
 import { test } from 'node:test'
 
@@ -691,4 +692,72 @@ test('the receiver attaches only to app conversations the board lists, leaves th
 test('a board address off this computer is refused before anything is attached', () => {
   assert.throws(() => startCodexAppReceiver({ boardUrl: 'http://192.168.1.9:9/?t=synthetic', executable: EXE, sessions: () => [], stateOf: () => 'idle' }), /LOCAL_BOARD_URL_REQUIRED/)
   assert.throws(() => startCodexAppReceiver({ boardUrl: 'http://127.0.0.1:9/?t=synthetic', executable: 'codex', sessions: () => [], stateOf: () => 'idle' }), /EXPLICIT_EXECUTABLE_REQUIRED/)
+})
+
+const fakeChild = (pid, onKill = () => undefined) => Object.assign(new EventEmitter(), {
+  pid,
+  stdout: new EventEmitter(),
+  stderr: new EventEmitter(),
+  stdin: Object.assign(new EventEmitter(), { end() {} }),
+  kill: onKill,
+})
+
+test('a background run that errors after it started stays started and uncertain, never refused as SPAWN_FAILED (#1773)', async () => {
+  const syntheticProgram = { command: EXE, isShell: false, args: ['exec', 'resume', THREAD, '-'] }
+
+  // A started child (pid assigned) emits 'error' (e.g. a failed signal/kill) -> stays started: true.
+  const startedChild = fakeChild(999999)
+  setImmediate(() => startedChild.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM' })))
+  const startedResult = await runBackgroundProcess(syntheticProgram, { maxWaitMs: 20_000, spawnProcess: () => startedChild })
+  assert.equal(startedResult.started, true)
+  assert.equal(startedResult.exitCode, null)
+  assert.equal(startedResult.timedOut, false)
+  assert.equal(startedResult.spawnErrorCode, 'EPERM')
+  assert.equal(isWriterHeld(startedResult, THREAD), false)
+
+  // An unstarted child (no pid, no 'spawn' event) emits 'error' -> stays started: false.
+  const unstartedChild = fakeChild(undefined)
+  setImmediate(() => unstartedChild.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })))
+  const unstartedResult = await runBackgroundProcess(syntheticProgram, { maxWaitMs: 20_000, spawnProcess: () => unstartedChild })
+  assert.equal(unstartedResult.started, false)
+  assert.equal(unstartedResult.exitCode, null)
+  assert.equal(unstartedResult.timedOut, false)
+  assert.equal(unstartedResult.spawnErrorCode, 'ENOENT')
+
+  // A child that emitted 'spawn', hit maxWaitMs timeout, and then emitted 'error' during kill -> started: true, timedOut: true.
+  // Keep pid undefined here so killTree calls child.kill() directly instead of signalling an arbitrary pid.
+  let timedOutChild
+  timedOutChild = fakeChild(undefined, () => {
+    setImmediate(() => timedOutChild.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM' })))
+  })
+  setImmediate(() => timedOutChild.emit('spawn'))
+  const timedOutResult = await runBackgroundProcess(syntheticProgram, { maxWaitMs: 20, killWaitMs: 200, spawnProcess: () => timedOutChild })
+  assert.equal(timedOutResult.started, true)
+  assert.equal(timedOutResult.timedOut, true)
+  assert.equal(timedOutResult.spawnErrorCode, 'EPERM')
+
+  // Through startCodexAppReceiver: the receiver must invoke begin() (marking uncertain, never SPAWN_FAILED/unsent).
+  const appClient = fakeClient()
+  const app = startCodexAppReceiver({
+    boardUrl: 'http://127.0.0.1:9/?t=synthetic',
+    client: appClient,
+    executable: EXE,
+    tickMs: 60_000,
+    sessions: () => [{ id: THREAD, dir: DIR }],
+    stateOf: () => 'idle',
+    env: {},
+    run: (program, options) => {
+      const child = fakeChild(999999)
+      setImmediate(() => child.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM' })))
+      return runBackgroundProcess(program, { ...options, maxWaitMs: 20_000, spawnProcess: () => child })
+    },
+  })
+  try {
+    await app.tick()
+    const cb = callbacks()
+    await assert.rejects(() => deliverWith(appClient.attached.get(THREAD), cb), /EXIT_FAILED/)
+    assert.deepEqual(cb.said, ['starting', 'begin'])
+  } finally {
+    app.kill()
+  }
 })
