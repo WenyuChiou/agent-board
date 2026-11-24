@@ -7491,6 +7491,29 @@ test('Hermes setup still leaves a config.yaml alone whose hooks key holds a list
   assert.equal(readFileSync(config, 'utf8'), listed, 'nothing is written')
 }))
 
+// A shape the line editor cannot follow is refused whole, with nothing written, rather than turned into a file Hermes
+// reads differently: setup would otherwise add a second hooks key, or hooks after the document's end.
+const refusedWhole1588 = (f, texts) => {
+  const config = hermesConfig(f)
+  for (const text of texts) {
+    f.save(config, text)
+    const result = f.install('--agent', 'hermes', '--apply', '--json')
+    assert.ok(result.stdout.trimStart().startsWith('{'), `setup prints a JSON plan\n${result.stdout}\n${result.stderr}`)
+    const plan = JSON.parse(result.stdout)
+    assert.ok(plan.conflicts.some(conflict => conflict.endsWith('config.yaml')), `the file is refused: ${JSON.stringify(plan.conflicts)}\n${text}`)
+    assert.equal(readFileSync(config, 'utf8'), text, `nothing is written\n${text}`)
+  }
+}
+
+test('Hermes setup leaves alone a config.yaml whose hooks key is written with escapes, instead of adding a second hooks key (#1588)', () => fixture(f => {
+  const personal = '"ho\\x6fks":\n  pre_llm_call:\n  - command: echo-personal\n'
+  refusedWhole1588(f, [personal, `${personal}toolsets:\n- hermes-cli\n`])
+}))
+
+test('Hermes setup leaves alone a config.yaml with a document end marker or a second document, instead of adding hooks after it (#1588)', () => fixture(f => {
+  refusedWhole1588(f, ['toolsets:\n  - hermes-cli\n...\n', 'toolsets:\n- hermes-cli\n...\n', 'toolsets:\n  - hermes-cli\n---\nother: 1\n'])
+}))
+
 test('Hermes refresh and removal recognize a recorded Unicode path after YAML escaping', () => fixture(f => {
   const data = join(f.home, 'caf\u00e9-\u{1f600}')
   const install = () => f.install('--agent', 'hermes', '--data-dir', data, '--apply')
