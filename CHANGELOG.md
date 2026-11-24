@@ -2,6 +2,92 @@
 
 What changed for the person using Agent Board, one line per change, newest version first. How a change was built and tested is in its pull request. Entries up to 0.24.0 were shortened to this form on 2026-11-02; their full text is in `git show ddbef2a:CHANGELOG.md`.
 
+## 0.25.1 — 2026-11-24
+
+- Opening the board in a terminal through an older install runs setup --update first (#1783).
+
+- Connecting or removing the plugin keeps Hermes hooks the board did not write (#1664).
+
+- Setup --update updates a host folder an earlier setup was given, without the flag (#1784).
+
+- A slow hook no longer leaves two queued copies of one event for recovery (#1782).
+
+- Setup --update updates in one line and asks once, only when a hook, loaded file, trust or a new use changed (#1778).
+
+- A reply sent from the board to a Codex desktop app conversation runs once the app is quit (#1771).
+
+- An upgrade that keeps Codex's hook approval names no trust command (#1753).
+
+- For contributors: the Ubuntu board tests run in three parts, so a slower runner keeps each part under its time budget (#1765).
+
+- For contributors: the Windows board tests go to their parts by measured time, and a check fails when they no longer fit (#1763).
+
+- A report that Antigravity's sandbox refuses reaches the board at the conversation's next step (#1760).
+
+- For contributors: the Windows board split weighs new setup test files by their measured times and starts each part from shares measured again (#1758).
+
+- Setup's next steps keep a folder given on the command line and, after repairing one agent, list only that agent's steps; `--agent claude` points to the Claude Code plugin (#1356).
+
+- For contributors: automatic hook recovery test accepts fewer attempts when the deadline runs out first (#1748).
+
+- For contributors: L5 locked-file test accepts a kept next-run event on a slow Windows runner (#1747).
+
+- Copy-only Codex cards say plainly how to get a message to Codex (#1679).
+
+- For contributors: L5 recovery observation waits 5 s for a stalled Windows runner (#1744).
+
+- `--json` run through an older board script exits 1, and the page names that script (#1704).
+
+- Setup keeps the board's Codex hook group where it was, so a person's own later group and its approval stay (#1705).
+
+- An Antigravity `agy -p` question shows a question card, and a run that has ended no longer shows as working (#1736).
+
+- For contributors: every Windows board part runs a share of legacy-connect, so no part holds the whole file and runs over 480 s (#1742).
+
+- For contributors: the board bundle is split into a fourth part, so pull requests that rebuild it build again (#1739).
+
+- A closed Codex window's card leaves Needs you on Linux, and elsewhere says the window may be closed after two quiet minutes (#1731).
+
+- Setup from a Node in another folder keeps the Codex hook commands it wrote (#1730).
+
+- For contributors: Windows board parts start from their measured share of the self-parted tests, so part 1 no longer runs over its 480 s (#1734).
+
+- A message the Codex receiver claimed but never started goes back to the queue instead of reading as no reply confirmed (#1682).
+
+- Setup re-reads each file before removing it (#1680).
+
+- `--hermes-trust` and the Codex hook trust step re-read each file before writing, like the rest of setup (#1692).
+
+- The board page can switch approvals off and says why the hook refused (#1726).
+
+- Setup refuses to edit a file whose bytes are not valid UTF-8 and names it, instead of overwriting the bytes it cannot read (#1725).
+
+- A start that meets an old page still exiting waits for it to go instead of naming that process to end (#1724).
+
+- The Claude Code pane counts an answer queued for the next turn as handled and says it is queued (#1717).
+
+- The /board command stays while setup keeps an older board script the person edited (#1709).
+
+- A .new copy another setup run wrote stops this run as busy, and undoing an edit removes each copy once (#1708).
+
+- For contributors: the Windows board tests run in seven parts, and four slow test files get time budgets from their slowest recent Windows runs (#1715, #1718, #1719).
+
+- A dead page no longer locks the board, and a holder it cannot stop is named with one action (#1671).
+
+- An upgrade keeps a file the person edited and still updates every agent that shares it (#1686).
+
+- An upgrade no longer skips Hermes when config.yaml holds an earlier release's board hooks (#1703).
+
+- An approval card shows its command and buttons at the card's full width (#1701).
+
+- The Claude Code hook sends a command only to a listener it has checked is the board (#1678).
+
+- On Windows, the board server keeps running after the Antigravity command that started it ends (#1683).
+
+- After OpenCode quits, its card stops offering Send and the Agents list stops saying open (#1670).
+
+- A hook event reaches the board page within 2 s: the page waits on one open request the server answers when the board changes, instead of asking every 2 s (#1593).
+
 ## 0.25.0 — 2026-11-18
 
 - A board message delivered through a generated hook keeps its question open, and the PowerShell hook no longer searches the module folders on every run (#1334, #836, #1573).
