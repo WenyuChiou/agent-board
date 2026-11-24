@@ -5,6 +5,7 @@ import type { LocalAgent } from './local-agents'
 import { baseName, escapeOptionsJson, NO_OPTIONS, parseAttrs, parseProgress, RESUME, validOptions } from './parse'
 import { scanBlocks, sectionOfProject } from './blocks'
 import { cutLine } from './step-words'
+import { CONTROLS } from './redact'
 import type { BlockSpan } from './blocks'
 import { sha256 } from './sha256'
 import { agentClaimOf, HOST_HASH } from './session-liveness'
@@ -201,7 +202,7 @@ export const questionSteps = (
 // One line of an approval's command or description: no comment markers, one space between words, cut to `max` characters.
 const cleanWords = (value: unknown, max: number): string => {
   if (typeof value !== 'string') return ''
-  const chars = [...value.replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()]
+  const chars = [...value.replace(CONTROLS, ' ').replace(/<!--|-->/g, ' ').replace(/\s+/g, ' ').trim()]
   return chars.length > max ? `${chars.slice(0, max - 1).join('')}…` : chars.join('')
 }
 

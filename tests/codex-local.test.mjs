@@ -7849,7 +7849,7 @@ test('setup writes Hermes config where --hermes-dir says, ahead of HERMES_HOME (
   assert.equal(existsSync(hermesConfig(f)), false)
 }))
 
-test('Codex lifecycle hooks never retain conversation and approval payloads, and open nothing that is not a Codex history file', () => fixture(f => {
+test('Codex lifecycle hooks never retain conversation text or an approval payload with no command, and open nothing that is not a Codex history file', () => fixture(f => {
   f.install('--apply')
   const secret = 'DO-NOT-STORE-THIS-PRIVATE-TEXT'
   const transcript = join(f.home, 'nonexistent-transcript')
@@ -7886,6 +7886,48 @@ test('a Codex PermissionRequest names its command and description on the approva
   assert.ok(JSON.stringify(json).includes('Remove the synthetic build folder'))
   assert.equal(f.event('Stop', 'turn-1').status, 0)
   assert.ok(readFileSync(f.progress, 'utf8').includes(step.replace('[?]', '[x]')))
+}))
+
+test('a Codex approval command is masked after its white space is made one line, for each way a command line writes a secret (#1798)', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  const secret = 'synthetic-private-value'
+  const hidden = [
+    `deploy --token  ${secret}`,
+    `deploy --password\t${secret}`,
+    `deploy --password\n${secret}`,
+    `deploy --password \r\n  ${secret}`,
+    `deploy --access-token ${secret}`,
+    `deploy --passwd ${secret}`,
+    `deploy --api-key=${secret}`,
+    `deploy --client-secret ${secret}`,
+    `sshpass -p ${secret} ssh host`,
+    `mysql -pSynthetic1${secret} db`,
+    `curl -u user:${secret} https://example.invalid`,
+    `curl --user=user:${secret} https://example.invalid`,
+    `curl -u "user:${secret}" https://example.invalid`,
+    `curl https://user:${secret}@example.invalid/path`,
+  ]
+  for (const command of hidden) {
+    assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'Bash', tool_input: { command, description: `uses ${command.split(/\s/)[0]} --token  ${secret}` } }).status, 0)
+    const text = readFileSync(f.progress, 'utf8')
+    assert.ok(!text.includes(secret), JSON.stringify(command))
+    assert.ok(text.includes('•••'), JSON.stringify(command))
+  }
+  // An ordinary flag with the same letters is left as it was written.
+  for (const command of ['mkdir -p build/out', 'find . -name x -print', 'perl -pi -e s/a/b/ file', 'ssh -p 22 host', 'deploy --target staging']) {
+    assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'Bash', tool_input: { command } }).status, 0)
+    assert.ok(readFileSync(f.progress, 'utf8').includes(`Codex asks to run a command: ${command}\n`), command)
+  }
+}))
+
+test('a Codex approval command and description lose control characters and bidi marks (#1798)', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  const bad = [0, 7, 8, 27, 127, 0x85, 0x202e, 0x2066, 0x200b, 0xfeff].map(code => String.fromCharCode(code)).join('')
+  assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'Bash', tool_input: { command: `echo a${bad}b${String.fromCharCode(27)}[31mred`, description: `say${bad}hi` } }).status, 0)
+  const step = readFileSync(f.progress, 'utf8').match(/- \[\?\] Codex [^\n]*/)?.[0]
+  assert.equal(step, '- [?] Codex asks to run a command: echo a b [31mred (say hi)')
 }))
 
 test('a long Codex approval command is cut so its description still shows, and a request with no command keeps the plain line (#1798)', () => fixture(f => {

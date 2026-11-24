@@ -72,3 +72,27 @@ export const redact = (text: string, home: string, isWindows = false): string =>
     })
     .replace(PREFIXED, MASK)
 }
+
+// A command an agent asks to run, as one line of words for a card (#1798). The line is made first (control characters, bidi marks and
+// every kind of white space become one space) and masked after, so a secret split by a tab or two spaces is still one `--flag value`.
+// `redact` runs, then the forms below that a command line has and a sentence does not. A list of forms never names every secret: the
+// page on the local network never gets this line, and the board script keeps no more of it than the first 2,000 characters.
+export const CONTROLS = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb]+/g
+const PASS_FLAG = new RegExp(`(--(?:[\\w-]*-)?(?:password|passwd|pwd|pass|token|secret|api-?key|access-?key|private-?key|auth|credentials?|key)(?:[= ]+))(?:${VALUE})`, 'gi')
+// curl -u user:pass, --user user:pass, and a proxy's.
+const USER_FLAG = /((?:^|\s)(?:-u|--user|--proxy-user)(?:[= ]+))(?:"[^"]*:[^"]*"|'[^']*:[^']*'|[^\s:]*:\S*)/gi
+// sshpass -p X, and an attached -pX with a digit or a capital in it (mysql takes a bare -p as a prompt; -print, -perm and -pi do not match).
+const SSHPASS = new RegExp(`(\\bsshpass\\s+(?:-\\S+\\s+)*-p\\s*)(?:${VALUE})`, 'gi')
+const SHORT_P = /(?<=\s)(-p)(?=[^\s=-]*[A-Z0-9])[^\s=-]\S*/g
+
+export const approvalWords = (text: string, home: string, isWindows: boolean, max: number): string => {
+  const line = text.replace(CONTROLS, ' ').replace(/\s+/g, ' ').trim().slice(0, 20000)
+
+  // The cut to `max` comes last, so a secret is never half cut into a shape the patterns no longer know.
+  return redact(line, home, isWindows)
+    .replace(PASS_FLAG, `$1${MASK}`)
+    .replace(USER_FLAG, `$1${MASK}`)
+    .replace(SSHPASS, `$1${MASK}`)
+    .replace(SHORT_P, `$1${MASK}`)
+    .slice(0, max)
+}

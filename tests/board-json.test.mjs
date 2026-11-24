@@ -20,7 +20,7 @@ const loadSources = async () => {
   } finally { loader.deregister() }
 }
 
-const [{ BOARD_JSON_SCHEMA, boardDocument, collectFinished }, { serveModel }, { buildView }, { parseProgress }, { STRINGS }, { clipped, plain, redact }] = await loadSources()
+const [{ BOARD_JSON_SCHEMA, boardDocument, collectFinished }, { serveModel, serveAction }, { buildView }, { parseProgress }, { STRINGS }, { boardItems, clipped, plain, redact }] = await loadSources()
 const NOW = Date.parse('2026-11-04T12:00:00Z')
 const MINUTE = 60_000
 const block = (id, agent, state, title, steps, at = NOW) => `<!-- auto session=${id} agent=${agent} state=${state} updated=${new Date(at).toISOString()} -->
@@ -458,4 +458,27 @@ ${block('c0123457', 'cursor', 'waiting', 'Open question', '- [?] What should the
   const cliDoc = JSON.parse(ran.stdout)
   assert.deepEqual(cliDoc.needs[0]?.options, ['Postgres', 'SQLite'])
   assert.deepEqual(cliDoc.needs[1]?.options, [])
+})
+
+test('a Codex approval step names its command on the computer, and the page on the local network gets the plain line (#1798)', () => {
+  const command = 'deploy --target synthetic-staging'
+  for (const s of Object.values(STRINGS)) {
+    const source = `## synthetic-api
+${block('d0123456', 'codex', 'waiting', 'Deploy', `- [ ] Waiting for the next instruction\n- [?] ${s.codexApprovalCommand(command, 'Deploy the synthetic build')}\n<!-- native=codex -->`, NOW - MINUTE)}
+`
+    const view = viewOf(source, s)
+    const options = groupOptions(NOW)
+    const home = serveModel(view, [], s, new Set(), false, undefined, false, options)
+    assert.ok(JSON.stringify(home).includes(command), 'the page on this computer names the command')
+    const lan = serveModel(view, [], s, new Set(), true, undefined, false, options)
+    const drawn = JSON.stringify(lan)
+    const where = []; const walk = (v, path) => { if (typeof v === 'string') { if (v.includes(command)) where.push(path) } else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, `${path}.${k}`) }; walk(lan, 'lan')
+    assert.deepEqual(where, [], 'the command is on the local network page')
+    assert.ok(!drawn.includes(command), 'the page on the local network does not carry the command')
+    assert.ok(!drawn.includes('Deploy the synthetic build'), 'nor its description')
+    assert.ok(drawn.includes(s.codexApprovalStep), 'it carries the plain line')
+    // A press on the phone's key still finds the card on this computer.
+    const press = serveAction(boardItems(view, [], true, false), { key: lan.asks[0].key, type: 'hide', text: '', session: '' }, s, true)
+    assert.notEqual(press.type, 'refuse')
+  }
 })

@@ -10,7 +10,8 @@ import { dockScript } from './board-dock'
 import type { SettingsLang } from './board-settings'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
-import { agentLabel } from './strings'
+import { agentLabel, STRINGS } from './strings'
+import { sha256 } from './sha256'
 import type { Tone } from './palette'
 import { cellCode } from './progress-bar'
 import { RESUME } from './parse'
@@ -821,8 +822,31 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   if (isLan) {
     for (const item of [...model.asks, ...model.reminder, ...model.older, ...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows), ...model.finished, ...model.recent]) delete item.dir
     for (const row of [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)]) delete row.sessionId
+    lanApprovals(model)
   }
   return model
+}
+
+// A Codex approval step names its command (#1798), and the command is the computer's only, like a resume command: the page on
+// the local network gets the plain line. A key is built from the step's words and a press names it, so a key keeps a short
+// hash of what was cut, and `lanKey` gives the same key from the computer's side to find the item the press names.
+const APPROVAL_HEADS = Object.values(STRINGS).map(words => ({ head: words.codexApprovalCommand('', '').split('')[0]!, plain: words.codexApprovalStep }))
+const lanWords = (text: string, isKey: boolean): string => {
+  for (const { head, plain } of APPROVAL_HEADS) {
+    const at = text.indexOf(head)
+    if (at >= 0) return `${text.slice(0, at)}${plain}${isKey ? `#${sha256(text.slice(at + head.length)).slice(0, 8)}` : ''}`
+  }
+  return text
+}
+const LAN_KEYS = new Set(['key', 'unhideKey', 'hideKey', 'questionId'])
+const lanApprovals = (value: unknown): void => {
+  if (typeof value !== 'object' || value === null) return
+  const record = value as Record<string, unknown>
+  for (const name of Object.keys(record)) {
+    const one = record[name]
+    if (typeof one === 'string') record[name] = lanWords(one, LAN_KEYS.has(name))
+    else lanApprovals(one)
+  }
 }
 
 // `asked`: with a reply, the question the page showed it under ('' for none). `fp`: the line's
@@ -871,7 +895,7 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
 const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean): ServeAction => {
   // A hidden question is off the board: it is named by the key it was hidden under.
   if (request.type === 'unhide') return request.key.startsWith('hidden:') ? { type: 'unhide', key: request.key.slice('hidden:'.length) } : { type: 'refuse', note: '' }
-  const item = items.find(one => one.key === request.key)
+  const item = items.find(one => one.key === request.key) ?? (isLan ? items.find(one => lanWords(one.key, true) === request.key) : undefined)
   if (item === undefined) return { type: 'refuse', note: s.boardLineChanged }
   if (request.type === 'tick') {
     if (item.type === 'ask') {

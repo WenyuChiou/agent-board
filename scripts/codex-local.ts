@@ -32,7 +32,7 @@ import { installControlRoot, withInstallLock } from './install-control'
 import { ConnectTransaction } from './connect-transaction'
 import { boardPromptHelper, boardRequestWords, boardRun, deliveryRequestWords, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
-import { redact } from '../hooks/redact'
+import { approvalWords as maskedWords } from '../hooks/redact'
 import { hookProgram, windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
@@ -1140,8 +1140,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const toolInput = typeof raw.tool_input === 'object' && raw.tool_input !== null && !Array.isArray(raw.tool_input) ? raw.tool_input as Json : {}
       const approvalWords: Json = agent === 'codex' && mode === '--codex-event' && raw.hook_event_name === 'PermissionRequest' && typeof toolInput.command === 'string'
         ? {
-            approval_command: redact(toolInput.command.slice(0, 2000), home, process.platform === 'win32'),
-            ...(typeof toolInput.description === 'string' ? { approval_description: redact(toolInput.description.slice(0, 500), home, process.platform === 'win32') } : {}),
+            approval_command: maskedWords(toolInput.command, home, process.platform === 'win32', 2000),
+            ...(typeof toolInput.description === 'string' ? { approval_description: maskedWords(toolInput.description, home, process.platform === 'win32', 500) } : {}),
           }
         : {}
       const antigravityTitle = mode === '--agent-status' && agent === 'antigravity'
