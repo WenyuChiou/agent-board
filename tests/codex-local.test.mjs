@@ -7459,6 +7459,38 @@ test('Hermes setup adopts an entry that already runs this release\'s command whe
   assert.deepEqual(JSON.parse(f.install('--agent', 'hermes', '--apply', '--json').stdout).changes, [], 'a third apply reports no changes')
 }))
 
+// Hermes saves config.yaml with PyYAML, which writes the items of a list at the left edge, right under their key.
+const leftEdgeLists1588 = 'model:\n  default: synthetic-model\ntoolsets:\n- hermes-cli\n- synthetic-tools\nplatform_toolsets:\n  cli:\n  - hermes-cli\n'
+
+test('Hermes setup installs, updates and removes its hooks in a config.yaml whose lists sit at the left edge under their key, as Hermes saves it (#1588)', () => fixture(f => {
+  const config = hermesConfig(f)
+  f.save(config, leftEdgeLists1588)
+  const installed = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.equal(installed.status, 0, `${installed.stdout}\n${installed.stderr}`)
+  assert.deepEqual(JSON.parse(installed.stdout).conflicts, [], 'no whole-file refusal')
+  const text = readFileSync(config, 'utf8')
+  assert.ok(text.startsWith(leftEdgeLists1588), `the person's settings stay as they were\n${text}`)
+  assert.deepEqual(Object.keys(hermesHooksOf(text)).sort(), [...hermesEvents].sort(), 'every hook of the board is added')
+  const again = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.equal(again.status, 0, again.stderr)
+  assert.deepEqual(JSON.parse(again.stdout).conflicts, [], 'an update does not skip the file')
+  assert.equal(readFileSync(config, 'utf8'), text, 'an update has nothing to change')
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(config, 'utf8'), leftEdgeLists1588, 'removal leaves only the person’s settings')
+}))
+
+test('Hermes setup still leaves a config.yaml alone whose hooks key holds a list at the left edge (#1588)', () => fixture(f => {
+  const config = hermesConfig(f)
+  const listed = 'model:\n  default: synthetic-model\nhooks:\n- synthetic-hook\n'
+  f.save(config, listed)
+  const result = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.ok(result.stdout.trimStart().startsWith('{'), `setup prints a JSON plan\n${result.stdout}\n${result.stderr}`)
+  const plan = JSON.parse(result.stdout)
+  assert.ok(plan.conflicts.some(conflict => conflict.endsWith('config.yaml')), `the file is refused: ${JSON.stringify(plan.conflicts)}`)
+  assert.equal(readFileSync(config, 'utf8'), listed, 'nothing is written')
+}))
+
 test('Hermes refresh and removal recognize a recorded Unicode path after YAML escaping', () => fixture(f => {
   const data = join(f.home, 'caf\u00e9-\u{1f600}')
   const install = () => f.install('--agent', 'hermes', '--data-dir', data, '--apply')
