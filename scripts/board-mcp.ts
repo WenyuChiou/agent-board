@@ -24,22 +24,11 @@ export const processStart = (pid: number, signal?: AbortSignal): Promise<string 
     } catch { done(null) }
     return
   }
-  const isWin = process.platform === 'win32'
-  const system = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32')
-  const [file, args] = isWin
-    ? [
-      join(system, 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-      ['-NoProfile', '-NonInteractive', '-Command', `$ErrorActionPreference = 'Stop'; $PSModuleAutoLoadingPreference = 'None'; [System.Diagnostics.Process]::GetProcessById(${pid}).StartTime.ToFileTimeUtc()`],
-    ] as const
-    : ['/bin/ps', ['-o', 'lstart=', '-p', String(pid)]] as const
+  const [file, args] = process.platform === 'darwin'
+    ? ['/bin/ps', ['-o', 'lstart=', '-p', String(pid)]] as const
+    : [join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).StartTime.ToFileTimeUtc()`]] as const
   try {
-    execFile(file, args, {
-      encoding: 'utf8',
-      timeout: 30_000,
-      windowsHide: true,
-      signal,
-      ...(isWin ? { env: { ...process.env, PSModulePath: join(system, 'WindowsPowerShell', 'v1.0', 'Modules') } } : {}),
-    }, (error, stdout) => { done(error ? null : stdout.trim() || null) })
+    execFile(file, args, { encoding: 'utf8', timeout: 30_000, windowsHide: true, signal }, (error, stdout) => { done(error ? null : stdout.trim() || null) })
   } catch { done(null) }
 })
 type Options = {

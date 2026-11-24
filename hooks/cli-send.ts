@@ -8,6 +8,7 @@ export type SendCandidate = {
   connection: Connection
   project: string
   title: string
+  updated?: number
 }
 
 export type TargetResolution =
@@ -28,16 +29,8 @@ const MESSAGE_LABEL: Record<Message['status'], (s: Strings) => string> = {
 const cleanOneLine = (text: string): string =>
   text.replace(/[\r\n\t\0]+/g, ' ').replace(/\s+/g, ' ').trim()
 
-export const stripFilePaths = (text: string): string =>
-  text
-    .replace(/(?<![\w.-])[A-Za-z]:[\\/][^\s"'`<>|]+/g, '[path]')
-    .replace(/\\\\[^\s"'`<>|]+/g, '[path]')
-    .replace(/(?<![\w.-])~[\\/][^\s"'`<>|]+/g, '[path]')
-    .replace(/(?<![\w.-])\.\.?[\\/][^\s"'`<>|]+/g, '[path]')
-    .replace(/(?<![\w.:/])\/(?:(?:tmp|var|etc|opt|usr|home|Users|mnt|root|private)(?:[\\/][^\s"'`<>|]*)?|[^\s"'`<>|/]+\/[^\s"'`<>|]+)/g, '[path]')
-
 export const sanitizeSenderTitle = (title: string, scrub: (text: string) => string = text => text): string =>
-  cleanOneLine(stripFilePaths(scrub(title))
+  cleanOneLine(scrub(title)
     .replace(/^\s*agent board message\b|reply first with this line alone|<<<\s*AB-|AB-[0-9a-f]{6,32}\s*>>>/gi, ' ')
     .replace(/"/g, "'"))
     .slice(0, 120)
@@ -63,11 +56,6 @@ const candidateScore = (query: string, candidate: SendCandidate, s: Strings): nu
     candidate.title,
   ]
   return fields.reduce((best, field) => Math.max(best, fieldScore(query, field)), 0)
-}
-
-export const sessionOfAddress = (addr: string): string => {
-  const split = addr.indexOf(':')
-  return split === -1 ? '' : addr.slice(split + 1)
 }
 
 export const resolveSendTarget = (
@@ -97,13 +85,17 @@ export const resolveSendTarget = (
 
 export const formatSendCandidate = (
   candidate: SendCandidate,
+  now: number,
   s: Strings,
   scrub: (text: string) => string = text => text,
-): string =>
-  [agentLabel(candidate.connection.agent, s), stripFilePaths(scrub(candidate.project)), stripFilePaths(scrub(candidate.title))]
-    .map(cleanOneLine)
-    .filter(Boolean)
-    .join(' · ')
+): string => {
+  const label = agentLabel(candidate.connection.agent, s)
+  const project = cleanOneLine(scrub(candidate.project))
+  const age = typeof candidate.updated === 'number' && Number.isFinite(candidate.updated) && candidate.updated > 0 && candidate.updated <= now
+    ? relativeTime(candidate.updated, now, s)
+    : ''
+  return [label, project, age].filter(Boolean).join(' · ')
+}
 
 export const isSameWorkspaceAllowed = (
   senderDigest: string | undefined,

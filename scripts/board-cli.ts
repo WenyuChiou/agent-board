@@ -41,11 +41,11 @@ import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder
 import { dockArguments, dockCommand, probeOf, windowsStartScript, windowPath, windowPlaceOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
-import { ACK_MAX, address, agentOf, HOP_LIMIT, isFinished, isMailboxTarget, isReceiverRoutes, messageId, messageReceipt, pruneMessages, queueMessage } from '../hooks/messaging'
+import { address, HOP_LIMIT, isReceiverRoutes, messageId, pruneMessages, queueMessage } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ReceiverRoutes } from '../hooks/messaging'
 import { expireMailboxes } from '../hooks/hook-messages'
 import { parseMessageStore } from '../hooks/queued-store'
-import { formatSendCandidate, isSameWorkspaceAllowed, resolveSendTarget, sanitizeSenderTitle, sessionOfAddress } from '../hooks/cli-send'
+import { formatSendCandidate, isSameWorkspaceAllowed, resolveSendTarget } from '../hooks/cli-send'
 import type { SendCandidate } from '../hooks/cli-send'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pagePortOf, pickSurface, sshTargetOf } from '../hooks/surface'
@@ -75,7 +75,7 @@ import { codexSignal, isStrongRun, runLookupId } from '../hooks/runs'
 import { findSessionFile, readSessionFolder, readSessionMeta } from './codex-history'
 import { CODEX_APP_ORIGINATOR } from './codex-app-receiver'
 import type { CodexAppSession } from './codex-app-receiver'
-import { processStart, runMcp } from './board-mcp'
+import { runMcp } from './board-mcp'
 import { createSettingsAgents } from './settings-agents'
 
 // The line `/progress connect` puts above the bundle sets it.
@@ -95,7 +95,7 @@ const VALUE_FLAGS = new Set([
   '--agent', '--codex-bin', '--codex-dir', '--cwd', '--data-dir', '--deepseek-dir', '--event',
   '--grok-dir', '--hermes-dir', '--home', '--hook-deadline', '--hook-event', '--hook-started',
   '--id', '--idle-minutes', '--keys', '--lang', '--legacy-connect-request', '--mailbox',
-  '--message-ack', '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
+  '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
   '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
   '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--ref', '--removing',
   '--send', '--session', '--setup-version', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
@@ -106,7 +106,6 @@ type ParsedCli = {
   flagValues: Map<string, string | undefined>
   positionals: string[]
   sendPair: CliPair
-  ackPair: CliPair
   unknown?: string
 }
 const parseCliArgs = (argv: readonly string[]): ParsedCli => {
@@ -114,7 +113,6 @@ const parseCliArgs = (argv: readonly string[]): ParsedCli => {
   const flagValues = new Map<string, string | undefined>()
   const positionals: string[] = []
   let sendPair: CliPair = { first: undefined, second: undefined }
-  let ackPair: CliPair = { first: undefined, second: undefined }
   let unknown: string | undefined
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
@@ -134,29 +132,6 @@ const parseCliArgs = (argv: readonly string[]): ParsedCli => {
       }
       sendPair = { first: argv[i + 1], second: argv[i + 2] }
       i += 2
-      continue
-    }
-    if (arg === '--message-ack') {
-      optionFlags.add('--message-ack')
-      if (argv[i + 1] === '--') {
-        ackPair = { first: argv[i + 2], second: argv[i + 3] }
-        positionals.push(...argv.slice(i + 4))
-        break
-      }
-      if (argv[i + 2] === '--') {
-        ackPair = { first: argv[i + 1], second: argv[i + 3] }
-        positionals.push(...argv.slice(i + 4))
-        break
-      }
-      const first = argv[i + 1]
-      const maybeSecond = argv[i + 2]
-      if (maybeSecond !== undefined && !BOOL_FLAGS.has(maybeSecond) && !VALUE_FLAGS.has(maybeSecond) && maybeSecond !== '--days' && maybeSecond !== '--lan') {
-        ackPair = { first, second: maybeSecond }
-        i += 2
-      } else {
-        ackPair = { first, second: undefined }
-        i += 1
-      }
       continue
     }
     if (VALUE_FLAGS.has(arg)) {
@@ -183,7 +158,7 @@ const parseCliArgs = (argv: readonly string[]): ParsedCli => {
     if (!BOOL_FLAGS.has(arg)) { unknown = unknown ?? arg; continue }
     optionFlags.add(arg)
   }
-  return { optionFlags, flagValues, positionals, sendPair, ackPair, unknown }
+  return { optionFlags, flagValues, positionals, sendPair, unknown }
 }
 const parsedCli = parseCliArgs(args)
 const hasFlag = (name: string): boolean => parsedCli.optionFlags.has(name)
@@ -2158,7 +2133,7 @@ const serveFile = (): string => {
   const name = addressFileName(board(path))
   return (served = join(runFolder(name), name))
 }
-const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? (hasAnyFlag(['--mcp', '--send', '--message-ack']) ? defaultMessagesDirectory(path, homedir(), process.env, process.platform) : serveFile().replace(/\.json$/, '-messages')))
+const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? (hasAnyFlag(['--mcp', '--send']) ? defaultMessagesDirectory(path, homedir(), process.env, process.platform) : serveFile().replace(/\.json$/, '-messages')))
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
@@ -2406,7 +2381,7 @@ const serveChild = (): void => {
         // A page snapshot follows its synchronous view read. Handoff requests
         // still read current bytes instead of accepting an older page's baseline.
         const projects = !isFresh && progressProjectCache !== null ? progressProjectCache.projects : parseProgress(read(path))
-        return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated, ...(task.auto.dir ? { dir: task.auto.dir } : {}) }]))
+        return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated, ...(task.auto.dir ? { dir: task.auto.dir } : {}), ...(task.title ? { title: task.title } : {}) }]))
       },
       get s() { return s },
       port: requestedPort,
@@ -3374,7 +3349,7 @@ const writeMessageState = (root: string, changed: MessageState, now: number, cla
   }
 }
 
-type ConnectionMeta = { project: string; title: string; folderDigest?: string }
+type ConnectionMeta = { project: string; title: string; updated: number; folderDigest?: string }
 
 const connectionMeta = (projects: readonly ProgressProject[]): Map<string, ConnectionMeta> => {
   const meta = new Map<string, ConnectionMeta>()
@@ -3385,6 +3360,7 @@ const connectionMeta = (projects: readonly ProgressProject[]): Map<string, Conne
       const entry: ConnectionMeta = {
         project: project.name || s.uncategorized,
         title: task.title || s.unnamed,
+        updated: task.auto.updated,
         ...(digest ? { folderDigest: digest } : {}),
       }
       meta.set(address(task.auto.agent, task.auto.session), entry)
@@ -3415,7 +3391,7 @@ const targetCandidates = (connections: readonly Connection[], meta: ReadonlyMap<
     .filter(one => one.expires > now)
     .map(connection => {
       const info = meta.get(address(connection.agent, connection.session))
-      return { connection, project: info?.project ?? '', title: info?.title ?? '' }
+      return { connection, project: info?.project ?? '', title: info?.title ?? '', ...(info ? { updated: info.updated } : {}) }
     })
 
 const fetchHubTargets = async (serverUrl: string): Promise<{ connections: Connection[]; mailboxes: Connection[] } | null> => {
@@ -3437,58 +3413,11 @@ const fetchHubTargets = async (serverUrl: string): Promise<{ connections: Connec
   }
 }
 
-type AuthenticatedSender =
-  | { kind: 'receiver'; box: Connection; title: string; source: string; secret: string }
-  | { kind: 'mcp'; box: Connection; title: string }
-
-const resolveSenderSession = async (
-  liveConnections: readonly Connection[],
-  mailboxes: readonly Connection[],
-  meta: ReadonlyMap<string, ConnectionMeta>,
-  now: number,
-): Promise<AuthenticatedSender | null> => {
-  const live = liveConnections.filter(box => box.expires > now)
-  const env = process.env
-  if (env.AGENT_BOARD_CONNECTION_ID && env.AGENT_BOARD_CONNECTION_SECRET) {
-    const matched = live.find(box => box.id === env.AGENT_BOARD_CONNECTION_ID)
-    const title = matched ? meta.get(address(matched.agent, matched.session))?.title ?? '' : ''
-    const box: Connection = matched ?? {
-      id: env.AGENT_BOARD_CONNECTION_ID,
-      agent: env.AGENT_BOARD_AGENT || 'unknown',
-      session: env.AGENT_BOARD_SESSION_ID || env.AGENT_BOARD_CONNECTION_ID,
-      surface: 'CLI',
-      turn: 'session',
-      expires: now + 60_000,
-    }
-    return { kind: 'receiver', box, title, source: env.AGENT_BOARD_CONNECTION_ID, secret: env.AGENT_BOARD_CONNECTION_SECRET }
-  }
-  if (
-    env.AGENT_BOARD_AGENT
-    && env.AGENT_BOARD_SESSION_ID
-    && env.AGENT_BOARD_HOST_PID === String(process.ppid)
-    && env.AGENT_BOARD_HOST_STARTED
-  ) {
-    const matched = mailboxes.filter(box => box.expires > now).find(box =>
-      box.agent === env.AGENT_BOARD_AGENT
-      && box.session === env.AGENT_BOARD_SESSION_ID
-      && (box.mcpLeaseUntil ?? 0) > now
-      && box.contested !== true
-      && box.mcpOwner === `${process.ppid}:${env.AGENT_BOARD_HOST_STARTED}`,
-    )
-    if (!matched) return null
-    const started = await processStart(process.ppid)
-    if (!started || started !== env.AGENT_BOARD_HOST_STARTED) return null
-    const title = meta.get(address(matched.agent, matched.session))?.title ?? ''
-    return { kind: 'mcp', box: matched, title }
-  }
-  return null
+const receiverCredentials = (): { source: string; secret: string } | null => {
+  const source = process.env.AGENT_BOARD_CONNECTION_ID
+  const secret = process.env.AGENT_BOARD_CONNECTION_SECRET
+  return source && secret ? { source, secret } : null
 }
-
-const isEligibleAckMessage = (one: Message, nonce: string, senderAddress?: string): boolean =>
-  one.nonce === nonce
-  && one.awaitsStart !== true
-  && (!isFinished(one) || (one.status === 'uncertain' && one.error === 'EXPIRED' && one.hasAccepted === true && one.to.startsWith('opencode:')))
-  && (senderAddress === undefined || one.to === senderAddress)
 
 const peerSendFailureNote = (code: string): string =>
   code === 'HOP_LIMIT' ? s.cliSendHopLimit(HOP_LIMIT)
@@ -3525,9 +3454,23 @@ const postMessageAction = async (serverUrl: string, action: string, payload: Rec
 const scrubCli = (text: string): string => redact(text, homeOrNone(), process.platform === 'win32')
 
 const runCliSend = async (): Promise<void> => {
+  if (hasFlag('--id') && flag('--id') === undefined) {
+    process.stderr.write(`${s.boardUsage}\n`)
+    process.exitCode = 1
+    return
+  }
   const { first: targetQuery, second: rawBody } = parsedCli.sendPair
   if (targetQuery === undefined || targetQuery.trim() === '' || rawBody === undefined || rawBody.trim() === '') {
     process.stderr.write(`${s.cliSendMissingTarget}\n`)
+    process.exitCode = 1
+    return
+  }
+  const rawId = flag('--id')
+  let id: string
+  try {
+    id = rawId === undefined ? randomBytes(16).toString('hex') : messageId(rawId)
+  } catch {
+    process.stderr.write(`${s.boardUsage}\n`)
     process.exitCode = 1
     return
   }
@@ -3540,8 +3483,6 @@ const runCliSend = async (): Promise<void> => {
   const meta = connectionMeta(projects)
   let claim: ReturnType<typeof claimMessageStore> | undefined
   try {
-    const rawId = flag('--id')
-    const id = rawId === undefined ? randomBytes(16).toString('hex') : messageId(rawId)
     let state = readMessageState(root, now)
     if (serverUrl === null && existsSync(root)) {
       ensurePrivateMessageFolder(root)
@@ -3551,11 +3492,10 @@ const runCliSend = async (): Promise<void> => {
     const liveConnections = hubTargets?.connections ?? []
     const liveMailboxes = hubTargets?.mailboxes ?? state.mailboxes ?? []
     const pool = mergedConnections(liveConnections, liveMailboxes, meta, now)
-    const sender = await resolveSenderSession(liveConnections, liveMailboxes, meta, now)
-    if (sender?.kind === 'receiver' && serverUrl === null) throw new Error('CONNECTOR_NOT_CONNECTED')
-    const senderAddress = sender === null || (sender.kind === 'receiver' && !hubTargets?.connections.some(c => c.id === sender.source))
-      ? undefined
-      : address(sender.box.agent, sender.box.session)
+    const creds = receiverCredentials()
+    if (creds !== null && serverUrl === null) throw new Error('CONNECTOR_NOT_CONNECTED')
+    const matchedSender = creds === null ? undefined : liveConnections.find(box => box.id === creds.source && box.expires > now)
+    const senderAddress = matchedSender ? address(matchedSender.agent, matchedSender.session) : undefined
     const resolution = resolveSendTarget(targetQuery, targetCandidates(pool, meta, now), now, s, senderAddress)
     if (resolution.kind === 'none') {
       process.stderr.write(`${s.cliSendOffline}\n`)
@@ -3563,29 +3503,26 @@ const runCliSend = async (): Promise<void> => {
       return
     }
     if (resolution.kind === 'ambiguous') {
-      const lines = resolution.candidates.map(one => `  ${formatSendCandidate(one, s, scrubCli)}`)
+      const lines = resolution.candidates.map(one => `  ${formatSendCandidate(one, now, s, scrubCli)}`)
       process.stderr.write(`${s.cliSendAmbiguous(targetQuery)}\n${lines.join('\n')}\n`)
       process.exitCode = 1
       return
     }
     const target = resolution.candidate.connection
-    const senderDigest = senderAddress ? (sender?.box.folderDigest ?? workspaceDigest(process.cwd())) : workspaceDigest(process.cwd())
+    const senderDigest = matchedSender?.folderDigest ?? workspaceDigest(process.cwd())
     if (!isSameWorkspaceAllowed(senderDigest, target.folderDigest, isCrossProject)) {
       process.stderr.write(`${s.cliSendCrossProject}\n`)
       process.exitCode = 1
       return
     }
     const text = rawBody.trim()
-    const senderTitle = senderAddress ? sanitizeSenderTitle(sender?.title ?? '', scrubCli) : ''
-    const from = senderAddress ?? 'unverified'
     if (serverUrl !== null) {
       const sent = await postMessageAction(serverUrl, 'peer-send', {
         agent: target.agent,
         session: target.session,
         text,
         id,
-        ...(sender?.kind === 'receiver' ? { source: sender.source, secret: sender.secret } : { from }),
-        ...(senderTitle === '' ? {} : { senderTitle }),
+        ...(creds !== null ? { source: creds.source, secret: creds.secret } : { from: 'unverified' }),
         folderDigest: senderDigest ?? '',
         ...(isCrossProject ? { crossProject: true } : {}),
       })
@@ -3599,7 +3536,7 @@ const runCliSend = async (): Promise<void> => {
         process.exitCode = 1
         return
       }
-      process.stdout.write(`${s.cliSendSent(formatSendCandidate(resolution.candidate, s, scrubCli))}\n`)
+      process.stdout.write(`${s.cliSendSent(formatSendCandidate(resolution.candidate, now, s, scrubCli))}\n`)
       return
     }
     if (claim === undefined) {
@@ -3625,128 +3562,12 @@ const runCliSend = async (): Promise<void> => {
       scope: 'mailbox',
       expires: now + 60_000,
     }
-    const queued = queueMessage(state, { id, target: existing?.target ?? deliveryTarget.id, turn: existing?.turn ?? deliveryTarget.turn, text }, from, deliveryTarget, now, 'local', randomBytes(16).toString('hex'), undefined, undefined, senderTitle || undefined)
+    const queued = queueMessage(state, { id, target: existing?.target ?? deliveryTarget.id, turn: existing?.turn ?? deliveryTarget.turn, text }, 'unverified', deliveryTarget, now, 'local', randomBytes(16).toString('hex'))
     writeMessageState(root, queued.state, now, claim)
-    process.stdout.write(`${s.cliSendSent(formatSendCandidate(resolution.candidate, s, scrubCli))}\n`)
+    process.stdout.write(`${s.cliSendSent(formatSendCandidate(resolution.candidate, now, s, scrubCli))}\n`)
   } catch (error) {
     const code = error instanceof Error ? error.message : 'UNKNOWN'
     process.stderr.write(`${peerSendFailureNote(code)}\n`)
-    process.exitCode = 1
-  } finally {
-    try { claim?.release() } catch {}
-  }
-}
-
-const runCliMessageAck = async (): Promise<void> => {
-  const { first: rawNonce, second: rawSummary } = parsedCli.ackPair
-  const nonce = (rawNonce ?? '').trim().toLowerCase()
-  if (!/^[0-9a-f]{6}$/.test(nonce)) {
-    process.stderr.write(`${s.cliSendAckInvalid}\n`)
-    process.exitCode = 1
-    return
-  }
-  const summary = (rawSummary ?? '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim()
-  const reply = (summary === '' ? `ACK ${nonce}` : `ACK ${nonce} ${summary}`).slice(0, ACK_MAX)
-  const now = Date.now()
-  const root = messagesDirectory()
-  const serverUrl = await runningStoreServer(root)
-  const hubTargets = serverUrl === null ? null : await fetchHubTargets(serverUrl)
-  const projects = parseProgress(read(path))
-  const meta = connectionMeta(projects)
-  let claim: ReturnType<typeof claimMessageStore> | undefined
-  try {
-    let state = readMessageState(root, now)
-    if (serverUrl === null && existsSync(root)) {
-      ensurePrivateMessageFolder(root)
-      claim = claimMessageStore(root)
-      state = readMessageState(root, now)
-    }
-    const liveConnections = hubTargets?.connections ?? []
-    const liveMailboxes = hubTargets?.mailboxes ?? state.mailboxes ?? []
-    const sender = await resolveSenderSession(liveConnections, liveMailboxes, meta, now)
-    const senderAddress = sender === null || (sender.kind === 'receiver' && !hubTargets?.connections.some(c => c.id === sender.source))
-      ? undefined
-      : address(sender.box.agent, sender.box.session)
-    const open = state.messages.filter(one => isEligibleAckMessage(one, nonce, senderAddress))
-    if (open.length !== 1) {
-      process.stderr.write(`${s.cliSendAckNotFound}\n`)
-      process.exitCode = 1
-      return
-    }
-    const found = open[0]!
-    const targetAgent = agentOf(found.to)
-    const targetSession = sessionOfAddress(found.to)
-    if (!isMailboxTarget(found.target)) {
-      if (serverUrl === null || sender?.kind !== 'receiver' || sender.source !== found.target) {
-        process.stderr.write(`${s.cliSendAckNotFound}\n`)
-        process.exitCode = 1
-        return
-      }
-      const acked = await postMessageAction(serverUrl, 'receipt', {
-        connection: sender.source,
-        secret: sender.secret,
-        id: found.id,
-        nonce,
-        status: 'acknowledged',
-        reply,
-      })
-      if (acked.kind !== 'ok') {
-        const msg = acked.kind === 'uncertain' ? s.cliSendRefused('RESPONSE_LOST')
-          : ['TARGET_MISMATCH', 'NOT_FOUND', 'CLAIM_REQUIRED', 'INVALID_RECEIPT', 'CONNECTOR_NOT_CONNECTED'].includes(acked.code) ? s.cliSendAckNotFound
-            : peerSendFailureNote(acked.code)
-        process.stderr.write(`${msg}\n`)
-        process.exitCode = 1
-        return
-      }
-      process.stdout.write(`${s.cliSendAcked}\n`)
-      return
-    }
-    const mailbox = (hubTargets?.mailboxes ?? state.mailboxes ?? []).find(one => one.id === found.target)
-    if ((mailbox?.mcpLeaseUntil ?? 0) > now && senderAddress !== found.to) {
-      process.stderr.write(`${s.cliSendAckNotFound}\n`)
-      process.exitCode = 1
-      return
-    }
-    if (serverUrl !== null) {
-      const acked = await postMessageAction(serverUrl, 'mailbox-ack', {
-        agent: targetAgent,
-        session: targetSession,
-        id: found.id,
-        nonce,
-        reply,
-      })
-      if (acked.kind !== 'ok') {
-        const msg = acked.kind === 'uncertain' ? s.cliSendRefused('RESPONSE_LOST')
-          : ['TARGET_MISMATCH', 'NOT_FOUND', 'CLAIM_REQUIRED', 'OFFLINE'].includes(acked.code) ? s.cliSendAckNotFound
-            : peerSendFailureNote(acked.code)
-        process.stderr.write(`${msg}\n`)
-        process.exitCode = 1
-        return
-      }
-      process.stdout.write(`${s.cliSendAcked}\n`)
-      return
-    }
-    if (claim === undefined) {
-      process.stderr.write(`${s.cliSendAckNotFound}\n`)
-      process.exitCode = 1
-      return
-    }
-    const target: Connection = state.mailboxes?.find(one => one.id === found.target) ?? {
-      id: found.target,
-      agent: targetAgent,
-      session: targetSession,
-      surface: found.surface ?? 'CLI',
-      turn: found.turn,
-      scope: 'mailbox',
-      expires: now + 60_000,
-    }
-    if (hasLiveStoreLock(root)) throw new Error('MESSAGE_STORE_IN_USE')
-    const next = messageReceipt(state, target, { id: found.id, nonce, status: 'acknowledged', reply }, now)
-    writeMessageState(root, next, now, claim)
-    process.stdout.write(`${s.cliSendAcked}\n`)
-  } catch (error) {
-    const code = error instanceof Error ? error.message : 'UNKNOWN'
-    process.stderr.write(`${['TARGET_MISMATCH', 'NOT_FOUND', 'CLAIM_REQUIRED'].includes(code) ? s.cliSendAckNotFound : peerSendFailureNote(code)}\n`)
     process.exitCode = 1
   } finally {
     try { claim?.release() } catch {}
@@ -3772,6 +3593,11 @@ const run = async (): Promise<void> => {
       return
     }
   }
+  if (hasFlag('--id') && flag('--id') === undefined && !hasFlag('--mailbox')) {
+    process.stderr.write(`${s.boardUsage}\n`)
+    process.exitCode = 1
+    return
+  }
   // Setup keeps its own --json protocol; a board read wins over every action flag.
   if (isJsonBoard) {
     json()
@@ -3783,10 +3609,6 @@ const run = async (): Promise<void> => {
   }
   if (hasFlag('--send')) {
     await runCliSend()
-    return
-  }
-  if (hasFlag('--message-ack')) {
-    await runCliMessageAck()
     return
   }
   if (hasFlag('--status')) {

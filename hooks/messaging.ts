@@ -322,7 +322,7 @@ export const deliveryText = (message: Message, s: Strings = ZH_TW): string => [
 
 // Observation is not an authorization token. Only an exact, newer progress report
 // satisfies a handoff; a transport acceptance or even an ACK cannot do so.
-export type ProgressBinding = { agent: string; session: string; updated: number; dir?: string | null }
+export type ProgressBinding = { agent: string; session: string; updated: number; dir?: string | null; title?: string | null }
 export type SessionExpectation = {
   id: string; agent: string; session: string; surface: string
   created: number; deadline: number; baseline: number; observed: number | null

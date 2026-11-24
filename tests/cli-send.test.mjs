@@ -1,794 +1,1207 @@
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { createServer as createHttpServer } from 'node:http'
+import { execFileSync, spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { registerHooks } from 'node:module'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import test from 'node:test'
+import { hostname, tmpdir } from 'node:os'
+import { dirname, join, resolve } from 'node:path'
+import { after, test } from 'node:test'
 
-registerHooks({
-  resolve(specifier, context, next) {
-    try {
-      return next(specifier, context)
-    } catch (error) {
-      if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
-      return next(`${specifier}.ts`, context)
-    }
-  },
-})
+const resolveLocal = (specifier, context, next) => {
+  try {
+    return next(specifier, context)
+  } catch (error) {
+    if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+    return next(`${specifier}.ts`, context)
+  }
+}
+registerHooks({ resolve: resolveLocal })
 
 const { BOARD_SCRIPT } = await import('../hooks/board-script.ts')
-const { enrollMailbox, enrollMcp, mailboxId } = await import('../hooks/hook-messages.ts')
-const { address, claimMessages, deliveryText, queueMessage, textHash } = await import('../hooks/messaging.ts')
-const { parseMessageStore } = await import('../hooks/queued-store.ts')
-const { ZH_TW } = await import('../hooks/i18n.ts')
 const { EN } = await import('../hooks/strings-en.ts')
-const { agentLabel } = await import('../hooks/strings.ts')
+const { ZH_CN } = await import('../hooks/strings-zh-cn.ts')
+const { ZH_TW } = await import('../hooks/i18n.ts')
+const { addressFileName } = await import('../hooks/receiver.ts')
+const {
+  address,
+  claimMessages,
+  deliveryText,
+  HOP_LIMIT,
+  PEER_PAIR_BUDGET,
+  queueMessage,
+  textHash,
+} = await import('../hooks/messaging.ts')
+const { enrollMailbox, mailboxId } = await import('../hooks/hook-messages.ts')
+const { parseMessageStore } = await import('../hooks/queued-store.ts')
+const { createMessaging } = await import('../scripts/board-messaging.ts')
 const { folderIdentity } = await import('../scripts/folder-identity.ts')
-const { processStart } = await import('../scripts/board-mcp.ts')
-const { defaultMessagesDirectory, writePrivateRuntimeFile } = await import('../scripts/runtime-folder.ts')
+const { isPrivateDacl, runningAccount } = await import('../scripts/private-folder.ts')
+const {
+  defaultMessagesDirectory,
+  privateRuntimeFolder,
+  writePrivateRuntimeFile,
+} = await import('../scripts/runtime-folder.ts')
 
-const MACHINE_ENV_KEYS = ['PATH', 'SystemRoot', 'ComSpec', 'PATHEXT', 'WINDIR', 'NUMBER_OF_PROCESSORS', 'OS']
-
-const testWorkspaceDigest = dir => {
-  const id = folderIdentity(dir)
-  return id?.folderCanonicalDigest ?? id?.folderDigest
+const workspaceDigestOf = dir => {
+  const identity = folderIdentity(dir)
+  return identity.folderCanonicalDigest ?? identity.folderDigest
 }
 
-const cleanEnv = (root, extra = {}) => {
-  const run = join(root, 'run')
-  const home = join(root, 'home')
-  const tmp = join(root, 'tmp')
-  mkdirSync(join(home, '.cache'), { recursive: true })
-  mkdirSync(run, { recursive: true, mode: 0o700 })
-  mkdirSync(tmp, { recursive: true })
-  if (process.platform === 'win32') mkdirSync(join(run, 'agent-board'), { recursive: true })
-  const base = Object.fromEntries(MACHINE_ENV_KEYS.filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]]))
-  return {
-    ...base,
+const recordedRoutes = JSON.parse(readFileSync(new URL('./helpers/recorded-routes.json', import.meta.url), 'utf8'))
+
+const tempRoot = (prefix = 'ab-cli-send-') => mkdtempSync(join(tmpdir(), prefix))
+
+const isoAgo = (now, deltaMs = 60_000) => new Date(now - deltaMs).toISOString()
+
+const autoBlock = ({ agent, session, project, title, dir, updatedIso, state = 'working', step = '- [~] Active check' }) =>
+  `## ${project}\n<!-- auto session=${session} agent=${agent} state=${state} updated=${updatedIso}${dir ? ` dir=${dir}` : ''} -->\n### ${title}\n${step}\n<!-- /auto session=${session} -->\n`
+
+let sharedWorkRoot
+const getSharedWorkRoot = () => {
+  if (!sharedWorkRoot) sharedWorkRoot = tempRoot('ab-cli-shared-')
+  return sharedWorkRoot
+}
+
+let sharedRuntimeDir
+const getSharedRuntimeDir = () => {
+  if (!sharedRuntimeDir) {
+    sharedRuntimeDir = join(getSharedWorkRoot(), 'runtime')
+    mkdirSync(sharedRuntimeDir, { recursive: true, mode: 0o700 })
+    const cacheDir = process.platform === 'win32' ? join(sharedRuntimeDir, 'agent-board') : sharedRuntimeDir
+    mkdirSync(cacheDir, { recursive: true, mode: 0o700 })
+    privateRuntimeFolder(cacheDir)
+  }
+  return sharedRuntimeDir
+}
+
+let sharedScriptPath
+const getSharedBoardScript = () => {
+  if (!sharedScriptPath) {
+    sharedScriptPath = join(getSharedWorkRoot(), 'agent-board.mjs')
+    writeFileSync(sharedScriptPath, BOARD_SCRIPT)
+  }
+  return sharedScriptPath
+}
+
+after(() => {
+  if (sharedWorkRoot) {
+    rmSync(sharedWorkRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+    sharedWorkRoot = undefined
+    sharedRuntimeDir = undefined
+    sharedScriptPath = undefined
+  }
+})
+
+const baseChildEnv = (root, extra = {}, omit = []) => {
+  const home = extra.HOME ?? join(root, 'home')
+  const runtimeDir = extra.XDG_RUNTIME_DIR ?? sharedRuntimeDir ?? join(root, 'runtime')
+  const env = {
+    ...process.env,
+    AGENT_BOARD_TEST_PID: String(process.pid),
     HOME: home,
     USERPROFILE: home,
-    APPDATA: join(home, 'AppData', 'Roaming'),
-    LOCALAPPDATA: join(home, 'AppData', 'Local'),
-    XDG_CONFIG_HOME: join(home, '.config'),
-    XDG_DATA_HOME: join(home, '.local', 'share'),
-    XDG_CACHE_HOME: join(home, '.cache'),
-    XDG_RUNTIME_DIR: run,
-    TEMP: tmp,
-    TMP: tmp,
-    TMPDIR: tmp,
-    CLAUDE_PROGRESS_FILE: '',
-    AGENT_BOARD_TEST_PID: String(process.pid),
-    NO_COLOR: '1',
-    CI: '',
+    CLAUDE_CONFIG_DIR: join(home, '.claude'),
+    CODEX_HOME: join(home, '.codex'),
+    XDG_RUNTIME_DIR: runtimeDir,
+    AGENT_BOARD_AGENT: '',
+    AGENT_BOARD_SESSION_ID: '',
+    AGENT_BOARD_CONNECTION_ID: '',
+    AGENT_BOARD_CONNECTION_SECRET: '',
+    AGENT_BOARD_HOST_PID: '',
+    AGENT_BOARD_HOST_STARTED: '',
+    CODEX_THREAD_ID: '',
+    CLAUDE_SESSION_ID: '',
     ...extra,
   }
+  for (const key of omit) delete env[key]
+  return env
 }
 
-const block = (id, agent, state, project, title, dir, updatedMs = Date.now()) =>
-  `## ${project}\n<!-- auto session=${id} agent=${agent} dir=${dir} state=${state} updated=${new Date(updatedMs).toISOString()} -->\n### ${title}\n- [~] Active step\n<!-- /auto session=${id} -->\n`
-
-const writeStore = (messagesDir, state) => {
-  mkdirSync(messagesDir, { recursive: true })
-  writeFileSync(join(messagesDir, 'messages.json'), JSON.stringify({ version: 2, ...state }))
-}
-
-const readStore = (messagesDir, now = Date.now()) => parseMessageStore(readFileSync(join(messagesDir, 'messages.json'), 'utf8'), now)
-
-const makeMailbox = (state, agent, session, dir, now) => {
-  const next = enrollMailbox(state, agent, session, 'CLI', now, 600_000)
-  const digest = testWorkspaceDigest(dir)
-  return {
-    ...next,
-    mailboxes: (next.mailboxes ?? []).map(box => box.id === mailboxId(agent, session) && digest
-      ? { ...box, folderDigest: digest }
-      : box),
+const runCli = async (root, cliArgs, { cwd = root, env = {}, omit = [], timeoutMs = 15_000 } = {}) => {
+  const scriptPath = getSharedBoardScript()
+  const child = spawn(
+    process.execPath,
+    [scriptPath, ...cliArgs],
+    { cwd, env: baseChildEnv(root, env, omit), stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
+  )
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const timer = setTimeout(() => {
+    try { child.kill() } catch {}
+  }, timeoutMs)
+  try {
+    const [status] = await once(child, 'exit')
+    return { status: status ?? 1, stdout, stderr }
+  } finally {
+    clearTimeout(timer)
+    if (child.exitCode === null) {
+      try { child.kill() } catch {}
+      await once(child, 'exit').catch(() => {})
+    }
   }
 }
 
-const makeMcpMailbox = (state, agent, session, owner, dir, now) =>
-  enrollMcp(state, agent, session, 'mcp', owner, testWorkspaceDigest(dir), now + 600_000, now, 600_000)
-
-const mcpEnvFor = (agent, session, started) => ({
-  AGENT_BOARD_AGENT: agent,
-  AGENT_BOARD_SESSION_ID: session,
-  AGENT_BOARD_HOST_PID: String(process.pid),
-  AGENT_BOARD_HOST_STARTED: started,
-})
-
-let cachedHostStarted
-const ownProcessStart = async () => {
-  if (cachedHostStarted === undefined) cachedHostStarted = await processStart(process.pid)
-  return cachedHostStarted
-}
-
-const runCli = (root, args, extraEnv = {}, cwd = undefined) =>
-  new Promise((resolve, reject) => {
-    const script = join(root, 'agent-board.mjs')
-    if (!existsSync(script)) writeFileSync(script, BOARD_SCRIPT)
-    execFile(process.execPath, [script, ...args], {
-      env: cleanEnv(root, extraEnv),
-      cwd,
-      encoding: 'utf8',
-      timeout: 30_000,
-      windowsHide: true,
-    }, (error, stdout, stderr) => {
-      if (error && typeof error.code !== 'number') return reject(error)
-      resolve({ status: error ? error.code : 0, stdout, stderr })
-    })
+const postJson = async (url, token, action, payload) => {
+  const base = new URL(url)
+  const res = await fetch(`http://127.0.0.1:${base.port}/api/messages/${action}`, {
+    method: 'POST',
+    headers: { 'x-board-token': token, 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
   })
-
-const removeDir = async dir => {
-  const deadline = Date.now() + 8_000
-  for (;;) {
-    try {
-      rmSync(dir, { recursive: true, force: true })
-      return
-    } catch (error) {
-      if (!['EPERM', 'EBUSY', 'ENOTEMPTY'].includes(error?.code) || Date.now() >= deadline) throw error
-      await new Promise(done => setTimeout(done, 100))
-    }
-  }
+  const data = await res.json().catch(() => ({}))
+  return { status: res.status, data }
 }
 
-test('--send refuses an ambiguous target and lists ranked candidates without session ids', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'cli-send-ambig-'))
-  try {
-    const now = Date.now()
-    const workspace = join(root, 'workspace')
-    mkdirSync(workspace, { recursive: true })
-    const progress = join(root, 'progress.md')
-    const messagesDir = join(root, 'messages')
-    const winSecretPath = 'C:\\secret\\repo\\auth.ts'
-    const unixSecretPath = '/Users/alice/secret/app.ts'
-    writeFileSync(progress, [
-      '# Progress',
-      block('sess-alpha-111', 'codex', 'working', 'Alpha', `Review ${winSecretPath}`, workspace, now),
-      block('sess-beta-222', 'claude', 'working', 'Build', 'Release helper', workspace, now),
-      block('sess-gamma-333', 'gemini', 'waiting', 'Gamma', `Check ${unixSecretPath}`, workspace, now),
-    ].join('\n'))
-    let store = { messages: [], mailboxes: [] }
-    store = makeMailbox(store, 'codex', 'sess-alpha-111', workspace, now)
-    store = makeMailbox(store, 'claude', 'sess-beta-222', workspace, now)
-    store = makeMailbox(store, 'gemini', 'sess-gamma-333', workspace, now)
-    writeStore(messagesDir, store)
+const addressFolderFor = runtimeDir => (
+  process.platform === 'win32' ? join(runtimeDir, 'agent-board') : runtimeDir
+)
 
-    const ambig = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--send', 'a', 'Check status'], {}, workspace)
-    assert.equal(ambig.status, 1, `expected ambiguous target refusal:\nstdout=${ambig.stdout}\nstderr=${ambig.stderr}`)
-    const combined = `${ambig.stdout}\n${ambig.stderr}`
-    assert.ok(combined.includes('Alpha') && combined.includes('Gamma'), `expected candidates listed:\n${combined}`)
-    for (const secret of ['sess-alpha-111', 'sess-beta-222', 'sess-gamma-333', workspace, messagesDir, winSecretPath, unixSecretPath]) {
-      assert.equal(combined.includes(secret), false, `must not expose ${secret}`)
+const startHub = async (root, {
+  progressPath = join(root, 'progress.md'),
+  messagesDir = join(root, 'messages'),
+  runtimeDir = getSharedRuntimeDir(),
+  reportsOf = () => [],
+  gate = { routes: recordedRoutes, stateOfSession: () => 'working' },
+} = {}) => {
+  mkdirSync(messagesDir, { recursive: true })
+  const cacheDir = addressFolderFor(runtimeDir)
+  const store = createMessaging(messagesDir, false, gate)
+  const token = 'test-hub-token'
+  const server = createServer(async (req, res) => {
+    const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1')
+    if (req.headers['x-board-token'] !== token) {
+      res.writeHead(403, { 'content-type': 'application/json' })
+      res.end('{}')
+      return
     }
-
-    // Exact agent/project name "Build" outranks partial matches and sends cleanly.
-    const exact = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--send', 'Build', 'Check exact match'], {}, workspace)
-    assert.equal(exact.status, 0, `${exact.stdout}\n${exact.stderr}`)
-    const saved = readStore(messagesDir)
-    assert.equal(saved.messages.length, 1)
-    assert.equal(saved.messages[0].to, 'claude:sess-beta-222')
-  } finally {
-    await removeDir(root)
-  }
-})
-
-test('--send labels an authenticated peer session with its agent and task title and marks unauthenticated callers unverified', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'cli-send-auth-'))
-  try {
-    const now = Date.now()
-    const workspace = join(root, 'workspace')
-    mkdirSync(workspace, { recursive: true })
-    const progress = join(root, 'progress.md')
-    const messagesDir = join(root, 'messages')
-    const hostStarted = await ownProcessStart()
-    assert.ok(hostStarted, 'expected host processStart timestamp')
-    writeFileSync(progress, [
-      '# Progress',
-      block('sess-sender-444', 'codex', 'working', 'Workspace', 'Implement API endpoint', workspace, now),
-      block('sess-target-555', 'claude', 'working', 'Workspace', 'Write integration tests', workspace, now),
-    ].join('\n'))
-    let store = { messages: [], mailboxes: [] }
-    store = makeMcpMailbox(store, 'codex', 'sess-sender-444', `${process.pid}:${hostStarted}`, workspace, now)
-    store = makeMailbox(store, 'claude', 'sess-target-555', workspace, now)
-    writeStore(messagesDir, store)
-
-    const senderEnv = mcpEnvFor('codex', 'sess-sender-444', hostStarted)
-    const peer = await runCli(root, [
-      '--progress-file', progress,
-      '--messages-dir', messagesDir,
-      '--lang', 'en',
-      '--send', 'claude', 'Schema is ready',
-    ], senderEnv, workspace)
-    assert.equal(peer.status, 0, `${peer.stdout}\n${peer.stderr}`)
-
-    let saved = readStore(messagesDir)
-    assert.equal(saved.messages.length, 1)
-    assert.equal(saved.messages[0].from, 'codex:sess-sender-444')
-    assert.equal(saved.messages[0].text, 'Schema is ready')
-    assert.equal(saved.messages[0].senderTitle, 'Implement API endpoint')
-    const claimedPeer = claimMessages(saved, saved.mailboxes.find(b => b.session === 'sess-target-555'), Date.now(), 'a1b2c3')
-    assert.equal(claimedPeer.messages.length, 1)
-    const deliveredPeer = deliveryText(claimedPeer.messages[0], EN)
-    const lines = deliveredPeer.split('\n')
-    assert.match(lines[0], /Codex, task "Implement API endpoint"/)
-    assert.equal(lines[2], EN.cliSendNoReplyLoop)
-    const fenceOpen = lines.findIndex(line => line.startsWith('<<<AB-'))
-    assert.ok(fenceOpen >= 3, deliveredPeer)
-    assert.equal(lines[fenceOpen + 1], 'Schema is ready')
-
-    saved = {
-      ...claimedPeer.state,
-      messages: claimedPeer.state.messages.map(m => ({ ...m, status: 'acknowledged', text: '', reply: `ACK ${m.nonce}` })),
-    }
-    writeStore(messagesDir, saved)
-
-    const zhPeer = await runCli(root, [
-      '--progress-file', progress,
-      '--messages-dir', messagesDir,
-      '--lang', 'zh-TW',
-      '--send', 'claude', '綱要已就緒',
-    ], senderEnv, workspace)
-    assert.equal(zhPeer.status, 0, `${zhPeer.stdout}\n${zhPeer.stderr}`)
-    saved = readStore(messagesDir)
-    const claimedZh = claimMessages(saved, saved.mailboxes.find(b => b.session === 'sess-target-555'), Date.now(), 'c3d4e5')
-    assert.equal(claimedZh.messages.length, 1)
-    const deliveredZh = deliveryText(claimedZh.messages[0], ZH_TW)
-    assert.ok(deliveredZh.split('\n')[0].includes(ZH_TW.cliSendSenderWithTitle(agentLabel('codex', ZH_TW), 'Implement API endpoint')), deliveredZh)
-    assert.ok(deliveredZh.split('\n').slice(0, 4).includes(ZH_TW.cliSendNoReplyLoop), deliveredZh)
-
-    saved = {
-      ...claimedZh.state,
-      messages: claimedZh.state.messages.map(m => ({ ...m, status: 'acknowledged', text: '', reply: `ACK ${m.nonce}` })),
-    }
-    writeStore(messagesDir, saved)
-
-    // Supplying only CODEX_THREAD_ID without verified host ownership/secret must be treated as unverified.
-    const spoofed = await runCli(root, [
-      '--progress-file', progress,
-      '--messages-dir', messagesDir,
-      '--lang', 'en',
-      '--send', 'claude', 'Spoofed caller check',
-    ], { CODEX_THREAD_ID: 'sess-sender-444' }, workspace)
-    assert.equal(spoofed.status, 0, `${spoofed.stdout}\n${spoofed.stderr}`)
-
-    saved = readStore(messagesDir)
-    const unverifiedMsg = saved.messages.at(-1)
-    assert.equal(unverifiedMsg.from, 'unverified')
-    assert.equal(unverifiedMsg.senderTitle, undefined)
-    const claimedAnon = claimMessages(saved, saved.mailboxes.find(b => b.session === 'sess-target-555'), Date.now(), 'd4e5f6')
-    const deliveredAnon = deliveryText(claimedAnon.messages[0], EN)
-    assert.ok(deliveredAnon.split('\n')[0].includes('(unverified)'), deliveredAnon)
-    assert.ok(!deliveredAnon.includes('Implement API endpoint'), deliveredAnon)
-    assert.ok(deliveredAnon.split('\n').slice(0, 4).includes(EN.cliSendNoReplyLoop), deliveredAnon)
-  } finally {
-    await removeDir(root)
-  }
-})
-
-test('--send stops a reply loop at HOP_LIMIT and tells the sender why', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'cli-send-hop-'))
-  try {
-    const now = Date.now()
-    const workspace = join(root, 'workspace')
-    mkdirSync(workspace, { recursive: true })
-    const progress = join(root, 'progress.md')
-    const messagesDir = join(root, 'messages')
-    const hostStarted = await ownProcessStart()
-    assert.ok(hostStarted, 'expected host processStart timestamp')
-    writeFileSync(progress, [
-      '# Progress',
-      block('sess-hop-a', 'codex', 'working', 'Workspace', 'Service A', workspace, now),
-      block('sess-hop-b', 'claude', 'working', 'Workspace', 'Service B', workspace, now),
-    ].join('\n'))
-    let store = { messages: [], mailboxes: [] }
-    store = makeMcpMailbox(store, 'codex', 'sess-hop-a', `${process.pid}:${hostStarted}`, workspace, now)
-    store = makeMcpMailbox(store, 'claude', 'sess-hop-b', `${process.pid}:${hostStarted}`, workspace, now)
-    writeStore(messagesDir, store)
-
-    // Hop 1: A -> B
-    const hop1 = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--send', 'claude', 'Hop 1'], mcpEnvFor('codex', 'sess-hop-a', hostStarted), workspace)
-    assert.equal(hop1.status, 0, `${hop1.stdout}\n${hop1.stderr}`)
-
-    let saved = readStore(messagesDir)
-    const claimB = claimMessages(saved, saved.mailboxes.find(b => b.session === 'sess-hop-b'), Date.now(), '111aaa')
-    assert.equal(claimB.messages[0].hops, 1)
-    writeStore(messagesDir, { ...claimB.state, messages: claimB.state.messages.map(m => ({ ...m, status: 'acknowledged', text: '', reply: `ACK ${m.nonce}` })) })
-
-    // Hop 2: B -> A
-    const hop2 = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--send', 'codex', 'Hop 2'], mcpEnvFor('claude', 'sess-hop-b', hostStarted), workspace)
-    assert.equal(hop2.status, 0, `${hop2.stdout}\n${hop2.stderr}`)
-
-    saved = readStore(messagesDir)
-    const claimA = claimMessages(saved, saved.mailboxes.find(b => b.session === 'sess-hop-a'), Date.now(), '222bbb')
-    assert.equal(claimA.messages[0].hops, 2)
-    writeStore(messagesDir, { ...claimA.state, messages: claimA.state.messages.map(m => ({ ...m, status: 'acknowledged', text: '', reply: `ACK ${m.nonce}` })) })
-
-    // Hop 3 (> HOP_LIMIT = 2): A -> B must refuse with clear reason and enqueue nothing.
-    const hop3 = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--send', 'claude', 'Hop 3'], mcpEnvFor('codex', 'sess-hop-a', hostStarted), workspace)
-    assert.equal(hop3.status, 1, `expected HOP_LIMIT refusal:\nstdout=${hop3.stdout}\nstderr=${hop3.stderr}`)
-    const out = `${hop3.stdout}\n${hop3.stderr}`
-    assert.ok(/hop|limit|loop/i.test(out), `expected localized HOP_LIMIT reason:\n${out}`)
-    assert.equal(readStore(messagesDir).messages.length, 2)
-  } finally {
-    await removeDir(root)
-  }
-})
-
-test('--send refuses cross-project agent sends unless --cross-project is given', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'cli-send-cross-'))
-  try {
-    const now = Date.now()
-    const dirOne = join(root, 'repo-one')
-    const dirTwo = join(root, 'repo-two')
-    mkdirSync(dirOne, { recursive: true })
-    mkdirSync(dirTwo, { recursive: true })
-    const progress = join(root, 'progress.md')
-    const messagesDir = join(root, 'messages')
-    writeFileSync(progress, [
-      '# Progress',
-      block('sess-one-111', 'codex', 'working', 'RepoOne', 'API work', dirOne, now),
-      block('sess-two-222', 'claude', 'working', 'RepoTwo', 'Frontend work', dirTwo, now),
-    ].join('\n'))
-    let store = { messages: [], mailboxes: [] }
-    store = makeMailbox(store, 'codex', 'sess-one-111', dirOne, now)
-    store = makeMailbox(store, 'claude', 'sess-two-222', dirTwo, now)
-    writeStore(messagesDir, store)
-
-    const refused = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--send', 'claude', 'Cross project ping'], {}, dirOne)
-    assert.equal(refused.status, 1, `expected cross-project refusal:\n${refused.stdout}\n${refused.stderr}`)
-    const out = `${refused.stdout}\n${refused.stderr}`
-    assert.ok(/--cross-project|workspace|project|folder/i.test(out), out)
-    assert.equal(readStore(messagesDir).messages.length, 0)
-
-    const allowed = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--cross-project', '--send', 'claude', 'Explicit cross project ping'], {}, dirOne)
-    assert.equal(allowed.status, 0, `${allowed.stdout}\n${allowed.stderr}`)
-
-    // Sending literal "--json" (directly or after "--") sends the message rather than triggering --json board output.
-    let saved = readStore(messagesDir)
-    assert.equal(saved.messages.length, 1)
-    assert.equal(saved.messages[0].to, 'claude:sess-two-222')
-    writeStore(messagesDir, { ...saved, messages: saved.messages.map(m => ({ ...m, status: 'acknowledged', text: '', reply: 'ACK' })) })
-
-    const sendDashJson = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--cross-project', '--send', 'claude', '--json'], {}, dirOne)
-    assert.equal(sendDashJson.status, 0, `${sendDashJson.stdout}\n${sendDashJson.stderr}`)
-    assert.equal(sendDashJson.stdout.trim().startsWith('{'), false, sendDashJson.stdout)
-    saved = readStore(messagesDir)
-    assert.equal(saved.messages.at(-1)?.text, '--json')
-
-    writeStore(messagesDir, { ...saved, messages: saved.messages.map(m => ({ ...m, status: 'acknowledged', text: '', reply: 'ACK' })) })
-    const sendDoubleDashJson = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--cross-project', '--send', 'claude', '--', '--json'], {}, dirOne)
-    assert.equal(sendDoubleDashJson.status, 0, `${sendDoubleDashJson.stdout}\n${sendDoubleDashJson.stderr}`)
-    assert.equal(sendDoubleDashJson.stdout.trim().startsWith('{'), false, sendDoubleDashJson.stdout)
-    assert.equal(readStore(messagesDir).messages.at(-1)?.text, '--json')
-  } finally {
-    await removeDir(root)
-  }
-})
-
-test('--message-ack upgrades an open claimed message to acknowledged without --serve running', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'cli-send-ack-'))
-  try {
-    const now = Date.now()
-    const workspace = join(root, 'workspace')
-    mkdirSync(workspace, { recursive: true })
-    const progress = join(root, 'progress.md')
-    const messagesDir = join(root, 'messages')
-    writeFileSync(progress, [
-      '# Progress',
-      block('sess-ack-1', 'codex', 'working', 'Workspace', 'Review patch', workspace, now),
-      block('sess-ack-live', 'codex', 'working', 'Workspace', 'Native turn waiting', workspace, now),
-    ].join('\n'))
-    let store = { messages: [], mailboxes: [] }
-    store = makeMailbox(store, 'codex', 'sess-ack-1', workspace, now)
-    const box = store.mailboxes[0]
-    const queued = queueMessage(store, { id: 'msg-ack-1', target: box.id, turn: box.turn, text: 'Please check patch' }, 'board', box, now)
-    const claimed = claimMessages(queued.state, box, now, 'deadbe')
-    writeStore(messagesDir, claimed.state)
-
-    const acked = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--message-ack', 'deadbe', 'Done reviewing patch'], {}, workspace)
-    assert.equal(acked.status, 0, `${acked.stdout}\n${acked.stderr}`)
-
-    const saved = readStore(messagesDir)
-    assert.equal(saved.messages[0].status, 'acknowledged')
-    assert.equal(saved.messages[0].reply, 'ACK deadbe Done reviewing patch')
-
-    const unknown = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--message-ack', '000000'], {}, workspace)
-    assert.equal(unknown.status, 1)
-
-    // Live-claimed or awaitsStart message cannot be confirmed by an unbound offline caller.
-    const liveConn = { id: 'conn-codex-live', agent: 'codex', session: 'sess-ack-live', surface: 'Codex daemon', turn: 'session', expires: now + 60_000 }
-    const liveQueued = queueMessage({ messages: [], mailboxes: [] }, { id: 'msg-live-ack', target: liveConn.id, turn: liveConn.turn, text: 'Wait for turn' }, 'board', liveConn, now)
-    const liveClaimed = claimMessages(liveQueued.state, liveConn, now, 'beeff0', undefined, true)
-    writeStore(messagesDir, liveClaimed.state)
-    const refusedLive = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--message-ack', 'beeff0', 'Premature'], {}, workspace)
-    assert.equal(refusedLive.status, 1)
-    assert.equal(readStore(messagesDir).messages[0].status, 'uncertain')
-
-    // Expired OpenCode wake with hasAccepted=true still accepts a late CLI --message-ack.
-    let lateState = { messages: [], mailboxes: [] }
-    lateState = makeMailbox(lateState, 'opencode', 'sess-late-oc', workspace, now - 40 * 60_000)
-    const ocBox = lateState.mailboxes[0]
-    const ocQueued = queueMessage(lateState, { id: 'msg-late-1', target: ocBox.id, turn: ocBox.turn, text: 'Late ping' }, 'board', ocBox, now - 40 * 60_000)
-    const ocClaimed = claimMessages(ocQueued.state, ocBox, now - 40 * 60_000, 'cafeba')
-    writeStore(messagesDir, {
-      ...ocClaimed.state,
-      messages: ocClaimed.state.messages.map(m => ({ ...m, status: 'uncertain', error: 'EXPIRED', hasAccepted: true, updated: now - 5 * 60_000 })),
-    })
-    const lateAck = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--message-ack', 'cafeba', 'Late reply finished'], {}, workspace)
-    assert.equal(lateAck.status, 0, `${lateAck.stdout}\n${lateAck.stderr}`)
-    const savedLate = readStore(messagesDir)
-    assert.equal(savedLate.messages[0].status, 'acknowledged')
-    assert.equal(savedLate.messages[0].reply, 'ACK cafeba Late reply finished')
-  } finally {
-    await removeDir(root)
-  }
-})
-
-test('terminal print and --chat show the latest message state without exposing session ids or nonces', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'cli-send-display-'))
-  try {
-    const now = Date.now() - 2 * 60_000
-    const workspace = join(root, 'workspace')
-    mkdirSync(workspace, { recursive: true })
-    const progress = join(root, 'progress.md')
-    const messagesDir = join(root, 'messages')
-    writeFileSync(progress, [
-      '# Progress',
-      block('SECRET_SESS_SENDER_606', 'gemini', 'working', 'ProjFrom', 'Sender Task', workspace, now),
-      block('SECRET_SESS_Q_101', 'codex', 'working', 'ProjQ', 'Queued Task', workspace, now),
-      block('SECRET_SESS_ACC_202', 'claude', 'working', 'ProjAcc', 'Accepted Task', workspace, now),
-      block('SECRET_SESS_ACK_303', 'gemini', 'working', 'ProjAck', 'Acknowledged Task', workspace, now),
-      block('SECRET_SESS_UNC_404', 'codex', 'working', 'ProjUnc', 'Uncertain Task', workspace, now),
-      block('SECRET_SESS_REJ_505', 'claude', 'working', 'ProjRej', 'Rejected Task', workspace, now),
-    ].join('\n'))
-
-    const msg = (id, agent, session, status, nonce, extra = {}) => ({
-      id,
-      target: mailboxId(agent, session),
-      turn: 'session',
-      from: 'board',
-      to: address(agent, session),
-      text: status === 'acknowledged' || status === 'rejected' ? '' : `Body ${id}`,
-      hash: textHash(`Body ${id}`),
-      origin: 'local',
-      status,
-      updated: now,
-      reply: status === 'acknowledged' ? `ACK ${nonce} All set` : '',
-      error: status === 'rejected' ? 'DISCONNECTED' : '',
-      hops: 1,
-      claimed: status === 'queued' ? 0 : now,
-      nonce,
-      ...extra,
-    })
-
-    writeStore(messagesDir, {
-      messages: [
-        msg('m1', 'codex', 'SECRET_SESS_Q_101', 'queued', '', { from: 'gemini:SECRET_SESS_SENDER_606', updated: now - 10_000 }),
-        msg('m2', 'claude', 'SECRET_SESS_ACC_202', 'accepted', 'aa11bb'),
-        msg('m3', 'gemini', 'SECRET_SESS_ACK_303', 'acknowledged', 'cc22dd'),
-        msg('m4', 'codex', 'SECRET_SESS_UNC_404', 'uncertain', 'ee33ff'),
-        msg('m5', 'claude', 'SECRET_SESS_REJ_505', 'rejected', '1122aa'),
-      ],
-      mailboxes: [],
-    })
-
-    const printed = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--print'], {}, workspace)
-    assert.equal(printed.status, 0, `${printed.stdout}\n${printed.stderr}`)
-    const chatted = await runCli(root, ['--progress-file', progress, '--messages-dir', messagesDir, '--lang', 'en', '--chat'], {}, workspace)
-    assert.equal(chatted.status, 0, `${chatted.stdout}\n${chatted.stderr}`)
-
-    for (const output of [printed.stdout, chatted.stdout]) {
-      for (const expectedState of [EN.messagesQueued, EN.messagesAccepted, EN.messagesAcknowledged, EN.messagesUncertain, EN.messagesRejected]) {
-        assert.ok(output.includes(expectedState), `missing state "${expectedState}" in:\n${output}`)
-      }
-      // Sender row (ProjFrom) also renders its outbound exchange status (Queued).
-      const senderMatch = output.match(/ProjFrom[\s\S]{0,160}/)
-      assert.ok(senderMatch && senderMatch[0].includes(EN.messagesQueued), `expected sender exchange status beside ProjFrom:\n${output}`)
-      for (const secret of ['SECRET_SESS_SENDER_606', 'SECRET_SESS_Q_101', 'SECRET_SESS_ACC_202', 'SECRET_SESS_ACK_303', 'SECRET_SESS_UNC_404', 'SECRET_SESS_REJ_505', 'aa11bb', 'cc22dd', 'ee33ff', '1122aa', workspace, messagesDir]) {
-        assert.equal(output.includes(secret), false, `must not expose ${secret} in:\n${output}`)
-      }
-    }
-  } finally {
-    await removeDir(root)
-  }
-})
-
-test('--send resolves and delivers to a live receiver connection through a running board server', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'cli-send-live-'))
-  const workspace = join(root, 'workspace')
-  const otherWorkspace = join(root, 'other-workspace')
-  mkdirSync(workspace, { recursive: true })
-  mkdirSync(otherWorkspace, { recursive: true })
-  const progress = join(root, 'progress.md')
-  const env = cleanEnv(root)
-  const messagesDir = defaultMessagesDirectory(progress, env.HOME, env, process.platform)
-  const now = Date.now()
-  writeFileSync(progress, [
-    '# Progress',
-    block('sess-live-777', 'claude', 'working', 'LiveProj', 'Handle incoming task', workspace, now),
-    block('sess-live-sender', 'codex', 'working', 'LiveProj', 'Live receiver sender', workspace, now),
-    block('sess-ordinary-codex', 'codex', 'working', 'LiveProj', 'Ordinary hook sender', workspace, now),
-  ].join('\n'))
-  writeStore(messagesDir, enrollMailbox({ messages: [], mailboxes: [] }, 'codex', 'sess-ordinary-codex', 'CLI', now, 600_000))
-
-  let owner = null
-  const lostSockets = new Set()
-  const lostServer = createHttpServer((req, res) => {
-    if (req.url === '/api/ping') {
+    if (req.method === 'GET' && reqUrl.pathname === '/api/ping') {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({ ok: true, messagesDirectory: messagesDir }))
+      res.end(JSON.stringify({ messagesDirectory: messagesDir, pageAgo: null, wantsKeyedPage: false }))
       return
     }
-    if (req.url === '/api/messages/targets') {
-      res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({
-        connections: [{ id: 'conn-fake-target', agent: 'claude', session: 'sess-live-777', surface: 'Claude Code', turn: 'session', scope: 'session', expires: Date.now() + 60_000 }],
-        mailboxes: [],
-      }))
+    if (req.method === 'POST' && reqUrl.pathname.startsWith('/api/messages/')) {
+      const action = reqUrl.pathname.slice('/api/messages/'.length)
+      let raw = ''
+      for await (const chunk of req) raw += chunk
+      try {
+        const body = raw === '' ? {} : JSON.parse(raw)
+        const result = store.act(action, body, Date.now(), reportsOf())
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(result))
+      } catch (error) {
+        res.writeHead(409, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ error: error instanceof Error ? error.message : 'MESSAGE_FAILED' }))
+      }
       return
     }
-    if (req.url === '/api/messages/peer-send') {
-      lostSockets.add(req.socket)
-      req.socket.destroy()
-      return
-    }
-    res.writeHead(404)
+    res.writeHead(404, { 'content-type': 'application/json' })
     res.end('{}')
   })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  const { port } = server.address()
+  const url = `http://127.0.0.1:${port}/?t=${token}`
+  const resolvedProgress = resolve(progressPath)
+  const addressFile = join(cacheDir, addressFileName(resolvedProgress))
+  writePrivateRuntimeFile(addressFile, JSON.stringify({ pid: process.pid, port, url, path: resolvedProgress, built: '' }))
+  store.recordOwner(port, url)
+  return {
+    store,
+    url,
+    token,
+    port,
+    post: (action, payload) => postJson(url, token, action, payload),
+    close: async () => {
+      await new Promise(done => server.close(() => done()))
+      store.close()
+    },
+  }
+}
 
-  try {
-    const served = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--serve', '--no-open', '--no-codex-send'], {}, workspace)
-    assert.equal(served.status, 0, `${served.stdout}\n${served.stderr}`)
-    owner = JSON.parse(readFileSync(join(messagesDir, 'server.owner'), 'utf8'))
-    const origin = new URL(owner.url).origin
-    const token = new URL(owner.url).searchParams.get('t')
-
-    const regSenderRes = await fetch(`${origin}/api/messages/register`, {
-      method: 'POST',
-      headers: { 'x-board-token': token, 'content-type': 'application/json' },
-      body: JSON.stringify({ agent: 'codex', session: 'sess-live-sender', surface: 'Codex daemon', turn: 'session', scope: 'session' }),
-    })
-    assert.equal(regSenderRes.status, 200)
-    const regSender = await regSenderRes.json()
-
-    const regTargetRes = await fetch(`${origin}/api/messages/register`, {
-      method: 'POST',
-      headers: { 'x-board-token': token, 'content-type': 'application/json' },
-      body: JSON.stringify({ agent: 'claude', session: 'sess-live-777', surface: 'Claude Code', turn: 'session', scope: 'session' }),
-    })
-    assert.equal(regTargetRes.status, 200)
-    const regTarget = await regTargetRes.json()
-    const heartbeat = async conn => {
-      const res = await fetch(`${origin}/api/messages/poll`, {
-        method: 'POST',
-        headers: { 'x-board-token': token, 'content-type': 'application/json' },
-        body: JSON.stringify({ connection: conn.id, secret: conn.secret, turn: 'session', receive: false }),
-      })
-      assert.equal(res.status, 200)
-    }
-
-    // Receiver-authenticated --send verifies connection + secret at the hub and places senderTitle on line 1 outside data fence.
-    const sent = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'claude', 'Live hello'], {
-      AGENT_BOARD_CONNECTION_ID: regSender.id,
-      AGENT_BOARD_CONNECTION_SECRET: regSender.secret,
-      AGENT_BOARD_AGENT: 'codex',
-      AGENT_BOARD_SESSION_ID: 'sess-live-sender',
-    }, workspace)
-    assert.equal(sent.status, 0, `${sent.stdout}\n${sent.stderr}`)
-
-    const pollRes = await fetch(`${origin}/api/messages/poll`, {
-      method: 'POST',
-      headers: { 'x-board-token': token, 'content-type': 'application/json' },
-      body: JSON.stringify({ connection: regTarget.id, secret: regTarget.secret, turn: 'session', receive: true }),
-    })
-    assert.equal(pollRes.status, 200)
-    const polled = await pollRes.json()
-    assert.equal(polled.messages.length, 1)
-    assert.equal(polled.messages[0].from, 'codex:sess-live-sender')
-    assert.equal(polled.messages[0].text, 'Live hello')
-    const delivered = deliveryText(polled.messages[0], EN)
-    assert.match(delivered.split('\n')[0], /Codex, task "Live receiver sender"/)
-    assert.equal(delivered.split('\n')[2], EN.cliSendNoReplyLoop)
-
-    // Unbound caller cannot confirm a live receiver message; credentialed live receiver confirms via /api/messages/receipt.
-    const nonce = polled.messages[0].nonce
-    assert.match(nonce, /^[0-9a-f]{6}$/)
-    const unboundAck = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--message-ack', nonce, 'Unauthorized'], {}, workspace)
-    assert.equal(unboundAck.status, 1)
-    assert.equal(readStore(messagesDir).messages.find(m => m.id === polled.messages[0].id)?.status, 'uncertain')
-
-    await heartbeat(regTarget)
-    const liveAck = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--message-ack', nonce, 'Live reply confirmed'], {
-      AGENT_BOARD_CONNECTION_ID: regTarget.id,
-      AGENT_BOARD_CONNECTION_SECRET: regTarget.secret,
-      AGENT_BOARD_AGENT: 'claude',
-      AGENT_BOARD_SESSION_ID: 'sess-live-777',
-    }, workspace)
-    assert.equal(liveAck.status, 0, `${liveAck.stdout}\n${liveAck.stderr}`)
-    const savedAck = readStore(messagesDir).messages.find(m => m.id === polled.messages[0].id)
-    assert.equal(savedAck?.status, 'acknowledged')
-    assert.equal(savedAck?.reply, `ACK ${nonce} Live reply confirmed`)
-
-    // Idempotent retry with --id creates only one message even if called twice.
-    const senderRetryEnv = {
-      AGENT_BOARD_CONNECTION_ID: regSender.id,
-      AGENT_BOARD_CONNECTION_SECRET: regSender.secret,
-      AGENT_BOARD_AGENT: 'codex',
-      AGENT_BOARD_SESSION_ID: 'sess-live-sender',
-    }
-    await heartbeat(regSender)
-    await heartbeat(regTarget)
-    const firstRetry = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--id', 'stable-retry-001', '--send', 'claude', 'Idempotent msg'], senderRetryEnv, workspace)
-    assert.equal(firstRetry.status, 0, `${firstRetry.stdout}\n${firstRetry.stderr}`)
-    await heartbeat(regSender)
-    await heartbeat(regTarget)
-    const secondRetry = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--id', 'stable-retry-001', '--send', 'claude', 'Idempotent msg'], senderRetryEnv, workspace)
-    assert.equal(secondRetry.status, 0, `${secondRetry.stdout}\n${secondRetry.stderr}`)
-    assert.equal(readStore(messagesDir).messages.filter(m => m.id === 'stable-retry-001').length, 1)
-
-    // Cross-project send to live connection is refused unless --cross-project is passed.
-    await heartbeat(regTarget)
-    const blocked = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'claude', 'Cross blocked'], {}, otherWorkspace)
-    assert.equal(blocked.status, 1, `${blocked.stdout}\n${blocked.stderr}`)
-
-    await heartbeat(regTarget)
-    const allowed = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--cross-project', '--send', 'claude', 'Cross allowed'], {}, otherWorkspace)
-    assert.equal(allowed.status, 0, `${allowed.stdout}\n${allowed.stderr}`)
-
-    // Same-workspace send TO an ordinary enrollMailbox session (no folderDigest stored on mailbox) also succeeds.
-    const toOrdinary = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'Ordinary hook sender', 'Ping ordinary mailbox'], {}, workspace)
-    assert.equal(toOrdinary.status, 0, `${toOrdinary.stdout}\n${toOrdinary.stderr}`)
-
-    // Stop the real server, then verify uncertain transport error tells caller to retry with --id instead of "Not sent".
-    const runDir = process.platform === 'win32' ? join(root, 'run', 'agent-board') : join(root, 'run')
-    const addrFiles = readdirSync(runDir).filter(f => f.startsWith('agent-board-') && f.endsWith('.json'))
-    assert.ok(addrFiles.length > 0, `expected runtime address file in ${runDir}`)
-    const stopped = await runCli(root, ['--progress-file', progress, '--stop'], {}, workspace)
-    assert.equal(stopped.status, 0, `${stopped.stdout}\n${stopped.stderr}`)
-    if (owner?.pid) {
-      const deadline = Date.now() + 10_000
-      while (Date.now() < deadline) {
-        try { process.kill(owner.pid, 0); await new Promise(r => setTimeout(r, 100)) } catch { break }
-      }
-      try { process.kill(owner.pid, 0); process.kill(owner.pid) } catch {}
-    }
-    await new Promise(done => lostServer.listen(0, '127.0.0.1', done))
-    const lostPort = lostServer.address().port
-    const lostRootUrl = `http://127.0.0.1:${lostPort}/?t=synthetic-lost-token`
-    writeFileSync(join(messagesDir, 'server.lock'), String(process.pid))
-    writeFileSync(join(messagesDir, 'server.owner'), JSON.stringify({ pid: process.pid, port: lostPort, url: lostRootUrl }))
-    for (const f of addrFiles) {
-      const addrPath = join(runDir, f)
-      rmSync(addrPath, { force: true })
-      const addrJson = JSON.stringify({ pid: process.pid, port: lostPort, url: lostRootUrl, path: progress, built: '' })
-      if (process.platform === 'win32') writePrivateRuntimeFile(addrPath, addrJson)
-      else writeFileSync(addrPath, addrJson, { mode: 0o600 })
-    }
-    const lost = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--id', 'lost-resp-001', '--send', 'claude', 'Lost response ping'], {}, workspace)
-    assert.equal(lost.status, 1, `${lost.stdout}\n${lost.stderr}`)
-    assert.ok(lost.stderr.includes('--id lost-resp-001'), lost.stderr)
-    assert.equal(lost.stderr.includes('Not sent'), false, lost.stderr)
-  } finally {
-    for (const sock of lostSockets) sock.destroy()
-    if (lostServer.listening) await new Promise(done => lostServer.close(done))
-    rmSync(join(messagesDir, 'server.lock'), { force: true })
-    rmSync(join(messagesDir, 'server.owner'), { force: true })
-    const cleanRunDir = process.platform === 'win32' ? join(root, 'run', 'agent-board') : join(root, 'run')
+const waitUntil = async (fn, timeoutMs = 12_000, stepMs = 40) => {
+  const deadline = Date.now() + timeoutMs
+  let lastError
+  while (Date.now() < deadline) {
     try {
-      for (const f of readdirSync(cleanRunDir)) {
-        if (f.startsWith('agent-board-') && f.endsWith('.json')) rmSync(join(cleanRunDir, f), { force: true })
-      }
-    } catch {}
-    await runCli(root, ['--progress-file', progress, '--stop'], {}, workspace).catch(() => {})
-    if (owner?.pid) {
-      const deadline = Date.now() + 5_000
-      while (Date.now() < deadline) {
-        try { process.kill(owner.pid, 0); await new Promise(r => setTimeout(r, 100)) } catch { break }
-      }
-      try { process.kill(owner.pid, 0); process.kill(owner.pid) } catch {}
+      const result = await fn()
+      if (result) return result
+    } catch (error) {
+      lastError = error
     }
-    await removeDir(root)
+    await new Promise(done => setTimeout(done, stepMs))
+  }
+  throw lastError ?? new Error('Timed out waiting for condition')
+}
+
+const startServeHub = async (root, {
+  progressPath = join(root, 'progress.md'),
+  messagesDir = join(root, 'messages'),
+  runtimeDir = join(root, 'runtime'),
+  homeDir = join(root, 'home'),
+  lang = 'en',
+} = {}) => {
+  mkdirSync(messagesDir, { recursive: true })
+  mkdirSync(runtimeDir, { recursive: true, mode: 0o700 })
+  mkdirSync(homeDir, { recursive: true })
+  const scriptPath = getSharedBoardScript()
+  const env = baseChildEnv(root, { HOME: homeDir, USERPROFILE: homeDir, XDG_RUNTIME_DIR: runtimeDir })
+  const child = spawn(
+    process.execPath,
+    [
+      scriptPath,
+      '--serve-child', '--no-codex-send',
+      '--lang', lang,
+      '--progress-file', progressPath,
+      '--messages-dir', messagesDir,
+    ],
+    { cwd: dirname(root), env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true },
+  )
+  let stderr = ''
+  let stdout = ''
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const addrPath = join(addressFolderFor(runtimeDir), addressFileName(resolve(progressPath)))
+  try {
+    const info = await waitUntil(async () => {
+      if (child.exitCode !== null) throw new Error(`--serve-child exited early (${child.exitCode}): ${stderr}\n${stdout}`)
+      if (!existsSync(addrPath)) return null
+      const parsed = JSON.parse(readFileSync(addrPath, 'utf8'))
+      const res = await fetch(`http://127.0.0.1:${parsed.port}/api/ping`, {
+        headers: { 'x-board-token': new URL(parsed.url).searchParams.get('t') ?? '' },
+        signal: AbortSignal.timeout(1000),
+      })
+      return res.ok ? parsed : null
+    }, 15_000, 50)
+    const token = new URL(info.url).searchParams.get('t') ?? ''
+    return {
+      url: info.url,
+      token,
+      port: info.port,
+      post: (action, payload) => postJson(info.url, token, action, payload),
+      close: async () => {
+        try {
+          await fetch(`http://127.0.0.1:${info.port}/api/close`, {
+            method: 'POST',
+            headers: { 'x-board-token': token, 'content-type': 'application/json' },
+            body: '{}',
+            signal: AbortSignal.timeout(3000),
+          })
+        } catch {}
+        if (child.exitCode === null) {
+          const exited = once(child, 'exit').catch(() => {})
+          await Promise.race([exited, new Promise(done => setTimeout(done, 1500))])
+          if (child.exitCode === null) {
+            try { child.kill() } catch {}
+            await once(child, 'exit').catch(() => {})
+          }
+        }
+      },
+    }
+  } catch (error) {
+    if (child.exitCode === null) {
+      try { child.kill() } catch {}
+      await once(child, 'exit').catch(() => {})
+    }
+    throw error
+  }
+}
+
+const registerReceiver = async (hub, { agent, session, dir: _dir, scope = 'session', turn = scope === 'session' ? 'session' : 'turn-1', surface = 'CLI' }) => {
+  const res = await hub.post('register', { agent, session, scope, turn, surface, origin: 'local' })
+  assert.equal(res.status, 200, JSON.stringify(res.data))
+  return res.data
+}
+
+const pollAndAck = async (hub, reg, reply = 'Done') => {
+  const polled = await hub.post('poll', { connection: reg.id, secret: reg.secret, turn: reg.turn })
+  assert.equal(polled.status, 200, JSON.stringify(polled.data))
+  for (const msg of polled.data.messages) {
+    const acked = await hub.post('receipt', {
+      connection: reg.id,
+      secret: reg.secret,
+      id: msg.id,
+      nonce: msg.nonce,
+      status: 'acknowledged',
+      reply: `ACK ${msg.nonce} ${reply}`,
+    })
+    assert.equal(acked.status, 200, JSON.stringify(acked.data))
+  }
+  return polled.data.messages
+}
+
+const readDaclSddl = targetDir => {
+  const icacls = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe')
+  const holder = mkdtempSync(join(dirname(resolve(targetDir)), '.acl-check-'))
+  const saved = join(holder, 'dacl.txt')
+  try {
+    execFileSync(icacls, [resolve(targetDir), '/save', saved, '/L'], { encoding: 'utf8', windowsHide: true })
+    const lines = readFileSync(saved).toString('utf16le').replace(/^\uFEFF/, '').split(/\r?\n/).filter(Boolean)
+    assert.equal(lines.length, 2, `Unexpected icacls output: ${lines.join(' | ')}`)
+    assert.ok(lines[1].startsWith('D:'), `Missing DACL SDDL: ${lines[1]}`)
+    return lines[1]
+  } finally {
+    try { rmSync(holder, { recursive: true, force: true }) } catch {}
+  }
+}
+
+// Case 1
+test('--send delivers as unverified with no task title', async () => {
+  const root = tempRoot()
+  let hub
+  try {
+    const ws = join(root, 'workspace')
+    mkdirSync(ws, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    writeFileSync(progressPath, [
+      autoBlock({ agent: 'claude', session: 'sess-alpha-101', project: 'Alpha', title: 'Secret target title', dir: ws, updatedIso: isoAgo(now, 60_000) }),
+      autoBlock({ agent: 'codex', session: 'sess-sender-102', project: 'Alpha', title: 'Secret sender rollout', dir: ws, updatedIso: isoAgo(now, 30_000) }),
+    ].join('\n'))
+    const reports = [
+      { agent: 'claude', session: 'sess-alpha-101', updated: now - 60_000, dir: ws, title: 'Secret target title' },
+      { agent: 'codex', session: 'sess-sender-102', updated: now - 30_000, dir: ws, title: 'Secret sender rollout' },
+    ]
+    hub = await startHub(root, { progressPath, reportsOf: () => reports })
+    await registerReceiver(hub, { agent: 'claude', session: 'sess-alpha-101', dir: ws })
+
+    const res = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'Please review parser'], { cwd: ws })
+    assert.equal(res.status, 0, res.stderr)
+    assert.ok(res.stdout.startsWith('Sent to Claude Code · Alpha · '), res.stdout)
+    assert.ok(!res.stdout.includes('Secret target title'), res.stdout)
+    assert.ok(!res.stdout.includes('Secret sender rollout'), res.stdout)
+
+    const { messages } = hub.store.snapshot(Date.now(), reports)
+    assert.equal(messages.length, 1)
+    assert.equal(messages[0].from, 'unverified')
+    assert.equal(messages[0].senderTitle, undefined)
+    const polled = await hub.post('poll', {
+      connection: hub.store.snapshot(Date.now(), reports).connections[0].id,
+      secret: undefined,
+    })
+    assert.equal(polled.status, 409)
+
+    const fullMsg = { ...parseMessageStore(readFileSync(join(root, 'messages', 'messages.json'), 'utf8'), Date.now()).messages[0], nonce: 'abc123' }
+    const text = deliveryText(fullMsg, EN)
+    const lines = text.split('\n')
+    assert.equal(lines[0], EN.messagesDeliveryAgent('unverified'))
+    assert.equal(lines[2], EN.cliSendNoReplyLoop)
+    assert.ok(!text.includes('Secret sender rollout'))
+    assert.ok(lines.indexOf(EN.cliSendNoReplyLoop) < lines.findIndex(line => line.startsWith('<<<AB-')))
+  } finally {
+    if (hub) await hub.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   }
 })
 
-test('--send matches same-workspace MCP mailbox alongside a live connection and across symlinked paths', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'cli-send-symlink-'))
-  const realWorkspace = join(root, 'real-workspace')
-  const aliasWorkspace = join(root, 'alias-workspace')
-  const otherWorkspace = join(root, 'other-workspace')
-  const aliasMessagesDir = join(root, 'alias-messages')
-  const realMessagesDir = join(root, 'real-messages')
-  mkdirSync(realWorkspace, { recursive: true })
-  mkdirSync(otherWorkspace, { recursive: true })
-  mkdirSync(realMessagesDir, { recursive: true })
-  symlinkSync(realWorkspace, aliasWorkspace, process.platform === 'win32' ? 'junction' : 'dir')
-  symlinkSync(realMessagesDir, aliasMessagesDir, process.platform === 'win32' ? 'junction' : 'dir')
-  const progress = join(root, 'progress.md')
-  const env = cleanEnv(root)
-  const messagesDir = defaultMessagesDirectory(progress, env.HOME, env, process.platform)
-  const now = Date.now()
-  writeFileSync(progress, [
-    '# Progress',
-    block('sess-symlink-codex', 'codex', 'working', 'LinkProj', 'Symlink sender', aliasWorkspace, now),
-  ].join('\n'))
-  writeStore(messagesDir, enrollMailbox({ messages: [], mailboxes: [] }, 'codex', 'sess-symlink-codex', 'CLI', now, 600_000))
-  writeStore(realMessagesDir, makeMailbox({ messages: [], mailboxes: [] }, 'codex', 'sess-symlink-codex', realWorkspace, now))
-
-  let owner = null
+// Case 2
+test('--send ignores session values in the environment', async () => {
+  const root = tempRoot()
+  let hub
   try {
-    // Offline send against a symlinked messages directory must be refused cleanly.
-    const unsafeDirRes = await runCli(root, ['--progress-file', progress, '--messages-dir', aliasMessagesDir, '--lang', 'en', '--send', 'codex', 'Unsafe dir'], {}, realWorkspace)
-    assert.equal(unsafeDirRes.status, 1, `${unsafeDirRes.stdout}\n${unsafeDirRes.stderr}`)
-    assert.ok(unsafeDirRes.stderr.includes('UNSAFE_MESSAGE_DIRECTORY'), unsafeDirRes.stderr)
+    const ws = join(root, 'workspace')
+    mkdirSync(ws, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    writeFileSync(progressPath, [
+      autoBlock({ agent: 'codex', session: 'sess-env-201', project: 'RepoEnv', title: 'Private sender task', dir: ws, updatedIso: isoAgo(now) }),
+      autoBlock({ agent: 'claude', session: 'sess-target-202', project: 'RepoEnv', title: 'Review task', dir: ws, updatedIso: isoAgo(now) }),
+    ].join('\n'))
+    const reports = [
+      { agent: 'codex', session: 'sess-env-201', updated: now - 60_000, dir: ws, title: 'Private sender task' },
+      { agent: 'claude', session: 'sess-target-202', updated: now - 60_000, dir: ws, title: 'Review task' },
+    ]
+    hub = await startHub(root, { progressPath, reportsOf: () => reports })
+    const targetReg = await registerReceiver(hub, { agent: 'claude', session: 'sess-target-202', dir: ws })
 
-    // Offline default-messages-dir send runs privateFolder ACL check cleanly without failing ACL setup.
-    const defaultOffline = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'codex', 'Default ACL check'], {}, realWorkspace)
-    assert.equal(defaultOffline.status, 0, `${defaultOffline.stdout}\n${defaultOffline.stderr}`)
-    assert.equal(defaultOffline.stderr.includes('MESSAGE_STORE_ACL'), false, defaultOffline.stderr)
-    writeStore(messagesDir, enrollMailbox({ messages: [], mailboxes: [] }, 'codex', 'sess-symlink-codex', 'CLI', now, 600_000))
-
-    const served = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--serve', '--no-open', '--no-codex-send'], {}, realWorkspace)
-    assert.equal(served.status, 0, `${served.stdout}\n${served.stderr}`)
-    owner = JSON.parse(readFileSync(join(messagesDir, 'server.owner'), 'utf8'))
-    const origin = new URL(owner.url).origin
-    const token = new URL(owner.url).searchParams.get('t')
-
-    const hostStarted = await ownProcessStart()
-    assert.ok(hostStarted, 'expected host processStart timestamp')
-
-    const mcpRes = await fetch(`${origin}/api/messages/mcp-enroll`, {
-      method: 'POST',
-      headers: { 'x-board-token': token, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        agent: 'gemini',
-        session: 'sess-dual-888',
-        surface: 'mcp',
-        owner: `${process.pid}:${hostStarted}`,
-        folderDigest: testWorkspaceDigest(realWorkspace),
-        until: Date.now() + 600_000,
-      }),
-    })
-    assert.equal(mcpRes.status, 200)
-
-    const regRes = await fetch(`${origin}/api/messages/register`, {
-      method: 'POST',
-      headers: { 'x-board-token': token, 'content-type': 'application/json' },
-      body: JSON.stringify({ agent: 'gemini', session: 'sess-dual-888', surface: 'Gemini CLI', turn: 'session', scope: 'session' }),
-    })
-    assert.equal(regRes.status, 200)
-    const reg = await regRes.json()
-
-    // Dual live + MCP mailbox session (no progress.md entry) accepts same-workspace send from symlinked cwd.
-    const sentDual = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'gemini', 'Dual live and MCP'], {}, aliasWorkspace)
-    assert.equal(sentDual.status, 0, `${sentDual.stdout}\n${sentDual.stderr}`)
-
-    const pollRes = await fetch(`${origin}/api/messages/poll`, {
-      method: 'POST',
-      headers: { 'x-board-token': token, 'content-type': 'application/json' },
-      body: JSON.stringify({ connection: reg.id, secret: reg.secret, turn: 'session', receive: true }),
-    })
-    assert.equal(pollRes.status, 200)
-    const polled = await pollRes.json()
-    assert.equal(polled.messages.length, 1)
-    assert.equal(polled.messages[0].from, 'unverified')
-    assert.ok(polled.messages[0].text.includes('Dual live and MCP'))
-
-    // Real workspace cwd matches codex progress dir (aliasWorkspace) via canonical digest.
-    const sentSymlink = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'codex', 'Real to symlink'], {}, realWorkspace)
-    assert.equal(sentSymlink.status, 0, `${sentSymlink.stdout}\n${sentSymlink.stderr}`)
-
-    const wrongWorkspace = await runCli(root, ['--progress-file', progress, '--lang', 'en', '--send', 'gemini', 'Wrong workspace'], {}, otherWorkspace)
-    assert.equal(wrongWorkspace.status, 1, `${wrongWorkspace.stdout}\n${wrongWorkspace.stderr}`)
-  } finally {
-    await runCli(root, ['--progress-file', progress, '--stop'], {}, realWorkspace).catch(() => {})
-    if (owner?.pid) {
-      const deadline = Date.now() + 5_000
-      while (Date.now() < deadline) {
-        try { process.kill(owner.pid, 0); await new Promise(r => setTimeout(r, 100)) } catch { break }
-      }
-      try { process.kill(owner.pid, 0); process.kill(owner.pid) } catch {}
+    const spoofEnv = {
+      CODEX_THREAD_ID: 'sess-env-201',
+      CLAUDE_SESSION_ID: 'sess-env-201',
+      AGENT_BOARD_AGENT: 'codex',
+      AGENT_BOARD_SESSION_ID: 'sess-env-201',
+      AGENT_BOARD_HOST_PID: String(process.ppid),
+      AGENT_BOARD_HOST_STARTED: '999999',
     }
-    await removeDir(root)
+    const enRes = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'Spoof check'], { cwd: ws, env: spoofEnv })
+    assert.equal(enRes.status, 0, enRes.stderr)
+    const polledEn = await pollAndAck(hub, targetReg)
+    assert.equal(polledEn.length, 1)
+    assert.equal(polledEn[0].text, 'Spoof check')
+
+    const stored = parseMessageStore(readFileSync(join(root, 'messages', 'messages.json'), 'utf8'), Date.now()).messages
+    assert.equal(stored.length, 1)
+    for (const one of stored) {
+      assert.equal(one.from, 'unverified')
+      assert.equal(one.senderTitle, undefined)
+      const renderedEn = deliveryText({ ...one, nonce: one.nonce || '111aaa' }, EN)
+      const renderedTw = deliveryText({ ...one, nonce: one.nonce || '111aaa' }, ZH_TW)
+      assert.equal(renderedEn.split('\n')[0], EN.messagesDeliveryAgent('unverified'))
+      assert.equal(renderedTw.split('\n')[0], ZH_TW.messagesDeliveryAgent('unverified'))
+      assert.ok(!renderedEn.includes('Private sender task'))
+    }
+  } finally {
+    if (hub) await hub.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Case 3
+test('--send from an authenticated receiver names its task', async () => {
+  const root = tempRoot()
+  let hub
+  try {
+    const homeDir = join(root, 'home')
+    const ws = join(homeDir, 'workspace')
+    mkdirSync(ws, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    const rawSenderTitle = `Fix "${join(homeDir, 'secret', 'file.ts')}"\u0007 now`
+    writeFileSync(progressPath, [
+      autoBlock({ agent: 'codex', session: 'sess-auth-301', project: 'AuthProj', title: rawSenderTitle, dir: ws, updatedIso: isoAgo(now) }),
+      autoBlock({ agent: 'claude', session: 'sess-auth-302', project: 'AuthProj', title: 'Run check', dir: ws, updatedIso: isoAgo(now) }),
+    ].join('\n'))
+
+    hub = await startServeHub(root, { progressPath, homeDir })
+    const senderReg = await registerReceiver(hub, { agent: 'codex', session: 'sess-auth-301', dir: ws })
+    const targetReg = await registerReceiver(hub, { agent: 'claude', session: 'sess-auth-302', dir: ws })
+
+    const res = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'Authenticated send'], {
+      cwd: ws,
+      env: { HOME: homeDir, USERPROFILE: homeDir, XDG_RUNTIME_DIR: join(root, 'runtime'), AGENT_BOARD_CONNECTION_ID: senderReg.id, AGENT_BOARD_CONNECTION_SECRET: senderReg.secret },
+    })
+    assert.equal(res.status, 0, res.stderr)
+
+    const polled = await pollAndAck(hub, targetReg)
+    assert.equal(polled.length, 1)
+    assert.equal(polled[0].from, 'codex:sess-auth-301')
+    assert.equal(typeof polled[0].senderTitle, 'string')
+    assert.ok(polled[0].senderTitle.includes('Fix'), polled[0].senderTitle)
+    assert.ok(polled[0].senderTitle.includes("'"), polled[0].senderTitle)
+    assert.ok(!polled[0].senderTitle.includes('"'), polled[0].senderTitle)
+    assert.ok(!polled[0].senderTitle.includes(homeDir), polled[0].senderTitle)
+
+    const deliveryEn = deliveryText(polled[0], EN)
+    const deliveryTw = deliveryText(polled[0], ZH_TW)
+    const linesEn = deliveryEn.split('\n')
+    assert.equal(linesEn[0], EN.messagesDeliveryAgent(EN.cliSendSenderWithTitle('Codex', polled[0].senderTitle)))
+    assert.equal(deliveryTw.split('\n')[0], ZH_TW.messagesDeliveryAgent(ZH_TW.cliSendSenderWithTitle('Codex', polled[0].senderTitle)))
+    assert.equal(linesEn[2], EN.cliSendNoReplyLoop)
+    assert.ok(linesEn.indexOf(EN.cliSendNoReplyLoop) < linesEn.findIndex(line => line.startsWith('<<<AB-')))
+
+    // Receiver credentials supplied while no hub is serving this folder must refuse cleanly.
+    const offlineProgress = join(root, 'offline-progress.md')
+    const offlineMessages = join(root, 'offline-messages')
+    mkdirSync(offlineMessages, { recursive: true })
+    writeFileSync(offlineProgress, autoBlock({ agent: 'claude', session: 'sess-off-303', project: 'AuthProj', title: 'Target', dir: ws, updatedIso: isoAgo(now) }))
+    let offState = { messages: [], mailboxes: [] }
+    offState = enrollMailbox(offState, 'claude', 'sess-off-303', 'cli', now, 600_000)
+    writeFileSync(join(offlineMessages, 'messages.json'), JSON.stringify({ version: 2, ...offState }))
+    const offlineRes = await runCli(root, ['--lang', 'en', '--progress-file', offlineProgress, '--messages-dir', offlineMessages, '--send', 'claude', 'Should fail'], {
+      cwd: ws,
+      env: { HOME: homeDir, USERPROFILE: homeDir, XDG_RUNTIME_DIR: join(root, 'runtime'), AGENT_BOARD_CONNECTION_ID: senderReg.id, AGENT_BOARD_CONNECTION_SECRET: senderReg.secret },
+    })
+    assert.equal(offlineRes.status, 1)
+  } finally {
+    if (hub) await hub.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Case 4
+test('peer-send refuses a sender title from the request', async () => {
+  const root = tempRoot()
+  let hub
+  try {
+    const ws = join(root, 'workspace')
+    mkdirSync(ws, { recursive: true })
+    const now = Date.now()
+    const reports = [
+      { agent: 'codex', session: 'sess-ps-401', updated: now - 10_000, dir: ws, title: 'Hub reported title' },
+      { agent: 'claude', session: 'sess-ps-402', updated: now - 10_000, dir: ws, title: 'Target' },
+    ]
+    hub = await startHub(root, { reportsOf: () => reports })
+    const senderReg = await registerReceiver(hub, { agent: 'codex', session: 'sess-ps-401', dir: ws })
+    await registerReceiver(hub, { agent: 'claude', session: 'sess-ps-402', dir: ws })
+    const digest = workspaceDigestOf(ws)
+
+    const authSpoof = await hub.post('peer-send', {
+      agent: 'claude',
+      session: 'sess-ps-402',
+      text: 'Hi',
+      id: 'spoof-auth-1',
+      source: senderReg.id,
+      secret: senderReg.secret,
+      senderTitle: 'Spoofed Title',
+      folderDigest: digest,
+    })
+    assert.equal(authSpoof.status, 409)
+    assert.equal(authSpoof.data.error, 'UNKNOWN_FIELD')
+
+    const unverifiedSpoof = await hub.post('peer-send', {
+      agent: 'claude',
+      session: 'sess-ps-402',
+      text: 'Hi',
+      id: 'spoof-unverified-1',
+      from: 'unverified',
+      senderTitle: 'Spoofed Title',
+      folderDigest: digest,
+    })
+    assert.equal(unverifiedSpoof.status, 409)
+    assert.equal(unverifiedSpoof.data.error, 'UNKNOWN_FIELD')
+
+    const authValid = await hub.post('peer-send', {
+      agent: 'claude',
+      session: 'sess-ps-402',
+      text: 'From hub report',
+      id: 'valid-auth-1',
+      source: senderReg.id,
+      secret: senderReg.secret,
+      folderDigest: digest,
+    })
+    assert.equal(authValid.status, 200)
+    const saved = hub.store.snapshot(Date.now(), reports).messages
+    assert.equal(saved.length, 1)
+    assert.equal(saved[0].from, 'codex:sess-ps-401')
+    assert.equal(saved[0].senderTitle, 'Hub reported title')
+  } finally {
+    if (hub) await hub.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Case 5
+test('--send stops at the pair budget and says why', async () => {
+  const root = tempRoot()
+  let hub
+  try {
+    const ws = join(root, 'workspace')
+    mkdirSync(ws, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    writeFileSync(progressPath, autoBlock({ agent: 'claude', session: 'sess-budget-501', project: 'BudgetRepo', title: 'Receiver', dir: ws, updatedIso: isoAgo(now) }))
+    const reports = [{ agent: 'claude', session: 'sess-budget-501', updated: now - 30_000, dir: ws, title: 'Receiver' }]
+    hub = await startHub(root, { progressPath, reportsOf: () => reports })
+    const targetReg = await registerReceiver(hub, { agent: 'claude', session: 'sess-budget-501', dir: ws })
+
+    const digest = workspaceDigestOf(ws)
+    for (let i = 1; i < PEER_PAIR_BUDGET; i++) {
+      const seeded = await hub.post('peer-send', {
+        agent: 'claude',
+        session: 'sess-budget-501',
+        text: `Ping ${i}`,
+        id: `budget-seed-${i}`,
+        from: 'unverified',
+        folderDigest: digest,
+      })
+      assert.equal(seeded.status, 200, JSON.stringify(seeded.data))
+      await pollAndAck(hub, targetReg, `Ack ${i}`)
+    }
+    const lastAllowed = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', `Ping ${PEER_PAIR_BUDGET}`], { cwd: ws })
+    assert.equal(lastAllowed.status, 0, lastAllowed.stderr)
+    await pollAndAck(hub, targetReg, `Ack ${PEER_PAIR_BUDGET}`)
+
+    const overEn = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'Over budget'], { cwd: ws })
+    assert.equal(overEn.status, 1)
+    assert.equal(overEn.stderr.trim(), EN.cliSendBudget)
+
+    const overTw = await runCli(root, ['--lang', 'zh-TW', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'Over budget TW'], { cwd: ws })
+    assert.equal(overTw.status, 1)
+    assert.equal(overTw.stderr.trim(), ZH_TW.cliSendBudget)
+
+    // A board-originated message to the session resets the pair budget.
+    const boardSend = await hub.post('send', {
+      id: 'board-reset-1',
+      target: targetReg.id,
+      turn: targetReg.turn,
+      text: 'Human checkpoint',
+    })
+    assert.equal(boardSend.status, 200)
+    await pollAndAck(hub, targetReg, 'Ack human')
+
+    const afterReset = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'Fresh turn'], { cwd: ws })
+    assert.equal(afterReset.status, 0, afterReset.stderr)
+  } finally {
+    if (hub) await hub.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Case 6
+test('--message-ack is not a board command', async () => {
+  const root = tempRoot()
+  try {
+    const enAck = await runCli(root, ['--lang', 'en', '--message-ack', 'deadbe', 'Done'])
+    assert.equal(enAck.status, 2)
+    assert.ok(enAck.stderr.includes(EN.boardUnknownFlag('--message-ack')), enAck.stderr)
+
+    const twAck = await runCli(root, ['--lang', 'zh-TW', '--message-ack', 'deadbe'])
+    assert.equal(twAck.status, 2)
+    assert.ok(twAck.stderr.includes(ZH_TW.boardUnknownFlag('--message-ack')), twAck.stderr)
+
+    // --send remains the recognized CLI messaging command (fails on base where --send is unknown).
+    const enSendMissing = await runCli(root, ['--lang', 'en', '--send'])
+    assert.equal(enSendMissing.status, 1)
+    assert.equal(enSendMissing.stderr.trim(), EN.cliSendMissingTarget)
+
+    for (const table of [EN, ZH_TW, ZH_CN]) {
+      assert.equal('cliSendAckInvalid' in table, false)
+      assert.equal('cliSendAckNotFound' in table, false)
+      assert.equal('cliSendAcked' in table, false)
+      assert.ok(table.localAgentSkill('agent-board').includes('--send'))
+      assert.equal(table.localAgentSkill('agent-board').includes('--message-ack'), false)
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Case 7
+test('--send lists ambiguous candidates without task titles', async () => {
+  const root = tempRoot()
+  try {
+    const ws = join(root, 'workspace')
+    const messagesDir = join(root, 'messages')
+    mkdirSync(ws, { recursive: true })
+    mkdirSync(messagesDir, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    writeFileSync(progressPath, [
+      autoBlock({ agent: 'claude', session: 'sess-cand-701', project: 'AlphaOne', title: 'SecretAlphaTask C:\\Users\\alice\\alpha.ts', dir: ws, updatedIso: isoAgo(now, 60_000) }),
+      autoBlock({ agent: 'claude', session: 'sess-cand-702', project: 'GammaTwo', title: 'SecretGammaTask /home/bob/gamma.ts', dir: ws, updatedIso: isoAgo(now, 120_000) }),
+      autoBlock({ agent: 'codex', session: 'sess-cand-703', project: 'Build', title: 'SecretBuildTask', dir: ws, updatedIso: isoAgo(now, 30_000) }),
+    ].join('\n'))
+    let state = { messages: [], mailboxes: [] }
+    state = enrollMailbox(state, 'claude', 'sess-cand-701', 'cli', now, 600_000)
+    state = enrollMailbox(state, 'claude', 'sess-cand-702', 'cli', now, 600_000)
+    state = enrollMailbox(state, 'codex', 'sess-cand-703', 'cli', now, 600_000)
+    writeFileSync(join(messagesDir, 'messages.json'), JSON.stringify({ version: 2, ...state }))
+
+    const ambiguous = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', messagesDir, '--send', 'claude', 'Check status'], { cwd: ws })
+    assert.equal(ambiguous.status, 1)
+    assert.ok(ambiguous.stderr.startsWith(EN.cliSendAmbiguous('claude')), ambiguous.stderr)
+    assert.ok(ambiguous.stderr.includes('Claude Code · AlphaOne · '), ambiguous.stderr)
+    assert.ok(ambiguous.stderr.includes('Claude Code · GammaTwo · '), ambiguous.stderr)
+    for (const forbidden of ['SecretAlphaTask', 'SecretGammaTask', 'alpha.ts', 'gamma.ts', 'sess-cand-701', 'sess-cand-702']) {
+      assert.equal(ambiguous.stderr.includes(forbidden), false, `Leaked ${forbidden} in: ${ambiguous.stderr}`)
+    }
+
+    const exact = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', messagesDir, '--send', 'Build', 'Exact match'], { cwd: ws })
+    assert.equal(exact.status, 0, exact.stderr)
+    assert.ok(exact.stdout.startsWith('Sent to Codex · Build · '), exact.stdout)
+    assert.equal(exact.stdout.includes('SecretBuildTask'), false)
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Case 8
+test('--send still finds a target by a word of its title', async () => {
+  const root = tempRoot()
+  try {
+    const ws = join(root, 'workspace')
+    const messagesDir = join(root, 'messages')
+    mkdirSync(ws, { recursive: true })
+    mkdirSync(messagesDir, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    writeFileSync(progressPath, [
+      autoBlock({ agent: 'claude', session: 'sess-word-801', project: 'SharedRepo', title: 'Refactor authentication middleware', dir: ws, updatedIso: isoAgo(now, 60_000) }),
+      autoBlock({ agent: 'codex', session: 'sess-word-802', project: 'SharedRepo', title: 'Polish stylesheet layout', dir: ws, updatedIso: isoAgo(now, 120_000) }),
+    ].join('\n'))
+    let state = { messages: [], mailboxes: [] }
+    state = enrollMailbox(state, 'claude', 'sess-word-801', 'cli', now, 600_000)
+    state = enrollMailbox(state, 'codex', 'sess-word-802', 'cli', now, 600_000)
+    writeFileSync(join(messagesDir, 'messages.json'), JSON.stringify({ version: 2, ...state }))
+
+    const res = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', messagesDir, '--send', 'authentication', 'Check JWT'], { cwd: ws })
+    assert.equal(res.status, 0, res.stderr)
+    assert.ok(res.stdout.startsWith('Sent to Claude Code · SharedRepo · '), res.stdout)
+    assert.equal(res.stdout.includes('Refactor authentication middleware'), false)
+
+    const saved = parseMessageStore(readFileSync(join(messagesDir, 'messages.json'), 'utf8'), Date.now()).messages
+    assert.equal(saved.length, 1)
+    assert.equal(saved[0].to, 'claude:sess-word-801')
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Case 9
+test('--send retried with the same --id delivers once', async () => {
+  const root = tempRoot()
+  let hub
+  let lostServer
+  try {
+    const ws = join(root, 'workspace')
+    mkdirSync(ws, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    writeFileSync(progressPath, autoBlock({ agent: 'claude', session: 'sess-idemp-901', project: 'RetryRepo', title: 'Target task', dir: ws, updatedIso: isoAgo(now) }))
+    const reports = [{ agent: 'claude', session: 'sess-idemp-901', updated: now - 30_000, dir: ws, title: 'Target task' }]
+    hub = await startHub(root, { progressPath, reportsOf: () => reports })
+    await registerReceiver(hub, { agent: 'claude', session: 'sess-idemp-901', dir: ws })
+
+    const argsFirst = ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'First delivery', '--id', 'stable-retry-001']
+    const first = await runCli(root, argsFirst, { cwd: ws })
+    assert.equal(first.status, 0, first.stderr)
+    const retry = await runCli(root, argsFirst, { cwd: ws })
+    assert.equal(retry.status, 0, retry.stderr)
+    assert.equal(hub.store.snapshot(Date.now(), reports).messages.length, 1)
+
+    const conflict = await hub.post('peer-send', {
+      agent: 'claude',
+      session: 'sess-idemp-901',
+      text: 'Different body',
+      id: 'stable-retry-001',
+      from: 'unverified',
+      folderDigest: workspaceDigestOf(ws),
+    })
+    assert.equal(conflict.status, 409)
+    assert.equal(conflict.data.error, 'ID_CONFLICT')
+
+    // Dropped HTTP response on peer-send reports uncertain status naming the retry --id.
+    const lostRoot = join(root, 'lost')
+    const lostProgress = join(lostRoot, 'progress.md')
+    const lostMessages = join(lostRoot, 'messages')
+    const lostRuntime = getSharedRuntimeDir()
+    const lostCacheDir = addressFolderFor(lostRuntime)
+    mkdirSync(lostMessages, { recursive: true })
+    writeFileSync(lostProgress, autoBlock({ agent: 'claude', session: 'sess-lost-902', project: 'LostRepo', title: 'Lost target', dir: ws, updatedIso: isoAgo(now) }))
+    let lostState = { messages: [], mailboxes: [] }
+    lostState = enrollMailbox(lostState, 'claude', 'sess-lost-902', 'cli', now, 600_000)
+    writeFileSync(join(lostMessages, 'messages.json'), JSON.stringify({ version: 2, ...lostState }))
+    const lostDigest = workspaceDigestOf(ws)
+    lostServer = createServer((req, res) => {
+      const reqUrl = new URL(req.url ?? '/', 'http://127.0.0.1')
+      if (reqUrl.pathname === '/api/ping') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ messagesDirectory: lostMessages, pageAgo: null, wantsKeyedPage: false }))
+        return
+      }
+      if (reqUrl.pathname === '/api/messages/targets') {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({
+          connections: [],
+          mailboxes: [{ id: mailboxId('claude', 'sess-lost-902'), agent: 'claude', session: 'sess-lost-902', surface: 'cli', turn: 'mailbox', scope: 'mailbox', expires: Date.now() + 600_000, folderDigest: lostDigest }],
+        }))
+        return
+      }
+      if (reqUrl.pathname === '/api/messages/peer-send') {
+        req.socket.destroy()
+        return
+      }
+      res.writeHead(404).end()
+    })
+    await new Promise(done => lostServer.listen(0, '127.0.0.1', done))
+    const { port: lostPort } = lostServer.address()
+    const lostUrl = `http://127.0.0.1:${lostPort}/?t=lost-token`
+    const lostLockStore = createMessaging(lostMessages, false)
+    try {
+      const resolvedLost = resolve(lostProgress)
+      writePrivateRuntimeFile(join(lostCacheDir, addressFileName(resolvedLost)), JSON.stringify({ pid: process.pid, port: lostPort, url: lostUrl, path: resolvedLost, built: '' }))
+      lostLockStore.recordOwner(lostPort, lostUrl)
+      const lostRes = await runCli(root, ['--lang', 'en', '--progress-file', lostProgress, '--messages-dir', lostMessages, '--send', 'claude', 'Maybe delivered', '--id', 'lost-resp-001'], {
+        cwd: ws,
+        env: { XDG_RUNTIME_DIR: lostRuntime },
+      })
+      assert.equal(lostRes.status, 1)
+      assert.equal(lostRes.stderr.trim(), EN.cliSendUncertain('lost-resp-001'))
+      assert.equal(lostRes.stderr.includes('Not sent'), false)
+    } finally {
+      lostLockStore.close()
+    }
+  } finally {
+    if (lostServer) await new Promise(done => lostServer.close(() => done()))
+    if (hub) await hub.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Case 10
+test('--send refuses --id without a value', async () => {
+  const root = tempRoot()
+  let trackerServer
+  let trackerLockStore
+  try {
+    const messagesDir = join(root, 'messages')
+    const runtimeDir = getSharedRuntimeDir()
+    const cacheDir = addressFolderFor(runtimeDir)
+    const progressPath = join(root, 'progress.md')
+    mkdirSync(messagesDir, { recursive: true })
+    writeFileSync(progressPath, '## Empty\n')
+
+    let hits = 0
+    trackerServer = createServer((_req, res) => {
+      hits += 1
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('{}')
+    })
+    await new Promise(done => trackerServer.listen(0, '127.0.0.1', done))
+    const { port } = trackerServer.address()
+    const url = `http://127.0.0.1:${port}/?t=no-hit`
+    trackerLockStore = createMessaging(messagesDir, false)
+    const resolvedProgress = resolve(progressPath)
+    writePrivateRuntimeFile(join(cacheDir, addressFileName(resolvedProgress)), JSON.stringify({ pid: process.pid, port, url, path: resolvedProgress, built: '' }))
+    trackerLockStore.recordOwner(port, url)
+
+    const uncreatedDir = join(root, 'must-not-read-or-create')
+    const forms = [
+      ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', uncreatedDir, '--send', 'codex', 'hello', '--id'],
+      ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', uncreatedDir, '--send', 'codex', 'hello', '--id', '--cross-project'],
+      ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', uncreatedDir, '--id', '--cross-project'],
+      ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', uncreatedDir, '--send', 'codex', 'hello', '--id', 'invalid/id!'],
+    ]
+    for (const cliArgs of forms) {
+      const res = await runCli(root, cliArgs, { env: { XDG_RUNTIME_DIR: runtimeDir } })
+      assert.equal(res.status, 1, `Expected exit 1 for ${cliArgs.join(' ')}`)
+      assert.equal(res.stdout, '', `Expected empty stdout for ${cliArgs.join(' ')}`)
+      assert.equal(res.stderr.trim(), EN.boardUsage.trim())
+    }
+    assert.equal(hits, 0)
+    assert.equal(existsSync(uncreatedDir), false)
+  } finally {
+    if (trackerLockStore) trackerLockStore.close()
+    if (trackerServer) await new Promise(done => trackerServer.close(() => done()))
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Case 11
+test('--send offline makes the default message folder private on Windows', { skip: process.platform !== 'win32' }, async () => {
+  const root = tempRoot()
+  try {
+    const homeDir = join(root, 'home')
+    const claudeDir = join(homeDir, '.claude')
+    const ws = join(root, 'workspace')
+    mkdirSync(claudeDir, { recursive: true })
+    mkdirSync(ws, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(claudeDir, 'progress.md')
+    writeFileSync(progressPath, autoBlock({ agent: 'claude', session: 'sess-acl-11', project: 'WinAclRepo', title: 'ACL target', dir: ws, updatedIso: isoAgo(now) }))
+
+    const env = baseChildEnv(root, { HOME: homeDir, USERPROFILE: homeDir, CLAUDE_CONFIG_DIR: claudeDir }, ['XDG_RUNTIME_DIR', 'AGENT_BOARD_MESSAGE_FOLDER'])
+    const defaultDir = defaultMessagesDirectory(progressPath, homeDir, env, 'win32')
+    mkdirSync(defaultDir, { recursive: true })
+    let state = { messages: [], mailboxes: [] }
+    state = enrollMailbox(state, 'claude', 'sess-acl-11', 'cli', now, 600_000)
+    writeFileSync(join(defaultDir, 'messages.json'), JSON.stringify({ version: 2, ...state }))
+
+    const icacls = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe')
+    execFileSync(icacls, [defaultDir, '/grant', '*S-1-1-0:(OI)(CI)F', '/L'], { encoding: 'utf8', windowsHide: true })
+    const beforeDacl = readDaclSddl(defaultDir)
+    assert.ok(beforeDacl.includes('WD'), beforeDacl)
+
+    const res = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--send', 'claude', 'Offline private check'], {
+      cwd: ws,
+      env: { HOME: homeDir, USERPROFILE: homeDir, CLAUDE_CONFIG_DIR: claudeDir },
+      omit: ['XDG_RUNTIME_DIR', 'AGENT_BOARD_MESSAGE_FOLDER'],
+    })
+    assert.equal(res.status, 0, res.stderr)
+
+    const whoami = execFileSync(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true })
+    const acc = runningAccount(whoami, process.env.COMPUTERNAME ?? '', hostname())
+    assert.ok(acc, `Could not parse account from whoami: ${whoami}`)
+    const afterDacl = readDaclSddl(defaultDir)
+    assert.equal(afterDacl.includes('WD'), false, afterDacl)
+    assert.equal(isPrivateDacl(afterDacl, acc.sid, acc.own), true, afterDacl)
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Case 12
+test('--send refuses cross-project agent sends unless --cross-project is given', async () => {
+  const root = tempRoot()
+  let hub
+  try {
+    const repoOne = join(root, 'repo-one')
+    const repoTwo = join(root, 'repo-two')
+    mkdirSync(repoOne, { recursive: true })
+    mkdirSync(repoTwo, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    writeFileSync(progressPath, [
+      autoBlock({ agent: 'codex', session: 'sess-cp-1', project: 'RepoOne', title: 'Sender', dir: repoOne, updatedIso: isoAgo(now) }),
+      autoBlock({ agent: 'claude', session: 'sess-cp-2', project: 'RepoTwo', title: 'Target', dir: repoTwo, updatedIso: isoAgo(now) }),
+    ].join('\n'))
+    const reports = [
+      { agent: 'codex', session: 'sess-cp-1', updated: now - 30_000, dir: repoOne, title: 'Sender' },
+      { agent: 'claude', session: 'sess-cp-2', updated: now - 30_000, dir: repoTwo, title: 'Target' },
+    ]
+    hub = await startHub(root, { progressPath, reportsOf: () => reports })
+    const targetReg = await registerReceiver(hub, { agent: 'claude', session: 'sess-cp-2', dir: repoTwo })
+
+    const blocked = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'Cross Blocked'], { cwd: repoOne })
+    assert.equal(blocked.status, 1)
+    assert.equal(blocked.stderr.trim(), EN.cliSendCrossProject)
+
+    const received = []
+    const flagAsBody = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', '--json', '--cross-project'], { cwd: repoOne })
+    assert.equal(flagAsBody.status, 0, flagAsBody.stderr)
+    assert.ok(flagAsBody.stdout.startsWith('Sent to Claude Code · RepoTwo · '), flagAsBody.stdout)
+    received.push(...(await pollAndAck(hub, targetReg)).map(one => one.text))
+
+    const dashDashBody = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--cross-project', '--send', 'claude', '--', '--json'], { cwd: repoOne })
+    assert.equal(dashDashBody.status, 0, dashDashBody.stderr)
+    received.push(...(await pollAndAck(hub, targetReg)).map(one => one.text))
+
+    assert.deepEqual(received, ['--json', '--json'])
+  } finally {
+    if (hub) await hub.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Retained 13
+test('--send stops a reply loop at HOP_LIMIT for an authenticated receiver', async () => {
+  const root = tempRoot()
+  let hub
+  try {
+    const ws = join(root, 'workspace')
+    mkdirSync(ws, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    writeFileSync(progressPath, [
+      autoBlock({ agent: 'codex', session: 'sess-hop-a', project: 'HopRepo', title: 'Agent A', dir: ws, updatedIso: isoAgo(now) }),
+      autoBlock({ agent: 'claude', session: 'sess-hop-b', project: 'HopRepo', title: 'Agent B', dir: ws, updatedIso: isoAgo(now) }),
+    ].join('\n'))
+    const reports = [
+      { agent: 'codex', session: 'sess-hop-a', updated: now - 30_000, dir: ws, title: 'Agent A' },
+      { agent: 'claude', session: 'sess-hop-b', updated: now - 30_000, dir: ws, title: 'Agent B' },
+    ]
+    hub = await startHub(root, { progressPath, reportsOf: () => reports })
+    const regA = await registerReceiver(hub, { agent: 'codex', session: 'sess-hop-a', dir: ws })
+    const regB = await registerReceiver(hub, { agent: 'claude', session: 'sess-hop-b', dir: ws })
+
+    const hop1 = await hub.post('peer-send', {
+      agent: 'claude',
+      session: 'sess-hop-b',
+      text: 'Hop 1',
+      id: 'hop-seed-1',
+      source: regA.id,
+      secret: regA.secret,
+      folderDigest: workspaceDigestOf(ws),
+    })
+    assert.equal(hop1.status, 200, JSON.stringify(hop1.data))
+    await pollAndAck(hub, regB)
+
+    const hop2 = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'codex', 'Hop 2'], {
+      cwd: ws,
+      env: { AGENT_BOARD_CONNECTION_ID: regB.id, AGENT_BOARD_CONNECTION_SECRET: regB.secret },
+    })
+    assert.equal(hop2.status, 0, hop2.stderr)
+    await pollAndAck(hub, regA)
+
+    const hop3 = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'Hop 3 blocked'], {
+      cwd: ws,
+      env: { AGENT_BOARD_CONNECTION_ID: regA.id, AGENT_BOARD_CONNECTION_SECRET: regA.secret },
+    })
+    assert.equal(hop3.status, 1)
+    assert.equal(hop3.stderr.trim(), EN.cliSendHopLimit(HOP_LIMIT))
+    assert.equal(hub.store.snapshot(Date.now(), reports).messages.length, HOP_LIMIT)
+  } finally {
+    if (hub) await hub.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Retained 14
+test('terminal print and --chat show the latest message state without exposing session ids or nonces', async () => {
+  const root = tempRoot()
+  try {
+    const ws = join(root, 'workspace')
+    const messagesDir = join(root, 'messages')
+    mkdirSync(ws, { recursive: true })
+    mkdirSync(messagesDir, { recursive: true })
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    const rows = [
+      { agent: 'codex', session: 'sess-leak-sender-0', project: 'ProjFrom', title: 'Sender Task' },
+      { agent: 'claude', session: 'sess-leak-q-1', project: 'ProjQueued', title: 'Queued Task' },
+      { agent: 'gemini', session: 'sess-leak-a-2', project: 'ProjAccepted', title: 'Accepted Task' },
+      { agent: 'cursor', session: 'sess-leak-ok-3', project: 'ProjAcked', title: 'Acked Task' },
+      { agent: 'codex', session: 'sess-leak-u-4', project: 'ProjUncertain', title: 'Uncertain Task' },
+      { agent: 'claude', session: 'sess-leak-r-5', project: 'ProjRejected', title: 'Rejected Task' },
+    ]
+    writeFileSync(progressPath, rows.map(r => autoBlock({ ...r, dir: ws, updatedIso: isoAgo(now) })).join('\n'))
+
+    const senderAddr = address('codex', 'sess-leak-sender-0')
+    const messages = [
+      {
+        id: 'st-queued',
+        target: 'conn-q',
+        turn: 't1',
+        from: senderAddr,
+        to: address('claude', 'sess-leak-q-1'),
+        text: 'queued body',
+        hash: textHash('queued body'),
+        origin: 'local',
+        hops: 1,
+        claimed: 0,
+        nonce: '',
+        framingNonce: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
+        status: 'queued',
+        updated: now - 10_000,
+        reply: '',
+        error: '',
+      },
+      {
+        id: 'st-accepted',
+        target: 'conn-a',
+        turn: 't1',
+        from: 'board',
+        to: address('gemini', 'sess-leak-a-2'),
+        text: 'accepted body',
+        hash: textHash('accepted body'),
+        origin: 'local',
+        hops: 1,
+        claimed: now - 9_000,
+        nonce: 'aa11bb',
+        status: 'accepted',
+        updated: now - 8_000,
+        reply: '',
+        error: '',
+      },
+      {
+        id: 'st-acked',
+        target: 'conn-ok',
+        turn: 't1',
+        from: 'board',
+        to: address('cursor', 'sess-leak-ok-3'),
+        text: 'acked body',
+        hash: textHash('acked body'),
+        origin: 'local',
+        hops: 1,
+        claimed: now - 7_000,
+        nonce: 'cc22dd',
+        status: 'acknowledged',
+        updated: now - 6_000,
+        reply: 'Finished check',
+        error: '',
+      },
+      {
+        id: 'st-uncertain',
+        target: 'conn-u',
+        turn: 't1',
+        from: 'board',
+        to: address('codex', 'sess-leak-u-4'),
+        text: 'uncertain body',
+        hash: textHash('uncertain body'),
+        origin: 'local',
+        hops: 1,
+        claimed: now - 5_000,
+        nonce: 'ee33ff',
+        status: 'uncertain',
+        updated: now - 4_000,
+        reply: '',
+        error: 'LOST',
+      },
+      {
+        id: 'st-rejected',
+        target: 'conn-r',
+        turn: 't1',
+        from: 'board',
+        to: address('claude', 'sess-leak-r-5'),
+        text: 'rejected body',
+        hash: textHash('rejected body'),
+        origin: 'local',
+        hops: 1,
+        claimed: 0,
+        nonce: '',
+        status: 'rejected',
+        updated: now - 3_000,
+        reply: '',
+        error: 'OFFLINE',
+      },
+    ]
+    // Ensure a valid claimMessages reference exists on store types too.
+    assert.equal(typeof claimMessages, 'function')
+    assert.equal(typeof queueMessage, 'function')
+    writeFileSync(join(messagesDir, 'messages.json'), JSON.stringify({ version: 2, messages, mailboxes: [] }))
+
+    const printRes = await runCli(root, ['--lang', 'en', '--print', '--no-color', '--progress-file', progressPath, '--messages-dir', messagesDir])
+    assert.equal(printRes.status, 0, printRes.stderr)
+    const chatRes = await runCli(root, ['--lang', 'en', '--chat', '--no-color', '--progress-file', progressPath, '--messages-dir', messagesDir])
+    assert.equal(chatRes.status, 0, chatRes.stderr)
+
+    for (const out of [printRes.stdout, chatRes.stdout]) {
+      assert.ok(out.includes('ProjFrom'), out)
+      assert.ok(out.includes(EN.messagesQueued), out)
+      assert.ok(out.includes(EN.messagesAccepted), out)
+      assert.ok(out.includes(EN.messagesAcknowledged), out)
+      assert.ok(out.includes(EN.messagesUncertain), out)
+      assert.ok(out.includes(EN.messagesRejected), out)
+      for (const secret of ['sess-leak-', 'a1b2c3d4e5f60718293a4b5c6d7e8f90', 'aa11bb', 'cc22dd', 'ee33ff']) {
+        assert.equal(out.includes(secret), false, `Exposed ${secret} in:\n${out}`)
+      }
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+  }
+})
+
+// Retained 15
+test('--send matches same-workspace MCP mailbox alongside a live connection and across symlinked paths', async () => {
+  const root = tempRoot()
+  let hub
+  try {
+    const homeDir = join(root, 'home')
+    const realWs = join(root, 'real-ws')
+    const aliasWs = join(root, 'alias-ws')
+    const messagesDir = join(root, 'messages')
+    const runtimeDir = join(root, 'runtime')
+    mkdirSync(realWs, { recursive: true })
+    symlinkSync(realWs, aliasWs, process.platform === 'win32' ? 'junction' : 'dir')
+
+    const now = Date.now()
+    const progressPath = join(root, 'progress.md')
+    writeFileSync(progressPath, [
+      autoBlock({ agent: 'gemini', session: 'sess-mcp-15', project: 'SymlinkRepo', title: 'MCP + Live', dir: realWs, updatedIso: isoAgo(now) }),
+      autoBlock({ agent: 'codex', session: 'sess-alias-16', project: 'SymlinkRepo', title: 'Alias Cwd', dir: aliasWs, updatedIso: isoAgo(now) }),
+    ].join('\n'))
+
+    hub = await startServeHub(root, { progressPath, messagesDir, runtimeDir, homeDir })
+    const canonicalDigest = workspaceDigestOf(realpathSync(aliasWs))
+    assert.equal(workspaceDigestOf(aliasWs), canonicalDigest)
+
+    const enroll = await hub.post('mcp-enroll', {
+      agent: 'gemini',
+      session: 'sess-mcp-15',
+      surface: 'mcp',
+      owner: '12345:133000000000000000',
+      folderDigest: canonicalDigest,
+      until: Date.now() + 300_000,
+    })
+    assert.equal(enroll.status, 200, JSON.stringify(enroll.data))
+    const liveReg = await registerReceiver(hub, { agent: 'gemini', session: 'sess-mcp-15', dir: realWs, surface: 'ide' })
+
+    const sendRes = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', messagesDir, '--send', 'gemini', 'Symlink workspace hello'], {
+      cwd: aliasWs,
+      env: { HOME: homeDir, USERPROFILE: homeDir, XDG_RUNTIME_DIR: runtimeDir },
+    })
+    assert.equal(sendRes.status, 0, sendRes.stderr)
+
+    // Live connection is preferred over the co-resident MCP mailbox.
+    const livePolled = await pollAndAck(hub, liveReg)
+    assert.equal(livePolled.length, 1)
+    assert.equal(livePolled[0].text, 'Symlink workspace hello')
+
+    // Offline symlinked --messages-dir must be refused as UNSAFE_MESSAGE_DIRECTORY.
+    const unsafeDir = join(root, 'symlink-messages')
+    const targetDir = join(root, 'real-offline-messages')
+    mkdirSync(targetDir, { recursive: true })
+    symlinkSync(targetDir, unsafeDir, process.platform === 'win32' ? 'junction' : 'dir')
+    const offlineProgress = join(root, 'offline-sym.md')
+    writeFileSync(offlineProgress, autoBlock({ agent: 'codex', session: 'sess-sym-off', project: 'SymOff', title: 'Offline', dir: realWs, updatedIso: isoAgo(now) }))
+    const unsafeRes = await runCli(root, ['--lang', 'en', '--progress-file', offlineProgress, '--messages-dir', unsafeDir, '--send', 'codex', 'Refused symlink'], {
+      cwd: realWs,
+      env: { HOME: homeDir, USERPROFILE: homeDir, XDG_RUNTIME_DIR: runtimeDir },
+    })
+    assert.equal(unsafeRes.status, 1)
+    assert.ok(unsafeRes.stderr.includes('UNSAFE_MESSAGE_DIRECTORY'), unsafeRes.stderr)
+  } finally {
+    if (hub) await hub.close()
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   }
 })
