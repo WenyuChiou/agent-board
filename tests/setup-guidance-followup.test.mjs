@@ -52,13 +52,14 @@ test('a terminal repair reports already trusted hooks done without trusting them
   }, ['codex'])
 })
 
-test('a terminal missing-Codex retry quotes the translated path placeholder in every language', () => {
+test('a terminal missing-Codex trust command quotes the translated path placeholder in every language', () => {
   for (const [index, lang] of locales.entries()) terminal(f => {
     const result = f.invoke(['--agent', 'codex', '--lang', lang], 'y\n')
     assert.equal(result.status, 0, result.stderr)
-    const part = bootstrap[index].trustPart.replace('{host}', 'Codex')
-    const line = result.stdout.split(/\r?\n/).find(one => one.startsWith(part)) ?? ''
-    assert.ok(line.includes(`--codex-bin '${bootstrap[index].codexPath}'`), 'the retry contains a nonempty localized path protected from shell redirection')
+    // No Codex program: no approval part is promised (#1801); the line naming the approval's path carries the command.
+    const missing = bootstrap[index].codexMissing
+    const line = result.stdout.split(/\r?\n/).find(one => one.startsWith(missing.slice(0, missing.indexOf('{')))) ?? ''
+    assert.ok(line.includes(`--codex-bin '${bootstrap[index].codexPath}'`), 'the command contains a nonempty localized path protected from shell redirection')
     assert.equal(f.commands.calls().length, 0, 'no real host is reached')
   }, [])
 })

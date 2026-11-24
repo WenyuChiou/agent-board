@@ -54,9 +54,10 @@ test('the installed doctor gives the missing-Codex trust step as one Next line a
     const next = doctor.stdout.split(/\r?\n/).filter(line => line.startsWith(nextPrefixes[index]))
     assert.equal(next.length, 1, `one Next line for the one step\n${doctor.stdout}`)
     assert.ok(next[0].includes('where.exe codex') && next[0].includes('command -v codex'), `the line says how to find Codex\n${doctor.stdout}`)
-    assert.ok(next[0].endsWith(`--agent codex --codex-trust --codex-bin "${codexPaths[index]}"`), `the line ends with the trust command and its placeholder\n${doctor.stdout}`)
+    assert.ok(next[0].endsWith(`--codex-trust --codex-bin "${codexPaths[index]}"`), `the line ends with the trust command and its placeholder\n${doctor.stdout}`)
     // On Windows a path with a backslash in the install context still takes the code-point form, as the found-Codex command does.
     if (process.platform !== 'win32') {
+      assert.ok(next[0].endsWith(`--agent codex --codex-trust --codex-bin "${codexPaths[index]}"`), `the agent reads in the command\n${doctor.stdout}`)
       assert.doesNotMatch(next[0], /fromCodePoint/, `the command is readable\n${doctor.stdout}`)
       assert.ok(next[0].includes(`node "${join(f.root, 'data', 'agent-board.mjs')}" `), `the command names the installed board script\n${doctor.stdout}`)
     }

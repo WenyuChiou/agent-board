@@ -503,13 +503,13 @@ export const codexDoctorOutput = (result: LocalPlan & {
   if (isPending) lines.push(words.pending)
   if (result.agent === 'codex' && result.installed) lines.push(result.hooksTrusted === true ? words.trusted : result.hooksTrusted === false ? words.untrusted : words.trustUnknown)
   lines.push(s.codexDoctor)
-  if (isCodexMissing && result.agent === 'codex' && result.installed && result.hooksTrusted !== true && !result.conflicts.length && !isPending) lines.push(words.trust)
   lines.push(result.conflicts.length ? words.review(command)
     : !hasHook ? words.setup(command)
     : isOutdated ? words.outdatedNext
     : isPending ? words.skill(host)
-    // --codex-trust works only on an installed Codex, not on one the connector hooked.
-    : result.agent === 'codex' && result.installed && result.hooksTrusted !== true ? trustCommand ? words.trustRun(trustCommand) : words.trust
+    // --codex-trust works only on an installed Codex, not on one the connector hooked. With Codex not found, finding it
+    // and the trust command are one step, on one line (#1800).
+    : result.agent === 'codex' && result.installed && result.hooksTrusted !== true ? trustCommand ? (isCodexMissing ? words.trustMissing(trustCommand) : words.trustRun(trustCommand)) : words.trust
     : words.verify(host))
   return `${lines.join('\n')}\n`
 }
@@ -943,8 +943,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }, quote, (program, argv, isRunnable) => {
     if (!isRunnable) {
       // A missing-host placeholder stays visible and last even if its context needs code-point quoting.
+      // The part before it reads as words when it can, as a runnable command does (#1800): the code points only for a path that needs them.
       const at = argv.indexOf(nextMode)
-      return `${boardRun(program, argv.slice(0, at))} ${argv.slice(at).map(arg => /^[\w.:=/-]+$/.test(arg) ? arg : quote(arg)).join(' ')}`
+      const head = argv.slice(0, at)
+      const shown = (arg: string): string => /^[\w.:=/-]+$/.test(arg) ? arg : quote(arg)
+      const start = head.some(arg => /["`$%!\\\r\n]/.test(arg)) ? boardRun(program, head) : [boardRun(program), ...head.map(shown)].join(' ')
+      return `${start} ${argv.slice(at).map(shown).join(' ')}`
     }
     const rest = argv
       // A Codex path a person can read: Windows takes forward slashes, and they need no code points.
@@ -2202,13 +2206,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     return approvals === null ? 'unknown' : recordedHooks.length > 0 && wanted.every(([event, command]) => approvals.list.some(entry => entry.event === event && entry.command === command))
   }
   let trustNow: boolean | 'unknown' | undefined
-  if (isUpdate && !args.includes('--apply') && (agent === 'codex' || agent === 'hermes') && initial(manifestFile) !== null) {
+  // A plain setup preview asks the same of Codex (--read-trust, #1799), so its next steps name the trust step only when needed.
+  const isTrustRead = isUpdate || !remove && agent === 'codex' && args.includes('--read-trust')
+  if (isTrustRead && !args.includes('--apply') && (agent === 'codex' || agent === 'hermes') && initial(manifestFile) !== null) {
     const executable = flag('--codex-bin')
     try { trustNow = agent === 'hermes' ? hermesTrust() : executable ? (await trustCodex(executable, config, Object.fromEntries(Object.entries(manifest.groups).filter(([event]) => !removedByPerson.has(event))), false)).hooks.every(hook => hook.trust === 'trusted') : 'unknown' } catch { trustNow = 'unknown' }
   }
   // Whether this board approved the hooks before, so an update tells an approval the person revoked from one never given
   // (#1314). A record from before this field says neither, and an update treats that as revoked.
-  const isApproved = loaded.approved === true || args.includes('--hooks-approved') || trustNow === true
+  // Only an update records the trust it read; a preview's read changes no record.
+  const isApproved = loaded.approved === true || args.includes('--hooks-approved') || isUpdate && trustNow === true
   const approval = agent !== 'codex' && agent !== 'hermes' ? {} : isApproved ? { approved: true } : loaded.approved === false || initial(manifestFile) === null && flag('--setup-version') !== undefined ? { approved: false } : {}
   // A new record keeps the newest use's version however it was set up (Settings, or this script's own setup), as setup
   // writes it, so an update does not ask about a use the install has had from the start. An older record without one keeps none.
@@ -2267,8 +2274,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     hooks: [...new Set([...wasHooks.keys(), ...nowHooks.keys()])].filter(event => !isSame(wasHooks.get(event) ?? [], nowHooks.get(event) ?? [])).map(event => ({ event, before: wasHooks.get(event) ?? [], after: nowHooks.get(event) ?? [] })),
     loaded: changes.filter(change => change.action !== 'remove' && Object.hasOwn(files, change.file) && !isTextFile(change.file) && !change.file.endsWith('.new')).map(change => change.file),
   }
+  // What a plain preview read (#1799): Codex trusts the hooks now and this plan leaves their definitions as they are, so the
+  // trust holds after the apply. A plan that rewrites hooks.json gives Codex definitions it has not seen: that is unknown.
+  const previewTrust = isUpdate || trustNow === undefined ? undefined
+    : trustNow === true ? (changes.some(change => change.file === nativeConfig) ? 'unknown' : 'kept') : trustNow === false ? 'untrusted' : 'unknown'
   const plan = {
-    mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts, ...(update === undefined ? {} : { update }),
+    mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts, ...(update === undefined ? {} : { update }), ...(previewTrust === undefined ? {} : { previewTrust }),
     alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), ...(opens === undefined ? {} : { opens }), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }

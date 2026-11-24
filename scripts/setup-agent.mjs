@@ -75,7 +75,7 @@ const summaries = [
     "codex": "Codex: approve the board's hooks for the Codex app and CLI: preview with {command}, then run it again with --apply (in the Codex CLI, /hooks also works).",
     "codexTrustHeld": "Codex: the board's hooks are still trusted.",
     "codexTrustNeeded": "Codex: the board's hooks for {events} are not trusted. Approve them: preview with {command}, then run it again with --apply (in the Codex CLI, /hooks also works).",
-    "codexMissing": "Codex: setup could not find Codex. Find it with where.exe codex on Windows or command -v codex elsewhere, then replace {codex} in this preview command: {command}",
+    "codexMissing": "Codex: setup could not find Codex. Approving the board's hooks needs its full path: find it with where.exe codex on Windows or command -v codex elsewhere, replace {codex} in this command to preview the approval, then run it again with --apply: {command}",
     "codexPath": "<full path to codex>",
     "hermes": "Hermes Agent: Hermes asks once whether to trust the board's hooks; answer y. In a chat that cannot ask, preview {command}, then run it again with --apply.",
     "opencode": "OpenCode: restart OpenCode to load its generated agent-board plugin.",
@@ -163,7 +163,7 @@ const summaries = [
     "codex": "Codex：為 Codex 應用程式和 CLI 核准看板的 hooks：先執行 {command} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
     "codexTrustHeld": "Codex：看板的 hooks 仍然受信任。",
     "codexTrustNeeded": "Codex：看板在 {events} 的 hooks 尚未受信任。請核准它們：先執行 {command} 預覽，再加上 --apply 重新執行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
-    "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系統用 command -v codex 找到它，再替換這個預覽指令中的 {codex}：{command}",
+    "codexMissing": "Codex：setup 找不到 Codex。核准看板的 hooks 需要它的完整路徑：Windows 用 where.exe codex，其他系統用 command -v codex 找到它，替換這個指令中的 {codex} 先預覽核准，再加上 --apply 重新執行同一指令：{command}",
     "codexPath": "<Codex 的完整路徑>",
     "hermes": "Hermes Agent：Hermes 會問一次是否信任看板的 hooks，請回答 y。在無法詢問的聊天通道中，先執行 {command} 預覽，再加上 --apply 重新執行同一命令。",
     "opencode": "OpenCode：重新啟動 OpenCode，載入 setup 產生的 agent-board 外掛。",
@@ -251,7 +251,7 @@ const summaries = [
     "codex": "Codex：为 Codex 应用程序和 CLI 批准看板的 hooks：先运行 {command} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
     "codexTrustHeld": "Codex：看板的 hooks 仍然受信任。",
     "codexTrustNeeded": "Codex：看板在 {events} 的 hooks 尚未受信任。请批准它们：先运行 {command} 预览，再加上 --apply 重新运行同一命令（在 Codex CLI 中也可以使用 /hooks）。",
-    "codexMissing": "Codex：setup 找不到 Codex。Windows 用 where.exe codex，其他系统用 command -v codex 找到它，再替换这个预览命令中的 {codex}：{command}",
+    "codexMissing": "Codex：setup 找不到 Codex。批准看板的 hooks 需要它的完整路径：Windows 用 where.exe codex，其他系统用 command -v codex 找到它，替换这个命令中的 {codex} 先预览批准，再加上 --apply 重新运行同一命令：{command}",
     "codexPath": "<Codex 的完整路径>",
     "hermes": "Hermes Agent：Hermes 会问一次是否信任看板的 hooks，请回答 y。在无法询问的聊天渠道中，先运行 {command} 预览，再加上 --apply 重新运行同一命令。",
     "opencode": "OpenCode：重新启动 OpenCode，加载 setup 生成的 agent-board 插件。",
@@ -568,9 +568,14 @@ const main = () => {
   let removing = selected
   // An update reads Codex's trust through the Codex it would name in a trust command.
   const updateCodex = isUpdate ? flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
+  // A plain preview asks Codex whether it trusts the board's hooks now, through the Codex its trust step would name, so its
+  // next steps leave that step out when the apply would find the trust still there (#1799). The apply reads it back itself.
+  const previewCodex = !isRemove && !isUpdate && !apply && !isJson ? flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
   const run = (agent, isApplying, extra = []) => {
+    const readsTrust = agent === 'codex' && !isApplying && !!previewCodex
     const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')]
-      : [...common, '--setup-version', newestUse,...(agent === 'codex' && updateCodex && !flag('--codex-bin') ? ['--codex-bin', updateCodex] : [])]
+      : [...common, '--setup-version', newestUse,...(agent === 'codex' && updateCodex && !flag('--codex-bin') ? ['--codex-bin', updateCodex] : []),
+        ...(readsTrust ? ['--read-trust', ...(flag('--codex-bin') ? [] : ['--codex-bin', previewCodex])] : [])]
     // A preview taken for an apply checks a conflict again under the install lock, so a copy another setup run is
     // writing stops this command as busy instead of being shown as a file to fix or move (#1694).
     const result = spawnSync(process.execPath, [script, ...runArgs, ...extra, '--json', '--agent', agent, ...(isApplying ? ['--apply'] : apply ? ['--check-conflicts'] : [])], { encoding: 'utf8', windowsHide: true })
@@ -765,7 +770,10 @@ const main = () => {
     const facts = agent => planOf(agent).update ?? { hooks: [], loaded: [] }
     // A host that trusts the hooks now is asked again only for hook commands that change. One whose trust cannot be read, or
     // is gone, is asked only when this board never approved the hooks; an approval revoked since is never given back.
-    const approvals = own.filter(agent => facts(agent).trust === true ? facts(agent).hooks.length > 0 : facts(agent).trust !== undefined && facts(agent).approved === false)
+    // With no Codex program found, the update cannot read or give Codex's approval: it asks for none and says the approval
+    // needs the program's path (#1801).
+    const missing = own.filter(agent => agent === 'codex' && !updateCodex && facts(agent).trust === 'unknown')
+    const approvals = own.filter(agent => !missing.includes(agent) && (facts(agent).trust === true ? facts(agent).hooks.length > 0 : facts(agent).trust !== undefined && facts(agent).approved === false))
     const revoked = own.filter(agent => facts(agent).trust === false && facts(agent).approved !== false)
     // Trust that cannot be read now, after this board approved the hooks: no approval is written, and none is claimed gone.
     const unread = own.filter(agent => facts(agent).trust === 'unknown' && facts(agent).approved !== false)
@@ -823,7 +831,10 @@ const main = () => {
       const result = retry.isRunnable && !failed.has(agent) ? boardRun(planOf(agent), agent, extra) : undefined
       part(agent, words('trustPart', { host: names[agent] }), result !== undefined && !result.error && result.status === 0, retry.text)
     }
-    const revokedLines = [...revoked, ...unread].map(agent => words(unread.includes(agent) ? 'updateTrustUnread' : 'updateRevoked', { host: names[agent], command: boardStep(planOf(agent), agent, [`--${agent}-trust`], agent === 'codex' ? updateCodex || { placeholder: words('codexPath') } : undefined).text }))
+    const revokedLines = [
+      ...[...revoked, ...unread.filter(agent => !missing.includes(agent))].map(agent => words(unread.includes(agent) ? 'updateTrustUnread' : 'updateRevoked', { host: names[agent], command: boardStep(planOf(agent), agent, [`--${agent}-trust`], agent === 'codex' ? updateCodex || { placeholder: words('codexPath') } : undefined).text })),
+      ...missing.map(agent => words('codexMissing', { command: boardStep(planOf(agent), agent, ['--codex-trust'], { placeholder: words('codexPath') }).text, codex: quote(words('codexPath')) })),
+    ]
     // A trust step that ran wrote too, so only an update that wrote nothing says it is up to date.
     const lines = [...(failed.size || !own.length ? [] : [words(changed.length || approvals.length ? 'updated' : 'updateCurrent', { version: setupVersion })]), ...out, ...revokedLines, ...(asks.length ? [] : kept), ...skipped.map(agent => agentLines[selected.indexOf(agent)])]
     if (skipped.length) lines.push(words('retry', { command: setupCommand(['--agent', skipped.join(','), '--update']) }))
@@ -833,11 +844,16 @@ const main = () => {
   }
   if (isAsking) {
     const codex = flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1'])
-    const approvals = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
+    const needsApproval = available.filter(agent => ['codex', 'hermes'].includes(agent)).filter(agent => {
       const plan = plans[selected.indexOf(agent)]
       if (isRepair && !changedAgents.includes(agent)) return false
       return plan.managedBy !== 'connector' && (plan.changes.length || !isTrusted(plan, agent, agent === 'codex' ? codex : undefined))
     })
+    // With no Codex program found, setup cannot approve Codex's hooks: it promises no approval and names the command
+    // the approval needs, with the program's path left to fill in (#1801).
+    const approvals = needsApproval.filter(agent => agent !== 'codex' || codex)
+    const codexMissing = needsApproval.includes('codex') && !codex
+      ? words('codexMissing', { command: boardStep(plans[selected.indexOf('codex')], 'codex', ['--codex-trust'], { placeholder: words('codexPath') }).text, codex: quote(words('codexPath')) }) : ''
     // Keep file work and explicit host approvals separate: current files can still need trust.
     const will = [
       ...(sharedChanges.length ? [sharedLine] : []),
@@ -864,7 +880,7 @@ const main = () => {
     // With nothing to do there is nothing to ask; the plain preview below says so.
     let hasConsent = false
     if (will.length) {
-      process.stdout.write(`${lines.join('\n')}\n\n${words('thisWill')}\n${will.map(line => `- ${line}`).join('\n')}\n`)
+      process.stdout.write(`${lines.join('\n')}\n\n${words('thisWill')}\n${will.map(line => `- ${line}`).join('\n')}\n${codexMissing ? `${codexMissing}\n` : ''}`)
       hasConsent = askYes()
       process.stdout.write('\n')
     }
@@ -936,7 +952,7 @@ const main = () => {
         }
       }
       if (completed.includes('antigravity')) offerSidecar()
-      const next = []
+      const next = codexMissing && completed.includes('codex') ? [codexMissing] : []
       const sessions = []
       // How each agent opens the board (docs/SETUP.md, After setup): /agent-board, $agent-board in Codex, the skill in
       // Hermes Agent, and /board where /agent-board waits with an edited older board script. The plan names the way and
@@ -1018,7 +1034,8 @@ const main = () => {
       const codex = agent === 'codex' ? flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
       // A repeat run of an unchanged install asks Codex or Hermes itself whether the board's hooks are trusted,
       // and leaves out the trust step only on its yes; no answer or any other answer keeps it (#808).
-      const hasTrustedHooks = ['codex', 'hermes'].includes(agent) && (!hasAgentChanges || isRepair) && isTrusted(plan, agent, agent === 'codex' ? codex : undefined)
+      // A preview read Codex's trust itself, before any file changed: it counts whenever this plan keeps the hooks as they are (#1799).
+      const hasTrustedHooks = ['codex', 'hermes'].includes(agent) && (!apply && plan.previewTrust === 'kept' || (!hasAgentChanges || isRepair) && isTrusted(plan, agent, agent === 'codex' ? codex : undefined))
       if (!hasAgentChanges && hasTrustedHooks) continue
       if (agent === 'codex' && !codex) {
         if (!hasTrustedHooks) steps.push(words('codexMissing', { command: boardStep(plan, agent, ['--codex-trust'], { placeholder: words('codexPath') }).text, codex: quote(words('codexPath')) }))

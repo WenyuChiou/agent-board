@@ -690,7 +690,7 @@ test('every board option is classified as a view or not, and the view list is pi
     '--chat', '--status', '--tidy', '--mcp', '--report', '--stop', '--help', '-h', '--version', '-v', '--stopped', '--unsent',
     '--agent-status', '--apply', '--awaits-ack', '--check-conflicts', '--remove', '--update', '--antigravity-sidecar', '--hooks-approved',
     '--codex-doctor', '--codex-event', '--codex-remove', '--codex-report', '--codex-setup', '--codex-trust', '--hermes-trust', '--plan-event',
-    '--recover-hooks', '--hook-recovery-parent', '--serve-child',
+    '--read-trust', '--recover-hooks', '--hook-recovery-parent', '--serve-child',
     '--agent', '--codex-bin', '--codex-dir', '--data-dir', '--deepseek-dir', '--event', '--grok-dir', '--hermes-dir', '--hook-deadline',
     '--hook-event', '--hook-started', '--id', '--legacy-connect-request', '--mailbox', '--messages-dir', '--nonce', '--older', '--openclaw-dir',
     '--opencode-dir', '--progress-file', '--ready-file', '--recovery-owner-created', '--recovery-owner-pid', '--recovery-owner-token',
