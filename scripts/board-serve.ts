@@ -573,10 +573,13 @@ export const startServer = (o: ServeOptions): void => {
   const mintOpenLink = (now: number, pairKey = ''): string => {
     for (const [code, entry] of openLinks) if (entry.until < now) openLinks.delete(code)
     if (openLinks.size >= (o.openLinkMax ?? OPEN_LINK_MAX)) {
+      // A used code stays only to catch a replay, so one goes first. An unused one may be the link a
+      // command just printed: then the oldest goes, but never one an /api/open is waiting on. Pushing
+      // out unkeyed codes first made the newest printed link the one to go when keyed codes filled
+      // the cap (#1650).
       let evictKey: string | undefined
-      for (const [code, entry] of openLinks) {
-        if (entry.pairKey === '') { evictKey = code; break }
-      }
+      for (const [code, entry] of openLinks) if (entry.used) { evictKey = code; break }
+      if (evictKey === undefined) for (const code of openLinks.keys()) if (!redeemWaiters.has(code)) { evictKey = code; break }
       openLinks.delete(evictKey ?? (openLinks.keys().next().value as string))
     }
     const code = randomBytes(24).toString('base64url')

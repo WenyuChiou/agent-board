@@ -1450,21 +1450,25 @@ const PAGE_SCRIPT = String.raw`
   var sessionEl = document.getElementById('page-session');
   var pageSession = sessionEl && sessionEl.textContent ? JSON.parse(sessionEl.textContent) : '';
   if (sessionEl && sessionEl.parentNode) sessionEl.parentNode.removeChild(sessionEl);
+  var isOpenPath = /^\/open\//.test(location.pathname || '');
+  // A one-use link the board did not take (used, expired, unknown) ends the tab's session as well:
+  // the screen that follows says to get a fresh link, whatever this tab held before (#1650).
+  var isDeadLink = isOpenPath && !pageSession;
   var storedSession = '';
   try {
     if (typeof sessionStorage !== 'undefined') {
       if (pageSession) sessionStorage.setItem('agent_board_session', pageSession);
+      else if (isDeadLink) sessionStorage.removeItem('agent_board_session');
       else storedSession = sessionStorage.getItem('agent_board_session') || '';
     }
   } catch (error) {}
-  var token = pageSession || new URLSearchParams(location.search).get('t') || storedSession || '';
+  var token = pageSession || (isDeadLink ? '' : new URLSearchParams(location.search).get('t') || storedSession) || '';
   // Approvals (D3, #1318): a page the board opened itself carries a one-time key after its #. It is
   // traded once for this page's secret, which lives in this variable only: never in the tab's
   // storage, which the browser writes to disk where a program could read it. The key leaves the
   // address. A page opened any other way, or reloaded, shows the requests with no button.
   var approveSecret = '';
   var pairKey = /^#k=([\w-]+)$/.exec(location.hash || '');
-  var isOpenPath = /^\/open\//.test(location.pathname || '');
   if (pairKey || isOpenPath) { try { history.replaceState(null, '', (isOpenPath ? '/' : location.pathname) + (location.search || '')); } catch (error) {} }
   var board = document.getElementById('board');
   var note = document.getElementById('note');

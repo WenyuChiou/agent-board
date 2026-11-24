@@ -68,6 +68,15 @@ export const liveBoardPage = (stdout: string, s: Pick<Strings, 'serveAt' | 'serv
   return { url, isKept }
 }
 
+// The board's note beside the link it printed (#1650): a window it started that was not seen to load
+// the page, a page that looks open already, or no browser. The board writes it to stderr so the
+// address stays the last line of stdout; /progress shows it with the link. Only a whole line this
+// language words for this very link counts, so no other text from the run reaches the reply.
+export const liveBoardNote = (stderr: string, url: string, s: Pick<Strings, 'boardPageLaunchedLink' | 'boardPageAlreadyOpenLink' | 'serveBrowserNone'>): string | null => {
+  const notes = [s.boardPageLaunchedLink(url), s.boardPageAlreadyOpenLink(url), s.serveBrowserNone(url)]
+  return stderr.split(/\r?\n/).find(line => notes.includes(line)) ?? null
+}
+
 // The board's own refusal, from a run that exited with an error: its last line when it is one the
 // board words for a page that gave no link (busy, or an older page kept), so /progress passes it on
 // as it is, with no retry command of its own (#1650).

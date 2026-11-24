@@ -107,7 +107,7 @@ import { answerTurns, applyDigest, applyLateDigest, clearBackgroundJobs, cleanHa
 import type { Digest } from './digest'
 import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
-import { liveBoardArgv, liveBoardPage, liveBoardRefusal, liveBoardScript, pageDoneHash, pageDonePath, pageStatePath, readPageDone, readPageState } from './live-page'
+import { liveBoardArgv, liveBoardNote, liveBoardPage, liveBoardRefusal, liveBoardScript, pageDoneHash, pageDonePath, pageStatePath, readPageDone, readPageState } from './live-page'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -1569,7 +1569,7 @@ const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; t
 
 let isInteractiveSession = true
 
-const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean; opened?: 'window' } | null; needsInstall: boolean; reason?: string; refusal?: string }> => {
+const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean; opened?: 'window'; note?: string } | null; needsInstall: boolean; reason?: string; refusal?: string }> => {
   // Use the connector's installed file so sessions and agents share the same script
   // and the CLI's existing running-page check.
   const script = liveBoardScript(path)
@@ -1590,7 +1590,10 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInt
       return { page: null, needsInstall: false, reason }
     }
     const page = liveBoardPage(ran.stdout, s)
-    return { page, needsInstall: false, ...(page === null ? { reason: s.livePageNoAddress } : {}) }
+    if (page === null) return { page, needsInstall: false, reason: s.livePageNoAddress }
+    // What became of the window, which the board says beside its link (#1650).
+    const note = page.url === '' ? null : liveBoardNote(ran.stderr, page.url, s)
+    return { page: note === null ? page : { ...page, note }, needsInstall: false }
   } catch (error) {
     const text = messageOf(error)
     const code = /\b(EACCES|EPERM|EROFS|ENOSPC|EBUSY|EAGAIN)\b/.exec(text)?.[1]
@@ -1612,7 +1615,7 @@ const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, h
     }
     const { page, needsInstall, reason, refusal } = live
     if (page !== null && page.url === '') return { text: `${s.boardPageWindowOpened}${page.isKept ? `\n${s.serveKept}` : ''}` }
-    if (page !== null) return { text: `${headline}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
+    if (page !== null) return { text: `${headline}\n${page.note === undefined ? `<${page.url}>` : page.note.replace(page.url, `<${page.url}>`)}${page.isKept ? `\n${s.serveKept}` : ''}` }
     // The board said what to do next; a command from here would only repeat it.
     if (refusal !== undefined) return { text: refusal }
     return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : `${s.serveFailed(reason ?? s.serveNotStarted)}\n`}${s.livePageCommand(boardRun(liveBoardScript(progress), ['--serve']))}` }
