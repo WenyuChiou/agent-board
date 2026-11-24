@@ -7888,6 +7888,19 @@ test('a Codex PermissionRequest names its command and description on the approva
   assert.ok(readFileSync(f.progress, 'utf8').includes(step.replace('[?]', '[x]')))
 }))
 
+test('a long Codex approval command is cut so its description still shows, and a request with no command keeps the plain line (#1798)', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  const long = `powershell -NoProfile -Command ${'Get-ChildItem -Recurse | '.repeat(30)}Remove-Item`
+  assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'Bash', tool_input: { command: long, description: 'Remove the synthetic build folder' } }).status, 0)
+  const step = readFileSync(f.progress, 'utf8').match(/- \[\?\] Codex [^\n]*/)?.[0]
+  assert.ok(step)
+  assert.ok([...step.slice(6)].length <= 120, step)
+  assert.ok(step.includes('powershell -NoProfile') && step.includes('…') && step.endsWith('(Remove the synthetic build folder)'), step)
+  assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'apply_patch', tool_input: { patch: 'x' } }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Codex asks to run a command\n/)
+}))
+
 test('a Codex PermissionRequest adds a waiting approval step with a native line, and Stop closes it', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
