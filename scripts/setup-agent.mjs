@@ -802,7 +802,9 @@ const main = () => {
       const isYes = askYes('updateQuestion', false)
       process.stdout.write('\n')
       if (!isYes) {
-        process.exitCode = 1
+        // Direct `setup --update` keeps exit code 1 on a decline; the launcher asks with this flag so it knows
+        // setup already printed `updateLater` and skips the duplicate older-script notice (#1802).
+        process.exitCode = process.env.AGENT_BOARD_LAUNCHER_UPDATE === '1' ? 4 : 1
         process.stdout.write(`${words('updateLater', { command: again })}\n`)
         return
       }
