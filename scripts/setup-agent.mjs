@@ -570,7 +570,11 @@ const main = () => {
   const updateCodex = isUpdate ? flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
   // A plain preview asks Codex whether it trusts the board's hooks now, through the Codex its trust step would name, so its
   // next steps leave that step out when the apply would find the trust still there (#1799). The apply reads it back itself.
-  const previewCodex = !isRemove && !isUpdate && !apply && !isJson ? flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
+  // A Codex found only on PATH is started here just where setup already started it before (#1806 review): a run whose
+  // agents are all set up already, a repair or a repeat, whose next steps ask the doctor and so Codex anyway. A run that
+  // also sets up a new agent reads only the Codex the person named with --codex-bin.
+  const isTrustReadBefore = selected.length > 0 && selected.every(agent => touched.includes(agent))
+  const previewCodex = !isRemove && !isUpdate && !apply && !isJson && (flag('--codex-bin') || isTrustReadBefore) ? flag('--codex-bin') || findOnPath(['codex'], ['.exe', '.cmd', '.ps1']) : undefined
   const run = (agent, isApplying, extra = []) => {
     const readsTrust = agent === 'codex' && !isApplying && !!previewCodex
     const runArgs = isRemove ? ['--codex-remove', '--removing', removing.join(','), ...common.filter(arg => arg !== '--remove')]

@@ -509,7 +509,7 @@ export const codexDoctorOutput = (result: LocalPlan & {
     : isPending ? words.skill(host)
     // --codex-trust works only on an installed Codex, not on one the connector hooked. With Codex not found, finding it
     // and the trust command are one step, on one line (#1800).
-    : result.agent === 'codex' && result.installed && result.hooksTrusted !== true ? trustCommand ? (isCodexMissing ? words.trustMissing(trustCommand) : words.trustRun(trustCommand)) : words.trust
+    : result.agent === 'codex' && result.installed && result.hooksTrusted !== true ? trustCommand ? (isCodexMissing ? words.trustMissing(trustCommand, s.setupSummary.codexPath) : words.trustRun(trustCommand)) : words.trust
     : words.verify(host))
   return `${lines.join('\n')}\n`
 }
@@ -2207,7 +2207,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   }
   let trustNow: boolean | 'unknown' | undefined
   // A plain setup preview asks the same of Codex (--read-trust, #1799), so its next steps name the trust step only when needed.
-  const isTrustRead = isUpdate || !remove && agent === 'codex' && args.includes('--read-trust')
+  // A plan setup skips for a conflict is never asked about: setup did not start Codex for one before.
+  const isTrustRead = isUpdate || !remove && agent === 'codex' && args.includes('--read-trust') && conflicts.length === 0
   if (isTrustRead && !args.includes('--apply') && (agent === 'codex' || agent === 'hermes') && initial(manifestFile) !== null) {
     const executable = flag('--codex-bin')
     try { trustNow = agent === 'hermes' ? hermesTrust() : executable ? (await trustCodex(executable, config, Object.fromEntries(Object.entries(manifest.groups).filter(([event]) => !removedByPerson.has(event))), false)).hooks.every(hook => hook.trust === 'trusted') : 'unknown' } catch { trustNow = 'unknown' }

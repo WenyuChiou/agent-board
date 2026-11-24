@@ -753,6 +753,55 @@ test('a setup repair preview whose hooks Codex trusts names no trust step (#1799
   assert.doesNotMatch(preview, /--codex-trust/, `no trust step while Codex trusts the hooks\n${preview}`)
 })
 
+test('a setup repair preview keeps the trust step when the Codex it asks fails or never answers (#1799)', async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'codex', '--codex-trust', '--apply', '--json', '--codex-bin', mock.executable], { timeoutMs: 60000 }), 'the board approves its hooks')
+  rmSync(f.script)
+  // One stand-in stops at once; the other answers initialize and then never answers hooks/list, so the read times out.
+  const failing = join(f.home, 'bin', 'codex-fails.js'), silent = join(f.home, 'bin', 'codex-silent.js')
+  writeFileSync(failing, 'process.exit(1)\n')
+  writeFileSync(silent, `require('readline').createInterface({ input: process.stdin }).on('line', line => { const m = JSON.parse(line); if (m.method === 'initialize') process.stdout.write(JSON.stringify({ id: m.id, result: { capabilities: {} } }) + '\\n') })\n`)
+  for (const codex of [failing, silent]) {
+    const preview = await setup(f, ['--codex-bin', codex])
+    assert.match(preview, /--codex-trust --codex-bin/, `no answer keeps the trust step\n${preview}`)
+  }
+})
+
+// A Codex found only on PATH: a stand-in that writes a line to a log each time it starts. POSIX only: on Windows setup
+// finds codex.exe, .cmd or .ps1, which this stand-in cannot be.
+const pathCodex = (f, mock) => {
+  const bin = join(f.home, 'path-bin'), log = join(f.home, 'path-codex.log')
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(join(bin, 'codex'), `#!/bin/sh\necho start >> ${JSON.stringify(log)}\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(mock.executable)} "$@"\n`, { mode: 0o755 })
+  return { env: { PATH: [bin, '/usr/bin', '/bin'].join(':') }, log }
+}
+const previewWith = async (f, env) => checked(await run(f, [join(repoRoot, 'scripts', 'setup-agent.mjs'), ...isolatedArgs(f), '--lang', 'en'], { timeoutMs: 120000, env }), 'setup preview')
+
+test('a setup preview that also sets up a new agent starts no Codex found only on PATH (#1806)', { skip: process.platform === 'win32' && 'POSIX stand-in' }, async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  rmSync(f.script)
+  mkdirSync(join(f.home, '.cursor'), { recursive: true })
+  const codex = pathCodex(f, mock)
+  const preview = await previewWith(f, codex.env)
+  assert.equal(existsSync(codex.log), false, `the preview started no Codex\n${preview}`)
+  assert.match(preview, /--codex-trust/, `without a read the trust step stays\n${preview}`)
+})
+
+test('a setup repair preview reads the trust of a Codex found on PATH, where setup already asked it, and names no trust step (#1799)', { skip: process.platform === 'win32' && 'POSIX stand-in' }, async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'codex', '--codex-trust', '--apply', '--json', '--codex-bin', mock.executable], { timeoutMs: 60000 }), 'the board approves its hooks')
+  rmSync(f.script)
+  const codex = pathCodex(f, mock)
+  const preview = await previewWith(f, codex.env)
+  assert.doesNotMatch(preview, /--codex-trust/, `no trust step while Codex trusts the hooks\n${preview}`)
+})
+
 test('a setup preview that rewrites the board\'s Codex hooks keeps the trust step even while Codex trusts them now (#1799)', async () => {
   const f = fixture(['.codex'])
   const mock = mockCodex(f)

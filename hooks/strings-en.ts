@@ -84,7 +84,7 @@ export const EN: Strings = {
     skill: (host: string): string => `Next: open the board with the agent-board skill in ${host}.`,
     trust: 'Next: locate Codex with where.exe codex on Windows (use the .exe or .cmd line) or command -v codex elsewhere, then preview --codex-trust --codex-bin with that full path.',
     trustRun: (command: string): string => `Next: preview the hook trust change: ${command}`,
-    trustMissing: (command: string): string => `Next: locate Codex with where.exe codex on Windows (use the .exe or .cmd line) or command -v codex elsewhere, put its full path in place of <full path to codex>, and preview the hook trust change: ${command}`,
+    trustMissing: (command: string, placeholder: string): string => `Next: locate Codex with where.exe codex on Windows (use the .exe or .cmd line) or command -v codex elsewhere, put its full path in place of ${placeholder}, and preview the hook trust change: ${command}`,
     verify: (host: string): string => `Next: start a new ${host} session and check that its activity appears on the board.`,
     removal: (host: string, state: string): string => `${host}: ${state}.`,
     removed: 'Agent Board removal applied',

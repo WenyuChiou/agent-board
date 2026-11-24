@@ -122,7 +122,7 @@ export const ZH_TW = {
     skill: (host: string): string => `下一步：在 ${host} 使用 agent-board skill 開啟看板。`,
     trust: '下一步：Windows 用 where.exe codex（取 .exe 或 .cmd 那一行），其他系統用 command -v codex 找到 Codex，再以完整路徑配合 --codex-trust --codex-bin 預覽信任變更。',
     trustRun: (command: string): string => `下一步：預覽 hook 信任變更：${command}`,
-    trustMissing: (command: string): string => `下一步：Windows 用 where.exe codex（取 .exe 或 .cmd 那一行），其他系統用 command -v codex 找到 Codex，把完整路徑填入 <Codex 的完整路徑> 的位置，再預覽 hook 信任變更：${command}`,
+    trustMissing: (command: string, placeholder: string): string => `下一步：Windows 用 where.exe codex（取 .exe 或 .cmd 那一行），其他系統用 command -v codex 找到 Codex，把完整路徑填入 ${placeholder} 的位置，再預覽 hook 信任變更：${command}`,
     verify: (host: string): string => `下一步：啟動新的 ${host} session，確認看板出現其活動。`,
     removal: (host: string, state: string): string => `${host}：${state}。`,
     removed: '已套用 Agent Board 移除',
