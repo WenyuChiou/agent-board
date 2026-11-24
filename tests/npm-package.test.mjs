@@ -562,6 +562,7 @@ test('a person who declines the launcher\'s update keeps the older script and th
   assert.equal(readFileSync(script, 'utf8'), text, 'the older script is left as it was')
   assert.equal(JSON.parse(readFileSync(record, 'utf8')).version, undefined, 'the record is left as it was')
   assert.ok(result.stdout.includes('Nothing changed. To update, run this in a terminal and answer y:'), result.stdout)
+  assert.ok(result.stderr.includes('To update it, preview'), `a no leaves the notice too\n${result.stderr}`)
   assert.ok(result.stdout.split('Nothing changed.')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the answer\n${result.stdout}`)
 }))
 
@@ -721,9 +722,10 @@ test('the launcher\'s update keeps the install\'s own progress file when CLAUDE_
 
 // #1783: the update the launcher starts reaches only an install laid out as setup lays it out now (#1790). Codex and
 // Grok installed in another folder than the one setup picks now keep the notice, a relative recorded folder too; in
-// the folder CODEX_HOME or GROK_HOME names, the update runs and keeps them there.
+// the folder CODEX_HOME or GROK_HOME names, the update runs and keeps them there. That folder's name starts with `..`,
+// which is still a folder inside the home.
 const keptHostFolder = (f, agent, variable, tail) => {
-  const installed = join(f.home, `${agent} folder`), other = join(f.home, `another ${agent} folder`)
+  const installed = join(f.home, `..${agent} folder`), other = join(f.home, `another ${agent} folder`)
   const { pkg, root, script, record, text } = olderInstall(f, agent, [`--${agent}-dir`, installed])
   const config = join(installed, ...tail)
   const owned = readFileSync(record, 'utf8')
@@ -748,7 +750,9 @@ const keptHostFolder = (f, agent, variable, tail) => {
   assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), `the update wrote this package's board script\n${result.stdout}\n${result.stderr}`)
   assert.equal(resolve(JSON.parse(readFileSync(record, 'utf8')).config), resolve(config), 'the record still names that folder')
   assert.ok(readFileSync(config, 'utf8').includes('agent-board'), 'the hooks stay in that folder')
-  assert.ok(result.stdout.split('Agent Board updated to')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the update\n${result.stdout}`)
+  assert.match(result.stdout.split('[y/N]')[1] ?? '', /Progress/, `the board opened after the update\n${result.stdout}`)
+  // Without a Codex program setup's trust step fails after the files are written: the script is new, so no notice.
+  assert.equal(result.stderr.includes('To update it, preview'), false, `the updated script gets no notice\n${result.stderr}`)
 }
 
 test('the launcher\'s update reaches a Codex install only in the folder setup picks now, and keeps it there', () => fixture(f => keptHostFolder(f, 'codex', 'CODEX_HOME', ['hooks.json'])))
@@ -770,6 +774,19 @@ test('the launcher\'s update reaches an install made for another home only from 
   success(there)
   assert.equal(there.stdout.split('[y/N]').length - 1, 1, `${there.stdout}\n${there.stderr}`)
   assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), `from that home the update wrote this package's board script\n${there.stdout}\n${there.stderr}`)
+}))
+
+// #1783: an install made for a home inside this one passes the layout check, but setup run from here does not know that
+// home and leaves the install as it was: the notice names the command, as for any other home (#1790).
+test('an install made for a home inside this one keeps the older script and prints the notice', () => fixture(f => {
+  const other = join(f.home, 'nested home')
+  mkdirSync(other, { recursive: true })
+  const { pkg, root, script, text } = olderInstall(f, 'cursor', ['--home', other])
+  const result = f.run(pkg, ['--data-dir', root, '--print'], terminalLauncher(f), 'y\n')
+  assert.ifError(result.error)
+  assert.equal(readFileSync(script, 'utf8'), text, `the older script is left as it was\n${result.stdout}\n${result.stderr}`)
+  assert.ok(result.stderr.includes('To update it, preview'), `the notice names the command\n${result.stdout}\n${result.stderr}`)
+  assert.match(result.stdout, /Progress/, `the board opened\n${result.stdout}`)
 }))
 
 test('--json through an older script prints the notice on stderr and exits 1', () => fixture(f => {
