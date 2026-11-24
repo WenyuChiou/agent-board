@@ -4797,7 +4797,8 @@ test('a turn that waits on an approval past the limit is interrupted and its mes
   try {
     await codexSend(board, await codexConnection(board))
     await codexUncertain(board, 'AB-CX-001', 'APPROVAL_TIMEOUT')
-    const interrupt = daemon.calls().find(one => one.method === 'turn/interrupt')
+    // The message settles before the interrupt is sent (scripts/codex-receiver.mjs), so the interrupt may come a moment later.
+    const interrupt = await waitFor(() => daemon.calls().find(one => one.method === 'turn/interrupt'))
     assert.equal(interrupt.params.turnId, 'turn-delivery')
     await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
     assert.equal(codexStarts(daemon), 1)
