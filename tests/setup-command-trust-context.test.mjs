@@ -6,12 +6,15 @@ import { test } from 'node:test'
 import { bootstrap, fixture, locales, terminal } from './helpers/setup-fixture.mjs'
 import { commandIn, runPrinted, syntheticCodex } from './helpers/setup-command-fixture.mjs'
 
-test('a terminal missing-Codex retry keeps context once and its placeholder last in every language', () => {
+test('a terminal missing-Codex trust command keeps context once and its placeholder last in every language', () => {
   for (const [index, lang] of locales.entries()) terminal(f => {
     const custom = join(f.root, 'custom Codex configuration')
     const result = f.invoke(['--agent', 'codex', '--codex-dir', custom, '--lang', lang], 'y\n')
     assert.equal(result.status, 0, result.stderr)
-    const part = bootstrap[index].trustPart.replace('{host}', 'Codex')
+    // No Codex program: setup promises no approval (#1801) and names the command the approval needs.
+    assert.ok(!result.stdout.includes(bootstrap[index].trustPart.replace('{host}', 'Codex')), result.stdout)
+    const missing = bootstrap[index].codexMissing
+    const part = missing.slice(0, missing.indexOf('{'))
     const line = result.stdout.split(/\r?\n/).find(one => one.startsWith(part)) ?? ''
     assert.ok(line.endsWith(`--codex-bin '${bootstrap[index].codexPath}'`))
     assert.equal((line.match(/--codex-dir/g) ?? []).length, 1)

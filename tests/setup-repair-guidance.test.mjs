@@ -44,6 +44,25 @@ test('the installed doctor prints a full trust command without Codex on PATH in 
   })
 })
 
+test('the installed doctor gives the missing-Codex trust step as one Next line a person can read in every language (#1800)', () => {
+  const nextPrefixes = ['Next: ', '下一步：', '下一步：']
+  for (const [index, lang] of locales.entries()) fixture((setup, f) => {
+    f.env.PATH = ''
+    setup('--agent', 'codex', '--lang', lang, '--apply')
+    const doctor = boardCheck(f, ['--codex-doctor', '--agent', 'codex', '--lang', lang])
+    assert.equal(doctor.status, 0, doctor.stderr)
+    const next = doctor.stdout.split(/\r?\n/).filter(line => line.startsWith(nextPrefixes[index]))
+    assert.equal(next.length, 1, `one Next line for the one step\n${doctor.stdout}`)
+    assert.ok(next[0].includes('where.exe codex') && next[0].includes('command -v codex'), `the line says how to find Codex\n${doctor.stdout}`)
+    assert.ok(next[0].endsWith(`--agent codex --codex-trust --codex-bin "${codexPaths[index]}"`), `the line ends with the trust command and its placeholder\n${doctor.stdout}`)
+    // On Windows a path with a backslash in the install context still takes the code-point form, as the found-Codex command does.
+    if (process.platform !== 'win32') {
+      assert.doesNotMatch(next[0], /fromCodePoint/, `the command is readable\n${doctor.stdout}`)
+      assert.ok(next[0].includes(`node "${join(f.root, 'data', 'agent-board.mjs')}" `), `the command names the installed board script\n${doctor.stdout}`)
+    }
+  })
+})
+
 test('a one-agent repair leaves unrelated first-time steps out in every language (#1278)', () => {
   for (const [index, lang] of locales.entries()) fixture((setup, f) => {
     f.env.PATH = ''

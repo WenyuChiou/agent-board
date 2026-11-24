@@ -401,6 +401,18 @@ test('a failed Claude plugin part keeps files and both trust applies and does no
   })
 })
 
+test('terminal setup with no Codex program promises no Codex approval, says it needs the path, and reads no failure (#1801)', () => terminal(f => {
+  const result = f.invoke(['--agent', 'codex', '--lang', 'en'], 'y\n')
+  succeeded(result)
+  const [asked, after = ''] = result.stdout.split('Set these up? [Y/n]')
+  assert.doesNotMatch(asked.split('This will:')[1] ?? '', /Approve the board's hooks in Codex/, `the list does not promise the approval\n${result.stdout}`)
+  assert.match(asked, /Codex: setup could not find Codex\. Approving the board's hooks needs its full path.*--codex-trust --codex-bin '<full path to codex>'/, `before the question, the approval's path is named\n${result.stdout}`)
+  assert.match(after, /Codex files: done\./)
+  assert.doesNotMatch(result.stdout, /failed/, `nothing reads failed\n${result.stdout}`)
+  assert.match(after.split('Next steps:')[1] ?? '', /--codex-trust --codex-bin '<full path to codex>'/, `the next steps keep the approval command\n${result.stdout}`)
+  assert.equal(f.commands.calls().length, 0)
+}, []))
+
 test('a failed Codex trust part keeps Hermes trust and the Claude plugin installation', () => terminal(f => {
   f.env.AGENT_BOARD_TEST_CODEX_FAIL = '1'
   const result = f.invoke(['--agent', 'codex,hermes', '--lang', 'en'])
