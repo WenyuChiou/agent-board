@@ -29,7 +29,7 @@ const fixture = action => {
     mkdirSync(join(directory, 'hooks'))
     mkdirSync(join(directory, 'docs/validation'), { recursive: true })
     for (const file of ['messaging-matrix.mjs', 'message-client.mjs', 'ws-stdio.mjs', ...connectors]) copyFileSync(join(root, 'scripts', file), join(directory, 'scripts', file))
-    for (const file of ['messaging.ts', 'i18n.ts', 'sha256.ts']) copyFileSync(join(root, 'hooks', file), join(directory, 'hooks', file))
+    for (const file of ['messaging.ts', 'data-block.ts', 'i18n.ts', 'sha256.ts']) copyFileSync(join(root, 'hooks', file), join(directory, 'hooks', file))
     for (const file of matrixFiles) writeFileSync(join(directory, file), `Before ${file}\n${start}\n${end}\nAfter ${file}\n`)
     return action(directory)
   } finally { rmSync(directory, { recursive: true, force: true }) }
