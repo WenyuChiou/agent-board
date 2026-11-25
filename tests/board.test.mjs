@@ -13453,7 +13453,7 @@ test('stale saved agent filter clears cleanly and LAN models preserve interface 
   const lanModel = runtime.serveModel(view, [], EN, new Set(), true, messaging, false, { now, repoOf: () => null, versions: { board: '1.2.3', package: null } })
   assert.equal(lanModel.asks[0].surface, 'Codex desktop app')
   assert.equal(lanModel.groups[0].rows[0].surface, 'Codex desktop app')
-  const dom = await pageDom(await sourcePage(), lanModel, { width: 1280, saved: { 'agent-board.filter': 'gemini' } })
+  const dom = await pageDom(await sourcePage(), lanModel, { width: 1280, storage: new Map([['agent-board.filter', 'gemini']]) })
   // Absent stored agent 'gemini' is cleared from pg.filters.agents so Codex questions still show.
   assert.ok(shownWords(dom.node('needs')).includes('Approve desktop edit?'))
   assert.equal(dom.node('filter-clear').hidden, true)
