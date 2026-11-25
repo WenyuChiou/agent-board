@@ -92,8 +92,11 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     assert.equal(await page.locator('#detail-rail').isVisible(), false, 'rail should be hidden before selecting an item')
 
     const row = board.task('Build export worker')
-    await board.openTask('Build export worker')
+    const rowBtn = row.locator('.row-btn')
+    await rowBtn.focus()
+    await page.keyboard.press('Enter')
     await page.locator('#detail-rail').waitFor({ state: 'visible' })
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'detail-close', 'opening row detail rail via keyboard should focus close button')
 
     const railBox = await page.evaluate(() => {
       const rail = document.getElementById('detail-rail')
@@ -117,9 +120,10 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     assert.equal(railBox.rowInlineOpen, false, 'selected item should open in the rail, not inline')
     assert.equal(await row.locator('.row-open').isVisible(), false)
 
-    // Esc closes the rail.
+    // Esc closes the rail without manually focusing #detail-close and restores focus to the row trigger.
     await page.keyboard.press('Escape')
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
+    assert.equal(await rowBtn.evaluate(node => document.activeElement === node), true, 'closing row rail should restore focus to the row trigger')
 
     // Expanding Older shows older cards without a details button and clicking one does not open the rail.
     await page.locator('.older-line button.link').click()
@@ -130,21 +134,21 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     await olderCard.locator('.q').click()
     assert.equal(await page.locator('#detail-rail').isVisible(), false, 'clicking an older card should not open the detail rail')
 
-    // Card detail trigger is keyboard-accessible and restores focus on close.
+    // Card detail trigger is keyboard-accessible and restores focus on close without manual rail focus.
     const cardBtn = board.question('Retry upload with backoff').locator('.card-detail-btn')
     await cardBtn.focus()
     await page.keyboard.press('Enter')
     await page.locator('#detail-rail').waitFor({ state: 'visible' })
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'detail-close', 'opening card detail rail via keyboard should focus close button')
     const cardRail = await page.evaluate(() => {
       const rail = document.getElementById('detail-rail')
       return { width: Math.round(rail.getBoundingClientRect().width), text: rail.textContent }
     })
     assert.ok(cardRail.width > 0 && cardRail.width <= 340, `expected rail width <= 340px, got ${cardRail.width}px`)
     assert.match(cardRail.text, /Retry upload with backoff/)
-    await page.locator('#detail-close').focus()
     await page.keyboard.press('Escape')
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
-    assert.equal(await cardBtn.evaluate(node => document.activeElement === node), true, 'closing rail from inside should restore focus to the card detail button')
+    assert.equal(await cardBtn.evaluate(node => document.activeElement === node), true, 'closing rail should restore focus to the card detail button')
 
     // Shrinking from 1440px to 1300px moves the selected task inline and preserves draft, focus, and caret.
     await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()

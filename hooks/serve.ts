@@ -2197,6 +2197,23 @@ const PAGE_SCRIPT = String.raw`
       restored.trigger.focus({ preventScroll: true });
     }
   }
+  function selectDetailRail(key, focusRail) {
+    if (selectedKey === key) {
+      closeDetailRail(false);
+      var restored = railItems[key];
+      if (focusRail && restored && restored.trigger && typeof restored.trigger.focus === 'function') {
+        restored.trigger.focus({ preventScroll: true });
+      }
+      return;
+    }
+    selectedKey = key;
+    if (pg.model) draw(pg.model);
+    else renderDetailRail();
+    if (focusRail) {
+      var closeBtn = document.getElementById('detail-close');
+      if (closeBtn && typeof closeBtn.focus === 'function') closeBtn.focus({ preventScroll: true });
+    }
+  }
   function renderDetailRail() {
     var shell = document.getElementById('shell');
     var rail = document.getElementById('detail-rail');
@@ -2423,8 +2440,7 @@ const PAGE_SCRIPT = String.raw`
     if (!isOlder) {
       card.setAttribute('data-rail-item', '1');
       detailBtn = navButton(w('pgDetailRail'), function () {
-        selectedKey = selectedKey === ref.key ? '' : ref.key;
-        if (pg.model) draw(pg.model);
+        selectDetailRail(ref.key, true);
       });
       detailBtn.className = 'card-detail-btn';
       detailBtn.setAttribute('aria-expanded', String(isWideDetail() && selectedKey === ref.key));
@@ -2622,8 +2638,7 @@ const PAGE_SCRIPT = String.raw`
         if (target && target.closest && target.closest('button, a, input, textarea, select, summary, label, details')) return;
         var sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
         if (sel && String(sel)) return;
-        selectedKey = selectedKey === ref.key ? '' : ref.key;
-        if (pg.model) draw(pg.model);
+        selectDetailRail(ref.key, false);
       });
     }
     return card;
@@ -2753,8 +2768,7 @@ const PAGE_SCRIPT = String.raw`
     if (!isRailSelected) add(fold, add(el('div', 'fold-in'), inner));
     var head = isExpandable ? navButton('', function () {
       if (isWideDetail()) {
-        selectedKey = selectedKey === ref.key ? '' : ref.key;
-        if (pg.model) draw(pg.model);
+        selectDetailRail(ref.key, true);
         return;
       }
       var now = !hasClass(li, 'open');
