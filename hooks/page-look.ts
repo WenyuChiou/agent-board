@@ -23,7 +23,7 @@ export const pageTokens = (headHeight = '54px'): string => {
     // is the card question, section headings and the empty-page heading. The owner asked for a smaller page
     // (11-06), so the scale is one step below the 14/16/18/22 it had. Line height is 1.5 up to 16px and 1.4
     // above; headings differ from row titles by size and space, not by weight.
-    'text-xs': 'max(13px,.8125rem)', 'text-sm': 'max(14px,.875rem)', 'text-md': 'max(16px,1rem)', 'text-lg': 'max(20px,1.25rem)',
+    'text-xs': 'max(13px,.8125rem)', 'text-sm': 'max(14px,.875rem)', 'text-md': 'max(16px,1rem)', 'text-lg': 'max(18px,1.125rem)',
     'radius-s': '6px', 'radius-m': '10px', 'radius-round': '999px',
     // Spacing on a 4px scale; a control is at least 36px tall (44px under a coarse pointer, in the page's CSS).
     's1': '4px', 's2': '8px', 's3': '12px', 's4': '16px', 's5': '24px', 's6': '32px', 's7': '48px', 'hit': '36px',
@@ -198,7 +198,7 @@ export const motionCss = `
 .fx.gone{grid-template-rows:0fr;opacity:0;transition-duration:var(--dur-base),var(--dur-fast);transition-timing-function:var(--ease-in)}
 .fold{display:grid;grid-template-rows:0fr;transition:grid-template-rows var(--dur-layout) var(--ease-out)}
 .fold>.fold-in{min-height:0;overflow:hidden}
-.open>.fold,.open>.fx>.fx-in>.fold{grid-template-rows:1fr}
+.open>.fold,.open>.fx>.fx-in>.fold,.card.open>.c-body>.fold{grid-template-rows:1fr}
 @keyframes glow{from{background:var(--current)}to{background:transparent}}
 @keyframes dot{0%,100%{opacity:.25}50%{opacity:1}}
 /* switching a view: the new content rises 6px and fades in; nothing else moves */
@@ -297,7 +297,7 @@ export const sheetCss = `
 .needs-wrap{display:flex;flex-direction:column}
 .sheet-tab{align-self:flex-start}
 .sheet-tab h2{margin:0}
-.flag{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:0 var(--s4) 0 var(--s3);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-md);font-weight:600;line-height:1.4;font-variant-numeric:tabular-nums;clip-path:polygon(0 0,100% 0,calc(100% - 8px) 50%,100% 100%,0 100%);border-radius:var(--radius-s) 0 0 0}
+.flag{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:0 var(--s4) 0 var(--s3);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-lg);font-weight:600;line-height:1.4;font-variant-numeric:tabular-nums;clip-path:polygon(0 0,100% 0,calc(100% - 8px) 50%,100% 100%,0 100%);border-radius:var(--radius-s) 0 0 0}
 .flag b{font-weight:600;margin-left:var(--s2)}
 .sheet{background:var(--surface);border:1px solid var(--line-strong);border-radius:0 var(--radius-m) var(--radius-m) var(--radius-m)}
 `

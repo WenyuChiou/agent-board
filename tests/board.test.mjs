@@ -4200,12 +4200,13 @@ test('the serve page and the terminal board answer every action with a visible l
       idle: [], stopped: [], turns: [], recent: [{ project: 'Demo', title: 'Finished card', when: 'Just now' }],
     }
     const first = await pageDom(html, model)
-    const labels = first.buttons().map(button => button.textContent)
+    const firstButtons = first.buttons()
+    const labels = firstButtons.map(button => button.textContent)
     // A button inside a block that is not shown yet (the line after a copy, the box behind Write your own) is not pressed here.
     const isWaiting = node => { for (let one = node; one; one = one.parentNode) if (String(one.className ?? '').split(' ').includes('gone')) return true; return false }
-    const shown = first.buttons().map(button => !isWaiting(button))
+    const shown = firstButtons.map(button => !isWaiting(button))
     for (const [index, label] of labels.entries()) {
-      if (label === words.serveMore || !shown[index]) continue
+      if (label === words.serveMore || String(firstButtons[index]?.className ?? '').split(' ').includes('q-toggle') || !shown[index]) continue
       const dom = await pageDom(html, model, { post: async () => { throw new Error('synthetic offline') } })
       dom.boxes().forEach(box => { box.value = 'A synthetic reply' })
       const button = dom.buttons()[index]
@@ -4601,7 +4602,7 @@ test('every serve page action on every card kind from every agent answers with a
         } })
         // Copy again lives inside .state and only appears once something was copied; it is not an offered action.
         const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain]
-        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent)).flatMap(button =>
+        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent) && !String(button.className ?? '').split(' ').includes('q-toggle')).flatMap(button =>
           button.className === 'answer-send'
             ? pressWalk(pageCard(button)).filter(node => node.className === 'choice').map(choice => ({ button, choice }))
             : [{ button, choice: null }],
@@ -11642,17 +11643,17 @@ const isPageVisible = node => {
 const cardActionNodes = card => pressWalk(card).filter(node =>
   (node.tag === 'button' || node.tag === 'a') && node.getAttribute('data-nav') === null && ['answers', 'acts'].includes(node.parentNode?.className),
 )
-const cardMore = card => pressWalk(card).filter(node => node.tag === 'button' && node.textContent === EN.serveMore)
+const cardMore = card => pressWalk(card).filter(node => node.tag === 'button' && node.className === 'q-toggle')
 
 test('the page names each agent by its brand name on questions, older questions, the hidden shelf and the agent row', async () => {
   for (const lang of ['en', 'zh-TW', 'zh-CN']) {
     const html = await sourcePage(lang)
     for (const [agent, name] of Object.entries(EN.agentNames)) {
       const dom = await pageDom(html, cardsModel(agent))
-      const whoOf = key => pressWalk(cardWithKey(dom, key)).find(node => node.className === 'who').textContent
-      assert.equal(whoOf('ask'), name)
-      assert.equal(whoOf('retained'), name)
-      assert.equal(whoOf('reminder'), name)
+      const markTitleOf = key => pressWalk(cardRoot(cardWithKey(dom, key))).find(node => node.className?.startsWith('ag '))?.getAttribute('title')
+      assert.equal(markTitleOf('ask'), name)
+      assert.equal(markTitleOf('retained'), name)
+      assert.equal(markTitleOf('reminder'), name)
       assert.equal(pressWalk(cardWithKey(dom, 'hidden')).find(node => node.className === 'c-meta').textContent, `Demo · ${name} › Hidden plan`)
       const chip = dom.node('chips').childNodes.find(node => node.getAttribute('data-agent') === agent)
       assert.ok(chip, `${lang}: ${name}`)
@@ -11671,8 +11672,9 @@ test('a Claude Code card says Claude Code, a hand-kept card shows a round check 
   model.asks.push({ ...model.asks[0], key: 'own-codex-ask', project: 'reservoir-paper', task: 'Paper sync', text: 'Reconnect the board', agent: 'codex', isOwn: true, canTick: true, tickFp: 'fp-codex-ask', fileLine: 25, answers: [] })
   model.groups[0].rows.push({ ...model.groups[0].rows[0], key: 'own-row', title: 'My task', agent: '', isOwn: true })
   const dom = await pageDom(await sourcePage(), model)
-  const whoOf = key => pressWalk(cardWithKey(dom, key)).find(node => node.className === 'who').textContent
-  assert.equal(whoOf('ask'), 'Claude Code')
+  const markTitleOf = key => pressWalk(cardRoot(cardWithKey(dom, key))).find(node => node.className?.startsWith('ag '))?.getAttribute('title')
+  assert.equal(markTitleOf('ask'), 'Claude Code')
+  assert.equal(pressWalk(cardRoot(cardWithKey(dom, 'ask'))).some(node => node.className === 'who'), false)
   const ownCard = cardRoot(cardWithKey(dom, 'own-ask'))
   assert.ok(!ownCard.textContent.includes('Claude Code'))
   assert.ok(!ownCard.textContent.includes('Your own') && !ownCard.textContent.includes('你的待辦'))
@@ -11681,8 +11683,8 @@ test('a Claude Code card says Claude Code, a hand-kept card shows a round check 
   const codexCheck = pressWalk(codexOwnCard).find(node => node.className === 'chk')
   assert.ok(codexCheck)
   const codexBody = pressWalk(codexOwnCard).find(node => node.className === 'c-body')
-  assert.equal(codexBody.childNodes[0].className, 'q')
-  assert.equal(codexBody.childNodes[1].className, 'c-meta')
+  assert.equal(codexBody.childNodes[0].className, 'q-toggle')
+  assert.equal(codexBody.childNodes[1].className, 'c-line2')
   assert.ok(pressWalk(codexBody.childNodes[1]).some(node => String(node.className).includes('ag-codex')))
   codexCheck.click()
   await dom.flush()
@@ -11714,15 +11716,15 @@ test('an agent without a brand name keeps its own name', async () => {
   for (const agent of ['My-agent', 'constructor', 'toString']) {
     const shown = agent.toLowerCase()
     const dom = await pageDom(html, cardsModel(agent))
-    assert.equal(pressWalk(cardWithKey(dom, 'ask')).find(node => node.className === 'who').textContent, shown)
+    const mark = pressWalk(cardRoot(cardWithKey(dom, 'ask'))).find(node => node.className === 'ag ag-other')
+    assert.equal(mark.getAttribute('title'), shown)
     const chip = dom.node('chips').childNodes.find(node => node.getAttribute('data-agent') === shown)
     assert.ok(chip, shown)
     assert.ok(pressWalk(chip).find(node => node.className === 'c-name').textContent.startsWith(shown))
-    const mark = pressWalk(cardRoot(cardWithKey(dom, 'ask'))).find(node => node.className === 'ag ag-other')
     assert.equal(mark.textContent, shown[0].toUpperCase())
   }
   const dom = await pageDom(html, cardsModel('CODEX'))
-  assert.equal(pressWalk(cardWithKey(dom, 'ask')).find(node => node.className === 'who').textContent, 'Codex')
+  assert.equal(pressWalk(cardRoot(cardWithKey(dom, 'ask'))).find(node => node.className?.startsWith('ag '))?.getAttribute('title'), 'Codex')
 })
 
 test("every card kind on the page carries its agent's mark", async () => {
@@ -11747,8 +11749,8 @@ test('a question card puts choices before its copy button and the hide button la
   assert.deepEqual(answers.childNodes[0].childNodes.slice(0, 2).map(node => node.textContent), ['Yes', 'No'])
   assert.equal(answers.childNodes.at(-1).getAttribute('aria-label'), EN.pgCopyChoice)
   // The box for the person's own words comes after the answers, and the line after a copy last.
-  const kinds = card.childNodes.map(node => pressWalk(node).find(one => ['answers', 'composer', 'state'].includes(one.className))?.className)
-  assert.deepEqual(kinds.filter(Boolean), ['answers', 'composer', 'state'])
+  const kinds = pressWalk(card).filter(one => ['answers', 'composer', 'state'].includes(one.className)).map(one => one.className)
+  assert.deepEqual(kinds, ['answers', 'composer', 'state'])
   // A task row opens on its message box, then its buttons: the resume command, Archive and Confirm done.
   const row = cardWithKey(dom, 'row')
   assert.ok(row.childNodes.findIndex(node => node.className === 'composer') < row.childNodes.findIndex(node => node.className === 'acts'))
@@ -11792,23 +11794,23 @@ test('each choice button and each listed native option shows its choice as it is
   assert.deepEqual(listed.childNodes.map(node => node.textContent), answers)
 })
 
-test('a card with more than three actions shows three and the rest behind More', async () => {
+test('a card with more than three actions shows two choices plus Copy/Send and the rest when opened', async () => {
   const model = cardsModel()
   model.asks[0] = { ...model.asks[0], answers: ['Yes', 'No', 'Maybe'] }
   const dom = await pageDom(await sourcePage(), model)
   const card = cardWithKey(dom, 'ask')
   const actions = cardActionNodes(card)
-  // Three answers show; the command, the link, the resume command and Already answered, hide wait behind More.
+  // Two choices + Copy choice show on line 2 (at most 3 controls); remaining choices, command, link, resume and hide wait behind the fold.
   assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
-  assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No', 'Maybe'])
+  assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No'])
   const more = cardMore(card)
   assert.equal(more.length, 1)
   assert.equal(more[0].getAttribute('aria-expanded'), 'false')
-  const panel = pressWalk(card).find(node => node.className === 'more')
+  const panel = pressWalk(card).find(node => node.className?.split(' ').includes('card-fold'))
   assert.ok(panel)
   assert.deepEqual(actions.filter(node => !isPageVisible(node)).map(node => node.textContent), [EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
   assert.ok(actions.filter(node => !isPageVisible(node)).every(node => pressWalk(panel).includes(node)))
-  // A task row lists all its buttons and has no More.
+  // A task row lists all its buttons and has no card toggle.
   assert.ok(cardMore(cardWithKey(dom, 'row')).length === 0)
   assert.ok(cardActionNodes(cardWithKey(dom, 'row')).length > 0)
 })
@@ -11873,10 +11875,9 @@ test('a card with nothing behind More shows no More button', async () => {
     model.groups[0].rows[0] = { ...model.groups[0].rows[0], resume: null, canConfirm: canHide }
     const dom = await pageDom(html, model)
     const card = cardWithKey(dom, 'ask')
-    // Already answered, hide alone still goes behind More.
-    assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice').map(node => node.textContent), ['Yes', 'No'])
+    assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No'])
     assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
-    assert.equal(cardMore(card).length, canHide ? 1 : 0)
+    assert.equal(cardMore(card).length, 1)
     assert.equal(cardActionNodes(card).length, canHide ? 2 : 1)
     const row = cardWithKey(dom, 'row')
     assert.equal(cardActionNodes(row).length, canHide ? 2 : 1)
@@ -11885,13 +11886,13 @@ test('a card with nothing behind More shows no More button', async () => {
   }
 })
 
-test('a question with four answers shows three and keeps the fourth behind More', async () => {
+test('a question with four answers shows two choices and Copy/Send when folded, and reveals the rest on open', async () => {
   const model = cardsModel()
   model.asks[0] = { ...model.asks[0], kind: 'choose', answers: ['A', 'B', 'C', 'D'] }
   const dom = await pageDom(await sourcePage(), model)
   const card = cardWithKey(dom, 'ask')
   const visibleChoices = () => pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent)
-  assert.deepEqual(visibleChoices(), ['A', 'B', 'C'])
+  assert.deepEqual(visibleChoices(), ['A', 'B'])
   assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
   const more = cardMore(card)[0]
   assert.ok(more)
@@ -11907,9 +11908,9 @@ test('More opens and closes by keyboard and keeps its state across a refresh', a
   const html = await sourcePage()
   const dom = await pageDom(html, model, { copyAllowed: true })
   const moreFor = key => cardMore(cardWithKey(dom, key))[0]
-  const panelFor = key => pressWalk(cardWithKey(dom, key)).find(node => node.className?.startsWith('more'))
-  // Open: the panel says so, and what it holds is no longer inert.
-  const isOpen = key => panelFor(key).className.split(' ').includes('open') && isPageVisible(panelFor(key).childNodes[0])
+  const panelFor = key => pressWalk(cardWithKey(dom, key)).find(node => node.className?.split(' ').includes('card-fold'))
+  // Open: the card says so, and what it holds is no longer inert.
+  const isOpen = key => cardRoot(cardWithKey(dom, key)).className.split(' ').includes('open') && isPageVisible(panelFor(key).childNodes[0])
   let more = moreFor('ask')
   assert.equal(more.type, 'button')
   assert.notEqual(more.getAttribute('data-local'), null)
@@ -11923,14 +11924,14 @@ test('More opens and closes by keyboard and keeps its state across a refresh', a
   assert.equal(isOpen('ask'), false)
   more.click()
   moreFor('ask2').click()
-  // Escape closes the panel the focus is in and sends the focus back to its More button.
+  // Escape closes the card fold the focus is in and sends the focus back to its toggle button.
   pressWalk(panelFor('ask')).find(node => node.tag === 'button').focus()
   dom.key({ key: 'Escape' })
   assert.equal(dom.active(), more)
   assert.equal(more.getAttribute('aria-expanded'), 'false')
   assert.equal(moreFor('ask2').getAttribute('aria-expanded'), 'true')
-  // A reply being typed elsewhere keeps the open panels; with no focus anywhere, Escape closes them.
-  dom.boxes()[0].focus()
+  // A reply being typed elsewhere keeps the open folds; with no focus anywhere, Escape closes them.
+  pressWalk(panelFor('ask2')).find(node => node.tag === 'textarea').focus()
   dom.key({ key: 'Escape' })
   assert.equal(moreFor('ask2').getAttribute('aria-expanded'), 'true')
   dom.active().blur()
