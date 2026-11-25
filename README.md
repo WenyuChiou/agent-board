@@ -39,6 +39,14 @@ npx @wenyuchiou/agent-board@next
 
 <img alt="The board's page: Needs you shows a question from Claude Code with answer buttons; Working now lists tasks from Codex, Antigravity and OpenCode with their steps. Synthetic data." src="docs/images/page-en-dark.png" width="860">
 
+## Compared with T3 Code and similar tools
+
+Tools such as [T3 Code](https://github.com/pingdotgg/t3code) start each agent session themselves and work only with the sessions they started. Agent Board works the other way: it shows the sessions you already run in each vendor's own terminal or desktop app, so nothing moves to a new tool.
+
+- **Your sessions stay yours.** Sign-in, billing and the vendor's own window stay as they are. Close the board and every session keeps running.
+- **Desktop apps too.** Sessions in the Codex and Antigravity desktop apps show next to the terminal ones.
+- **One page for every agent.** Whatever is waiting on you comes first, whichever AI asked.
+
 ## Supported agents
 
 ### In a terminal (command line)

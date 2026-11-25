@@ -39,6 +39,14 @@ npx @wenyuchiou/agent-board@next
 
 <img alt="看板网页：“需要你”里是 Claude Code 的提问，附答案按钮；“进行中”列出 Codex、Antigravity 和 OpenCode 的任务和步骤。合成数据。" src="docs/images/page-zh-CN-dark.png" width="860">
 
+## 和 T3 Code 等工具的区别
+
+[T3 Code](https://github.com/pingdotgg/t3code) 这类工具会自己启动每个 agent session，也只能操作自己启动的 session。Agent Board 走另一条路：它显示你已经在各家自己的终端或桌面 app 里运行的 session，工作不用搬到新工具。
+
+- **session 还是你的。** 登录、计费和各家自己的窗口都不变。关掉看板，每个 session 照样运行。
+- **桌面 app 也算。** Codex 和 Antigravity 桌面 app 里的 session，和终端里的排在一起。
+- **所有 agent 一页看完。** 不管是哪个 AI 问的，等你回答的都排在最前面。
+
 ## 支持的 agent
 
 ### 在终端（命令行）
