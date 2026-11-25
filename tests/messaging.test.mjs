@@ -3832,7 +3832,7 @@ test('a retry of a known message id after its receiver reconnected returns the f
   assert.deepEqual(stored.map(one => [one.id, one.to, one.status]), [['AB-RECONNECT-1', `codex:${thread}`, 'queued']])
 }))
 
-test('a known message id pressed on another agent's card with the same session id is refused', async () => fixture(async (board, dir) => {
+test("a known message id pressed on another agent's card with the same session id is refused", async () => fixture(async (board, dir) => {
   const thread = '11111111-2222-4333-8444-555555555555'
   const block = (id, agent, title) => `<!-- auto session=${id} agent=${agent} resume=${thread} state=waiting updated=${new Date().toISOString()} -->
 ### ${title}
@@ -3842,10 +3842,11 @@ test('a known message id pressed on another agent's card with the same session i
   writeFileSync(join(dir, 'progress.md'), `# Progress
 
 ## Synthetic
-${block('abcdef01', 'codex', 'Codex fixture')}${block('abcdef02', 'gemini', 'Gemini fixture')}`)
+${block('abcdef01', 'codex', 'Codex fixture')}${block('abcdef02', 'claude', 'Claude fixture')}`)
   await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli, unclaimed: true })
+  await board.call('/api/messages/register', { agent: 'claude', session: thread, turn: 'session', scope: 'session', surface: SURFACE_IDS.claude })
   const asks = (await board.call('/api/board')).body.model.asks
-  const ask = asks.find(one => one.agent === 'codex'), otherAsk = asks.find(one => one.agent === 'gemini')
+  const ask = asks.find(one => one.agent === 'codex'), otherAsk = asks.find(one => one.agent !== 'codex')
   assert.equal(otherAsk.session, ask.session)
   const request = { key: ask.key, type: 'message', id: 'AB-CROSS-1', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn }
   assert.equal((await board.call('/api/act', request)).status, 200)
@@ -7950,7 +7951,7 @@ test('a press made again while its send still tries joins that send, and other w
   assert.deepEqual(await page.runTimers('retrySend'), [2000])
   assert.deepEqual(page.requests.map(one => one.body.id), [page.requests[0].body.id, page.requests[0].body.id])
   // Other words are another message: the first send tries no more.
-  await page.redraw(modelOf([], claudeLive('c2')))
+  await page.redraw(modelOf([], claudeLive('c3')))
   await press('Stop here instead')
   assert.equal(page.requests.length, 3)
   assert.notEqual(page.requests[2].body.id, page.requests[0].body.id)

@@ -8988,7 +8988,7 @@ const terminalLostAnswer = async lose => {
 
 test('the terminal board resends a lost answer under the same id', { timeout: 60_000 }, () => terminalLostAnswer('drop'))
 
-test('the terminal board keeps the answer's id when its reply is cut off', { timeout: 60_000 }, () => terminalLostAnswer('cut'))
+test("the terminal board keeps the answer's id when its reply is cut off", { timeout: 60_000 }, () => terminalLostAnswer('cut'))
 
 test('t on the terminal board archives what finished at once and leaves the work in progress', () => {
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
