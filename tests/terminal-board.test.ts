@@ -380,7 +380,7 @@ test('the terminal board lists what waits on you, then what is working, then the
 
 test('the terminal board says a live session cannot be archived only after a is pressed', () => {
   const s = STRINGS.en
-  // The Codex question is a minute old: past two quiet minutes it may be closed and `a` archives it (#1092).
+  // The Codex question is a minute old: past 30 quiet minutes it may be closed and `a` archives it (#1092, #1813).
   const view = viewOf(BOARD.replace(`updated=${at(5)}`, `updated=${at(1)}`))
   const items = boardItems(view, [])
   for (const index of [0, 1]) {
