@@ -27,6 +27,12 @@ const FIXTURE_MD = () => {
 ### Verify stopped draft persistence
 - [ ] Reconnect grok session
 <!-- /auto session=48490003 -->
+
+## Delta Project
+<!-- auto session=48490004 agent=codex state=ended updated=${updated} -->
+### Audit archived format
+- [?] Keep legacy archive format?
+<!-- /auto session=48490004 -->
 `
 }
 
@@ -114,6 +120,15 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     // Esc closes the rail.
     await page.keyboard.press('Escape')
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
+
+    // Expanding Older shows older cards without a details button and clicking one does not open the rail.
+    await page.locator('.older-line button.link').click()
+    const olderCard = page.locator('#needs .sheet-foot article.card').filter({ hasText: 'Keep legacy archive format?' })
+    await olderCard.waitFor({ state: 'visible' })
+    assert.equal(await olderCard.locator('.card-detail-btn').count(), 0, 'older cards should not render a details button')
+    assert.equal(await olderCard.getAttribute('data-rail-item'), null, 'older cards should not be marked as rail items')
+    await olderCard.locator('.q').click()
+    assert.equal(await page.locator('#detail-rail').isVisible(), false, 'clicking an older card should not open the detail rail')
 
     // Card detail trigger is keyboard-accessible and restores focus on close.
     const cardBtn = board.question('Retry upload with backoff').locator('.card-detail-btn')
