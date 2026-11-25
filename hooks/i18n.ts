@@ -1143,6 +1143,21 @@ export const ZH_TW = {
   pgTipOpen: (n: number): string => `${n} 件待辦`,
   pgTipOpenOne: '1 件待辦',
   pgTipCantRead: '讀不到它的進度檔',
+  matrixUsage: '用法：node scripts/matrix-runner.mjs [--shapes S,P] [--surfaces id1,id2] [--cli id=cmd] [--lang en|zh-TW|zh-CN] [--version ver] [--timeout-ms ms] [--json]',
+  matrixColDate: '日期',
+  matrixColVersion: '版本',
+  matrixColShape: '安裝方式',
+  matrixColSurface: '介面',
+  matrixColCheck: '檢查',
+  matrixColResult: '結果',
+  matrixColEvidence: '證據',
+  matrixCheckA: 'a（看板打開）',
+  matrixCheckB: 'b（顯示一張提問卡）',
+  matrixCheckC: 'c（回覆送入對話）',
+  matrixCheckD: 'd（狀態正確且即時）',
+  matrixManualChecklist: (path: string): string => `人工檢查清單：${path}`,
+  matrixNoCli: (binary: string): string => `找不到 ${binary}（請將其加入 PATH 或透過 --cli id=cmd 指定）`,
+  matrixStoppedAt: (step: string, reason: string): string => `在步驟 ${step} 停止：${reason}`,
 }
 
 export type Strings = typeof ZH_TW
