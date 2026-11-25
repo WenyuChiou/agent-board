@@ -14,8 +14,9 @@ import { withLocalLock } from './local-lock'
 import { goneBlocksOf } from './session-liveness'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
-import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
-import { createHash, randomUUID } from 'node:crypto'
+import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
+import { workspaceDigest } from './folder-identity'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from '../hooks/history'
@@ -40,8 +41,12 @@ import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder
 import { dockArguments, dockCommand, probeOf, windowsStartScript, windowPath, windowPlaceOf } from '../hooks/board-dock'
 import type { Rect } from '../hooks/board-dock'
 import { addressFileName } from '../hooks/receiver'
-import { isReceiverRoutes } from '../hooks/messaging'
-import type { ReceiverRoutes } from '../hooks/messaging'
+import { address, HOP_LIMIT, isReceiverRoutes, messageId, pruneMessages, queueMessage } from '../hooks/messaging'
+import type { Connection, Message, MessageState, ReceiverRoutes } from '../hooks/messaging'
+import { expireMailboxes } from '../hooks/hook-messages'
+import { parseMessageStore } from '../hooks/queued-store'
+import { formatSendCandidate, isSameWorkspaceAllowed, resolveSendTarget } from '../hooks/cli-send'
+import type { SendCandidate } from '../hooks/cli-send'
 import { idleTimeout, worktreeRepoName } from '../hooks/serve'
 import { pagePortOf, pickSurface, sshTargetOf } from '../hooks/surface'
 import { pageDoneHash, pageStatePath, readPageDone, readPageState } from '../hooks/live-page'
@@ -77,15 +82,10 @@ import { createSettingsAgents } from './settings-agents'
 const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
 
 const args = process.argv.slice(2)
-const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'].includes(arg))
-const flag = (name: string): string | undefined => {
-  const at = args.indexOf(name)
-  return at === -1 ? undefined : args[at + 1]
-}
 const BOOL_FLAGS = new Set([
   '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--awaits-ack', '--chat', '--check-conflicts', '--codex-doctor',
   '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
-  '--no-codex-send',
+  '--cross-project', '--no-codex-send',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--hooks-approved', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
@@ -98,35 +98,80 @@ const VALUE_FLAGS = new Set([
   '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
   '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
   '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--ref', '--removing',
-  '--session', '--setup-version', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
+  '--send', '--session', '--setup-version', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
 ])
-const unknownFlag = (argv: readonly string[]): string | undefined => {
+type CliPair = { first: string | undefined; second: string | undefined }
+type ParsedCli = {
+  optionFlags: Set<string>
+  flagValues: Map<string, string | undefined>
+  positionals: string[]
+  sendPair: CliPair
+  unknown?: string
+}
+const parseCliArgs = (argv: readonly string[]): ParsedCli => {
+  const optionFlags = new Set<string>()
+  const flagValues = new Map<string, string | undefined>()
+  const positionals: string[] = []
+  let sendPair: CliPair = { first: undefined, second: undefined }
+  let unknown: string | undefined
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!
-    if (arg === '--') break
-    if (!arg.startsWith('-')) continue
-    if (VALUE_FLAGS.has(arg)) { i += 1; continue }
-    if (arg === '--days') {
+    if (arg === '--') { positionals.push(...argv.slice(i + 1)); break }
+    if (!arg.startsWith('-')) { positionals.push(arg); continue }
+    if (arg === '--send') {
+      optionFlags.add('--send')
+      if (argv[i + 1] === '--') {
+        sendPair = { first: argv[i + 2], second: argv[i + 3] }
+        positionals.push(...argv.slice(i + 4))
+        break
+      }
+      if (argv[i + 2] === '--') {
+        sendPair = { first: argv[i + 1], second: argv[i + 3] }
+        positionals.push(...argv.slice(i + 4))
+        break
+      }
+      sendPair = { first: argv[i + 1], second: argv[i + 2] }
+      i += 2
+      continue
+    }
+    if (VALUE_FLAGS.has(arg)) {
+      optionFlags.add(arg)
       const next = argv[i + 1]
-      if (next !== undefined && !next.startsWith('--')) i += 1
+      if (next !== undefined && next !== '--' && !BOOL_FLAGS.has(next) && !VALUE_FLAGS.has(next) && next !== '--days' && next !== '--lan') {
+        flagValues.set(arg, next)
+        i += 1
+      }
+      continue
+    }
+    if (arg === '--days') {
+      optionFlags.add('--days')
+      const next = argv[i + 1]
+      if (next !== undefined && !next.startsWith('--')) { flagValues.set('--days', next); i += 1 }
       continue
     }
     if (arg === '--lan') {
+      optionFlags.add('--lan')
       const next = argv[i + 1]
-      if (next !== undefined && /^[\d.]+$/.test(next)) i += 1
+      if (next !== undefined && /^[\d.]+$/.test(next)) { flagValues.set('--lan', next); i += 1 }
       continue
     }
-    if (!BOOL_FLAGS.has(arg)) return arg
+    if (!BOOL_FLAGS.has(arg)) { unknown = unknown ?? arg; continue }
+    optionFlags.add(arg)
   }
-  return undefined
+  return { optionFlags, flagValues, positionals, sendPair, unknown }
 }
+const parsedCli = parseCliArgs(args)
+const hasFlag = (name: string): boolean => parsedCli.optionFlags.has(name)
+const hasAnyFlag = (names: readonly string[]): boolean => names.some(name => parsedCli.optionFlags.has(name))
+const flag = (name: string): string | undefined => parsedCli.flagValues.get(name)
+const isJsonBoard = hasFlag('--json') && !hasAnyFlag(['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'])
 const idleMs = (): number => {
   const value = flag('--idle-minutes')
-  if (args.includes('--idle-minutes') && value === undefined) throw new Error('INVALID_IDLE_MINUTES')
+  if (hasFlag('--idle-minutes') && value === undefined) throw new Error('INVALID_IDLE_MINUTES')
   return idleTimeout(value)
 }
 const staleTimeoutMs = (): number => {
-  if (args.includes('--stale-ms') && flag('--stale-ms') === undefined) throw new Error('INVALID_STALE_MS')
+  if (hasFlag('--stale-ms') && flag('--stale-ms') === undefined) throw new Error('INVALID_STALE_MS')
   return parseStaleMs(flag('--stale-ms') ?? process.env.AGENT_BOARD_STALE_MS)
 }
 
@@ -290,7 +335,7 @@ const readLog = (file: string): string => {
 let pageStateCache = readPageState('')
 const pageDoneFiles = immutableQuestionFiles({
   directory: dirname(path),
-  isPersistent: args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg)),
+  isPersistent: hasAnyFlag(['--watch', '--serve', '--serve-child']),
   accepts: name => pageDoneHash(name) !== null,
   parse: (text, name) => readPageDone(text, pageDoneHash(name)!),
   // A broken receipt cannot invalidate another session's processed question.
@@ -324,8 +369,8 @@ let lastStat = { stat: '', at: 0 }
 let lastQuestions = emptyQuestions()
 const questionWriter = randomUUID()
 let questionWrite = 0
-const isQuestionWriter = !args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child', '--keys'].includes(arg))
-const isPersistentQuestions = !args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))
+const isQuestionWriter = !hasAnyFlag(['--chat', '--json', '--mcp']) && hasAnyFlag(['--watch', '--serve', '--serve-child', '--keys'])
+const isPersistentQuestions = !hasAnyFlag(['--chat', '--json', '--mcp']) && hasAnyFlag(['--watch', '--serve', '--serve-child'])
 let isViewQuestionRead = false
 const inboxFiles = recentInboxFiles({
   directory: join(dirname(path), 'progress-inbox'),
@@ -650,7 +695,7 @@ const readBoardView = (source: string, now: number) => {
     if (record !== null) {
       seen = record
       // Read-only output must never write a sidecar, even beside interactive flags.
-      if (!args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp') && args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg))) {
+      if (!hasAnyFlag(['--chat', '--json', '--mcp']) && hasAnyFlag(['--watch', '--serve', '--serve-child'])) {
         let observed = withSeen(record, projects, now, {}, false, true)
         const wrote = rewrite(file, before => {
           const current = parseSeen(before, answeredAge(file))
@@ -896,7 +941,7 @@ const options = () => ({
   width: Math.max(40, Math.min(process.stdout.columns || 80, 120)),
   ...terminalLook(process.env, args, process.stdout.isTTY === true),
   barStyle: barStyleNow(),
-  isIdleOpen: args.includes('--all'),
+  isIdleOpen: hasFlag('--all'),
   routes,
   messaging: queuedMessaging(),
 })
@@ -1791,7 +1836,7 @@ const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind:
 // The command line asks once and acts once: without a terminal there is no second press,
 // so a selector without one only previews and changes nothing.
 const runBulkTidy = (): boolean => {
-  const kinds = ['--stopped', '--agent', '--older'].filter(one => args.includes(one))
+  const kinds = ['--stopped', '--agent', '--older'].filter(one => hasFlag(one))
   if (kinds.length === 0) return false
   if (kinds.length > 1) {
     process.stdout.write(`${s.tidyInvalid}\n`)
@@ -2088,12 +2133,12 @@ const serveFile = (): string => {
   const name = addressFileName(board(path))
   return (served = join(runFolder(name), name))
 }
-const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? (args.includes('--mcp') ? defaultMessagesDirectory(path, homedir(), process.env, process.platform) : serveFile().replace(/\.json$/, '-messages')))
+const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? (hasAnyFlag(['--mcp', '--send']) ? defaultMessagesDirectory(path, homedir(), process.env, process.platform) : serveFile().replace(/\.json$/, '-messages')))
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
 const built = (() => {
-  if (args.includes('--status')) return ''
+  if (hasFlag('--status')) return ''
   try {
     return String(statSync(script).mtimeMs)
   } catch {
@@ -2213,7 +2258,7 @@ const openPageState = async (server: RunningServer): Promise<PageState> => {
 // Send to Codex is on unless the page was started with `--no-codex-send`: the live run of 2026-11-15 showed an approval in a
 // delivered turn reaching the person's own Codex window (docs/validation/2026-11-15-codex-send-default-live.md, #318).
 // `--codex-send`, the switch from before, is still accepted and changes nothing; with both, the receiver is off.
-const isCodexSendOn = (): boolean => !args.includes('--no-codex-send')
+const isCodexSendOn = (): boolean => !hasFlag('--no-codex-send')
 // The Codex program the receiver runs (#318): AGENT_BOARD_CODEX_BIN when it names one by full path (set to anything else, it
 // turns the receiver off), else the one on PATH. A test run (it sets AGENT_BOARD_TEST_PID) finds none unless it names its own,
 // so it never reaches the real ~/.codex.
@@ -2293,7 +2338,7 @@ const serveChild = (): void => {
   // A child that could not protect the folder cannot start a page: its address file would
   // be unprotected. The parent reuses a running page itself; a child on its own refuses.
   if (runtimeUnprotected) throw runtimeFolderFailure()
-  const requestedPort = args.includes('--port') ? parseServePort(flag('--port')) : 0
+  const requestedPort = hasFlag('--port') ? parseServePort(flag('--port')) : 0
   if (requestedPort === null) {
     serveChildError(`PORT_INVALID ${flag('--port') ?? ''}\n`)
     process.exitCode = 1
@@ -2316,7 +2361,7 @@ const serveChild = (): void => {
   try {
     startServer({
       addressFile: file,
-      allowResume: args.includes('--allow-resume'),
+      allowResume: hasFlag('--allow-resume'),
       routes: routesStandIn(),
       messagesDirectory: messagesDirectory(),
       isDefaultMessagesDirectory: flag('--messages-dir') === undefined,
@@ -2336,11 +2381,11 @@ const serveChild = (): void => {
         // A page snapshot follows its synchronous view read. Handoff requests
         // still read current bytes instead of accepting an older page's baseline.
         const projects = !isFresh && progressProjectCache !== null ? progressProjectCache.projects : parseProgress(read(path))
-        return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
+        return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated, ...(task.auto.dir ? { dir: task.auto.dir } : {}), ...(task.title ? { title: task.title } : {}) }]))
       },
       get s() { return s },
       port: requestedPort,
-      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: isCodexSendOn(), noCodexSend: args.includes('--no-codex-send'), messagesDirectory: messagesDirectory() },
+      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: hasFlag('--allow-resume'), codexSend: isCodexSendOn(), noCodexSend: hasFlag('--no-codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       // An open board request is answered when progress.md or the hooks' inbox changes (#359).
@@ -2446,7 +2491,7 @@ const routesStandIn = (): ReceiverRoutes[] | undefined => {
 }
 
 // Whether replacing this running server will listen on a different port, so the old page may stay open briefly to report the move (#1335).
-const replacementMove = (running: Running): boolean => !args.includes('--port') || parseServePort(flag('--port')) !== running.port
+const replacementMove = (running: Running): boolean => !hasFlag('--port') || parseServePort(flag('--port')) !== running.port
 
 // The page at that address is asked to close, and whether it agreed is answered. It refuses while
 // a reply is on its way (and then stops by itself once idle). Its file goes only when it agreed,
@@ -2509,7 +2554,7 @@ const runningPage = async (isStarting = false, isReplacing = false, replaced?: {
   const requestedStale = staleTimeoutMs()
   // Send to Codex (#318): a plain command keeps a page whether its receiver is on or off, so `/agent-board` never ends a page the
   // person turned it off for; `--codex-send` asks for a page with it on, `--no-codex-send` for one with it off.
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && (isStopping || (answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && (isStopping || (answer.allowResume === hasFlag('--allow-resume') && (hasFlag('--no-codex-send') ? answer.codexSend === false : !hasFlag('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   if (await stays(running, serveFile(), isReplacing && replacementMove(running))) return { page: running, isKept: true }
   if (replaced !== undefined && answer !== null && answer !== 'silent' && answer.noCodexSend === true) replaced.isCodexSendOff = true
   return null
@@ -2642,13 +2687,13 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   // receiver back on (#318). It is this launch's own, so a long-running command (`--watch`) never carries it to a later
   // launch. A page of a build before #318 does not report `noCodexSend`, so its replacement has the receiver on.
   const replaced = { isCodexSendOff: false }
-  const codexSwitch = (): string[] => (args.includes('--no-codex-send') || (replaced.isCodexSendOff && !args.includes('--codex-send')) ? ['--no-codex-send'] : [])
+  const codexSwitch = (): string[] => (hasFlag('--no-codex-send') || (replaced.isCodexSendOff && !hasFlag('--codex-send')) ? ['--no-codex-send'] : [])
   const found = await runningPage(false, true, replaced)
   if (found !== null) {
     await refreshServerPackage(found.page.url)
     return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
   }
-  if (args.includes('--port')) {
+  if (hasFlag('--port')) {
     const requestedPort = parseServePort(flag('--port'))
     if (requestedPort === null) {
       if (failure !== undefined) failure.invalidPort = flag('--port') ?? ''
@@ -2659,8 +2704,8 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     const value = flag(name)
     return value === undefined ? [] : [name, value]
   })
-  if (args.includes('--allow-resume')) rest.push('--allow-resume')
-  if (args.includes('--codex-send')) rest.push('--codex-send')
+  if (hasFlag('--allow-resume')) rest.push('--allow-resume')
+  if (hasFlag('--codex-send')) rest.push('--codex-send')
   // The child runs with cwd set to the board's folder, so a relative path would resolve
   // against the board's folder instead of this command's folder. Pass the board and the
   // messages folder the parent resolved, as absolute paths, so the child serves the same
@@ -2923,14 +2968,14 @@ const serveBoard = async (): Promise<void> => {
     process.stdout.write(`\n${isKept ? `${s.serveKept}\n` : ''}${idleNote}${s.serveAt(url)}\n`)
     // The address comes from a file and goes to a shell on Windows: only the shape this server
     // writes is opened.
-    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && page !== 'open') {
+    if (!hasFlag('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && page !== 'open') {
       const isOpen = await openThroughBoard(url, true, page === 'none')
       // With a page already open, no window is missing.
       if (!isOpen && page === 'none' && !isNoWindowHere()) {
         process.stderr.write(`${s.serveBrowserNone(url)}\n`)
       }
     }
-    if (args.includes('--lan')) await showLan(url)
+    if (hasFlag('--lan')) await showLan(url)
   }
   const server = await serverPromise
   if (server === null) {
@@ -2950,7 +2995,7 @@ const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string
     return { note: serveFailureNote(failure), isOpen: false }
   }
   const address = server.url
-  const isNoOpen = args.includes('--no-open')
+  const isNoOpen = hasFlag('--no-open')
   const isShape = !isNoOpen && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
   // The page is already in a window: point at it rather than opening another one that would poll too.
   const page = isShape ? await openPageState(server) : 'none'
@@ -2977,7 +3022,7 @@ const openPageSurface = async (): Promise<void> => {
   }
   process.stdout.write(`${opened.note}\n`)
   // `--lan` without `--serve`: the page opens here and the phone's address follows it (#868).
-  if (args.includes('--lan') && opened.url !== undefined) await showLan(opened.url)
+  if (hasFlag('--lan') && opened.url !== undefined) await showLan(opened.url)
 }
 
 const stopBoard = async (): Promise<void> => {
@@ -3114,12 +3159,7 @@ const boardJson = (days?: number, projectFilter?: string) => {
 }
 const json = (): void => {
   try {
-    const daysIndex = args.indexOf('--days')
-    let days: number | undefined
-    if (daysIndex !== -1) {
-      const nextArg = args[daysIndex + 1]
-      days = (nextArg === undefined || nextArg.startsWith('--')) ? 7 : Number(nextArg)
-    }
+    const days = hasFlag('--days') ? Number(flag('--days') ?? '7') : undefined
     const project = flag('--project')
     process.stdout.write(`${JSON.stringify(boardJson(days, project))}\n`)
   } catch (error) { jsonFailure(error) }
@@ -3133,7 +3173,7 @@ const runWatchTerminal = async (): Promise<void> => {
       sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshTargetOf(process.env), server.url), options())}\n`
     }
   }
-  let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }
+  let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: hasFlag('--all') }
   // What is on the screen now: a redraw that would show the same writes nothing.
   let drawn: string | null = null
   const paintScreen = (text: string, focus: readonly [number, number] | null = null): void => {
@@ -3210,42 +3250,407 @@ const runWatchTerminal = async (): Promise<void> => {
   void refreshRoutes().then(isChanged => { if (isChanged) draw() })
 }
 
+const samePathKey = (a: string, b: string): boolean =>
+  process.platform === 'win32' ? resolve(a).toLowerCase() === resolve(b).toLowerCase() : resolve(a) === resolve(b)
+
+const hasLiveStoreLock = (root: string): boolean => {
+  try {
+    const pid = readFileSync(join(root, 'server.lock'), 'utf8').trim()
+    return /^[1-9][0-9]*$/.test(pid) && isRunning(Number(pid))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    return true
+  }
+}
+
+const runningStoreServer = async (root: string): Promise<string | null> => {
+  if (!hasLiveStoreLock(root)) return null
+  const name = addressFileName(board(path))
+  const runtime = process.env.XDG_RUNTIME_DIR
+  let folder: string
+  try {
+    folder = process.platform === 'win32'
+      ? unprotectedRuntimeFolder(runtime ? join(runtime, 'agent-board') : join(homedir(), '.cache', 'agent-board'))
+      : (runtime && isOwnFolder(runtime) ? runtime : join(homedir(), '.cache', 'agent-board'))
+  } catch {
+    return null
+  }
+  const running = readRunning(join(folder, name))
+  if (running === null) return null
+  const answer = await ping(running, 1000)
+  if (answer === null || answer === 'silent' || typeof answer.messagesDirectory !== 'string') return null
+  return samePathKey(answer.messagesDirectory, root) ? running.url : null
+}
+
+const checkMessageDirSafe = (root: string): void => {
+  try {
+    const info = lstatSync(root)
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error('UNSAFE_MESSAGE_DIRECTORY')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+  }
+}
+
+const ensurePrivateMessageFolder = (root: string): void => {
+  checkMessageDirSafe(root)
+  const isDefault = flag('--messages-dir') === undefined
+  const isCreated = mkdirSync(root, { recursive: true, mode: 0o700 }) !== undefined
+  try {
+    const info = lstatSync(root)
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new Error('UNSAFE_MESSAGE_DIRECTORY')
+    if (process.platform === 'win32' && (isCreated || isDefault)) {
+      try {
+        privateFolder(root, !isCreated)
+      } catch (error) {
+        throw new Error(isTimeout(error) ? 'ACL_CHECK_TIMEOUT' : 'MESSAGE_STORE_ACL', { cause: error })
+      }
+    }
+  } catch (error) {
+    if (isDefault && isCreated) try { rmdirSync(root) } catch {}
+    throw error
+  }
+}
+
+const readMessageState = (root: string, now: number): MessageState => {
+  checkMessageDirSafe(root)
+  const file = join(root, 'messages.json')
+  const found = readSettings(file)
+  if (found.kind === 'missing') return { messages: [], mailboxes: [] }
+  if (found.kind !== 'ok') throw new Error('UNSAFE_MESSAGE_FILE')
+  return expireMailboxes(parseMessageStore(found.text, now), now)
+}
+
+const replaceMessageFile = (from: string, to: string): void => {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(from, to)
+      return
+    } catch (error) {
+      const code = String((error as NodeJS.ErrnoException | null)?.code ?? '')
+      if (attempt >= 4 || !['EPERM', 'EBUSY', 'EAGAIN'].includes(code)) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1))
+    }
+  }
+}
+
+const writeMessageState = (root: string, changed: MessageState, now: number, claim: ReturnType<typeof claimMessageStore>): void => {
+  const next = pruneMessages(changed, now)
+  claim.check(root)
+  const file = join(root, 'messages.json')
+  const temp = `${file}.${process.pid}.tmp`
+  try {
+    try { unlinkSync(temp) } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    writeFileSync(temp, JSON.stringify({ version: 2, ...next }), { mode: 0o600, flag: 'wx' })
+    replaceMessageFile(temp, file)
+  } finally {
+    try { unlinkSync(temp) } catch {}
+  }
+}
+
+type ConnectionMeta = { project: string; title: string; updated: number; folderDigest?: string }
+
+const connectionMeta = (projects: readonly ProgressProject[]): Map<string, ConnectionMeta> => {
+  const meta = new Map<string, ConnectionMeta>()
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto === null) continue
+      const digest = task.auto.dir ? workspaceDigest(task.auto.dir) : undefined
+      const entry: ConnectionMeta = {
+        project: project.name || s.uncategorized,
+        title: task.title || s.unnamed,
+        updated: task.auto.updated,
+        ...(digest ? { folderDigest: digest } : {}),
+      }
+      meta.set(address(task.auto.agent, task.auto.session), entry)
+      if (task.auto.resume) meta.set(address(task.auto.agent, task.auto.resume), entry)
+    }
+  }
+  return meta
+}
+
+const mergedConnections = (connections: readonly Connection[], mailboxes: readonly Connection[], meta: ReadonlyMap<string, ConnectionMeta>, now: number): Connection[] => {
+  const byAddr = new Map<string, Connection>()
+  for (const box of mailboxes) {
+    if (box.expires <= now) continue
+    const digest = box.folderDigest ?? meta.get(address(box.agent, box.session))?.folderDigest
+    byAddr.set(address(box.agent, box.session), digest && !box.folderDigest ? { ...box, folderDigest: digest } : box)
+  }
+  for (const conn of connections) {
+    if (conn.expires <= now) continue
+    const prev = byAddr.get(address(conn.agent, conn.session))
+    const digest = conn.folderDigest ?? prev?.folderDigest ?? meta.get(address(conn.agent, conn.session))?.folderDigest
+    byAddr.set(address(conn.agent, conn.session), digest && !conn.folderDigest ? { ...conn, folderDigest: digest } : conn)
+  }
+  return [...byAddr.values()]
+}
+
+const targetCandidates = (connections: readonly Connection[], meta: ReadonlyMap<string, ConnectionMeta>, now: number): SendCandidate[] =>
+  connections
+    .filter(one => one.expires > now)
+    .map(connection => {
+      const info = meta.get(address(connection.agent, connection.session))
+      return { connection, project: info?.project ?? '', title: info?.title ?? '', ...(info ? { updated: info.updated } : {}) }
+    })
+
+const savedRecipient = (saved: Message, meta: ReadonlyMap<string, ConnectionMeta>, now: number): SendCandidate | null => {
+  const split = saved.to.indexOf(':')
+  if (split < 1 || split >= saved.to.length - 1) return null
+  const agent = saved.to.slice(0, split)
+  const session = saved.to.slice(split + 1)
+  const info = meta.get(saved.to)
+  return {
+    connection: {
+      id: saved.target,
+      agent,
+      session,
+      surface: saved.surface ?? 'CLI',
+      turn: saved.turn,
+      scope: 'mailbox',
+      expires: now + 60_000,
+      ...(info?.folderDigest ? { folderDigest: info.folderDigest } : {}),
+    },
+    project: info?.project ?? '',
+    title: info?.title ?? '',
+    ...(info ? { updated: info.updated } : {}),
+  }
+}
+
+const fetchHubTargets = async (serverUrl: string): Promise<{ connections: Connection[]; mailboxes: Connection[] } | null> => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${new URL(serverUrl).port}/api/messages/targets`, {
+      method: 'POST',
+      headers: { 'x-board-token': tokenOf(serverUrl), 'content-type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(3000),
+    })
+    if (!res.ok) return null
+    const data = (await res.json()) as { connections?: unknown; mailboxes?: unknown }
+    return {
+      connections: Array.isArray(data.connections) ? (data.connections as Connection[]) : [],
+      mailboxes: Array.isArray(data.mailboxes) ? (data.mailboxes as Connection[]) : [],
+    }
+  } catch {
+    return null
+  }
+}
+
+const receiverCredentials = (): { source: string; secret: string } | null => {
+  const source = process.env.AGENT_BOARD_CONNECTION_ID
+  const secret = process.env.AGENT_BOARD_CONNECTION_SECRET
+  return source && secret ? { source, secret } : null
+}
+
+const peerSendFailureNote = (code: string): string =>
+  code === 'HOP_LIMIT' ? s.cliSendHopLimit(HOP_LIMIT)
+    : code === 'PEER_PAUSED' ? s.cliSendPaused
+      : code === 'PAIR_BUDGET_EXHAUSTED' ? s.cliSendBudget
+        : code === 'TARGET_BUSY' || code === 'PAIR_BUSY' ? s.messagesBusy
+          : code === 'TEXT_REFUSED' ? s.messagesTextRefused
+            : code === 'CONTESTED' ? s.messagesContested
+              : code === 'WORKSPACE_MISMATCH' ? s.cliSendCrossProject
+                : ['OFFLINE', 'STALE_TURN', 'WORKSPACE_UNKNOWN'].includes(code) ? s.cliSendOffline
+                  : s.cliSendRefused(code)
+
+type PostActionResult = { kind: 'ok' } | { kind: 'refused'; code: string } | { kind: 'uncertain' }
+
+const postMessageAction = async (serverUrl: string, action: string, payload: Record<string, unknown>): Promise<PostActionResult> => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${new URL(serverUrl).port}/api/messages/${action}`, {
+      method: 'POST',
+      headers: { 'x-board-token': tokenOf(serverUrl), 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(5000),
+    })
+    if (res.ok) return { kind: 'ok' }
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown }
+    return { kind: 'refused', code: typeof body.error === 'string' && body.error !== '' ? body.error : `HTTP_${res.status}` }
+  } catch (error) {
+    const cause = (error as { cause?: { code?: unknown }; code?: unknown } | null)
+    const code = String(cause?.cause?.code ?? cause?.code ?? '')
+    if (code === 'ECONNREFUSED') return { kind: 'refused', code: 'OFFLINE' }
+    return { kind: 'uncertain' }
+  }
+}
+
+const scrubCli = (text: string): string => redact(text, homeOrNone(), process.platform === 'win32')
+
+const runCliSend = async (): Promise<void> => {
+  if (hasFlag('--id') && flag('--id') === undefined) {
+    process.stderr.write(`${s.boardUsage}\n`)
+    process.exitCode = 1
+    return
+  }
+  const { first: targetQuery, second: rawBody } = parsedCli.sendPair
+  if (targetQuery === undefined || targetQuery.trim() === '' || rawBody === undefined || rawBody.trim() === '') {
+    process.stderr.write(`${s.cliSendMissingTarget}\n`)
+    process.exitCode = 1
+    return
+  }
+  const rawId = flag('--id')
+  let id: string
+  try {
+    id = rawId === undefined ? randomBytes(16).toString('hex') : messageId(rawId)
+  } catch {
+    process.stderr.write(`${s.boardUsage}\n`)
+    process.exitCode = 1
+    return
+  }
+  const now = Date.now()
+  const root = messagesDirectory()
+  const isCrossProject = hasFlag('--cross-project')
+  const serverUrl = await runningStoreServer(root)
+  const hubTargets = serverUrl === null ? null : await fetchHubTargets(serverUrl)
+  const projects = parseProgress(read(path))
+  const meta = connectionMeta(projects)
+  let claim: ReturnType<typeof claimMessageStore> | undefined
+  try {
+    let state = readMessageState(root, now)
+    if (serverUrl === null && existsSync(root)) {
+      ensurePrivateMessageFolder(root)
+      claim = claimMessageStore(root)
+      state = readMessageState(root, now)
+    }
+    const liveConnections = hubTargets?.connections ?? []
+    const liveMailboxes = hubTargets?.mailboxes ?? state.mailboxes ?? []
+    const pool = mergedConnections(liveConnections, liveMailboxes, meta, now)
+    const creds = receiverCredentials()
+    if (creds !== null && serverUrl === null) throw new Error('CONNECTOR_NOT_CONNECTED')
+    const matchedSender = creds === null ? undefined : liveConnections.find(box => box.id === creds.source && box.expires > now)
+    const senderAddress = matchedSender ? address(matchedSender.agent, matchedSender.session) : undefined
+    const senderDigest = (): string | undefined => matchedSender?.folderDigest ?? workspaceDigest(process.cwd())
+    const text = rawBody.trim()
+    const sendViaHub = async (candidate: SendCandidate): Promise<void> => {
+      const sent = await postMessageAction(serverUrl!, 'peer-send', {
+        agent: candidate.connection.agent,
+        session: candidate.connection.session,
+        text,
+        id,
+        ...(creds !== null ? { source: creds.source, secret: creds.secret } : { from: 'unverified' }),
+        folderDigest: senderDigest() ?? '',
+        ...(isCrossProject ? { crossProject: true } : {}),
+      })
+      if (sent.kind === 'uncertain') {
+        process.stderr.write(`${s.cliSendUncertain(id)}\n`)
+        process.exitCode = 1
+        return
+      }
+      if (sent.kind === 'refused') {
+        process.stderr.write(`${peerSendFailureNote(sent.code)}\n`)
+        process.exitCode = 1
+        return
+      }
+      process.stdout.write(`${s.cliSendSent(formatSendCandidate(candidate, now, s, scrubCli))}\n`)
+    }
+    const saved = rawId === undefined ? undefined : state.messages.find(one => one.id === id)
+    if (saved !== undefined) {
+      const candidate = savedRecipient(saved, meta, now)
+      if (candidate === null || resolveSendTarget(targetQuery, [candidate], now, s, senderAddress).kind !== 'unique') throw new Error('ID_CONFLICT')
+      if (serverUrl !== null) {
+        await sendViaHub(candidate)
+        return
+      }
+      if (hasLiveStoreLock(root)) throw new Error('MESSAGE_STORE_IN_USE')
+      queueMessage(state, { id, target: saved.target, turn: saved.turn, text }, 'unverified', undefined, now)
+      process.stdout.write(`${s.cliSendSent(formatSendCandidate(candidate, now, s, scrubCli))}\n`)
+      return
+    }
+    const resolution = resolveSendTarget(targetQuery, targetCandidates(pool, meta, now), now, s, senderAddress)
+    if (resolution.kind === 'none') {
+      process.stderr.write(`${s.cliSendOffline}\n`)
+      process.exitCode = 1
+      return
+    }
+    if (resolution.kind === 'ambiguous') {
+      const lines = resolution.candidates.map(one => `  ${formatSendCandidate(one, now, s, scrubCli)}`)
+      process.stderr.write(`${s.cliSendAmbiguous(targetQuery)}\n${lines.join('\n')}\n`)
+      process.exitCode = 1
+      return
+    }
+    const target = resolution.candidate.connection
+    if (!isSameWorkspaceAllowed(senderDigest(), target.folderDigest, isCrossProject)) {
+      process.stderr.write(`${s.cliSendCrossProject}\n`)
+      process.exitCode = 1
+      return
+    }
+    if (serverUrl !== null) {
+      await sendViaHub(resolution.candidate)
+      return
+    }
+    if (claim === undefined) {
+      ensurePrivateMessageFolder(root)
+      claim = claimMessageStore(root)
+      state = readMessageState(root, now)
+    }
+    const existing = state.messages.find(one => one.id === id)
+    if (existing && existing.to !== address(target.agent, target.session)) throw new Error('ID_CONFLICT')
+    const liveTarget = (state.mailboxes ?? []).find(box => box.id === target.id && box.expires > now)
+    if (!existing && !liveTarget) {
+      process.stderr.write(`${s.cliSendOffline}\n`)
+      process.exitCode = 1
+      return
+    }
+    if (hasLiveStoreLock(root)) throw new Error('MESSAGE_STORE_IN_USE')
+    const deliveryTarget: Connection = liveTarget ?? {
+      id: existing!.target,
+      agent: target.agent,
+      session: target.session,
+      surface: existing!.surface ?? 'CLI',
+      turn: existing!.turn,
+      scope: 'mailbox',
+      expires: now + 60_000,
+    }
+    const queued = queueMessage(state, { id, target: existing?.target ?? deliveryTarget.id, turn: existing?.turn ?? deliveryTarget.turn, text }, 'unverified', deliveryTarget, now, 'local', randomBytes(16).toString('hex'))
+    writeMessageState(root, queued.state, now, claim)
+    process.stdout.write(`${s.cliSendSent(formatSendCandidate(resolution.candidate, now, s, scrubCli))}\n`)
+  } catch (error) {
+    const code = error instanceof Error ? error.message : 'UNKNOWN'
+    process.stderr.write(`${peerSendFailureNote(code)}\n`)
+    process.exitCode = 1
+  } finally {
+    try { claim?.release() } catch {}
+  }
+}
+
 const run = async (): Promise<void> => {
-  const badFlag = unknownFlag(args)
+  const badFlag = parsedCli.unknown
   if (badFlag !== undefined) {
     process.stderr.write(`${s.boardUnknownFlag(badFlag)}\n`)
     process.exitCode = 2
     return
   }
-  if (args.includes('--version') || args.includes('-v')) {
+  if (hasAnyFlag(['--version', '-v'])) {
     process.stdout.write(`agent-board ${boardVersion}\n`)
     return
   }
-  if (args.includes('--days')) {
-    const daysIndex = args.indexOf('--days')
-    const nextArg = args[daysIndex + 1]
-    let isValid = true
-    if (nextArg !== undefined && !nextArg.startsWith('--')) {
-      if (!/^\d+$/.test(nextArg) || Number(nextArg) < 1 || Number(nextArg) > 90) {
-        isValid = false
-      }
-    }
-    if (!isValid) {
+  if (hasFlag('--days')) {
+    const nextArg = flag('--days')
+    if (nextArg !== undefined && (!/^\d+$/.test(nextArg) || Number(nextArg) < 1 || Number(nextArg) > 90)) {
       process.exitCode = 1
       process.stderr.write(`${s.boardUsage}\n`)
       return
     }
+  }
+  if (hasFlag('--id') && flag('--id') === undefined && !hasFlag('--mailbox')) {
+    process.stderr.write(`${s.boardUsage}\n`)
+    process.exitCode = 1
+    return
   }
   // Setup keeps its own --json protocol; a board read wins over every action flag.
   if (isJsonBoard) {
     json()
     return
   }
-  if (args.includes('--mcp')) {
+  if (hasFlag('--mcp')) {
     await runMcp({ directory: messagesDirectory(), cwd: process.cwd(), version: boardVersion, s, document: () => { try { return boardJson() } catch (error) { return jsonFailureDocument(error) } } })
     return
   }
-  if (args.includes('--status')) {
+  if (hasFlag('--send')) {
+    await runCliSend()
+    return
+  }
+  if (hasFlag('--status')) {
     const safeSidecar = (file: string): string => {
       try {
         const text = readFileSync(file, 'utf8')
@@ -3291,23 +3696,23 @@ const run = async (): Promise<void> => {
     return
   }
   if (await runCodexLocal(args, path, s)) return
-  if ((args.includes('--help') || args.includes('-h')) && !args.includes('--chat')) {
-    process.stdout.write(args.includes('all') ? `${s.boardUsageAll}\n` : `${s.boardUsage}\n`)
-  } else if (args[0] === 'stop' || args.includes('--stop')) {
+  if (hasAnyFlag(['--help', '-h']) && !hasFlag('--chat')) {
+    process.stdout.write(parsedCli.positionals.includes('all') ? `${s.boardUsageAll}\n` : `${s.boardUsage}\n`)
+  } else if (parsedCli.positionals[0] === 'stop' || hasFlag('--stop')) {
     await stopBoard()
-  } else if (args.includes('--serve-child')) {
+  } else if (hasFlag('--serve-child')) {
     dropServerMemoryEnv(process.env)
     serveChild()
-  } else if (args.includes('--chat')) {
+  } else if (hasFlag('--chat')) {
     // Before the flags that serve, open or write: a chat reply never starts a page.
     chat()
-  } else if (args.includes('--tidy')) {
+  } else if (hasFlag('--tidy')) {
     if (!runBulkTidy()) process.stdout.write(`${tidy(false)}\n`)
-  } else if (args.includes('--serve')) {
+  } else if (hasFlag('--serve')) {
     await serveBoard()
-  } else if (args.includes('--html')) {
+  } else if (hasFlag('--html')) {
     await openPageSurface()
-  } else if (args.includes('--print')) {
+  } else if (hasFlag('--print')) {
     // The explicit read-only print retains the questions and journal the old chat view showed.
     const at = Date.now()
     process.stdout.write(boardText(view(undefined, at), pending(), s, { ...options(), isQuestionsOpen: true }, doneToday(journalToday(at), at, s)))
@@ -3331,7 +3736,7 @@ const run = async (): Promise<void> => {
       }
     }
     process.stdout.write(screen(pin(state)))
-  } else if (args.includes('--watch') && process.stdout.isTTY !== true) {
+  } else if (hasFlag('--watch') && process.stdout.isTTY !== true) {
     // Into a pipe or a log: the board once, as plain text with no control codes (FORCE_COLOR
     // still paints it, for `| less -R`).
     try {
@@ -3339,9 +3744,9 @@ const run = async (): Promise<void> => {
     } catch (error) {
       process.stdout.write(`${failureNote(error)}\n`)
     }
-  } else if (args.includes('--watch') && process.stdin.isTTY) {
+  } else if (hasFlag('--watch') && process.stdin.isTTY) {
     await runWatchTerminal()
-  } else if (args.includes('--watch')) {
+  } else if (hasFlag('--watch')) {
     // A terminal to draw on with no keys to read (an agent's tool): it only redraws.
     let drawn: string | null = null
     const tick = () => {
@@ -3362,7 +3767,7 @@ const run = async (): Promise<void> => {
     setInterval(tick, 2000)
   } else {
     // `--lan` is for a phone, which only the page serves, so it picks the page everywhere.
-    const surface = args.includes('--lan') ? 'page' : pickSurface({ env: process.env, isTty: Boolean(process.stdout.isTTY && process.stdin.isTTY), platform: process.platform })
+    const surface = hasFlag('--lan') ? 'page' : pickSurface({ env: process.env, isTty: Boolean(process.stdout.isTTY && process.stdin.isTTY), platform: process.platform })
     if (surface === 'page') {
       await openPageSurface()
     } else if (surface === 'terminal' && process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
@@ -3378,35 +3783,35 @@ try {
 } catch (error) {
   if (isJsonBoard) {
     jsonFailure(error)
-  } else if (args.includes('--mcp')) {
+  } else if (hasFlag('--mcp')) {
     process.exitCode = 1
     process.stderr.write('MCP_START_FAILED\n')
   } else if (error instanceof RuntimeFolderTimeoutError) {
     process.exitCode = 1
-    if (args.includes('--serve-child')) serveChildError(`${s.serveRuntimeCheckTimeout}\n`)
+    if (hasFlag('--serve-child')) serveChildError(`${s.serveRuntimeCheckTimeout}\n`)
     else process.stdout.write(`${s.serveRuntimeCheckTimeout}\n`)
   } else if (error instanceof RuntimeFolderError) {
     process.exitCode = 1
     const message = `${error instanceof RuntimeFolderDeniedError ? s.serveRuntimeDenied : s.serveRuntimePrivate}\n`
-    if (args.includes('--serve-child')) serveChildError(message)
+    if (hasFlag('--serve-child')) serveChildError(message)
     else process.stdout.write(message)
   } else if (flag('--legacy-connect-request') !== undefined && typeof (globalThis as { AGENT_BOARD_WORKER_SOURCE?: unknown }).AGENT_BOARD_WORKER_SOURCE === 'string') {
     // The verified worker wrapper bounds data-URL errors and owns stage cleanup.
     throw error
-  } else if (args.some(arg => ['--codex-event', '--agent-status', '--codex-report', '--report', '--plan-event'].includes(arg))) {
+  } else if (hasAnyFlag(['--codex-event', '--agent-status', '--codex-report', '--report', '--plan-event'])) {
     // A plan mirror is a host's decision hook: it never fails the host, and says why on stderr only.
-    process.exitCode = args.includes('--plan-event') ? 0 : 1
+    process.exitCode = hasFlag('--plan-event') ? 0 : 1
     const raw = String((error as { code?: string })?.code ?? (error instanceof Error ? error.message : 'UNKNOWN'))
     const reason = /^[A-Z][A-Z0-9_]{0,63}$/.test(raw) ? raw : 'UNKNOWN'
     // A plan mirror's stderr only feeds the hook log, so it always names its code (#962 review).
-    process.stderr.write(`${args.includes('--plan-event') ? s.reporterFailed(reason) : reason === 'UNBOUND_REPORT' ? s.codexReportUnbound : reason === 'LOCK_DENIED' ? s.reporterLockDenied : reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
+    process.stderr.write(`${hasFlag('--plan-event') ? s.reporterFailed(reason) : reason === 'UNBOUND_REPORT' ? s.codexReportUnbound : reason === 'LOCK_DENIED' ? s.reporterLockDenied : reason === 'INCOMPLETE_PROGRESS_TAIL' ? s.tailRepairFailed : s.reporterFailed(reason)}\n`)
     const step = (error as { step?: unknown })?.step
-    if (reason === 'INVALID_STEP' && typeof step === 'string' && args.some(arg => ['--codex-report', '--report'].includes(arg))) {
+    if (reason === 'INVALID_STEP' && typeof step === 'string' && hasAnyFlag(['--codex-report', '--report'])) {
       process.stderr.write(`AGENT_BOARD_DETAIL ${JSON.stringify(s.reporterInvalidStep(step))}\n`)
     }
-  } else if (args.some(arg => ['--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'].includes(arg))) {
+  } else if (hasAnyFlag(['--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'])) {
     process.exitCode = 1
     const failure = setupFailure(error, flag('--agent') ?? 'codex', s)
-    process.stderr.write(`${args.includes('--json') ? JSON.stringify({ error: failure }) : failure.message}\n`)
+    process.stderr.write(`${hasFlag('--json') ? JSON.stringify({ error: failure }) : failure.message}\n`)
   } else failureNote(error)
 }

@@ -1,6 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
+import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
 import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, rebindMessages, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
@@ -8,7 +9,10 @@ import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
 import { isClaimRef, parseMessageStore, queuedMessagingOf, shownMessages } from '../hooks/queued-store'
+import { redact } from '../hooks/board'
+import { sanitizeSenderTitle } from '../hooks/cli-send'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
+import { workspaceDigest } from './folder-identity'
 import { claimMessageStore } from './message-store-claim'
 import { readSettings } from './settings-file'
 import type { MessageStoreClaim } from './message-store-claim'
@@ -356,18 +360,45 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         save({ ...state, pausePeerMessages: body.isPaused }, now)
         return { ok: true }
       }
+      if (action === 'targets') {
+        messageFields(body, [])
+        return {
+          connections: [...connections.values()].map(({ secret: _secret, keepsQueued: _keepsQueued, marksStart: _marksStart, ...one }) => one),
+          mailboxes: state.mailboxes ?? [],
+        }
+      }
       if (action === 'peer-send') {
-        messageFields(body, ['agent', 'session', 'text', 'id', 'from', 'folderDigest'])
+        messageFields(body, ['agent', 'session', 'text', 'id', 'from', 'source', 'secret', 'folderDigest', 'crossProject'])
         const agent = messageId(body.agent), session = messageId(body.session)
-        const from = peerSender(body.from)
-        const target = state.mailboxes?.find(one => one.agent === agent && one.session === session)
+        if (body.crossProject !== undefined && typeof body.crossProject !== 'boolean') throw new Error('INVALID_CROSS_PROJECT')
+        let from: string
+        let senderTitle: string | undefined
+        if (body.source !== undefined || body.secret !== undefined) {
+          const sender = authenticated(body.source, body.secret, now)
+          from = address(sender.agent, sender.session)
+          if (body.from !== undefined && body.from !== from) throw new Error('INVALID_SENDER')
+          const senderReport = reports
+            .filter(report => report.agent === sender.agent && report.session === sender.session && typeof report.title === 'string' && report.title.trim() !== '')
+            .sort((a, b) => b.updated - a.updated)[0]
+          const home = (() => { try { return homedir() } catch { return '' } })()
+          senderTitle = senderReport?.title
+            ? sanitizeSenderTitle(senderReport.title, text => redact(text, home, process.platform === 'win32')) || undefined
+            : undefined
+        } else {
+          from = peerSender(body.from)
+        }
+        const live = [...connections.values()].filter(one => one.agent === agent && one.session === session && one.expires > now)
+        const mailbox = state.mailboxes?.find(one => one.agent === agent && one.session === session)
+        const target = live.length > 1 ? { ...live[0]!, contested: true } : live[0] ?? mailbox
         const existing = state.messages.find(one => one.id === body.id)
         if (existing && existing.to !== address(agent, session)) throw new Error('ID_CONFLICT')
-        if (!existing) {
-          if (!target?.folderDigest) throw new Error('WORKSPACE_UNKNOWN')
-          if (target.folderDigest !== body.folderDigest) throw new Error('WORKSPACE_MISMATCH')
+        if (!existing && body.crossProject !== true) {
+          const boundDir = reports.find(report => report.agent === agent && report.session === session && typeof report.dir === 'string' && report.dir !== '')?.dir
+          const targetDigest = target?.folderDigest ?? mailbox?.folderDigest ?? (boundDir ? workspaceDigest(boundDir) : undefined)
+          if (!targetDigest) throw new Error('WORKSPACE_UNKNOWN')
+          if (targetDigest !== body.folderDigest) throw new Error('WORKSPACE_MISMATCH')
         }
-        const queued = queueMessage(state, { id: body.id, text: body.text, target: existing?.target ?? target?.id, turn: existing?.turn ?? target?.turn }, from, target, now, 'local', randomBytes(16).toString('hex'))
+        const queued = queueMessage(state, { id: body.id, text: body.text, target: existing?.target ?? target?.id, turn: existing?.turn ?? target?.turn }, from, target, now, 'local', randomBytes(16).toString('hex'), undefined, undefined, senderTitle)
         save(queued.state, now)
         return shownMessage(queued.message)
       }

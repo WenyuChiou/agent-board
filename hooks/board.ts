@@ -2,6 +2,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { boardCounts } from './board-status'
 import type { QueuedMessaging } from './board-status'
+import { formatMessageStatus, latestRowMessage } from './cli-send'
 import { lastQuestionInProse, normalizeReply } from './digest'
 import { withoutStamp } from './done-stamp'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail, turnOrder } from './inbox'
@@ -271,6 +272,8 @@ const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelv
   const lines = [`  ${c('bold', cut(row.title, o.width - 4))}`, `    ${lead}${c('quiet', cut(`${count}${status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6 - (bar.width === 0 ? 0 : bar.width + 1)))}`]
   if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
   if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
+  const latestMessage = o.messaging === undefined ? undefined : latestRowMessage(o.messaging.messages, row)
+  if (latestMessage !== undefined) lines.push(`    ${c('quiet', cut(formatMessageStatus(latestMessage, view.now, s), o.width - 6))}`)
   for (const step of row.steps) {
     const tone = step.status === 'waiting' ? 'waiting' : step.status === 'blocked' ? 'alert' : step.isCurrent ? 'accent' : step.status === 'done' ? 'quiet' : null
     const line = cut(stepLine(step), o.width - 6)
@@ -591,7 +594,9 @@ export const chatText = (
     const next = (row.steps.find(step => step.isCurrent && isNext(step)) ?? row.steps.find(isNext))?.text
     const status = row.isChatReplied === true && row.status === s.answeredWaiting ? ` · ${row.status}` : ''
     const words = `${mark} ${isSameName(row.project, row.title) ? named(row.project) : `${named(row.project)} › ${row.title}`}${row.hasFutureTime ? ` · ${row.when}` : ''}${row.due === null ? '' : ` · ${row.due.left}`}${status}${next === undefined ? '' : ` — ${s.reportNext(next)}`}${row.runs ? ` · ${row.runs}` : ''}`
-    items.push(`${index === 0 ? '\n' : ''}${line(words)}`)
+    const latestMessage = messaging === undefined ? undefined : latestRowMessage(messaging.messages, row)
+    const messageLine = latestMessage === undefined ? '' : `\n${line(formatMessageStatus(latestMessage, now ?? view.now, s), 4)}`
+    items.push(`${index === 0 ? '\n' : ''}${line(words)}${messageLine}`)
   })
   if (asks.length === 0 && rows.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && recentQuestions.length === 0) items.push(s.empty)
   // Each starts with its project (`project · task: step`).
@@ -1088,6 +1093,8 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const quiet = status.startsWith(lead) ? lead : ''
       lines.push(`    ${bar.width === 0 ? '' : `${bar.text} `}${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
       if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
+      const latestMessage = o.messaging === undefined ? undefined : latestRowMessage(o.messaging.messages, row)
+      if (latestMessage !== undefined) lines.push(`    ${c('quiet', cut(formatMessageStatus(latestMessage, view.now, s), o.width - 6))}`)
       if (!isOpen && row.context && (titleCounts.get(row.title) ?? 0) > 1) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
       if (isOpen) rowDetails(row)
       return

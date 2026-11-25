@@ -1,4 +1,5 @@
 import { type Strings, ZH_TW } from './i18n.ts'
+import { asData, dataBlock } from './data-block.ts'
 import { sha256 } from './sha256.ts'
 
 // Where a connection or a message comes from. Only this computer for now; the field is kept so
@@ -12,6 +13,7 @@ export type Message = {
   turn: string
   from: string
   to: string
+  senderTitle?: string
   // Empty once the message is finished; the hash stays, so a retry is still told from a reused id.
   text: string
   hash: string
@@ -292,23 +294,40 @@ export const pruneMessages = (state: MessageState, now: number): MessageState =>
   return messages.length === state.messages.length && messages.every((one, i) => one === state.messages[i]) ? state : { ...state, messages }
 }
 
-export const deliveryText = (message: Message, s: Strings = ZH_TW): string => [
-  message.from === 'board'
-    ? s.messagesDeliveryBoard
-    : s.messagesDeliveryAgent(message.framingNonce ? senderLabel(message.from) : agentOf(message.from)),
-  s.messagesDeliveryWarning,
-  // A Codex thread has run one message twice (L2), so it is told what to do when it has answered already; a message
-  // sent again says that in its own line.
-  ...(message.redelivered ? [s.messagesDeliveryRepeat] : agentOf(message.to) === 'codex' ? [s.messagesDeliveryAnswered(message.nonce)] : []),
-  s.messagesDeliveryAck(message.nonce),
-  `<<<AB-${message.framingNonce ?? message.nonce}`,
-  message.text,
-  `AB-${message.framingNonce ?? message.nonce}>>>`,
-].join('\n')
+const deliveryAgentName = (agent: string, s: Strings): string => {
+  if (agent === '') return ''
+  const key = Object.hasOwn(s.agentNames, agent) ? agent : agent.toLowerCase()
+  return Object.hasOwn(s.agentNames, key) ? s.agentNames[key] ?? agent : agent
+}
+
+const deliverySender = (message: Pick<Message, 'from' | 'framingNonce' | 'senderTitle'>, s: Strings): string => {
+  if (message.from === 'unverified') return 'unverified'
+  if (message.senderTitle) return deliveryAgentName(agentOf(message.from), s)
+  return message.framingNonce ? senderLabel(message.from) : agentOf(message.from)
+}
+
+export const deliveryText = (message: Message, s: Strings = ZH_TW): string => {
+  const title = message.from !== 'board' && message.from !== 'unverified' && message.senderTitle ? asData(message.senderTitle, 120) : ''
+  return [
+    message.from === 'board'
+      ? s.messagesDeliveryBoard
+      : s.messagesDeliveryAgent(deliverySender(message, s)),
+    s.messagesDeliveryWarning,
+    ...(message.from === 'board' ? [] : [s.cliSendNoReplyLoop]),
+    ...(title === '' ? [] : dataBlock([s.cliSendSenderWithTitle(deliveryAgentName(agentOf(message.from), s), title)], s)),
+    // A Codex thread has run one message twice (L2), so it is told what to do when it has answered already; a message
+    // sent again says that in its own line.
+    ...(message.redelivered ? [s.messagesDeliveryRepeat] : agentOf(message.to) === 'codex' ? [s.messagesDeliveryAnswered(message.nonce)] : []),
+    s.messagesDeliveryAck(message.nonce),
+    `<<<AB-${message.framingNonce ?? message.nonce}`,
+    message.text,
+    `AB-${message.framingNonce ?? message.nonce}>>>`,
+  ].join('\n')
+}
 
 // Observation is not an authorization token. Only an exact, newer progress report
 // satisfies a handoff; a transport acceptance or even an ACK cannot do so.
-export type ProgressBinding = { agent: string; session: string; updated: number }
+export type ProgressBinding = { agent: string; session: string; updated: number; dir?: string | null; title?: string | null }
 export type SessionExpectation = {
   id: string; agent: string; session: string; surface: string
   created: number; deadline: number; baseline: number; observed: number | null
@@ -344,7 +363,7 @@ export const dismissMessage = (state: MessageState, id: string, now: number): Me
   }) : message) }
 }
 
-export const queueMessage = (state: MessageState, input: Record<string, unknown>, from: string, target: Connection | undefined, now: number, origin: Origin = 'local', framingNonce?: string, line?: RouteLine, surface?: string): { state: MessageState; message: Message } => {
+export const queueMessage = (state: MessageState, input: Record<string, unknown>, from: string, target: Connection | undefined, now: number, origin: Origin = 'local', framingNonce?: string, line?: RouteLine, surface?: string, senderTitle?: string): { state: MessageState; message: Message } => {
   messageFields(input, ['id', 'target', 'turn', 'text', 'answers'])
   if (input.answers !== undefined && !isAnswersId(input.answers)) throw new Error('INVALID_ID')
   const answers = from === 'board' ? input.answers : undefined
@@ -379,7 +398,10 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
   if (state.messages.filter(isOpen).length >= OPEN_CAP || state.messages.length >= OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('MESSAGE_LIMIT')
-  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
+  const cleanTitle = from !== 'board' && from !== 'unverified' && typeof senderTitle === 'string'
+    ? senderTitle.replace(/[\r\n\t\0]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)
+    : ''
+  const message: Message = { ...request, ...(cleanTitle === '' ? {} : { senderTitle: cleanTitle }), ...(answers === undefined ? {} : { answers }), ...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
   return { state: { ...state, messages: [...state.messages, message] }, message }
 }
 export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string, marksStart = false): { state: MessageState; messages: Message[] } => {
