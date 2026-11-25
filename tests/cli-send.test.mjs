@@ -790,7 +790,7 @@ test('--send retried with the same --id delivers once', async () => {
     writeFileSync(progressPath, autoBlock({ agent: 'claude', session: 'sess-idemp-901', project: 'RetryRepo', title: 'Target task', dir: ws, updatedIso: isoAgo(now) }))
     const reports = [{ agent: 'claude', session: 'sess-idemp-901', updated: now - 30_000, dir: ws, title: 'Target task' }]
     hub = await startHub(root, { progressPath, reportsOf: () => reports })
-    await registerReceiver(hub, { agent: 'claude', session: 'sess-idemp-901', dir: ws })
+    const targetReg = await registerReceiver(hub, { agent: 'claude', session: 'sess-idemp-901', dir: ws })
 
     const argsFirst = ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'First delivery', '--id', 'stable-retry-001']
     const first = await runCli(root, argsFirst, { cwd: ws })
@@ -809,6 +809,53 @@ test('--send retried with the same --id delivers once', async () => {
     })
     assert.equal(conflict.status, 409)
     assert.equal(conflict.data.error, 'ID_CONFLICT')
+
+    // Saved --id retries still succeed after the recipient acknowledges and leaves the hub.
+    await pollAndAck(hub, targetReg, 'Acked before leaving')
+    const left = await hub.post('disconnect', { connection: targetReg.id, secret: targetReg.secret, turn: targetReg.turn })
+    assert.equal(left.status, 200)
+    assert.equal(hub.store.snapshot(Date.now(), reports).connections.length, 0)
+
+    const afterLeave = await runCli(root, argsFirst, { cwd: ws })
+    assert.equal(afterLeave.status, 0, afterLeave.stderr)
+    assert.ok(afterLeave.stdout.startsWith('Sent to Claude Code · RetryRepo · '), afterLeave.stdout)
+    assert.equal(hub.store.snapshot(Date.now(), reports).messages.length, 1)
+
+    const wrongBodyAfterLeave = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'claude', 'Different body', '--id', 'stable-retry-001'], { cwd: ws })
+    assert.equal(wrongBodyAfterLeave.status, 1)
+    assert.equal(wrongBodyAfterLeave.stderr.trim(), EN.cliSendRefused('ID_CONFLICT'))
+
+    const wrongTargetAfterLeave = await runCli(root, ['--lang', 'en', '--progress-file', progressPath, '--messages-dir', join(root, 'messages'), '--send', 'codex', 'First delivery', '--id', 'stable-retry-001'], { cwd: ws })
+    assert.equal(wrongTargetAfterLeave.status, 1)
+    assert.equal(wrongTargetAfterLeave.stderr.trim(), EN.cliSendRefused('ID_CONFLICT'))
+
+    // Offline retries with a saved --id also succeed after the target mailbox expires.
+    const expRoot = join(root, 'expired')
+    const expProgress = join(expRoot, 'progress.md')
+    const expMessages = join(expRoot, 'messages')
+    mkdirSync(expMessages, { recursive: true })
+    writeFileSync(expProgress, autoBlock({ agent: 'claude', session: 'sess-exp-903', project: 'ExpRepo', title: 'Expired mailbox target', dir: ws, updatedIso: isoAgo(now) }))
+    let expState = { messages: [], mailboxes: [] }
+    expState = enrollMailbox(expState, 'claude', 'sess-exp-903', 'cli', now, 600_000)
+    writeFileSync(join(expMessages, 'messages.json'), JSON.stringify({ version: 2, ...expState }))
+    const expArgs = ['--lang', 'en', '--progress-file', expProgress, '--messages-dir', expMessages, '--send', 'claude', 'Offline saved', '--id', 'offline-retry-001']
+    const expFirst = await runCli(root, expArgs, { cwd: ws })
+    assert.equal(expFirst.status, 0, expFirst.stderr)
+    const savedExp = JSON.parse(readFileSync(join(expMessages, 'messages.json'), 'utf8'))
+    savedExp.mailboxes = savedExp.mailboxes.map(one => ({ ...one, expires: Date.now() - 10_000 }))
+    writeFileSync(join(expMessages, 'messages.json'), JSON.stringify(savedExp))
+
+    const expRetry = await runCli(root, expArgs, { cwd: ws })
+    assert.equal(expRetry.status, 0, expRetry.stderr)
+    assert.ok(expRetry.stdout.startsWith('Sent to Claude Code · ExpRepo · '), expRetry.stdout)
+
+    const expWrongBody = await runCli(root, ['--lang', 'en', '--progress-file', expProgress, '--messages-dir', expMessages, '--send', 'claude', 'Tampered', '--id', 'offline-retry-001'], { cwd: ws })
+    assert.equal(expWrongBody.status, 1)
+    assert.equal(expWrongBody.stderr.trim(), EN.cliSendRefused('ID_CONFLICT'))
+
+    const expWrongTarget = await runCli(root, ['--lang', 'en', '--progress-file', expProgress, '--messages-dir', expMessages, '--send', 'codex', 'Offline saved', '--id', 'offline-retry-001'], { cwd: ws })
+    assert.equal(expWrongTarget.status, 1)
+    assert.equal(expWrongTarget.stderr.trim(), EN.cliSendRefused('ID_CONFLICT'))
 
     // Dropped HTTP response on peer-send reports uncertain status naming the retry --id.
     const lostRoot = join(root, 'lost')
