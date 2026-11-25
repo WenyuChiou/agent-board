@@ -3,6 +3,8 @@ import type { Strings } from './i18n'
 import { boardCounts } from './board-status'
 import type { QueuedMessaging } from './board-status'
 import { lastQuestionInProse, normalizeReply } from './digest'
+import { latestMessage, messageStatus } from './message-status'
+import type { StatusTone } from './message-status'
 import { withoutStamp } from './done-stamp'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail, turnOrder } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
@@ -257,6 +259,14 @@ const boardNeeds = (view: View, row: TaskRow, isShelved = false): ReturnType<typ
 // it is not worded a second time; a blocked step has no other line.
 const needsWords = (needs: { kind: 'stuck' | 'question'; reason: string }, s: Strings): string => (needs.kind === 'question' ? s.pgNeeds : s.pgNeedsWhy(needs.reason))
 
+// The status of the last message the board sent to a row's session (#1843 B4), in the page's words; null with none.
+const TONE_INK: Readonly<Record<StatusTone, Ink>> = { wait: 'quiet', done: 'done', alert: 'alert' }
+const messageLine = (view: View, row: TaskRow, s: Strings, o: BoardOptions): string | null => {
+  const one = latestMessage(o.messaging?.messages ?? [], row.agent, row.nativeSession)
+  const status = one === undefined ? null : messageStatus(one, view.now, s, row.at)
+  return status === null ? null : `    ${paint(o)(TONE_INK[status.tone], fit(status.line, o.width - 6, isWideLang(s)))}`
+}
+
 const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelved = false): string[] => {
   const c = paint(o)
   const isWide = isWideLang(s)
@@ -269,6 +279,8 @@ const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelv
   const bar = rowBar(row, o, isWide)
   const lead = bar.width === 0 ? '' : `${bar.text} `
   const lines = [`  ${c('bold', cut(row.title, o.width - 4))}`, `    ${lead}${c('quiet', cut(`${count}${status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6 - (bar.width === 0 ? 0 : bar.width + 1)))}`]
+  const message = messageLine(view, row, s, o)
+  if (message !== null) lines.push(message)
   if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
   if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
   for (const step of row.steps) {
@@ -1087,6 +1099,8 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const status = cut(`${lead}${needs !== null ? needsWords(needs, s) : step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve - barRoom)
       const quiet = status.startsWith(lead) ? lead : ''
       lines.push(`    ${bar.width === 0 ? '' : `${bar.text} `}${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
+      const message = messageLine(view, row, s, o)
+      if (message !== null) lines.push(message)
       if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
       if (!isOpen && row.context && (titleCounts.get(row.title) ?? 0) > 1) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
       if (isOpen) rowDetails(row)
