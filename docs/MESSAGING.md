@@ -350,6 +350,13 @@ out of Needs you; the receipt still distinguishes delivery from a confirmed mode
   message was handed out does not learn it either. Once the receiver acknowledges, the reply
   a send or the board returns is what follows `ACK <nonce>`, without that ACK line's prefix.
 - Reusing an id with a different text, source, binding or turn fails with `ID_CONFLICT`.
+- A press on the page or an answer key on the terminal board keeps its id for the same words to
+  the same question of the same session, whatever connection the card names by then. A press
+  that gets no answer is sent again under that id: the page tries every 2 s for 30 s, and the
+  terminal board when the key is pressed again. The board answers a press with an id it already
+  stored with that message, before it checks the card, so a receiver that connected again under
+  a new connection gets no second message. The same id on another session's card is refused
+  (#1843).
 
 IDs are scoped to this message store. A claim is never automatically replayed, except a hook's
 mailbox claim as above. Before each action or snapshot, finished messages older than 24 hours

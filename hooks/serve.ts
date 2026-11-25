@@ -1521,6 +1521,8 @@ const PAGE_SCRIPT = String.raw`
   var offlineButtons = [];
   var since = null;
   var messageAttempts = {};
+  // A send that gets no answer is tried again every 2 s for 30 s, the first try included (#1843, B3.1).
+  var SEND_RETRY_MS = 2000, SEND_TRIES = 15;
   var latest = null;
   var awaySnap = null;
   var connections = [];
@@ -1717,7 +1719,8 @@ const PAGE_SCRIPT = String.raw`
   // Names this page to the board, so it can tell one open page from another (#265).
   function newPageId() { try { return 'p' + crypto.randomUUID(); } catch (error) { return 'p' + String(Math.random()).slice(2, 14); } }
   var pageId = newPageId();
-  function call(path, body, signal, isNow) {
+  // isQuiet: a send that will be tried again does not mark the page offline when one try gets no answer.
+  function call(path, body, signal, isNow, isQuiet) {
     if (isUnreachable && body !== undefined) return Promise.reject();
     var requestPage = pageId;
     var headers = { 'x-board-token': token, 'x-board-page': requestPage, 'x-board-visible': document.hidden ? '0' : '1' };
@@ -1737,7 +1740,7 @@ const PAGE_SCRIPT = String.raw`
     }).catch(function (error) {
       // A request started under an earlier pageId (before persisted pageshow switched ids) must not mark the restored page offline (#1475).
       // Nor does an open board request this page replaced and aborted.
-      if (requestPage === pageId && !(signal && signal.aborted)) unreachable();
+      if (requestPage === pageId && !(signal && signal.aborted) && !isQuiet) unreachable();
       throw error;
     });
   }
@@ -1904,7 +1907,9 @@ const PAGE_SCRIPT = String.raw`
   }
   function nativeAct(key, text, delivery, session, asked, fp, go, line) {
     if (isUnreachable) return Promise.resolve(false);
-    var slot = JSON.stringify([key, delivery.id, delivery.turn, session, asked, fp]);
+    // One press, one message: the same words to the same question of the same session keep their id, whatever connection
+    // or line the card shows by then, so a press made again after the receiver reconnected is the same message (#1843, B3.1).
+    var slot = JSON.stringify([key, session, asked]);
     var attempt = messageAttempts[slot];
     if (!attempt || attempt.text !== text) attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
     var who = agentName(delivery.agent);
@@ -1921,7 +1926,18 @@ const PAGE_SCRIPT = String.raw`
               : w('serveSending', who);
     busyOn(go);
     say(waitingText, 'wait', key);
-    return call('/api/act', { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp }).then(function (data) {
+    var body = { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp };
+    // A try with no answer goes again under the same id: the board answers an id it knows with the message it stored, so an
+    // answer lost on its way back never makes a second message (#1843, B3.1).
+    var tries = 0;
+    function send() {
+      tries++;
+      return call('/api/act', body, undefined, false, true).catch(function (error) {
+        if (tries >= SEND_TRIES) throw error;
+        return new Promise(function (done) { setTimeout(function retrySend() { done(send()); }, SEND_RETRY_MS); });
+      });
+    }
+    return send().then(function (data) {
       var receiptStatus = data.receipt && data.receipt.status;
       var tone = !data.ok || receiptStatus === 'rejected'
         ? 'alert'
