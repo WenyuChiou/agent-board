@@ -1010,7 +1010,7 @@ const PAGE_WORDS = [
   'serveLineStepEnd', 'serveReopenRunning', 'serveReopenWaitingCodexApp', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesSentUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
-  'archiveNow', 'cleanUp', 'stoppedCount',
+  'archiveNow', 'cleanUp', 'boardLarge', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
@@ -3571,7 +3571,10 @@ const PAGE_SCRIPT = String.raw`
     agentPresence = presenceMap(view);
     drawChips(view);
     var parts = [];
-    if (model.warning) parts.push(el('p', 't-alert', model.warning));
+    var boardLargeText = w('boardLarge');
+    var warningParts = model.warning ? String(model.warning).split(' · ').filter(function (part) { return part && part !== boardLargeText; }) : [];
+    var hasSizeProblem = !!(model.isLarge || (boardLargeText && model.warning && String(model.warning).indexOf(boardLargeText) !== -1));
+    if (warningParts.length) parts.push(el('p', 't-alert', warningParts.join(' · ')));
     var asked = approvalSection(latestApprovals);
     if (asked) parts.push(asked);
     var hasOwn = Object.keys(view.own.counts).some(function (key) { return view.own.counts[key] > 0; });
@@ -3602,16 +3605,31 @@ const PAGE_SCRIPT = String.raw`
       if (hidden) parts.push(hidden);
       pg.rowKeys = workingKeys;
     }
+    var storageSec = document.getElementById('settings-storage');
+    var storageLine = document.getElementById('settings-storage-line');
+    var storageActs = document.getElementById('settings-storage-acts');
+    if (storageSec && storageLine) {
+      storageSec.hidden = !hasSizeProblem;
+      setText(storageLine, hasSizeProblem ? (model.details || boardLargeText) : '');
+      if (storageActs) {
+        storageActs.textContent = '';
+        if (hasSizeProblem && model.isCleanable) {
+          var settingsCleanup = button(w('cleanUp'), function () { tidyBoard('cleanup', '/api/clean'); });
+          add(storageActs, settingsCleanup);
+          resultSlot(storageActs, 'cleanup', '', w('cleanUp'));
+        } else if (hasSizeProblem && results.cleanup) resultSlot(storageActs, 'cleanup', '', w('cleanUp'));
+      }
+    }
     var notices = el('div', 'notices');
-    if (model.details) add(notices, el('p', 't-quiet', model.details));
+    if (!hasSizeProblem && model.details) add(notices, el('p', 't-quiet', model.details));
     if (model.pruned) add(notices, el('p', 't-quiet', model.pruned));
     (model.health || []).forEach(function (line) { add(notices, el('p', 't-alert', line)); });
     if (model.background) add(notices, el('p', 't-quiet', model.background));
-    if (model.isCleanable) {
+    if (!hasSizeProblem && model.isCleanable) {
       var cleanup = add(el('div', 'acts'), button(w('cleanUp'), function () { tidyBoard('cleanup', '/api/clean'); }));
       add(notices, cleanup);
       resultSlot(cleanup, 'cleanup', '', w('cleanUp'));
-    } else if (results.cleanup) resultSlot(notices, 'cleanup', '', w('cleanUp'));
+    } else if (!hasSizeProblem && results.cleanup) resultSlot(notices, 'cleanup', '', w('cleanUp'));
     if (notices.firstChild) parts.push(notices);
     // The filter is applied before anything is on the page, so a redraw never plays it.
     layout();

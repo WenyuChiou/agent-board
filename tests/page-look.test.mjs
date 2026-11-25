@@ -19,10 +19,14 @@ try {
     import('../hooks/strings.ts'),
     import('../hooks/agent-icons.ts'),
     import('../hooks/page-fonts.ts'),
+    import('../hooks/retention.ts'),
+    import('../hooks/view.ts'),
+    import('../hooks/parse.ts'),
+    import('./e2e/lib/surfaces.mjs'),
   ])
 } finally { loader.deregister() }
 
-const [{ pageTokens, BOARD_PATH: boardPath }, { servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
+const [{ pageTokens, BOARD_PATH: boardPath }, { serveModel, servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }, { RETENTION, sizeWarnings, storageDetails }, { buildView }, { parseProgress }, { pageDom }] = source
 const SANS = 'Inter,"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const SANS_SC = 'Inter,"PingFang SC","Noto Sans SC","Microsoft YaHei UI","Microsoft YaHei","PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
@@ -477,4 +481,40 @@ test('receipt state groups have distinct tokens with >= 4.5:1 contrast and disab
   assert.equal(disabledPrimary?.declarations.find(item => item.property === 'opacity')?.value, '1')
   const disabledSendingArrow = pageRules.find(rule => rule.selector === '.answers button.answer-send[data-sending="1"]:disabled')
   assert.equal(disabledSendingArrow?.declarations.find(item => item.property === 'opacity')?.value, '1')
+})
+
+test('a board over every size limit shows no storage notice on the first screen', async () => {
+  const sizes = { progress: RETENTION.progressSoftBytes + 128 * 1024, store: RETENTION.storeWarnBytes + 512 * 1024 }
+  const projects = parseProgress('## Synthetic project\n### Synthetic task\n- [ ] Check size notice placement\n')
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const s = STRINGS[lang]
+    const base = buildView(projects, ['Synthetic project'], null, now, 0, {}, s)
+    const details = storageDetails(sizes, 0, s)
+    const largeView = { ...base, warning: sizeWarnings(sizes, s).join(' · '), isLarge: true, details }
+    const group = { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }
+    const html = servePage(s, 'synthetic')
+    const dom = await pageDom(html, serveModel(largeView, [], s, new Set(), false, undefined, false, group))
+    const boardText = `${dom.node('board').readText}\n${dom.node('board').textContent}`
+    assert.ok(!boardText.includes(s.boardLarge), `${lang}: boardLarge must not appear on the first screen`)
+    assert.ok(!boardText.includes(s.progressLarge(Math.round(sizes.progress / 1024), RETENTION.progressSoftBytes / 1024)), `${lang}: progressLarge must not appear on the first screen`)
+    assert.ok(!boardText.includes(s.storeLarge((sizes.store / (1024 * 1024)).toFixed(1), (RETENTION.storeCapBytes / (1024 * 1024)).toFixed(1))), `${lang}: storeLarge must not appear on the first screen`)
+
+    const storageHtml = /<section id="settings-storage"[^>]*>([\s\S]*?)<\/section>/.exec(html)?.[1] ?? ''
+    assert.equal((storageHtml.match(/<p\b/g) ?? []).length, 1, `${lang}: Settings has one storage line`)
+    const storageSection = dom.node('settings-storage')
+    const storageLine = dom.node('settings-storage-line')
+    assert.equal(storageSection.hidden, false, `${lang}: Settings shows the storage section when over a limit`)
+    assert.equal(storageLine.textContent, details, `${lang}: Settings line carries the full storage details`)
+
+    const smallDom = await pageDom(html, serveModel(base, [], s, new Set(), false, undefined, false, group))
+    assert.equal(smallDom.node('settings-storage').hidden, true, `${lang}: Settings hides the storage section under the limits`)
+    assert.equal(smallDom.node('settings-storage-line').textContent, '', `${lang}: Settings storage line is empty under the limits`)
+
+    const writeFailView = { ...largeView, warning: [s.journalFailed, s.boardLarge].join(' · ') }
+    const writeFailDom = await pageDom(html, serveModel(writeFailView, [], s, new Set(), false, undefined, false, group))
+    const writeFailBoardText = `${writeFailDom.node('board').readText}\n${writeFailDom.node('board').textContent}`
+    assert.ok(writeFailBoardText.includes(s.journalFailed), `${lang}: write failure still speaks on the first screen`)
+    assert.ok(!writeFailBoardText.includes(s.boardLarge), `${lang}: boardLarge stays hidden alongside a write failure`)
+  }
 })

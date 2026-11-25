@@ -548,7 +548,10 @@ test('the production page API renders the measured store warning and cleared cou
     assert.ok(model.pruned?.includes(EN.prunedAgents(2)), JSON.stringify(model))
     assert.ok(model.pruned?.includes(EN.prunedSessions(3)), JSON.stringify(model))
     const dom = await pageDom(f.runtime.servePage(EN, 'synthetic'), model)
-    assert.ok(dom.node('board').readText.includes(model.warning))
+    assert.ok(!dom.node('board').readText.includes(model.warning))
+    assert.ok(!dom.node('board').readText.includes(EN.storeLarge('2.0', '1.5')))
+    assert.equal(dom.node('settings-storage').hidden, false)
+    assert.equal(dom.node('settings-storage-line').textContent, EN.storeLarge('2.0', '1.5'))
     assert.ok(dom.node('board').readText.includes(model.pruned))
   } finally { await f.close() }
 })
