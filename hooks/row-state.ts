@@ -1,4 +1,4 @@
-import { isLifecycleStep } from './codex'
+import { isLifecycleStep, isWorkDone } from './lifecycle-steps'
 import { WORKING_MS } from './grouping'
 import { waitsOnYou } from './mirror'
 import { STALE_MS } from './parse'
@@ -109,8 +109,9 @@ export const deriveRowState = (input: RowStateInput): RowState => {
   if (mirror !== null && mirror.tasks.some(task => waitsOnYou(mirror, task))) return 'answer'
   if (hasOpenAsk) return 'answer'
   const open = steps.filter(isOpenStep)
-  // Every step done is work to check, not work in progress.
-  if (steps.length > 0 && steps.every(step => step.status === 'done' || step.status === 'cancelled')) return 'toCheck'
+  // Every step done is work to check, not work in progress. The hook's own placeholder does not count: it is
+  // rewritten to open at every turn's end, so waiting on it would keep a finished block waiting (#1839).
+  if (steps.length > 0 && isWorkDone(steps)) return 'toCheck'
   // Only steps that wait on someone else are left: the session waits elsewhere.
   if (open.length > 0 && open.every(step => step.status === 'running')) return 'waitingElsewhere'
   // A turn that ended with real steps left and no ask stopped, not finished.

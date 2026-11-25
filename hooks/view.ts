@@ -7,6 +7,7 @@ import type { AskKind } from './ask'
 import { confirmKey, matchesSpan, shortId, stepWords, upsertAutoBlock } from './blocks'
 import type { ConfirmRef } from './blocks'
 import { isLifecycleStep } from './codex'
+import { isWorkDone } from './lifecycle-steps'
 import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
@@ -951,7 +952,7 @@ export const buildView = (
   const finished: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null }> = []
   const idle: TaskRow[] = []
   const stopped: Array<{ row: TaskRow; updated: number }> = []
-  const completed: Array<{ row: TaskRow; updated: number; recent: DoneItem & { at: number } | null }> = []
+  const completed: Array<{ row: TaskRow; updated: number; recent: DoneItem & { at: number } | null; isConfirmable?: true }> = []
   const inactiveScopes = new Map<string, number>()
   const liveScopes = new Set<string>()
   const unreadable = new Set<string>()
@@ -1019,7 +1020,10 @@ export const buildView = (
       const clock = observedTime(task.auto, now, seen)
       const updated = clock.updated
       const when = clock.isFuture ? updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(updated, now, s)) : relativeTime(updated, now, s)
-      const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
+      // A hook-written block still holds its own placeholder step open at turn end (state=waiting), so its finished work
+      // counts without it (#1839). One at work keeps its row: the agent may tick the last step and carry on.
+      const isConfirmable = task.auto !== null && task.auto.state !== 'done' && task.auto.state !== 'working' && isWorkDone(task.steps)
+      const isComplete = isTaskComplete(task) || task.auto?.state === 'done' || isConfirmable
       const isManual = task.auto === null
       const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
       // With nothing frozen, neither half can match, so the scope string is never built.
@@ -1215,7 +1219,8 @@ export const buildView = (
           completion = { key, project: name, title, when: clock.isFuture ? when : relativeTime(seen, now, s), at: seen, questions: isInactive ? unresolved : [] }
           recent.push(completion)
         }
-        if (!isInactive || (unresolved.length === 0 && !task.steps.some(step => step.status === 'waiting'))) continue
+        // A block that still needs the person's Archive or Confirm done keeps its row for them.
+        if (!isConfirmable && (!isInactive || (unresolved.length === 0 && !task.steps.some(step => step.status === 'waiting')))) continue
       }
 
       const auto = task.auto === null ? null : task.auto.state === 'done' || isComplete || isGone || isSilence ? 'ended' : task.auto.state
@@ -1329,7 +1334,7 @@ export const buildView = (
       }
 
       if (isComplete) {
-        completed.push({ row, updated, recent: completion })
+        completed.push({ row, updated, recent: completion, ...(isConfirmable ? { isConfirmable: true as const } : {}) })
         continue
       }
       // A finished session draws no row, so its runs are counted with the background runs instead.
@@ -1615,7 +1620,7 @@ export const buildView = (
     recent: shownRecent.map(({ at: _at, ...item }) => item),
     // A finished task reaches `completed` only with a step that still asks, even a hidden one. It has
     // nothing left to confirm, so it offers Archive alone. In the order Done recently draws them, so the cursor moves down the list.
-    recentAsking: shownRecent.flatMap(recent => completed.filter(item => item.recent === recent && item.row.archive !== null)).map(item => ({ ...item.row, confirm: null })),
+    recentAsking: shownRecent.flatMap(recent => completed.filter(item => item.recent === recent && item.row.archive !== null)).map(item => ({ ...item.row, confirm: item.isConfirmable === true ? item.row.confirm : null })),
     finished,
     ...(unreadable.size === 0 ? {} : { unreadable: [...unreadable] }),
   }

@@ -325,7 +325,7 @@ export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string;
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
 export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[]; olderScript?: { update: 'setup' | 'plugin'; command?: string; lanCommand?: string } }
-type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
+type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number; canArchive?: boolean; canConfirm?: boolean; fp?: string }
 type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
 type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
 type PageView = {
@@ -736,12 +736,14 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   }
 
   const askingByKey = new Map((view.recentAsking ?? []).map(one => [one.key, one]))
-  const askingFp = (itemKey: string): { canArchive?: boolean; fp?: string } => {
+  const askingFp = (itemKey: string): { canArchive?: boolean; canConfirm?: boolean; fp?: string } => {
     const asking = askingByKey.get(itemKey)
     if (asking === undefined) return {}
     const askingItem = items.find(one => one.type === 'row' && one.row.key === asking.key)
     return {
       canArchive: asking.archive !== null,
+      // A finished block whose file still says waiting offers Confirm done too (#1839).
+      ...(asking.confirm == null ? {} : { canConfirm: true }),
       ...(askingItem === undefined ? {} : { fp: fingerprint(askingItem, items) }),
     }
   }
@@ -2558,6 +2560,7 @@ const PAGE_SCRIPT = String.raw`
     } else {
       (row.questions || []).forEach(function (question) { add(inner, el('p', 'context', clean(question))); });
       if (row.canArchive || row.archiveNote) add(acts, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', row.fp); }));
+      if (row.canConfirm) add(acts, button(w('confirmDone'), function () { act(key, 'done', '', '', '', '', row.fp); }));
       if (acts.firstChild) add(inner, acts);
     }
     var isExpandable = inner.childNodes.length > 0;

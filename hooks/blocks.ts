@@ -14,6 +14,7 @@ import { sha256 } from './sha256'
 import { isOutranked, pickParent } from './runs'
 import { cutLine, oneLine, plain } from './step-words'
 import { isSilenceTask, isWorkingTask } from './grouping'
+import { isWorkDone } from './lifecycle-steps'
 import { isMaybeClosed, isStopped, observedTime } from './parse'
 import type { JournalEntry } from './journal'
 
@@ -522,7 +523,8 @@ export type ConfirmedTask = { text: string; ref: ConfirmRef; entries: Array<Omit
 // stopped. Recheck here, inside each caller's read/change/write retry.
 export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strings = ZH_TW, seen: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): ConfirmedTask | null => {
   const task = confirmedTarget(text, ref, s)
-  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !isStopped(task.auto, now, observedTime(task.auto, now, seen).updated, staleMs, gone)) return null
+  // A waiting block whose real steps are all done only has the hook's placeholder left open, so the person may close it (#1839).
+  if (task === null || task.line < 0 || task.auto !== null && task.auto.state !== 'ended' && !(task.auto.state === 'waiting' && isWorkDone(task.steps)) && !isStopped(task.auto, now, observedTime(task.auto, now, seen).updated, staleMs, gone)) return null
   const lines = linesOf(text)
   const spans = scanBlocks(lines)
   const span = ref.session === null ? undefined : spans.find(one => one.session === ref.session)
@@ -734,7 +736,9 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       // A Codex card that says the window may be closed offers Archive (#1092): the person's press
       // is the decision, and the question is kept as for any archive.
       const isMaybe = task !== undefined && isMaybeClosed(auto, task.steps, now, updated, auto === null ? false : observedTime(auto, now, observations).isFuture)
-      const stopped = isTwin || isStopped(auto, now, updated, staleMs, gone) || isMaybe || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
+      // A waiting block with every real step done has only the hook's placeholder open: archiving it leaves no work behind (#1839).
+      const isFinished = span.state === 'waiting' && task !== undefined && isWorkDone(task.steps)
+      const stopped = isTwin || isFinished || isStopped(auto, now, updated, staleMs, gone) || isMaybe || span.state === 'working' && task !== undefined && !isSilence && updated > 0 && !isWorkingTask(task.steps, updated, now)
       if (auto === null || !stopped) return null
     }
 
