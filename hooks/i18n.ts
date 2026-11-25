@@ -698,6 +698,7 @@ export const ZH_TW = {
   pressPending: '處理中…',
   pressDone: '操作完成。',
   pressFailed: '這次操作沒成功，請再試一次。',
+  pressTimedOut: '看板沒有及時回應。這項可能已經存好，頁面正在重新確認。',
   settingSaveFailed: '無法儲存這個設定，所以沒有變更。請再試一次。',
   pressCopyFallback: '無法複製，請手動複製下方文字。',
   pressHidden: '已在這台電腦上隱藏。',

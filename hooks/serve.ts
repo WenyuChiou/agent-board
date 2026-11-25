@@ -1014,7 +1014,7 @@ const PAGE_WORDS = [
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
   'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
-  'copied', 'pressDone', 'pressFailed', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
+  'copied', 'pressDone', 'pressFailed', 'pressTimedOut', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgOwn', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgOwnTodo', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
   'settingsLanguageChanged', 'settingsLanguageOverridden', 'settingsNotifications', 'settingsOn', 'settingsOff', 'settingsDenied', 'settingsUnavailable', 'settingsChanged', 'settingsLanguage',
@@ -1571,6 +1571,9 @@ const PAGE_SCRIPT = String.raw`
     return wrap;
   }
   var results = {};
+  // The hidden-list key of each hide press still waiting for its answer (#1830).
+  var hideWaiting = {};
+  var ACT_WAIT_MS = 10000;
   // The last message sent from each card or row, so a failed one can go again or be copied.
   var sentLast = {};
   var agentPresence = {};
@@ -1838,7 +1841,21 @@ const PAGE_SCRIPT = String.raw`
     if (isUnreachable) return Promise.resolve();
     busyOn(go);
     say(waiting || w('pressPending'), 'wait', key);
+    // A hide the board wrote may be drawn away before its answer comes: that draw settles it (#1830).
+    if (type === 'hide' && unhideKey) hideWaiting[key] = unhideKey;
+    // A press that gets no answer says so and reads the board again, so "Working…" never stays with nothing pending (#1830).
+    // Its answer, if it comes later, still replaces this line. A send to an agent runs for as long as the agent does.
+    var answered = false;
+    var waitTimer = type === 'send' ? 0 : setTimeout(function actTimedOut() {
+      if (answered) return;
+      say(w('pressTimedOut'), 'alert', key);
+      busyOff(go, false);
+      refresh(true);
+    }, ACT_WAIT_MS);
     return call('/api/act', { key: key, type: type, text: text || '', session: session || '', asked: asked || '', fp: fp || '', ...(line === undefined ? {} : { line: line }) }).then(function (data) {
+      answered = true;
+      clearTimeout(waitTimer);
+      delete hideWaiting[key];
       say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok);
       if (data.ok && type === 'hide' && unhideKey && results[key]) {
         results[key].unhideKey = unhideKey;
@@ -1847,6 +1864,9 @@ const PAGE_SCRIPT = String.raw`
       busyOff(go, data.ok);
       return data.ok;
     }, function () {
+      answered = true;
+      clearTimeout(waitTimer);
+      delete hideWaiting[key];
       say(w('serveOffline'), 'alert', key);
       busyOff(go, false);
       unreachable();
@@ -3631,6 +3651,12 @@ const PAGE_SCRIPT = String.raw`
       if (arriving.length) arriving[0].block.offsetHeight;
       arriving.forEach(function (one) { reveal(one.block, true); toggleClass(one.li, 'arrived', true); });
     }
+    // A hide the board has already written moved its card to the hidden list: that is its answer, so no
+    // "Working…" is drawn apart from the card (#1830). The reply's own note still shows when it comes.
+    Object.keys(hideWaiting).forEach(function (key) {
+      var written = (model.hidden || []).some(function (one) { return one.key === hideWaiting[key]; });
+      if (written && !resultSlots[key] && results[key] && results[key].pending) delete results[key];
+    });
     drawLostResults();
     // A result with no slot in this update was drawn apart from its card, if at all. It
     // stays for this update, and is dropped when a slot for its card is drawn again.
