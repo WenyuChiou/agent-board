@@ -11692,6 +11692,31 @@ test('a question card puts choices before its copy button and the hide button la
   assert.deepEqual(cardActionNodes(row).map(node => node.textContent), [EN.serveCopyResume, EN.serveArchive, EN.confirmDone])
 })
 
+test('a "#" followed by a number stays as written in card text, notes, folded steps, and current-step lines (#1836)', async () => {
+  const stepText = '等 Alex 決定：W48#1–#4、W47#1 撤回、W47#2/#3'
+  const base = cardsModel('codex')
+  base.asks[0] = { ...base.asks[0], text: stepText, note: stepText, noteLine: stepText }
+  base.groups[0].rows[0] = {
+    ...base.groups[0].rows[0],
+    at: Date.now(),
+    next: stepText,
+    steps: [{ text: stepText, note: '', status: 'todo', isCurrent: true, line: stepText }],
+  }
+  const model = viewed(base)
+  model.view.working = model.view.all.open
+  const dom = await pageDom(await sourcePage(), model)
+  const askCard = cardWithKey(dom, 'ask')
+  const question = pressWalk(askCard).find(node => node.className === 'q')
+  const note = pressWalk(askCard).find(node => String(node.className).includes('note'))
+  assert.equal(question.textContent, stepText)
+  assert.ok(note.textContent.includes(stepText), note.textContent)
+  const row = cardRoot(cardWithKey(dom, 'row'))
+  const stepNode = pressWalk(row).find(node => String(node.className).includes('steps'))
+  const metaNode = pressWalk(row).find(node => String(node.className).includes('r-meta'))
+  assert.ok(stepNode.textContent.includes(stepText), stepNode.textContent)
+  assert.ok(metaNode.textContent.includes(stepText), metaNode.textContent)
+})
+
 test('each choice button and each listed native option shows its choice as it is sent, so two choices never read the same (#1629)', async () => {
   const answers = ['Fix #123', 'Fix #456', 'abcdef12']
   const model = cardsModel()
