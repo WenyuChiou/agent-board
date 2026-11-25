@@ -4317,10 +4317,9 @@ test('the board you work in marks the chosen line and lists only the keys that d
   const onAsk = boardScreen(view, [], emptyBoardState, STRINGS.en, { width: 100, isColor: false })
   expect(onAsk).toContain('› [Choose] Per-key limit')
   expect(onAsk).toContain('    2 300 a minute')
-  // The Codex question has been quiet past two minutes with no process record: the window may be closed, so a archives it (#1092).
-  // At 100 columns the footer clips that last key's word ("a…").
-  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · a')
-  expect(onAsk).toContain('↑↓/jk select')
+  // The Codex question is only 5 minutes old with no process record (below the 30-minute threshold), so a is not offered here (#1813).
+  expect(onAsk).toContain('1–2 copy answer · h already answered, hide · ↑↓/jk select')
+  expect(onAsk).not.toContain('· a archive')
   const onJob = boardScreen(view, [], { selected: job, key: null, open: items[job]?.key ?? null, note: 'Copied: 300' }, STRINGS.en, { width: 100, isColor: false })
   expect(onJob).toContain('› Fabrikam fellowship')
   expect(onJob).toContain('    ✓ 1 Draft the statement')
