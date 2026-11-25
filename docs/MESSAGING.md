@@ -73,8 +73,10 @@ final; a later receipt from the session can clear a disconnected mark). A messag
 is never handed out or handed back again, even after a later receipt from its session makes it
 uncertain with no error, and dismissing it keeps the mark (#1407). At a board start, a claim a hook
 named that is still uncertain with no error, and a message a hook handed back with its ACK code,
-become `uncertain` / `BOARD_RESTARTED` with their text: nothing a hook was handed before a board
-start is handed out after it, and the page shows them as no reply confirmed. OpenCode's claims keep
+become `uncertain` / `BOARD_RESTARTED` with their text, and every claim a hook named that is still
+uncertain loses its name (one with an error keeps the error): nothing a hook was handed before a
+board start is handed out after it, whatever receipts its session sends later, and the page shows
+them as no reply confirmed. OpenCode's claims keep
 their own rules (below). While a claim stays open as uncertain (not yet `EXPIRED` or
 `DISMISSED`), none of the session's queued messages is handed out. A claim is taken again only when
 every message that holds the session (the condition is under "stdio MCP") is one of this mailbox's
@@ -128,7 +130,7 @@ A started wake the host never confirms (the model's `agent_board_ack`), and one 
 model never acknowledged, read "sent, not confirmed" on the card after 30 minutes and keep their text, so you can copy it;
 an accept or an ack that comes later is still taken. From then on the message no longer holds the session's next message,
 and a day later it expires like any other open message and its text goes. A repeated `attempt` is answered ok only while the message is
-still an active started wake. Each workspace the host loads the plugin for has its own receiver. `release` answers
+still an active started wake; once its host accepted it, an attempt answers `CLAIM_LOST`, even after a later receipt (#1407). Each workspace the host loads the plugin for has its own receiver. `release` answers
 `NOT_HELD` for a ref the board does not hold and `WAKE_STARTED` for a marked one without `--unsent`; `end` answers
 `ok: false` with a code when its write fails, and the tick asks again, a few times. The plugin reads no message of the
 conversation to decide any of this.
@@ -455,7 +457,8 @@ hub's reserved `EXPIRED` or `DISMISSED` errors. Send and claim still require the
 A restart hands out nothing by itself; a later hook can still claim, as "Next-turn mailbox" says.
 It applies the age limit, and it marks disconnected, as a disconnect would, the open messages whose
 target is gone: a live receiver's connection, or a mailbox whose session ended or which expired.
-Messages of a mailbox that is still enrolled get no mark. A restart or a disconnect gives an
+Messages of a mailbox that is still enrolled get no disconnected mark; what a hook was handed before
+the start reads Unsure, as "Next-turn mailbox" says. A restart or a disconnect gives an
 uncertain message no extra time. After expiry or dismissal that message no longer stops the card from sending.
 Stores are saved as version 2, which earlier releases cannot read: before going back to one,
 move both `messages.json` and `server.lock` out of the folder, since 0.24.0 and earlier take

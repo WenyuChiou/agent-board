@@ -149,7 +149,7 @@ const SAMPLES: Record<DeliveryState, Sample> = {
   turnEnded: { via: 'live', status: 'uncertain', error: 'TURN_ABORTED', ...out },
   inDoubt: { via: 'live', status: 'uncertain', error: 'TIMEOUT', ...out },
   disconnected: { via: 'live', status: 'uncertain', error: 'DISCONNECTED', ...out },
-  restarted: { via: 'mailbox', status: 'uncertain', error: BOARD_RESTARTED, ref: REF, ...out },
+  restarted: { via: 'mailbox', status: 'uncertain', error: BOARD_RESTARTED, ...out },
   unconfirmed: { ...wake, status: 'uncertain', error: UNCONFIRMED },
   acknowledged: { via: 'live', status: 'acknowledged', reply: 'ACK a1b2c3', text: '', ...out },
   rejected: { via: 'live', status: 'rejected', text: '', ...out },
@@ -363,14 +363,14 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     attempt: 'wakeStarted', release: 'queuedForWake', releaseUnsent: 'queuedForWake', dismiss: 'dismissed', disconnect: 'disconnected', leave: 'disconnected', rebind: 'wakeClaimed', openLimit: 'queuedForWake', dayLimit: 'queuedForWake', restart: 'wakeClaimed' },
     shapes: {
       acceptedBefore: { card: 'messagesAcceptedUnconfirmed', on: {
-        claim: 'wakeClaimed', claimLate: 'wakeClaimed', pull: 'wakeClaimed', release: 'wakeClaimed', releaseUnsent: 'wakeClaimed', openLimit: 'wakeExpired', dayLimit: 'wakeExpired' } },
+        claim: 'wakeClaimed', claimLate: 'wakeClaimed', pull: 'wakeClaimed', attempt: 'CLAIM_LOST', release: 'wakeClaimed', releaseUnsent: 'wakeClaimed', openLimit: 'wakeExpired', dayLimit: 'wakeExpired' } },
       otherSurface: { on: { claim: 'wakeClaimed', claimLate: 'wakeClaimed' } },
     } },
   wakeStarted: { holdsSend: true, holdsStart: true, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'wakeStarted', claimLate: 'wakeStarted', pull: 'wakeStarted', accept: 'handed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'wakeStarted',
     attempt: 'wakeStarted', release: 'wakeStarted', releaseUnsent: 'queuedForWake', dismiss: 'dismissed', disconnect: 'wakeStarted', leave: 'wakeStarted', rebind: 'wakeStarted', openLimit: 'unconfirmed', dayLimit: 'unconfirmed', restart: 'wakeStarted' },
     shapes: {
-      acceptedBefore: { card: 'messagesAcceptedUnconfirmed', on: { releaseUnsent: 'wakeStarted' } },
+      acceptedBefore: { card: 'messagesAcceptedUnconfirmed', on: { attempt: 'CLAIM_LOST', releaseUnsent: 'wakeStarted' } },
     } },
   accepted: { holdsSend: true, holdsStart: true, card: 'messagesAccepted', claudeCard: 'claudeDelivered', on: {
     claim: 'accepted', claimLate: 'accepted', pull: 'accepted', accept: 'accepted', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'claimed',

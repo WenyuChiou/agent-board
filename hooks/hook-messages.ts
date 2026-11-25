@@ -45,10 +45,11 @@ export const releaseMailboxMessage = (state: MessageState, agent: string, sessio
   return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, error: '', claimed: 0, updated: now } : message) }
 }
 // The OpenCode plugin tells the board it is about to wake the session with the message it holds under ref. Only the
-// current claim can be marked; asking again with the same ref answers the same, and any other ref has lost the claim.
+// current claim can be marked; asking again with the same ref answers the same, and any other ref has lost the claim. A
+// message its host accepted, even one a later receipt made uncertain, has lost it too: waking for it again would run it twice (#1407).
 export const attemptMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number): MessageState => {
   const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref)
-  if (one === undefined) throw new Error('CLAIM_LOST')
+  if (one === undefined || isAcceptedOnce(one)) throw new Error('CLAIM_LOST')
   // Answered again only while it is still an active started wake; a message dismissed or read "sent, not confirmed"
   // since is offered to the person to copy, so a receiver that repeats its attempt must not wake it.
   if (one.attempted !== undefined) {

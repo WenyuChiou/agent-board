@@ -1664,7 +1664,7 @@ export const LINES = [
 "};",
 "var attemptMailboxMessage = (state, agent, session, ref, now) => {",
 "  const one = state.messages.find((message) => message.target === mailboxId(agent, session) && message.ref === ref);",
-"  if (one === undefined)",
+"  if (one === undefined || isAcceptedOnce(one))",
 "    throw new Error(\"CLAIM_LOST\");",
 "  if (one.attempted !== undefined) {",
 "    if (one.status === \"uncertain\" && one.error === \"\")",

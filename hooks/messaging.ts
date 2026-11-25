@@ -498,16 +498,23 @@ export const disconnectMessages = (state: MessageState, target: string, now: num
   }),
 })
 // At a board start, nothing a hook was handed before it is handed out after it (#1407): a claim a hook named, and a message a
-// hook handed back with its ACK code, read Unsure with an error only the board writes, text and all. A claim keeps its times,
-// so its age limit is not extended; a handed-back message, which had no claim time, is stamped with the start, so its text
-// is kept for the open limit. OpenCode's messages keep their own rules (#724, #1366), and the start's disconnect settles a live
-// receiver's (#318, #557, #1507, #1578). A second start finds nothing to change.
+// hook handed back with its ACK code, read Unsure with an error only the board writes, text and all. A named claim also loses
+// its name, with or without an error: only a named claim lapses or is handed back, so no receipt its session sends later, one
+// that clears an error included, makes it a claim to hand out again. A claim keeps its times, so its age limit is not extended;
+// a handed-back message, which had no claim time, is stamped with the start, so its text is kept for the open limit.
+// OpenCode's messages keep their own rules (#724, #1366), and the start's disconnect settles a live receiver's (#318, #557,
+// #1507, #1578). A second start finds nothing to change.
 export const restartMessages = (state: MessageState, now: number): MessageState => {
-  const isHanded = (one: Message): boolean => isMailboxTarget(one.target) && !one.to.startsWith('opencode:') && one.error === ''
-    && (one.status === 'uncertain' && one.ref !== undefined || one.status === 'queued' && one.nonce !== '')
-  if (!state.messages.some(isHanded)) return state
-  return { ...state, messages: state.messages.map(one => !isHanded(one) ? one
-    : one.status === 'queued' ? { ...one, status: 'uncertain' as const, error: BOARD_RESTARTED, claimed: 0, updated: now } : { ...one, error: BOARD_RESTARTED }) }
+  const isHook = (one: Message): boolean => isMailboxTarget(one.target) && !one.to.startsWith('opencode:')
+  const isNamed = (one: Message): boolean => isHook(one) && one.status === 'uncertain' && one.ref !== undefined
+  const isHandedBack = (one: Message): boolean => isHook(one) && one.status === 'queued' && one.nonce !== '' && one.error === ''
+  if (!state.messages.some(one => isNamed(one) || isHandedBack(one))) return state
+  return { ...state, messages: state.messages.map(one => {
+    if (isHandedBack(one)) return { ...one, status: 'uncertain' as const, error: BOARD_RESTARTED, claimed: 0, updated: now }
+    if (!isNamed(one)) return one
+    const { ref: _ref, ...rest } = one
+    return one.error === '' ? { ...rest, error: BOARD_RESTARTED } : rest
+  }) }
 }
 // The next automatic receiver of the same session takes over what an earlier one left queued: a message for a
 // connection that is gone (`isLive` false), on this connection's surface or on none. The takeover clears the leave stamp.

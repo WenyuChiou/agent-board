@@ -236,11 +236,12 @@ test('a hook claim saved before a board start reads Unsure after it, with its te
   assert.equal(hookTake(hub(), now + 1).id, 'AB-1407-1')
   const before = saved('AB-1407-1')
   reopen()
-  assert.deepEqual(saved('AB-1407-1'), { ...before, error: 'BOARD_RESTARTED' })
+  // Only its name goes: no later receipt can make it a claim to hand out again.
+  const { ref: _ref, ...unnamed } = before
+  assert.deepEqual(saved('AB-1407-1'), { ...unnamed, error: 'BOARD_RESTARTED' })
   // The same for a claim handed out again, one its host accepted before, and one whose lease passed long ago.
   for (const fields of [{ redelivered: 2 }, { hasAccepted: true }, { claimed: now - 20 * MAILBOX_LEASE_MS, updated: now - 20 * MAILBOX_LEASE_MS }]) {
-    const one = { ...before, ...fields }
-    assert.deepEqual(restartMessages({ messages: [one] }, now + 5).messages[0], { ...one, error: 'BOARD_RESTARTED' })
+    assert.deepEqual(restartMessages({ messages: [{ ...before, ...fields }] }, now + 5).messages[0], { ...unnamed, ...fields, error: 'BOARD_RESTARTED' })
   }
 }))
 
@@ -291,11 +292,17 @@ test('a board start changes no mailbox message but a named hook claim and a hand
     { ...base, id: 'pulled', status: 'uncertain', claimed: now, nonce: 'aaaaaa' },
     { ...base, id: 'handed', status: 'accepted', claimed: now, nonce: 'bbbbbb', ref: 'a1b2c3d4e5f6' },
     { ...base, id: 'answered', status: 'acknowledged', claimed: now, nonce: 'cccccc', reply: 'ACK cccccc', text: '' },
-    { ...base, id: 'given-up', status: 'uncertain', error: 'EXPIRED', claimed: now, nonce: 'dddddd', ref: 'a1b2c3d4e5f6', text: '' },
-    { ...base, id: 'timed-out', status: 'uncertain', error: 'TIMEOUT', claimed: now, nonce: 'eeeeee', ref: 'a1b2c3d4e5f6' },
   ]
   const state = { ...queued, messages: others }
   assert.equal(restartMessages(state, now + 1), state)
+  // A named claim with an error keeps it and all else, and loses only its name.
+  for (const named of [
+    { ...base, id: 'given-up', status: 'uncertain', error: 'EXPIRED', claimed: now, nonce: 'dddddd', ref: 'a1b2c3d4e5f6', text: '' },
+    { ...base, id: 'timed-out', status: 'uncertain', error: 'TIMEOUT', claimed: now, nonce: 'eeeeee', ref: 'a1b2c3d4e5f6' },
+  ]) {
+    const { ref: _ref, ...unnamed } = named
+    assert.deepEqual(restartMessages({ ...queued, messages: [named] }, now + 1).messages, [unnamed])
+  }
   // The message never handed out goes once after a start, with no repeat line.
   startHub((hub, reopen) => {
     hub().act('mailbox-turn', HOOK_SESSION, now)
@@ -363,6 +370,54 @@ test('an uncertain receipt with no error does not clear what a board start wrote
   const state = messageReceipt(restartedClaim(now), live, { id: 'restart-a', nonce: 'abcdef', status: 'uncertain' }, now + 2)
   assert.deepEqual([state.messages[0].status, state.messages[0].error], ['uncertain', 'BOARD_RESTARTED'])
   assert.equal(mailboxHook(state, SURFACE_IDS.cli, now + 3 + MAILBOX_LEASE_MS, '111111').message, null)
+})
+
+// The same session's own receiver, and its receipts with no error, an error, or one then the other (#1407 review).
+const sameSession = now => ({ id: 'live-1', agent: 'codex', session: 'mailbox-session', surface: SURFACE_IDS.cli, turn: 'turn1', expires: now + 100 * MAILBOX_LEASE_MS })
+const unsureReceipts = (state, errors, now) => errors.reduce((next, error, index) => messageReceipt(next, sameSession(now), {
+  id: 'restart-a', nonce: 'abcdef', status: 'uncertain', ...(error === undefined ? {} : { error }) }, now + index), state)
+// Neither a later take nor a hand-back of the old claim sends it again; the message behind it waits.
+const assertNeverAgain = (state, now, where) => {
+  assert.equal(state.messages[0].ref, undefined, `${where}: kept its name`)
+  assert.equal(mailboxHook(state, SURFACE_IDS.cli, now + 10 * MAILBOX_LEASE_MS, '111111').message, null, `${where}: handed out again`)
+  assert.equal(mailboxAction(state, 'mailbox-release', { agent: 'codex', session: 'mailbox-session', ref: 'a1b2c3d4e5f6' }, now + 10 * MAILBOX_LEASE_MS).state, state, `${where}: queued again`)
+}
+
+test('a hook claim made before a board start is never handed out again after it, whatever receipts its session sends since', () => {
+  const now = Date.now()
+  for (const errors of [['TIMEOUT', undefined], ['TURN_ABORTED', undefined], ['TIMEOUT', 'TURN_ABORTED', undefined]]) {
+    assertNeverAgain(unsureReceipts(restartedClaim(now), errors, now + 2), now, errors.join(' then '))
+  }
+})
+
+test('a hook claim with an error before a board start is not handed out again after it when a later receipt clears the error', () => {
+  const now = Date.now()
+  let claimed = mailboxQueue(mailboxQueue(mailboxSeed(now), 'restart-a', 'board', now), 'restart-b', 'gemini:sender-session', now)
+  claimed = mailboxHook(claimed, SURFACE_IDS.cli, now, 'abcdef').state
+  // Its receiver timed out or its turn ended, or its mailbox's session ended, before the start.
+  const errored = [
+    ['timed out', unsureReceipts(claimed, ['TIMEOUT'], now + 1)],
+    ['turn ended', unsureReceipts(claimed, ['TURN_ABORTED'], now + 1)],
+    ['mailbox ended', endMailbox(claimed, 'codex', 'mailbox-session', now + 1)],
+  ]
+  for (const [where, before] of errored) {
+    const started = restartMessages(before, now + 2)
+    assert.deepEqual([started.messages[0].status, started.messages[0].error], [before.messages[0].status, before.messages[0].error], where)
+    assertNeverAgain(unsureReceipts(started, [undefined], now + 3), now, where)
+  }
+})
+
+test('an OpenCode attempt is refused for a wake its host accepted, after a later receipt with no error', () => {
+  const now = Date.now()
+  const claimed = ocTake(ocQueue(ocSeed(now), 'oc-1', now), now, 'a1b2c3d4e5f6').state
+  const started = ocAct(claimed, 'mailbox-attempt', { ref: 'a1b2c3d4e5f6' }, now + 1)
+  // Accepted with no attempt mark, or after one; then the plugin asks to wake it, inside the lease.
+  for (const [where, before] of [['no attempt mark', claimed], ['attempt marked', started]]) {
+    const accepted = ocAct(before, 'mailbox-accept', { id: 'oc-1', nonce: 'abcdef', awaitsAck: true }, now + 2)
+    const unsure = messageReceipt(accepted, accepted.mailboxes[0], { id: 'oc-1', nonce: 'abcdef', status: 'uncertain' }, now + 3)
+    assert.deepEqual([unsure.messages[0].status, unsure.messages[0].error, unsure.messages[0].hasAccepted], ['uncertain', '', true], where)
+    assert.throws(() => ocAct(unsure, 'mailbox-attempt', { ref: 'a1b2c3d4e5f6' }, now + 4), /CLAIM_LOST/, where)
+  }
 })
 
 test('a receiver cannot send BOARD_RESTARTED, as it cannot send EXPIRED or DISMISSED', () => {
