@@ -32,10 +32,12 @@ npx @wenyuchiou/agent-board@next
 
 ## 你會得到什麼
 
-- **問題排最前面。** agent 在等你回答的問題會排到最上面；它給的選項讀得出來，就每個選項一顆按鈕，否則自己輸入回答。
-- **每個 agent 留在原本的地方。** agent 繼續在自己的終端機裡跑，看板讀的是它們 hooks 的回報。
+- **問題排最前面。** 不管是哪個 agent 問的，在等你回答的問題都會排到最上面；它給的選項讀得出來，就每個選項一顆按鈕，否則自己輸入回答。
+- **每個 agent 留在原本的地方。** agent 繼續在自己的終端機和 Codex、Antigravity 桌面 app 裡跑，登入和計費都不變；看板讀的是它們 hooks 的回報，關掉看板也不會停掉任何 session。
 - **在本機、純文字。** 一個你可以自己看、自己改的 Markdown 檔，只在 127.0.0.1 的網頁，看板本身不呼叫模型。
 - **一個指令裝、一個指令移除。** `setup` 寫入前先列出要改什麼；`remove` 拿掉 setup 寫的東西，不動你自己的設定。
+
+[T3 Code](https://github.com/pingdotgg/t3code) 這類工具把每個 agent session 放在工具自己裡面跑，所以只看得到在那裡跑的 session。Agent Board 顯示的是你已經在各家自己的終端機或桌面 app 裡跑著的 session，工作不用搬到新工具。
 
 <img alt="看板網頁：「需要你」放著 Claude Code 的問題，附答案按鈕；「進行中」列出 Codex、Antigravity 和 OpenCode 的工作和步驟。合成資料。" src="docs/images/page-zh-TW-dark.png" width="860">
 
