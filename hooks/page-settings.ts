@@ -79,6 +79,7 @@ export const settingsScript = String.raw`
     settings.hidden = true;
     settingsButton.setAttribute('aria-expanded', 'false');
     document.getElementById('shell').inert = false;
+    if (typeof onSettingsClose === 'function') onSettingsClose();
     settingsButton.focus();
   }
   settingsButton.addEventListener('click', openSettings);

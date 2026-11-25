@@ -1576,6 +1576,19 @@ const PAGE_SCRIPT = String.raw`
   var agentPresence = {};
   var resultSlots = {};
   var lostResults = [];
+  var storageCleanBtn = null;
+  var storageHasCleanBtn = false;
+  var storageCleanupSlot = null;
+  var cleanupInSettings = false;
+  function onSettingsClose() {
+    cleanupInSettings = false;
+    var sec = document.getElementById('settings-storage');
+    var line = document.getElementById('settings-storage-line');
+    if (sec && line && !line.textContent && !storageHasCleanBtn) {
+      sec.hidden = true;
+      if (storageCleanupSlot) { storageCleanupSlot.remove(); storageCleanupSlot = null; }
+    }
+  }
   resultSlot(document.querySelector('.pfoot'), 'close', '', w('serveClose'));
   resultSlot(document.getElementById('tidy-bulk'), 'tidy', '', w('tidyBulk'));
   function resultSlot(card, key, revision, label) {
@@ -3608,16 +3621,27 @@ const PAGE_SCRIPT = String.raw`
     var storageSec = document.getElementById('settings-storage');
     var storageLine = document.getElementById('settings-storage-line');
     var storageActs = document.getElementById('settings-storage-acts');
+    if (!results.cleanup) cleanupInSettings = false;
+    var showCleanupResult = !!(cleanupInSettings && results.cleanup);
     if (storageSec && storageLine) {
-      storageSec.hidden = !hasSizeProblem;
+      storageSec.hidden = !(hasSizeProblem || showCleanupResult);
       setText(storageLine, hasSizeProblem ? (model.details || boardLargeText) : '');
       if (storageActs) {
-        storageActs.textContent = '';
-        if (hasSizeProblem && model.isCleanable) {
-          var settingsCleanup = button(w('cleanUp'), function () { tidyBoard('cleanup', '/api/clean'); });
-          add(storageActs, settingsCleanup);
+        var wantCleanupBtn = !!(hasSizeProblem && model.isCleanable);
+        if (wantCleanupBtn) {
+          if (!storageCleanBtn) {
+            storageCleanBtn = button(w('cleanUp'), function () { cleanupInSettings = true; tidyBoard('cleanup', '/api/clean'); });
+          }
+          if (!storageHasCleanBtn) { storageActs.appendChild(storageCleanBtn); storageHasCleanBtn = true; }
+        } else if (storageHasCleanBtn) {
+          storageCleanBtn.remove();
+          storageHasCleanBtn = false;
+        }
+        if (storageCleanupSlot) { storageCleanupSlot.remove(); storageCleanupSlot = null; }
+        if (wantCleanupBtn || showCleanupResult) {
           resultSlot(storageActs, 'cleanup', '', w('cleanUp'));
-        } else if (hasSizeProblem && results.cleanup) resultSlot(storageActs, 'cleanup', '', w('cleanUp'));
+          storageCleanupSlot = resultSlots.cleanup ? resultSlots.cleanup.node : null;
+        }
       }
     }
     var notices = el('div', 'notices');
@@ -3626,10 +3650,10 @@ const PAGE_SCRIPT = String.raw`
     (model.health || []).forEach(function (line) { add(notices, el('p', 't-alert', line)); });
     if (model.background) add(notices, el('p', 't-quiet', model.background));
     if (!hasSizeProblem && model.isCleanable) {
-      var cleanup = add(el('div', 'acts'), button(w('cleanUp'), function () { tidyBoard('cleanup', '/api/clean'); }));
+      var cleanup = add(el('div', 'acts'), button(w('cleanUp'), function () { cleanupInSettings = false; tidyBoard('cleanup', '/api/clean'); }));
       add(notices, cleanup);
       resultSlot(cleanup, 'cleanup', '', w('cleanUp'));
-    } else if (!hasSizeProblem && results.cleanup) resultSlot(notices, 'cleanup', '', w('cleanUp'));
+    } else if (!hasSizeProblem && !showCleanupResult && results.cleanup) resultSlot(notices, 'cleanup', '', w('cleanUp'));
     if (notices.firstChild) parts.push(notices);
     // The filter is applied before anything is on the page, so a redraw never plays it.
     layout();

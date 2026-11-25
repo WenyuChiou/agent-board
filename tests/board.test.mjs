@@ -10912,6 +10912,48 @@ test('a small page offers Clean up for its archive count and keeps the result af
   } finally { await board.close() }
 })
 
+test('Settings cleanup keeps button focus across redraws and keeps its result when crossing below the size limit', { timeout: 15_000 }, async () => {
+  const { seen } = largeManualBoard()
+  const bigFinished = `## Synthetic\n### Finished one\n> Context: ${'synthetic '.repeat(60_000)}\n- [x] Last step\n### Finished two\n- [x] Last step\n### Still open\n- [ ] Next step\n`
+  const board = await page('', {}, [], TIDY_NOW)
+  try {
+    writeFileSync(board.path, bigFinished)
+    writeFileSync(join(board.dir, 'progress-seen.json'), seen)
+    let model = (await board.call('GET', '/api/board')).json().model
+    assert.equal(model.isLarge, true)
+    assert.equal(model.isCleanable, true)
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const dom = await pageDom(html, model, {
+      currentModel: () => model,
+      post: async ({ path, body }) => {
+        if (path !== '/api/clean') return { ok: true, json: async () => ({ ok: true, agents: [] }) }
+        const response = await board.call('POST', path, { body })
+        model = (await board.call('GET', '/api/board')).json().model
+        return { ok: response.status === 200, json: async () => response.json() }
+      },
+    })
+    dom.node('settings-toggle').click()
+    const storageActs = dom.node('settings-storage-acts')
+    const button = pressWalk(storageActs).find(node => node.tag === 'button' && node.textContent === EN.cleanUp)
+    assert.ok(button)
+    button.focus()
+    assert.equal(dom.active(), button)
+    await dom.redraw({ ...model })
+    assert.equal(dom.active(), button, 'Clean up button keeps focus across board redraws')
+    const sameButton = pressWalk(storageActs).find(node => node.tag === 'button' && node.textContent === EN.cleanUp)
+    assert.equal(sameButton, button)
+
+    button.click()
+    await dom.settle()
+    assert.equal(model.isLarge, undefined)
+    assert.equal(dom.node('settings-storage').hidden, false, 'Settings keeps cleanup result visible after crossing below size limit')
+    assert.ok(storageActs.textContent.includes(EN.tidyMoved(2)))
+    assert.ok(!dom.node('board').textContent.includes(EN.tidyMoved(2)))
+    dom.node('settings-close').click()
+    assert.equal(dom.node('settings-storage').hidden, true)
+  } finally { await board.close() }
+})
+
 test('terminal and JSON size warnings keep translated numbers in the details line without a Clean up action', () => {
   const { source, seen } = largeManualBoard()
   for (const [lang, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
