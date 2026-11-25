@@ -1021,8 +1021,10 @@ export const buildView = (
       const updated = clock.updated
       const when = clock.isFuture ? updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(updated, now, s)) : relativeTime(updated, now, s)
       // A hook-written block still holds its own placeholder step open at turn end (state=waiting), so its finished work
-      // counts without it (#1839). One at work keeps its row (the agent may tick the last step and carry on), and an ended one keeps its Stopped row, which holds its Archive.
-      const isWorkFinished = task.auto !== null && task.auto.state === 'waiting' && isWorkDone(task.steps)
+      // counts without it (#1839). One at work keeps its row (the agent may tick the last step and carry on), and one that
+      // ended, went quiet past the stale time or lost its process keeps its Stopped row, which holds its Archive and resume.
+      const isGone = isStopped(task.auto, now, updated, staleMs, gone)
+      const isWorkFinished = task.auto !== null && task.auto.state === 'waiting' && !isGone && isWorkDone(task.steps)
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done' || isWorkFinished
       const isManual = task.auto === null
       const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
@@ -1034,7 +1036,6 @@ export const buildView = (
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
       // Questions travel with an inactive or gone session rather than asking for a live reply.
-      const isGone = isStopped(task.auto, now, updated, staleMs, gone)
       const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || isGone || isSilence || task.auto?.state === 'ended')
       const mayBeClosed = !isInactive && task.auto !== null && isMaybeClosed(task.auto, task.steps, now, updated, clock.isFuture)

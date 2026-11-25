@@ -228,12 +228,28 @@ test('a finished waiting block is Done, not Stopped, and leaves no live row to r
   expect(view.idle).toEqual([])
   expect(view.groups.flatMap(group => group.rows)).toEqual([])
   // A block that still has real work open keeps its row, a block at work keeps it even with its steps ticked,
-  // and an ended block keeps its Stopped row, which carries its Archive.
+  // and an ended block keeps its Stopped row, which carries its Archive (see the next test for stale and gone ones).
   const live = viewOf('waiting', ['- [ ] Waiting for the next instruction', '- [x] Read the file', '- [ ] Count the lines'])
   expect(live.finished ?? []).toEqual([])
   expect(live.groups.flatMap(group => group.rows)[0]?.auto).toBe('waiting')
   expect(viewOf('working').finished ?? []).toEqual([])
   const ended = viewOf('ended')
   expect(ended.finished ?? []).toEqual([])
+  expect(ended.stopped).toHaveLength(1)
   expect(ended.stopped[0]?.archive).not.toBeNull()
+})
+
+test('a finished waiting block whose session went quiet or lost its process stays Stopped, with its Archive', () => {
+  // As on main: a stale or process-gone block is Stopped, and Done has no Archive until the write side lands.
+  const old = buildView(parseProgress(antigravityFile('waiting', TICKED).replace(/updated=\S+/, `updated=${new Date(NOW - 13 * 60 * MIN).toISOString()}`)), [], null, NOW, 0, {}, EN)
+  expect(old.finished ?? []).toEqual([])
+  expect(old.stopped).toHaveLength(1)
+  expect(old.stopped[0]?.archive).not.toBeNull()
+  const projects = parseProgress(antigravityFile('waiting', TICKED))
+  const block = projects[0]?.tasks[0]?.auto ?? null
+  expect(block).not.toBeNull()
+  const lost = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, new Set(block === null ? [] : [blockKey(block)]))
+  expect(lost.finished ?? []).toEqual([])
+  expect(lost.stopped).toHaveLength(1)
+  expect(lost.stopped[0]?.archive).not.toBeNull()
 })
