@@ -13084,8 +13084,8 @@ test('on a wide screen the sidebar lists views, agents and projects', async () =
     assert.equal(dom.node('count-working').textContent, heading('working-now'))
     assert.ok(Number(dom.node('count-others').textContent) > 0)
     // The agents of the icon row, with the same labels and numbers, and the projects that have something open.
-    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
-    for (const id of ['own', 'codex', 'gemini', 'cursor']) assert.equal(sideAgent(dom, id).getAttribute('aria-label'), rowAgent(dom, id).getAttribute('aria-label'), id)
+    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['codex', 'gemini', 'cursor'])
+    for (const id of ['codex', 'gemini', 'cursor']) assert.equal(sideAgent(dom, id).getAttribute('aria-label'), rowAgent(dom, id).getAttribute('aria-label'), id)
     assert.equal(badgeOf(sideAgent(dom, 'codex')).textContent, '1')
     assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => node.getAttribute('data-project')), ['client-repo', 'deep-project', 'docs-repo', 'shared-repo'])
     assert.equal(projectCount(dom, 'docs-repo'), '1')
@@ -13579,7 +13579,7 @@ test('under 560 px the sidebar opens as a drawer from the button at the top left
     assert.equal(dom.node('pfoot').parentNode, dom.node('side-foot'))
     // The drawer shows the same views, agents and projects as the wide sidebar, with the same counts.
     assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
-    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
+    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['codex', 'gemini', 'cursor'])
     assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => node.getAttribute('data-project')), ['client-repo', 'deep-project', 'docs-repo', 'shared-repo'])
     // The button again shuts it, and focus goes back to the button.
     btn.click()
