@@ -1112,5 +1112,5 @@ export const ZH_CN: Strings = {
   matrixCheckD: 'd（状态正确且及时）',
   matrixManualChecklist: (path: string): string => `人工检查清单：${path}`,
   matrixNoCli: (binary: string): string => `找不到 ${binary}（请将其加入 PATH 或通过 --cli id=cmd 指定）`,
-  matrixStoppedAt: (step: string, reason: string): string => `stopped at ${step}: ${reason}`,
+  matrixStoppedAt: (step: string, reason: string): string => `在步骤 ${step} 停止：${reason}`,
 }

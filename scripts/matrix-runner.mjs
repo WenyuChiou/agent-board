@@ -19,7 +19,7 @@ const stringsFor = (lang = 'en') => MATRIX_STRINGS[lang] ?? EN
 
 // Seven surfaces named in docs/dev/plan-0.26.0.md (section E6a).
 export const SURFACES = [
-  { id: 'claude-cli', name: 'Claude Code CLI', kind: 'cli', agent: 'claude', surface: 'Claude Code', mode: 'live', binary: 'claude', args: ['-p'] },
+  { id: 'claude-cli', name: 'Claude Code CLI', kind: 'cli', agent: 'claude', surface: 'Claude Code', mode: 'live', binary: 'claude', args: [] },
   { id: 'codex-cli', name: 'Codex CLI', kind: 'cli', agent: 'codex', surface: 'Codex daemon', mode: 'live', binary: 'codex', args: ['exec'] },
   { id: 'agy', name: 'agy', kind: 'cli', agent: 'antigravity', surface: 'agy TUI', mode: 'mailbox', binary: 'agy', args: [] },
   { id: 'deepseek', name: 'DeepSeek Harness', kind: 'cli', agent: 'deepseek', surface: 'Web', mode: 'mailbox', binary: 'dsh', args: ['web'] },
@@ -108,7 +108,8 @@ export const buildCliInvocation = (surface, cli, prompt) => {
   const baseArgs = Array.isArray(cli.args) ? cli.args.map(arg => String(arg)) : []
   if (cli.isVendorCli !== true) return { command: cli.command, args: baseArgs }
   if (surface.id === 'claude-cli') {
-    return { command: cli.command, args: baseArgs.at(-1) === '-p' ? [...baseArgs, prompt] : [...baseArgs, '-p', prompt] }
+    const interactiveArgs = baseArgs.filter(arg => arg !== '-p' && arg !== '--print')
+    return { command: cli.command, args: [...interactiveArgs, prompt] }
   }
   if (surface.id === 'codex-cli') {
     return { command: cli.command, args: baseArgs.includes('exec') ? [...baseArgs, prompt] : ['exec', ...baseArgs, prompt] }
@@ -158,7 +159,7 @@ const killChild = async child => {
 }
 
 // Builds an isolated throwaway home for Shape S (setup) or Shape P (plugin connector), never touching the real home.
-export const buildThrowawayHome = ({ shape, surface, tempBase } = {}) => {
+export const buildThrowawayHome = ({ shape, surface, tempBase, setupScript = SETUP_AGENT_SCRIPT, setupTimeoutMs = 30_000 } = {}) => {
   if (!SHAPES.includes(shape)) throw new Error(`Unsupported install shape: ${String(shape)}`)
   const root = mkdtempSync(join(tempBase ?? tmpdir(), `agent-board-matrix-${shape.toLowerCase()}-`))
   const home = join(root, 'home')
@@ -240,6 +241,23 @@ export const buildThrowawayHome = ({ shape, surface, tempBase } = {}) => {
     if (existsSync(manifestSrc)) cpSync(manifestSrc, join(pluginInstallDir, '.claude-plugin', 'plugin.json'))
     const hooksSrc = join(REPO_ROOT, 'hooks')
     if (existsSync(hooksSrc)) cpSync(hooksSrc, join(pluginInstallDir, 'hooks'), { recursive: true })
+    const hooksJsonSrc = join(hooksSrc, 'hooks.json')
+    if (existsSync(hooksJsonSrc)) {
+      const hooksJsonText = readFileSync(hooksJsonSrc, 'utf8')
+      const pluginRefs = new Set()
+      for (const match of hooksJsonText.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/([A-Za-z0-9_./-]+)/g)) {
+        pluginRefs.add(match[1])
+      }
+      if (hooksJsonText.includes('claude-approval.mjs')) pluginRefs.add('scripts/claude-approval.mjs')
+      for (const relPath of pluginRefs) {
+        const srcFile = join(REPO_ROOT, ...relPath.split('/'))
+        if (existsSync(srcFile)) {
+          const destFile = join(pluginInstallDir, ...relPath.split('/'))
+          mkdirSync(dirname(destFile), { recursive: true })
+          cpSync(srcFile, destFile)
+        }
+      }
+    }
     writeFileSync(
       join(claudeDir, 'plugins', 'installed_plugins.json'),
       JSON.stringify({ version: 2, plugins: { 'agent-board@agent-board': [{ scope: 'user', version, installPath: pluginInstallDir }] } }, null, 2),
@@ -259,7 +277,7 @@ export const buildThrowawayHome = ({ shape, surface, tempBase } = {}) => {
     const setupRes = spawnSync(
       process.execPath,
       [
-        SETUP_AGENT_SCRIPT,
+        setupScript,
         '--agent', setupTargets.join(','),
         '--home', home,
         '--progress-file', progress,
@@ -268,11 +286,12 @@ export const buildThrowawayHome = ({ shape, surface, tempBase } = {}) => {
         '--apply',
         '--json',
       ],
-      { env, cwd: root, encoding: 'utf8', timeout: 30_000, windowsHide: true },
+      { env, cwd: root, encoding: 'utf8', timeout: setupTimeoutMs, windowsHide: true },
     )
-    if (setupRes.status !== 0) {
+    if (setupRes.error || setupRes.status !== 0) {
       rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
-      throw new Error(`setup-agent failed for ${setupTargets.join(',')} (status ${setupRes.status}): ${setupRes.stderr || setupRes.stdout}`)
+      const reason = setupRes.error?.message || setupRes.stderr || setupRes.stdout || `exit ${setupRes.status}`
+      throw new Error(`setup-agent failed for ${setupTargets.join(',')} (status ${setupRes.status}): ${reason}`)
     }
   }
   if (!existsSync(script)) {
@@ -376,6 +395,8 @@ export const runCliJourney = async ({
   timeoutMs = 10_000,
   pollMs = 40,
   tempBase,
+  setupScript = SETUP_AGENT_SCRIPT,
+  setupTimeoutMs = 30_000,
 } = {}) => {
   const s = stringsFor(lang)
   if (!cli) {
@@ -390,7 +411,12 @@ export const runCliJourney = async ({
     }))
   }
 
-  const home = buildThrowawayHome({ shape, surface, tempBase })
+  let home = null
+  try {
+    home = buildThrowawayHome({ shape, surface, tempBase, setupScript, setupTimeoutMs })
+  } catch (error) {
+    return failRemaining({ date, version, shape, surface, fromIndex: 0, step: 'a', reason: error instanceof Error ? error.message : String(error), prior: [], s })
+  }
   const rows = []
   let server = null
   let cliChild = null
@@ -450,7 +476,7 @@ export const runCliJourney = async ({
         env: cliEnv,
         cwd: dirname(home.root),
         detached: process.platform !== 'win32',
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: [surface.id === 'claude-cli' && cli.isVendorCli === true ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       })
     } catch (error) {
@@ -590,7 +616,7 @@ export const runCliJourney = async ({
   } finally {
     await killChild(cliChild)
     await server?.close?.()
-    home.cleanup()
+    home?.cleanup?.()
   }
 }
 
@@ -615,6 +641,8 @@ export const runMatrix = async ({
   timeoutMs = 10_000,
   pollMs = 40,
   tempBase,
+  setupScript = SETUP_AGENT_SCRIPT,
+  setupTimeoutMs = 30_000,
 } = {}) => {
   const s = stringsFor(lang)
   const rows = []
@@ -634,9 +662,13 @@ export const runMatrix = async ({
         }
         continue
       }
-      const cli = typeof cliFor === 'function' ? await cliFor(surface, shape) : cliFor?.[surface.id] ?? null
-      const resultRows = await runCliJourney({ surface, shape, cli, version, date, lang, timeoutMs, pollMs, tempBase })
-      rows.push(...resultRows)
+      try {
+        const cli = typeof cliFor === 'function' ? await cliFor(surface, shape) : cliFor?.[surface.id] ?? null
+        const resultRows = await runCliJourney({ surface, shape, cli, version, date, lang, timeoutMs, pollMs, tempBase, setupScript, setupTimeoutMs })
+        rows.push(...resultRows)
+      } catch (error) {
+        rows.push(...failRemaining({ date, version, shape, surface, fromIndex: 0, step: 'a', reason: error instanceof Error ? error.message : String(error), prior: [], s }))
+      }
     }
   }
   return { rows, markdown: formatMatrixTable(rows, { lang }) }

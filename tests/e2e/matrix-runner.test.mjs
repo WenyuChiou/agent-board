@@ -185,6 +185,22 @@ test('the runner builds a throwaway home for each install shape and never writes
       } else {
         assert.equal(h.progress, join(h.home, '.claude', 'agent-board', 'progress.md'))
         assert.equal(hasBoardPlugin(join(h.home, '.claude')), true)
+        const installed = JSON.parse(readFileSync(join(h.home, '.claude', 'plugins', 'installed_plugins.json'), 'utf8'))
+        const installPath = installed.plugins['agent-board@agent-board'][0].installPath
+        const hooksCfg = JSON.parse(readFileSync(join(installPath, 'hooks', 'hooks.json'), 'utf8'))
+        for (const mod of hooksCfg.modules ?? []) {
+          assert.equal(existsSync(join(installPath, 'hooks', mod)), true, `Shape P module exists: ${mod}`)
+        }
+        for (const group of Object.values(hooksCfg.hooks ?? {})) {
+          for (const entry of group) {
+            for (const hook of entry.hooks ?? []) {
+              for (const m of String(hook.command ?? '').matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/([A-Za-z0-9_./-]+)/g)) {
+                assert.equal(existsSync(join(installPath, ...m[1].split('/'))), true, `Shape P hook target exists: ${m[1]}`)
+              }
+            }
+          }
+        }
+        assert.equal(existsSync(join(installPath, 'scripts', 'claude-approval.mjs')), true)
       }
     }
     assert.notEqual(homes[0].root, homes[1].root)
@@ -202,7 +218,7 @@ test('the runner builds a throwaway home for each install shape and never writes
 test('real vendor CLIs receive host-specific question-producing task prompts', () => {
   const prompt = 'Ask the board: Proceed with check?'
   const cases = [
-    ['claude-cli', ['-p', prompt]],
+    ['claude-cli', [prompt]],
     ['codex-cli', ['exec', prompt]],
     ['agy', ['-p', prompt]],
     ['deepseek', ['-p', prompt]],
@@ -212,9 +228,13 @@ test('real vendor CLIs receive host-specific question-producing task prompts', (
     const built = buildCliInvocation(surface, { command: surface.binary, args: surface.args, isVendorCli: true }, prompt)
     assert.deepEqual(built, { command: surface.binary, args: expectedArgs })
   }
-  const standIn = SURFACES.find(one => one.id === 'claude-cli')
+  const claudeSurface = SURFACES.find(one => one.id === 'claude-cli')
   assert.deepEqual(
-    buildCliInvocation(standIn, { command: process.execPath, args: ['standin.mjs'] }, prompt),
+    buildCliInvocation(claudeSurface, { command: 'claude', args: ['-p', '--print', '--verbose'], isVendorCli: true }, prompt),
+    { command: 'claude', args: ['--verbose', prompt] },
+  )
+  assert.deepEqual(
+    buildCliInvocation(claudeSurface, { command: process.execPath, args: ['standin.mjs'] }, prompt),
     { command: process.execPath, args: ['standin.mjs'] },
   )
 })
@@ -355,4 +375,72 @@ test('the table has one row per cell with date, version, shape, result and evide
   const lines = formatMatrixTable(result.rows).trim().split('\n')
   assert.equal(lines[0], '| Date | Version | Shape | Surface | Check | Result | Evidence |')
   assert.equal(lines.length, result.rows.length + 2)
+})
+
+test('claude interactive invocation receives initial prompt and stdin pipe, and failing setup stays isolated per journey', { timeout: 60_000 }, async () => {
+  const { responder } = standInScripts()
+  const dir = makeTempDir('matrix-p1-checks-')
+  const interactiveResponder = join(dir, 'interactive-claude.mjs')
+  const failingSetupScript = join(dir, 'failing-setup.mjs')
+  const isolatedTemp = join(dir, 'throwaway-base')
+  mkdirSync(isolatedTemp, { recursive: true })
+
+  writeFileSync(interactiveResponder, `
+if (process.argv.includes('-p') || process.argv.includes('--print')) {
+  process.stderr.write('unexpected print flag')
+  process.exit(2)
+}
+const promptArg = process.argv.at(-1) || ''
+if (!promptArg.includes(process.env.AGENT_BOARD_MATRIX_QUESTION)) {
+  process.stderr.write('missing question prompt arg')
+  process.exit(3)
+}
+if (!process.stdin || process.stdin.readable !== true) {
+  process.stderr.write('expected readable stdin pipe for interactive session')
+  process.exit(4)
+}
+await import(${JSON.stringify(pathToFileURL(responder).href)})
+`, 'utf8')
+
+  writeFileSync(failingSetupScript, `
+process.stderr.write('synthetic setup boom\\n')
+process.exit(1)
+`, 'utf8')
+
+  const claudeOnly = SURFACES.filter(one => one.id === 'claude-cli')
+  const interactiveRun = await runMatrix({
+    shapes: ['P'],
+    surfaces: claudeOnly,
+    cliFor: () => ({ command: process.execPath, args: [interactiveResponder], isVendorCli: true }),
+    version: '0.26.0-test',
+    date: '2026-11-25',
+    timeoutMs: 8000,
+    tempBase: isolatedTemp,
+  })
+  assert.equal(interactiveRun.rows.length, 4)
+  for (const row of interactiveRun.rows) assert.equal(row.result, 'PASS', `interactive claude ${row.check}: ${row.evidence}`)
+
+  const codexAndClaude = [
+    SURFACES.find(one => one.id === 'codex-cli'),
+    SURFACES.find(one => one.id === 'claude-cli'),
+  ]
+  const isolatedRun = await runMatrix({
+    shapes: ['S'],
+    surfaces: codexAndClaude,
+    cliFor: () => ({ command: process.execPath, args: [responder] }),
+    version: '0.26.0-test',
+    date: '2026-11-25',
+    timeoutMs: 8000,
+    tempBase: isolatedTemp,
+    setupScript: failingSetupScript,
+  })
+  assert.equal(isolatedRun.rows.length, 8)
+  for (const row of isolatedRun.rows.slice(0, 4)) {
+    assert.equal(row.result, 'FAIL')
+    assert.match(row.evidence, /stopped at a:.*synthetic setup boom/i)
+  }
+  for (const row of isolatedRun.rows.slice(4)) {
+    assert.equal(row.result, 'PASS', `later journey should pass after prior setup failure: ${row.evidence}`)
+  }
+  assert.deepEqual(readdirSync(isolatedTemp), [])
 })

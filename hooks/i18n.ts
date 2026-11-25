@@ -1157,7 +1157,7 @@ export const ZH_TW = {
   matrixCheckD: 'd（狀態正確且即時）',
   matrixManualChecklist: (path: string): string => `人工檢查清單：${path}`,
   matrixNoCli: (binary: string): string => `找不到 ${binary}（請將其加入 PATH 或透過 --cli id=cmd 指定）`,
-  matrixStoppedAt: (step: string, reason: string): string => `stopped at ${step}: ${reason}`,
+  matrixStoppedAt: (step: string, reason: string): string => `在步驟 ${step} 停止：${reason}`,
 }
 
 export type Strings = typeof ZH_TW
