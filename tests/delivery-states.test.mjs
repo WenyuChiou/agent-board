@@ -10,9 +10,10 @@ registerHooks({ resolve(specifier, context, next) {
   }
 } })
 
-const { DELIVERY_EVENTS, DELIVERY_STATES, DELIVERY_TABLE, SAMPLE_NOW, SUSPECT_CELLS, applyEvent, isDoubleSend, observe, observeHolds, rowOf, sampleBinding, sampleOf, shapesOf, stateOf } = await import('../hooks/delivery-states.ts')
+const { DELIVERY_EVENTS, DELIVERY_STATES, DELIVERY_TABLE, SAMPLE_NOW, SUSPECT_CELLS, applyEvent, observe, observeHolds, rowOf, sampleBinding, sampleOf, shapesOf, stateOf } = await import('../hooks/delivery-states.ts')
 const { FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, MCP_SURFACE, OPEN_LIMIT_MS, claimMessages, disconnectMessages, dismissMessage, isMailboxSurfaceLost, isMailboxTarget, isOpen, messageReceipt, pruneMessages, queueMessage, rebindMessages, shownMessage } = await import('../hooks/messaging.ts')
 const { releaseMailboxMessage } = await import('../hooks/hook-messages.ts')
+const { restartMessages } = await import('../hooks/messaging.ts')
 const { mailboxAction } = await import('../scripts/board-messaging.ts')
 const { servePage } = await import('../hooks/serve.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
@@ -93,7 +94,7 @@ test('every card line in the delivery table is the one the page picks (#1543)', 
   assert.deepEqual(wrong, [], wrong.join('\n'))
 })
 
-test('isDoubleSend names exactly the uncertain receipts that send a message accepted before again (#1553)', () => {
+test('no uncertain receipt sends again a message its host accepted before, in any state of the table (#1553, #1407)', () => {
   const wrong = []
   for (const name of DELIVERY_STATES) {
     for (const shape of shapeNames(name)) {
@@ -115,9 +116,7 @@ test('isDoubleSend names exactly the uncertain receipts that send a message acce
         isSentAgain = [[after, at], [after, one.claimed + MAILBOX_LEASE_MS], [back(false), at + 1000], [back(true), at + 1000]]
           .some(([store, now]) => claimMessages(store, own, now, 'd4e5f6', binding.scope === 'mailbox' ? 'ba9876543210' : undefined).messages.some(item => item.id === message.id))
       }
-      const expected = (message.status === 'accepted' || message.hasAccepted === true) && isSentAgain
-      if (isDoubleSend(message, 'unsure') !== expected) wrong.push(`${label(name, shape)}: isDoubleSend ${isDoubleSend(message, 'unsure')}, accepted before and sent again ${expected}`)
-      for (const event of DELIVERY_EVENTS) if (event !== 'unsure' && isDoubleSend(message, event)) wrong.push(`${label(name, shape)}: isDoubleSend names ${event}`)
+      if ((message.status === 'accepted' || message.hasAccepted === true) && isSentAgain) wrong.push(`${label(name, shape)}: accepted before and sent again`)
     }
   }
   assert.deepEqual(wrong, [], wrong.join('\n'))
@@ -158,7 +157,7 @@ const generator = seed => () => {
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296
 }
 
-const EVERY_KIND = ['send', 'send', 'claim', 'claim', 'claim', 'pull', 'wake', 'receipt', 'receipt', 'hook', 'hook', 'dismiss', 'disconnect', 'leave', 'endMailbox', 'tick', 'tick', 'tick']
+const EVERY_KIND = ['send', 'send', 'claim', 'claim', 'claim', 'pull', 'wake', 'receipt', 'receipt', 'hook', 'hook', 'dismiss', 'disconnect', 'leave', 'endMailbox', 'restart', 'tick', 'tick', 'tick']
 
 test('short random event orders never lose a message, never send one twice, never start one in a running turn, and never open a finished one (#1543)', () => {
   const reached = new Set()
@@ -211,12 +210,9 @@ test('short random event orders never lose a message, never send one twice, neve
             const status = { accept: 'accepted', ack: 'acknowledged', reject: 'rejected', fail: 'uncertain', timeout: 'uncertain', unsure: 'uncertain' }[event]
             const error = { fail: 'TURN_ABORTED', timeout: 'TIMEOUT' }[event]
             const binding = one.to.startsWith('opencode:') ? opencodeBox : live
-            // The one receipt that sends a message twice today (#1553) is left out.
-            if (!isDoubleSend(one, event)) {
-              state = event === 'dismiss' ? dismissMessage(state, one.id, now) : messageReceipt(state, binding, {
-                id: one.id, nonce: one.nonce, status, ...(event === 'ack' ? { reply: `ACK ${one.nonce}` } : {}), ...(error === undefined ? {} : { error }),
-              }, now)
-            }
+            state = event === 'dismiss' ? dismissMessage(state, one.id, now) : messageReceipt(state, binding, {
+              id: one.id, nonce: one.nonce, status, ...(event === 'ack' ? { reply: `ACK ${one.nonce}` } : {}), ...(error === undefined ? {} : { error }),
+            }, now)
           }
         } else if (kind === 'hook') {
           // A hook's own call on a mailbox message, through the board's handler: OpenCode's plugin marks the wake it starts, a
@@ -237,6 +233,9 @@ test('short random event orders never lose a message, never send one twice, neve
           if (kind === 'leave') state = rebindMessages(state, live, id => id === live.id)
         } else if (kind === 'endMailbox') {
           state = disconnectMessages(state, pick([codexBox, opencodeBox]).id, now)
+        } else if (kind === 'restart') {
+          // The board starts again and loads the store (#1407).
+          state = restartMessages(state, now)
         } else {
           // Mostly short steps and lease ends, so a hook's claim can lapse up to its last repeat.
           now += pick([1000, MAILBOX_LEASE_MS, MAILBOX_LEASE_MS, MAILBOX_LEASE_MS, OPEN_LIMIT_MS + 1000, FINISHED_KEEP_MS + 1000])
