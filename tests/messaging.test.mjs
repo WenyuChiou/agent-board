@@ -3834,15 +3834,8 @@ test('a retry of a known message id after its receiver reconnected returns the f
 
 test("a known message id pressed on another agent's card with the same session id is refused", async () => fixture(async (board, dir) => {
   const thread = '11111111-2222-4333-8444-555555555555'
-  const block = (id, agent, title) => `<!-- auto session=${id} agent=${agent} resume=${thread} state=waiting updated=${new Date().toISOString()} -->
-### ${title}
-- [?] Blue or green?
-<!-- /auto session=${id} -->
-`
-  writeFileSync(join(dir, 'progress.md'), `# Progress
-
-## Synthetic
-${block('abcdef01', 'codex', 'Codex fixture')}${block('abcdef02', 'claude', 'Claude fixture')}`)
+  const block = (id, agent, title) => `<!-- auto session=${id} agent=${agent} resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### ${title}\n- [?] Blue or green?\n<!-- /auto session=${id} -->\n`
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n${block('abcdef01', 'codex', 'Codex fixture')}${block('abcdef02', 'claude', 'Claude fixture')}`)
   await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli, unclaimed: true })
   await board.call('/api/messages/register', { agent: 'claude', session: thread, turn: 'session', scope: 'session', surface: SURFACE_IDS.claude })
   const asks = (await board.call('/api/board')).body.model.asks
@@ -3854,6 +3847,25 @@ ${block('abcdef01', 'codex', 'Codex fixture')}${block('abcdef02', 'claude', 'Cla
   const crossed = await board.call('/api/act', { ...request, key: otherAsk.key, asked: otherAsk.text, fp: otherAsk.fp })
   assert.deepEqual([crossed.status, crossed.body.note], [409, EN.messagesConflict])
   assert.deepEqual((await board.call('/api/board')).body.messaging.messages.map(one => [one.id, one.to]), [['AB-CROSS-1', `codex:${thread}`]])
+}))
+
+test('a retry of a known message id after its question left the board returns the stored message', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const block = steps => `# Progress\n\n## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Gone fixture\n${steps}\n<!-- /auto session=abcdef01 -->\n`
+  writeFileSync(join(dir, 'progress.md'), block('- [?] Blue or green?'))
+  const connected = (await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli })).body
+  const ask = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  const request = { key: ask.key, type: 'message', id: 'AB-GONE-1', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn }
+  assert.equal((await board.call('/api/act', request)).status, 200)
+  // The answer to the page is lost; the agent takes the answer, says it has it, and its report moves on before the page tries again.
+  const credentials = { connection: connected.id, secret: connected.secret }
+  const claimed = (await board.call('/api/messages/poll', { ...credentials, turn: 'turn1' })).body.messages[0]
+  await board.call('/api/messages/receipt', { ...credentials, id: 'AB-GONE-1', nonce: claimed.nonce, status: 'acknowledged', reply: 'ACK ' + claimed.nonce })
+  writeFileSync(join(dir, 'progress.md'), block('- [x] Blue or green? Blue\n- [ ] Paint it'))
+  assert.equal((await board.call('/api/board')).body.model.asks.length, 0)
+  const retried = await board.call('/api/act', request)
+  assert.deepEqual([retried.status, retried.body.receipt?.id], [200, 'AB-GONE-1'])
+  assert.equal((await board.call('/api/board')).body.messaging.messages.length, 1)
 }))
 
 test('after an answer reaches its session, that question leaves Needs you when the agent rewrites its report, and the next question starts with no receipt (#725)', async () => fixture(async (board, dir) => {

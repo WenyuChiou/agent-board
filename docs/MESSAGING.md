@@ -358,7 +358,8 @@ out of Needs you; the receipt still distinguishes delivery from a confirmed mode
   wins, and a press made again while the send still tries joins it; other words stop it. The
   board answers a press with an id it already stored with that message, before it checks the
   card, so a receiver that connected again under a new connection gets no second message. The
-  same id on another session's card, or on another agent's, is refused (#1843).
+  same id on another session's card, or on another agent's, is refused; a press whose card has
+  left the board since gets the stored message (#1843).
 
 IDs are scoped to this message store. A claim is never automatically replayed, except a hook's
 mailbox claim as above. Before each action or snapshot, finished messages older than 24 hours
