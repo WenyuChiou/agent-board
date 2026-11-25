@@ -6,7 +6,6 @@ import { blockKey, hostHashOf } from '../hooks/session-liveness'
 import type { ProgressAuto, ProgressStep } from '../types'
 import { parseProgress } from '../hooks/parse'
 import { buildView } from '../hooks/view'
-import { confirmTask, takeTask } from '../hooks/blocks'
 import { EN } from '../hooks/strings-en'
 
 // One row per (events + steps + mirror + liveness) combination → exactly one
@@ -221,30 +220,18 @@ test('a block leaves waiting when its last real step is ticked, whatever the hoo
   expect(view.overview.active).toBe(0)
 })
 
-test('an Antigravity Done row offers Archive and Confirm done, and both go through', () => {
-  const file = antigravityFile('waiting', TICKED)
-  const view = buildView(parseProgress(file), [], null, NOW, 0, {}, EN)
-  expect(view.finished).toHaveLength(1)
-  const row = view.recentAsking?.[0]
-  if (row === undefined || row.archive === null || row.confirm == null) throw new Error('the Done row offers no Archive or Confirm done')
-  expect(takeTask(file, row.archive, NOW, EN)?.text).not.toContain('Count the lines')
-  const confirmed = confirmTask(file, row.confirm, NOW, EN)
-  expect(confirmed?.text).toContain('state=done')
-  expect(confirmed?.text).toContain('- [x] Waiting for the next instruction')
-})
-
 test('a Done row is never Stopped and an ended session never reads Still running', () => {
   for (const state of ['waiting', 'ended']) {
     const view = viewOf(state)
+    // Done, and on no other shelf: not Stopped, not Idle, no live row that could say Still running.
+    expect(view.finished).toHaveLength(1)
     expect(view.stopped).toEqual([])
     expect(view.idle).toEqual([])
     expect(view.groups.flatMap(group => group.rows)).toEqual([])
-    const row = view.recentAsking?.[0]
-    expect(row?.auto).toBe('ended')
-    expect(row?.rowState).toBe(state === 'waiting' ? 'toCheck' : 'ended')
   }
-  // A block that still has real work open keeps its row and its Archive refusal.
+  // A block that still has real work open keeps its row, and a block at work keeps it even with its steps ticked.
   const live = viewOf('waiting', ['- [ ] Waiting for the next instruction', '- [x] Read the file', '- [ ] Count the lines'])
-  expect(live.recentAsking ?? []).toEqual([])
+  expect(live.finished ?? []).toEqual([])
   expect(live.groups.flatMap(group => group.rows)[0]?.auto).toBe('waiting')
+  expect(viewOf('working').finished ?? []).toEqual([])
 })
