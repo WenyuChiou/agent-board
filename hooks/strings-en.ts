@@ -914,6 +914,7 @@ export const EN: Strings = {
   settingsAgentsBusy: 'An agent setup or removal is running. Wait for it to finish, then try again.',
   settingsAgentInvalid: 'Choose an agent that setup knows.',
   settingsAgentsReadFailed: 'Could not check the agents. Close and reopen Settings to try again.',
+  settingsStorage: 'Storage',
   barStyleSet: (name: string): string => `The progress bar now uses the ${name} style on the page, the pane and the terminal board.`,
   barStyleUnknown: 'Progress bar styles: ink, blue, green.',
   barStyleUnreadable: 'The board’s settings file is not valid JSON, so settings were not changed and the file was not overwritten. Fix or delete progress-settings.json, then pick again.',

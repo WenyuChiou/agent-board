@@ -907,6 +907,7 @@ export const ZH_CN: Strings = {
   settingsAgentsBusy: '正在接入或移除另一个 agent，等它完成再试一次。',
   settingsAgentInvalid: '看板不认识这个 agent，请从列表里选。',
   settingsAgentsReadFailed: '查不到 agents 的状态。关掉设置再打开，就会重新检查。',
+  settingsStorage: '存储空间',
   barStyleSet: (name: string): string => `进度条改用“${name}”样式，页面、面板和终端看板都会跟着换。`,
   barStyleUnknown: '进度条样式：ink（墨）、blue（蓝）、green（绿）。',
   barStyleUnreadable: '看板的设置文件不是有效的 JSON，设置没有改，也没有覆盖它。请修好或删掉 progress-settings.json 再选一次。',

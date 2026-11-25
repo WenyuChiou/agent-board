@@ -10891,21 +10891,19 @@ test('the size warning is one sentence with one Clean up button and its numbers 
           return { ok: response.status === 200, json: async () => response.json() }
         },
       })
-      const paragraphs = dom.node('board').childNodes.filter(node => node.tag === 'p')
-      assert.equal(paragraphs.filter(node => node.textContent === s.boardLarge).length, 1)
-      const warning = paragraphs.find(node => node.textContent === s.boardLarge)
-      // The numbers sit in the quiet details line of the notices block, which comes after the warning.
-      const notices = dom.node('board').childNodes.find(node => node.className === 'notices')
-      const details = pressWalk(notices).find(node => node.tag === 'p' && node.textContent === model.details)
-      assert.ok(details && details.className.includes('t-quiet'))
-      assert.ok(dom.node('board').childNodes.indexOf(notices) > dom.node('board').childNodes.indexOf(warning))
-      assert.doesNotMatch(warning.textContent, /\d/)
-      const buttons = dom.buttons().filter(button => button.textContent === s.cleanUp)
+      const boardText = dom.node('board').textContent
+      assert.ok(!boardText.includes(s.boardLarge))
+      assert.ok(!boardText.includes(model.details))
+      const storage = dom.node('settings-storage')
+      const storageActs = dom.node('settings-storage-acts')
+      assert.equal(storage.hidden, false)
+      assert.equal(dom.node('settings-storage-line').textContent, model.details)
+      const buttons = pressWalk(storageActs).filter(node => node.tag === 'button' && node.textContent === s.cleanUp)
       assert.equal(buttons.length, 1)
       buttons[0].click()
       await dom.settle()
       assert.deepEqual(dom.requests.map(request => request.path), ['/api/clean'])
-      assert.ok(dom.node('board').textContent.includes(s.tidyMoved(3)))
+      assert.ok(storageActs.textContent.includes(s.tidyMoved(3)))
       assert.equal(readFileSync(board.path, 'utf8'), source.replace('### Finished one\n- [x] Last step\n### Finished two\n- [x] Last step\n', ''))
       const archive = readFileSync(join(board.dir, 'progress-archive-2026-10.md'), 'utf8')
       assert.ok(archive.includes('### Finished agent block'))
@@ -10946,11 +10944,13 @@ test('Clean up archives the finished hand-kept tasks it counted and nothing open
           return { ok: response.status === 200, json: async () => response.json() }
         },
       })
-      assert.equal(dom.buttons().filter(button => button.textContent === s.cleanUp).length, 1)
-      dom.buttons().find(button => button.textContent === s.cleanUp).click()
+      const storageActs = dom.node('settings-storage-acts')
+      const cleanButtons = () => pressWalk(storageActs).filter(node => node.tag === 'button' && node.textContent === s.cleanUp)
+      assert.equal(cleanButtons().length, 1)
+      cleanButtons()[0].click()
       await dom.settle()
       assert.deepEqual(dom.requests.map(request => request.path), ['/api/clean'])
-      assert.ok(dom.node('board').textContent.includes(s.tidyMoved(3)))
+      assert.ok(storageActs.textContent.includes(s.tidyMoved(3)))
       assert.equal(readFileSync(board.path, 'utf8'), `## Synthetic\n${remaining}`)
       const archive = readFileSync(join(board.dir, 'progress-archive-2026-10.md'), 'utf8')
       const done = new Date(TIDY_NOW - 4 * day)
@@ -10961,9 +10961,9 @@ test('Clean up archives the finished hand-kept tasks it counted and nothing open
       assert.ok(!model.details.includes(s.canArchive(1)) && !model.details.includes(s.canArchive(2)), model.details)
       const snapshot = () => Object.fromEntries(readdirSync(board.dir).filter(name => statSync(join(board.dir, name)).isFile()).map(name => [name, readFileSync(join(board.dir, name))]))
       const before = snapshot()
-      dom.buttons().find(button => button.textContent === s.cleanUp).click()
+      cleanButtons()[0].click()
       await dom.settle()
-      assert.ok(dom.node('board').textContent.includes(s.tidyScheduledNothing))
+      assert.ok(storageActs.textContent.includes(s.tidyScheduledNothing))
       assert.deepEqual(snapshot(), before)
     } finally { await board.close() }
   }
@@ -11021,6 +11021,48 @@ test('a small page offers Clean up for its archive count and keeps the result af
     assert.equal(model.details, undefined)
     assert.equal(dom.buttons().filter(button => button.textContent === EN.cleanUp).length, 0)
     assert.ok(dom.node('board').textContent.includes(EN.tidyMoved(2)))
+  } finally { await board.close() }
+})
+
+test('Settings cleanup keeps button focus across redraws and keeps its result when crossing below the size limit', { timeout: 15_000 }, async () => {
+  const { seen } = largeManualBoard()
+  const bigFinished = `## Synthetic\n### Finished one\n> Context: ${'synthetic '.repeat(60_000)}\n- [x] Last step\n### Finished two\n- [x] Last step\n### Still open\n- [ ] Next step\n`
+  const board = await page('', {}, [], TIDY_NOW)
+  try {
+    writeFileSync(board.path, bigFinished)
+    writeFileSync(join(board.dir, 'progress-seen.json'), seen)
+    let model = (await board.call('GET', '/api/board')).json().model
+    assert.equal(model.isLarge, true)
+    assert.equal(model.isCleanable, true)
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const dom = await pageDom(html, model, {
+      currentModel: () => model,
+      post: async ({ path, body }) => {
+        if (path !== '/api/clean') return { ok: true, json: async () => ({ ok: true, agents: [] }) }
+        const response = await board.call('POST', path, { body })
+        model = (await board.call('GET', '/api/board')).json().model
+        return { ok: response.status === 200, json: async () => response.json() }
+      },
+    })
+    dom.node('settings-toggle').click()
+    const storageActs = dom.node('settings-storage-acts')
+    const button = pressWalk(storageActs).find(node => node.tag === 'button' && node.textContent === EN.cleanUp)
+    assert.ok(button)
+    button.focus()
+    assert.equal(dom.active(), button)
+    await dom.redraw({ ...model })
+    assert.equal(dom.active(), button, 'Clean up button keeps focus across board redraws')
+    const sameButton = pressWalk(storageActs).find(node => node.tag === 'button' && node.textContent === EN.cleanUp)
+    assert.equal(sameButton, button)
+
+    button.click()
+    await dom.settle()
+    assert.equal(model.isLarge, undefined)
+    assert.equal(dom.node('settings-storage').hidden, false, 'Settings keeps cleanup result visible after crossing below size limit')
+    assert.ok(storageActs.textContent.includes(EN.tidyMoved(2)))
+    assert.ok(!dom.node('board').textContent.includes(EN.tidyMoved(2)))
+    dom.node('settings-close').click()
+    assert.equal(dom.node('settings-storage').hidden, true)
   } finally { await board.close() }
 })
 
@@ -14850,15 +14892,15 @@ test('#1085: a style picked on the page is written to the settings file with its
   } finally { await board.close() }
 })
 
-test('Settings has one labelled button and five accessible sections in every language and keeps focus inside until closed', async () => {
+test('Settings has one labelled button and six accessible sections in every language and keeps focus inside until closed', async () => {
   for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
     const html = await sourcePage(lang)
     assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
     assert.doesNotMatch(html, /data-theme-toggle|data-look-menu/)
     assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
     const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
-    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsApprovals, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
-    assert.equal((panel.match(/<section\b/g) ?? []).length, 5)
+    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsApprovals, words.settingsStorage, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 6)
     const dom = await pageDom(html, redesignModel(), { width: 375 })
     assert.equal(dom.node('settings').hidden, true)
     dom.node('settings-toggle').click()

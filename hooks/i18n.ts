@@ -952,6 +952,7 @@ export const ZH_TW = {
   settingsAgentsBusy: '正在接上或移除另一個 agent，等它跑完再試一次。',
   settingsAgentInvalid: '看板不認得這個 agent，請從清單裡選。',
   settingsAgentsReadFailed: '查不到 agents 的狀態。關掉設定再打開，就會重新檢查。',
+  settingsStorage: '儲存空間',
   barStyleSet: (name: string): string => `進度條改用「${name}」樣式，頁面、面板和終端看板都會跟著換。`,
   barStyleUnknown: '進度條樣式：ink（墨）、blue（藍）、green（綠）。',
   barStyleUnreadable: '看板的設定檔不是有效的 JSON，設定沒有改，也沒有覆寫它。請修好或刪掉 progress-settings.json 再選一次。',
