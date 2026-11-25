@@ -3802,6 +3802,72 @@ test('an existing card sends only to its exact live receiver and preserves mark 
   assert.equal((await board.call('/api/board')).body.model.asks.length, 1)
 }))
 
+test('a retry of a known message id after its receiver reconnected returns the first message', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555', other = '66666666-7777-4888-8999-aaaaaaaaaaaa'
+  const block = (id, session, title) => `<!-- auto session=${id} agent=codex resume=${session} state=waiting updated=${new Date().toISOString()} -->\n### ${title}\n- [?] Blue or green?\n<!-- /auto session=${id} -->\n`
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n${block('abcdef01', thread, 'Retry fixture')}${block('abcdef02', other, 'Other fixture')}`)
+  const register = (session, turn) => board.call('/api/messages/register', { agent: 'codex', session, turn, surface: SURFACE_IDS.cli, unclaimed: true }).then(one => one.body)
+  const first = await register(thread, 'turn1')
+  await register(other, 'turn1')
+  const asks = (await board.call('/api/board')).body.model.asks
+  const ask = asks.find(one => one.session === thread), otherAsk = asks.find(one => one.session === other)
+  const request = { key: ask.key, type: 'message', id: 'AB-RECONNECT-1', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn }
+  assert.equal((await board.call('/api/act', request)).status, 200)
+  // The receiver goes and comes back under a new connection before the page hears the answer; the page sends the same press again.
+  assert.equal((await board.call('/api/messages/disconnect', { connection: first.id, secret: first.secret, turn: 'turn1' })).status, 200)
+  const again = await register(thread, 'turn2')
+  assert.notEqual(again.id, first.id)
+  const retried = await board.call('/api/act', request)
+  assert.deepEqual([retried.status, retried.body.receipt?.id, retried.body.receipt?.status], [200, 'AB-RECONNECT-1', 'queued'])
+  // The page drew the card again with the new connection: the same id still answers with the first message.
+  const redrawn = (await board.call('/api/board')).body.model.asks.find(one => one.session === thread)
+  assert.equal(redrawn.delivery.id, again.id)
+  const pressed = await board.call('/api/act', { ...request, fp: redrawn.fp, connection: redrawn.delivery.id, turn: redrawn.delivery.turn })
+  assert.deepEqual([pressed.status, pressed.body.receipt?.id], [200, 'AB-RECONNECT-1'])
+  // Other words under that id, and the same id on another session's card, are refused.
+  assert.equal((await board.call('/api/act', { ...request, text: 'Green' })).status, 409)
+  const crossed = await board.call('/api/act', { ...request, key: otherAsk.key, session: otherAsk.session, asked: otherAsk.text, fp: otherAsk.fp, connection: otherAsk.delivery.id, turn: otherAsk.delivery.turn })
+  assert.deepEqual([crossed.status, crossed.body.note], [409, EN.messagesConflict])
+  const stored = (await board.call('/api/board')).body.messaging.messages
+  assert.deepEqual(stored.map(one => [one.id, one.to, one.status]), [['AB-RECONNECT-1', `codex:${thread}`, 'queued']])
+}))
+
+test("a known message id pressed on another agent's card with the same session id is refused", async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const block = (id, agent, title) => `<!-- auto session=${id} agent=${agent} resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### ${title}\n- [?] Blue or green?\n<!-- /auto session=${id} -->\n`
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n${block('abcdef01', 'codex', 'Codex fixture')}${block('abcdef02', 'claude', 'Claude fixture')}`)
+  await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli, unclaimed: true })
+  await board.call('/api/messages/register', { agent: 'claude', session: thread, turn: 'session', scope: 'session', surface: SURFACE_IDS.claude })
+  const asks = (await board.call('/api/board')).body.model.asks
+  const ask = asks.find(one => one.agent === 'codex'), otherAsk = asks.find(one => one.agent !== 'codex')
+  assert.equal(otherAsk.session, ask.session)
+  const request = { key: ask.key, type: 'message', id: 'AB-CROSS-1', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn }
+  assert.equal((await board.call('/api/act', request)).status, 200)
+  // The same id from the other agent's card, which names the same session id, is not that card's message.
+  const crossed = await board.call('/api/act', { ...request, key: otherAsk.key, asked: otherAsk.text, fp: otherAsk.fp })
+  assert.deepEqual([crossed.status, crossed.body.note], [409, EN.messagesConflict])
+  assert.deepEqual((await board.call('/api/board')).body.messaging.messages.map(one => [one.id, one.to]), [['AB-CROSS-1', `codex:${thread}`]])
+}))
+
+test('a retry of a known message id after its question left the board returns the stored message', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const block = steps => `# Progress\n\n## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Gone fixture\n${steps}\n<!-- /auto session=abcdef01 -->\n`
+  writeFileSync(join(dir, 'progress.md'), block('- [?] Blue or green?'))
+  const connected = (await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli })).body
+  const ask = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
+  const request = { key: ask.key, type: 'message', id: 'AB-GONE-1', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn }
+  assert.equal((await board.call('/api/act', request)).status, 200)
+  // The answer to the page is lost; the agent takes the answer, says it has it, and its report moves on before the page tries again.
+  const credentials = { connection: connected.id, secret: connected.secret }
+  const claimed = (await board.call('/api/messages/poll', { ...credentials, turn: 'turn1' })).body.messages[0]
+  await board.call('/api/messages/receipt', { ...credentials, id: 'AB-GONE-1', nonce: claimed.nonce, status: 'acknowledged', reply: 'ACK ' + claimed.nonce })
+  writeFileSync(join(dir, 'progress.md'), block('- [x] Blue or green? Blue\n- [ ] Paint it'))
+  assert.equal((await board.call('/api/board')).body.model.asks.length, 0)
+  const retried = await board.call('/api/act', request)
+  assert.deepEqual([retried.status, retried.body.receipt?.id], [200, 'AB-GONE-1'])
+  assert.equal((await board.call('/api/board')).body.messaging.messages.length, 1)
+}))
+
 test('after an answer reaches its session, that question leaves Needs you when the agent rewrites its report, and the next question starts with no receipt (#725)', async () => fixture(async (board, dir) => {
   const thread = '11111111-2222-4333-8444-555555555555'
   const block = steps => `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Answer fixture\n${steps}\n<!-- /auto session=abcdef01 -->\n`
@@ -7767,6 +7833,159 @@ test('1486 a Claude row allocates a fresh id after ACK_MISSING and stays blocked
   assert.equal(uncertainPage.buttons(blockedCard).find(one => one.textContent === EN.serveSend('Claude')).disabled, true)
   assert.throws(() => queueMessage(uncertainDelivery, { id: 'AB-BLOCKED', target: connection.id, turn: connection.turn, text: 'Continue' }, 'board', connection, now + 4), /PAIR_BUSY/)
   assert.deepEqual(claimMessages(uncertainDelivery, connection, now + 5, 'fedcba').messages, [])
+})
+
+// One page with one Claude row, for the page's own retry of a send (#1843, B3.1).
+const retryPage = async (post, connection) => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now()
+  const rowFile = `## Synthetic\n<!-- auto session=abcdef01 agent=claude resume=claude-session state=waiting updated=${new Date(now).toISOString()} -->\n### Claude row delivery\n- [ ] Next step\n<!-- /auto session=abcdef01 -->\n`
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  const rowView = buildView(parseProgress(rowFile), [], null, now, 0, {}, EN)
+  const modelOf = (messages, live = connection) => serveModel(rowView, [], EN, new Set(), false, { connections: [live], messages }, false, group)
+  const page = await pageDom(servePage(EN, 'synthetic'), modelOf([]), post)
+  const press = async text => {
+    const card = page.cards().find(one => page.inputs(one).length)
+    page.inputs(card)[0].value = text
+    page.buttons(card).find(one => one.textContent === EN.serveSend('Claude')).click()
+    await page.flush()
+  }
+  return { page, press, modelOf }
+}
+const claudeLive = (id = 'c1') => ({ id, agent: 'claude', session: 'claude-session', surface: SURFACE_IDS.claude, turn: 'session', scope: 'session', expires: Date.now() + 120000 })
+
+test('a lost response retries with the same id and shows one message', async () => {
+  const { shownMessage } = await import('../hooks/messaging.ts')
+  const connection = claudeLive()
+  // The board stores the message, then the answer to the first request is lost on its way to the page.
+  let store = { messages: [] }, isLost = true
+  const { page, press } = await retryPage(async request => {
+    const { id, text, connection: target, turn } = request.body
+    store = queueMessage(store, { id, target, turn, text }, 'board', connection, Date.now()).state
+    if (isLost) { isLost = false; throw new Error('synthetic lost response') }
+    return { ok: true, json: async () => ({ note: EN.messagesQueued, receipt: shownMessage(store.messages.find(one => one.id === id)) }) }
+  }, connection)
+  await press('Continue')
+  assert.equal(page.requests.length, 1)
+  // One try with no answer does not mark the page offline: the next one may get through.
+  assert.notEqual(page.node('offline').textContent, EN.serveOffline)
+  assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.equal(page.requests.length, 2)
+  assert.equal(page.requests[1].body.id, page.requests[0].body.id)
+  assert.equal(store.messages.length, 1)
+  assert.ok(!page.text().includes(EN.messagesFailed), page.text())
+  // The retry answered: nothing is left to try again.
+  assert.deepEqual(await page.runTimers('retrySend'), [])
+  assert.equal(page.requests.length, 2)
+})
+
+test('a send that gets no answer stops trying again after 30 s and says it failed', async () => {
+  const { page, press } = await retryPage(async () => { throw new Error('synthetic board gone') }, claudeLive())
+  await press('Continue')
+  // Every 2 s for 30 s: the first try and 14 more, all under the first press's id.
+  for (let i = 0; i < 14; i++) assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.equal(page.requests.length, 15)
+  assert.equal(new Set(page.requests.map(one => one.body.id)).size, 1)
+  // The fifteenth try's 2 s end with no answer: the send failed, and nothing more is tried.
+  assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.equal(page.requests.length, 15)
+  assert.ok(page.text().includes(EN.messagesFailed), page.text())
+  assert.deepEqual(await page.runTimers('retrySend'), [])
+})
+
+// The board stores each try's message (the same one, for one id); `answer` says what reaches the page.
+const storingPost = async (connection, answer) => {
+  const { shownMessage } = await import('../hooks/messaging.ts')
+  let store = { messages: [] }
+  const post = request => {
+    const { id, text, connection: target, turn } = request.body
+    store = queueMessage(store, { id, target, turn, text }, 'board', connection, Date.now()).state
+    return answer(request, { ok: true, json: async () => ({ note: EN.messagesQueued, receipt: shownMessage(store.messages.find(one => one.id === id)) }) })
+  }
+  return { post, stored: () => store.messages }
+}
+
+test('a try that gets no answer and no close is sent again after 2 s, and its late answer changes nothing', async () => {
+  const connection = claudeLive()
+  let late
+  const { post, stored } = await storingPost(connection, (request, answer) => {
+    if (late !== undefined) return answer
+    // The first try is stored, but its answer never comes and its connection stays open.
+    const held = new Promise(done => { late = () => done(answer) })
+    held.isHeld = true
+    return held
+  })
+  const { page, press } = await retryPage(post, connection)
+  await press('Continue')
+  assert.equal(page.requests.length, 1)
+  assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.equal(page.requests.length, 2)
+  assert.equal(page.requests[1].body.id, page.requests[0].body.id)
+  assert.ok(!page.text().includes(EN.messagesFailed), page.text())
+  late()
+  await page.flush()
+  assert.deepEqual(await page.runTimers('retrySend'), [])
+  assert.equal(page.requests.length, 2)
+  assert.equal(stored().length, 1)
+})
+
+test('an answer cut off on its way is no answer: the page sends the same id again', async () => {
+  const connection = claudeLive()
+  let isCut = true
+  const { post, stored } = await storingPost(connection, (request, answer) => {
+    if (!isCut) return answer
+    isCut = false
+    // The board stored it and said 200, but the body broke off.
+    return { ok: true, json: async () => { throw new SyntaxError('synthetic cut body') } }
+  })
+  const { page, press } = await retryPage(post, connection)
+  await press('Continue')
+  assert.equal(page.requests.length, 1)
+  assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.equal(page.requests.length, 2)
+  assert.equal(page.requests[1].body.id, page.requests[0].body.id)
+  assert.equal(stored().length, 1)
+  assert.deepEqual(await page.runTimers('retrySend'), [])
+})
+
+test('a press made again while its send still tries joins that send, and other words stop it', async () => {
+  const { page, press, modelOf } = await retryPage(async request => {
+    // Every try of the first words gets no answer.
+    if (request.body.text === 'Continue') throw new Error('synthetic lost response')
+    return { ok: true, json: async () => ({ note: EN.messagesQueued }) }
+  }, claudeLive('c1'))
+  await press('Continue')
+  // The card is drawn again under a new connection while the send still tries, and Send is pressed again.
+  await page.redraw(modelOf([], claudeLive('c2')))
+  await press('Continue')
+  assert.equal(page.requests.length, 1)
+  assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.deepEqual(page.requests.map(one => one.body.id), [page.requests[0].body.id, page.requests[0].body.id])
+  // Other words are another message: the first send tries no more.
+  await page.redraw(modelOf([], claudeLive('c3')))
+  await press('Stop here instead')
+  assert.equal(page.requests.length, 3)
+  assert.notEqual(page.requests[2].body.id, page.requests[0].body.id)
+  await page.runTimers('retrySend')
+  assert.equal(page.requests.length, 3)
+  assert.deepEqual(await page.runTimers('retrySend'), [])
+  assert.ok(!page.text().includes(EN.messagesFailed), page.text())
+})
+
+test('the page keeps a message\'s id for the same text when its receiver reconnects between presses', async () => {
+  // The first press meets a busy store; before the person presses again, the receiver connects again under a new id.
+  let answers = 0
+  const { page, press, modelOf } = await retryPage(async () => {
+    answers++
+    return answers === 1 ? { ok: false, json: async () => ({ error: 'MESSAGE_STORE_BUSY' }) } : { ok: true, json: async () => ({ note: EN.messagesQueued }) }
+  }, claudeLive('c1'))
+  await press('Continue')
+  await page.redraw(modelOf([], claudeLive('c2')))
+  await press('Continue')
+  assert.equal(page.requests.length, 2)
+  assert.deepEqual(page.requests.map(one => one.body.connection), ['c1', 'c2'])
+  assert.equal(page.requests[1].body.id, page.requests[0].body.id)
 })
 
 test('1486 reconnect preserves ended-uncertain receipt and lets next receiver claim newly queued message', () => {

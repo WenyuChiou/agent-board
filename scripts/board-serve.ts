@@ -19,10 +19,10 @@ import type { BoardAction, PendingTurn } from '../hooks/board'
 import type { Strings } from '../hooks/i18n'
 import { agentLabel } from '../hooks/strings'
 import type { ReceiverRoutes } from '../hooks/messaging'
-import { isRecordedRoute } from '../hooks/messaging'
+import { address, agentOf, isRecordedRoute, SURFACE_IDS } from '../hooks/messaging'
 import type { SendDecision } from '../hooks/messaging'
 import { RECEIVER_ROUTES } from '../hooks/receiver-routes'
-import { cardSendKey, handledOnly, lanAddress, localHosts, pagePolicy, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
+import { cardSendKey, handledOnly, lanAddress, localHosts, pagePolicy, replyText, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { isFolder, runSendPlan } from './background-resume'
@@ -1169,25 +1169,19 @@ export const startServer = (o: ServeOptions): void => {
       }
       if (url.pathname === '/api/act') {
         const state = isLan ? undefined : messaging.snapshot(Date.now())
-        const view = o.view()
-        // The press picks its target as the card did: a live connection hides the mailbox only on a recorded route (#318).
-        const targets = deliveryTargets(state?.connections ?? [], state?.mailboxes, live => isRecordedRoute(live, (agent, session) => sessionState(view, agent, session), o.routes ?? RECEIVER_ROUTES))
-        // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
-        const action = serveAction(boardItems(view, o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, targets, true, o.allowResume, o.routes)
-        if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
-        if (action.type === 'message') {
-          if (isLan) return json(res, 403, {})
+        // A message sent, and what came of it, as the page shows it. The press's agent words the queued line.
+        const sendMessage = (input: Record<string, unknown>, agent: string, isAfterAppQuit: boolean) => {
           try {
-            const receipt = messaging.act('send', { id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text, ...(action.answers === undefined ? {} : { answers: action.answers }) }, Date.now())
+            const receipt = messaging.act('send', input, Date.now())
             const receiptLine = 'line' in receipt ? receipt.line : undefined
-            const agentName = agentLabel(action.connection.agent, o.s)
+            const agentName = agentLabel(agent, o.s)
             const queuedNote = receiptLine === 'nextTurn'
               ? o.s.serveQueuedNextTurn(agentName)
               : receiptLine === 'chatOpen'
                 ? o.s.serveQueuedNextOpen(agentName)
                 : receiptLine === 'reopen'
                   // A Codex desktop app conversation runs only once the app has let go of it (#557).
-                  ? action.connection.isAfterAppQuit === true ? o.s.serveReopenWaitingCodexApp : o.s.serveReopenRunning(agentName)
+                  ? isAfterAppQuit ? o.s.serveReopenWaitingCodexApp : o.s.serveReopenRunning(agentName)
                   : o.s.messagesQueued
             const acceptedNote = receiptLine === 'reopen' ? o.s.serveReopenRunning(agentName) : o.s.messagesAccepted
             const acknowledgedNote = receiptLine === 'reopen' ? o.s.serveReopenDone(agentName) : o.s.messagesAcknowledged
@@ -1199,12 +1193,36 @@ export const startServer = (o: ServeOptions): void => {
             if (['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
             const decision = (error as { decision?: SendDecision } | null)?.decision
             if (error instanceof Error && error.message === 'NO_RECORDED_ROUTE' && decision !== undefined && !decision.canSend) {
-              const state = sessionState(o.view(), action.connection.agent, text(body.session))
-              return json(res, 409, { note: routeText(decision.line, false, action.connection.agent, o.s, state, decision.reason) })
+              const state = sessionState(o.view(), agent, text(body.session))
+              return json(res, 409, { note: routeText(decision.line, false, agent, o.s, state, decision.reason) })
             }
             const notes: Record<string, string> = { ID_CONFLICT: o.s.messagesConflict, TARGET_BUSY: o.s.messagesBusy, PAIR_BUSY: o.s.messagesBusy, TEXT_REFUSED: o.s.messagesTextRefused, CONTESTED: o.s.messagesContested }
             return json(res, 409, { note: error instanceof Error ? notes[error.message] ?? o.s.messagesFailed : o.s.messagesFailed })
           }
+        }
+        // A press made again under an id the board stored is answered with that message, before the card is checked: its
+        // receiver may have connected again since, under a connection the press no longer names. Only for the session it was
+        // sent to, and only with the same words; the store refuses other words (#1843, B3.1). The session is the pressed
+        // card's: its agent and the session it names, so another agent's card with the same session id is refused. A card
+        // gone since (its agent took the answer and moved on) has nothing to show the message on wrongly: the stored
+        // message's own agent stands in for it.
+        const known = text(body.type) === 'message' ? state?.messages.find(one => one.id === body.id) : undefined
+        if (known !== undefined) {
+          const card = boardItems(o.view(), o.pending(), true, false).find(one => one.key === text(body.key))
+          const cardAgent = card === undefined ? agentOf(known.to) : card.type === 'ask' ? card.ask.agent || 'claude' : card.type === 'row' ? card.row.agent || 'claude' : ''
+          if (known.from !== 'board' || known.to !== address(cardAgent, text(body.session))) return json(res, 409, { note: o.s.messagesConflict })
+          const live = state?.connections.find(one => one.id === known.target)
+          return sendMessage({ id: known.id, target: known.target, turn: known.turn, text: replyText(text(body.text)) }, agentOf(known.to), live?.surface === SURFACE_IDS.codexApp)
+        }
+        const view = o.view()
+        // The press picks its target as the card did: a live connection hides the mailbox only on a recorded route (#318).
+        const targets = deliveryTargets(state?.connections ?? [], state?.mailboxes, live => isRecordedRoute(live, (agent, session) => sessionState(view, agent, session), o.routes ?? RECEIVER_ROUTES))
+        // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
+        const action = serveAction(boardItems(view, o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, targets, true, o.allowResume, o.routes)
+        if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
+        if (action.type === 'message') {
+          if (isLan) return json(res, 403, {})
+          return sendMessage({ id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text, ...(action.answers === undefined ? {} : { answers: action.answers }) }, action.connection.agent, action.connection.isAfterAppQuit === true)
         }
         if (action.type === 'send') {
           const sent = send(action.target, action.text, action.title, text(body.key))
