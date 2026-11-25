@@ -7833,7 +7833,7 @@ test('a lost response retries with the same id and shows one message', async () 
   await press('Continue')
   assert.equal(page.requests.length, 1)
   // One try with no answer does not mark the page offline: the next one may get through.
-  assert.ok(!page.text().includes(EN.serveOffline), page.text())
+  assert.notEqual(page.node('offline').textContent, EN.serveOffline)
   assert.deepEqual(await page.runTimers('retrySend'), [2000])
   assert.equal(page.requests.length, 2)
   assert.equal(page.requests[1].body.id, page.requests[0].body.id)
@@ -7854,7 +7854,7 @@ test('a send that gets no answer stops trying again after 30 s and says it faile
   assert.deepEqual(await page.runTimers('retrySend'), [])
   assert.equal(page.requests.length, 15)
   assert.ok(page.text().includes(EN.messagesFailed), page.text())
-  assert.ok(page.text().includes(EN.serveOffline), page.text())
+  assert.equal(page.node('offline').textContent, EN.serveOffline)
 })
 
 test('the page keeps a message\'s id for the same text when its receiver reconnects between presses', async () => {
