@@ -2362,7 +2362,8 @@ test('the person can dismiss an uncertain message and the next message is handed
     const dismissed = dismissMessage(state, input.id, 1002)
     assert.equal(state.messages[0].status, status)
     assert.equal(state.messages[0].error, '')
-    assert.deepEqual(dismissed.messages[0], { ...state.messages[0], status: 'uncertain', error: 'DISMISSED', updated: 1002, text: '' })
+    // A message its host accepted keeps the mark when it is dismissed (#1407).
+    assert.deepEqual(dismissed.messages[0], { ...state.messages[0], status: 'uncertain', error: 'DISMISSED', updated: 1002, text: '', ...(status === 'accepted' ? { hasAccepted: true } : {}) })
     assert.equal(pruneMessages(dismissed, 1002 + OPEN_LIMIT_MS + 1), dismissed)
     assert.equal(disconnectMessages(dismissed, target.id, 1003).messages[0], dismissed.messages[0])
     const next = queueMessage(dismissed, { ...input, id: 'after-dismiss' }, 'board', target, 1003).state
