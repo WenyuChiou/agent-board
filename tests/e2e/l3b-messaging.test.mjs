@@ -158,7 +158,9 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
   ], async hub => {
     const [, receiver] = hub.actors
     await nativeDelivery(hub, hub.actors[0], receiver)
-    const surfaces = { terminal: await terminal.screen(hub.world), print: await print(hub.world) }
+    // The terminal reads the page's store: the hub's page was started on its own folder.
+    const store = ['--messages-dir', hub.messages]
+    const surfaces = { terminal: await terminal.screen(hub.world, store), print: await print(hub.world, store) }
     for (const [surface, output] of Object.entries(surfaces)) {
       assert.ok(output.includes(receiver.title), `${surface}: receiver card missing`)
       noMachineIds(output, hub.world)
