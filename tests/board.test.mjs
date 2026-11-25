@@ -5542,6 +5542,34 @@ test('#1830: a hide that times out and is then written leaves no timed-out warni
   } finally { await board.close() }
 })
 
+// #1786: the board's next draw can take the hidden card away before the hide's own answer comes back. The
+// answer is then drawn as a lost result, and it must carry Show again: the hidden shelf leaves its own
+// button out while that notice is up, so without it the question has no way back.
+test('#1786: a hide whose card is drawn away before its answer still offers Show again on the lost result', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const ask = { key: 'hide-race', task: 'Synthetic task', project: 'Demo', text: 'Blue or green?', kind: 'choose', answers: ['Blue', 'green'], canTick: false, canHide: true, unhideKey: 'hidden:hide-race', command: null, reopen: null, link: null, send: 'copy', fp: 'before' }
+  const base = { counts: { waiting: 1, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [ask] }
+  const hidden = { ...base, counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [{ key: 'hidden:hide-race', project: 'Demo', agent: 'codex', task: 'Synthetic task', text: ask.text }] }
+  let answer
+  const answered = new Promise(done => { answer = done })
+  const calls = []
+  const dom = await pageDom(html, base, { post: async request => { calls.push(request.body); return request.body.type === 'hide' ? answered : { ok: true, json: async () => ({ ok: true, note: 'Shown again' }) } } })
+  dom.buttons().find(button => button.textContent === EN.answeredHide).click()
+  await dom.flush()
+  // The draw that shows the hide written comes first; the hide's answer only after it.
+  await dom.redraw(hidden)
+  answer({ ok: true, json: async () => ({ ok: true, note: 'Hidden: "Blue or green?"' }) })
+  await dom.settle()
+  const lost = pressWalk(dom.node('board')).filter(node => node.tag === 'article' && String(node.className || '').split(' ').includes('lost') && node.textContent.includes('Hidden:'))
+  assert.equal(lost.length, 1, dom.node('board').textContent)
+  const again = pressWalk(lost[0]).filter(node => node.tag === 'button' && node.textContent === EN.showAgain)
+  assert.equal(again.length, 1, 'the lost Hidden notice has its own Show again')
+  again[0].click()
+  await dom.settle()
+  assert.deepEqual(calls.map(body => ({ key: body.key, type: body.type })), [{ key: 'hide-race', type: 'hide' }, { key: 'hidden:hide-race', type: 'unhide' }])
+})
+
 test('#1830: a hide the board refuses says the reason on the card', async () => {
   const board = await page()
   try {
