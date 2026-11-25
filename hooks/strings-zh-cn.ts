@@ -1065,6 +1065,7 @@ export const ZH_CN: Strings = {
   pgProjects: '项目',
   pgSideFold: '收起侧栏',
   pgSideOpen: '展开侧栏',
+  pgDetailRail: '详情',
   pgGithub: '在 GitHub 上查看 Agent Board',
   pgPasteLater: (text: string, agent: string): string => `已复制“${text}”。等 ${agent} 打开后，贴到它的对话。`,
   serveRetry: '再发一次',
@@ -1099,5 +1100,4 @@ export const ZH_CN: Strings = {
   pgTipOpen: (n: number): string => `${n} 件待办`,
   pgTipOpenOne: '1 件待办',
   pgTipCantRead: '读不到它的进度文件',
-  pgDetailRail: '详情',
 }

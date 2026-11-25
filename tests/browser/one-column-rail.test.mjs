@@ -21,6 +21,12 @@ const FIXTURE_MD = () => {
 - [~] Stream rows to temporary file
 - [ ] Upload export bundle
 <!-- /auto session=48490002 -->
+
+## Gamma Project
+<!-- auto session=48490003 agent=grok state=ended updated=${updated} resume=11111111-2222-4333-8444-555555555555 dir=%2Ftmp -->
+### Verify stopped draft persistence
+- [ ] Reconnect grok session
+<!-- /auto session=48490003 -->
 `
 }
 
@@ -109,8 +115,10 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     await page.keyboard.press('Escape')
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
 
-    // Selecting a waiting question card at 1440x900 also opens it in the rail and Esc closes it.
-    await board.question('Retry upload with backoff').locator('.q').click()
+    // Card detail trigger is keyboard-accessible and restores focus on close.
+    const cardBtn = board.question('Retry upload with backoff').locator('.card-detail-btn')
+    await cardBtn.focus()
+    await page.keyboard.press('Enter')
     await page.locator('#detail-rail').waitFor({ state: 'visible' })
     const cardRail = await page.evaluate(() => {
       const rail = document.getElementById('detail-rail')
@@ -118,7 +126,34 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     })
     assert.ok(cardRail.width > 0 && cardRail.width <= 340, `expected rail width <= 340px, got ${cardRail.width}px`)
     assert.match(cardRail.text, /Retry upload with backoff/)
+    await page.locator('#detail-close').focus()
     await page.keyboard.press('Escape')
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
+    assert.equal(await cardBtn.evaluate(node => document.activeElement === node), true, 'closing rail from inside should restore focus to the card detail button')
+
+    // Shrinking from 1440px to 1300px moves the selected task inline and preserves draft, focus, and caret.
+    await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
+    await board.openTask('Verify stopped draft persistence')
+    await page.locator('#detail-rail textarea[data-key]').waitFor({ state: 'visible' })
+    await page.locator('#detail-rail textarea[data-key]').fill('draft keep caret')
+    await page.evaluate(() => {
+      const box = document.querySelector('#detail-rail textarea[data-key]')
+      box.focus()
+      box.setSelectionRange(5, 5)
+    })
+    await page.setViewportSize({ width: 1300, height: 900 })
+    await page.locator('#detail-rail').waitFor({ state: 'hidden' })
+    const inlineRow = board.task('Verify stopped draft persistence')
+    await inlineRow.locator('.row-open textarea[data-key]').waitFor({ state: 'visible' })
+    const preserved = await page.evaluate(() => {
+      const box = document.querySelector('li.row.open .row-open textarea[data-key]')
+      return {
+        value: box?.value,
+        isFocused: document.activeElement === box,
+        start: box?.selectionStart,
+        end: box?.selectionEnd,
+      }
+    })
+    assert.deepEqual(preserved, { value: 'draft keep caret', isFocused: true, start: 5, end: 5 })
   })
 })

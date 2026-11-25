@@ -1072,6 +1072,7 @@ export const EN: Strings = {
   pgProjects: 'Projects',
   pgSideFold: 'Collapse sidebar',
   pgSideOpen: 'Expand sidebar',
+  pgDetailRail: 'Details',
   pgGithub: 'Agent Board on GitHub',
   pgPasteLater: (text: string, agent: string): string => `Copied "${text}". Paste it in ${agent} once it is open again.`,
   serveRetry: 'Send again',
@@ -1106,5 +1107,4 @@ export const EN: Strings = {
   pgTipOpen: (n: number): string => `${n} open`,
   pgTipOpenOne: '1 open',
   pgTipCantRead: "its progress file can't be read",
-  pgDetailRail: 'Details',
 }

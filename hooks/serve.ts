@@ -1024,7 +1024,7 @@ const PAGE_WORDS = [
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent', 'settingsApprovals', 'approvalSwitchFailed',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen', 'sideClose',
+  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen', 'sideClose', 'pgDetailRail',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -1244,6 +1244,7 @@ ${CLIP_CSS}
 .d-title{margin:0;font-size:var(--text-md);line-height:1.4;font-weight:600;overflow-wrap:anywhere}
 .d-body .row-open{opacity:1;background:transparent;padding:0;border-radius:0}
 .row.selected .row-btn,.card.selected{background:var(--current)}
+.card-detail-btn{display:none}
 .s-brand{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 var(--s2)}
 .s-brand .b-logo{flex:1 1 auto;display:flex;align-items:center;min-width:0}.s-brand .b-logo svg,.s-brand .b-icon svg{display:block}
 .s-brand .b-icon{display:none}
@@ -1346,6 +1347,9 @@ ${ICON_CSS}
   .shell[data-rail="1"][data-detail="1"]{grid-template-columns:64px minmax(0,1fr) 340px}
   .shell[data-detail="1"] .detail-rail{display:flex;flex-direction:column;position:sticky;top:0;height:100dvh;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;border-left:1px solid var(--line);background:var(--ground);width:340px;max-width:340px}
   .card[data-ref-key]{cursor:pointer}
+  .card-detail-btn{display:inline-flex;align-items:center;margin-left:auto;padding:0 var(--s2);min-height:24px;border:0;border-radius:var(--radius-s);background:transparent;color:var(--muted);font-size:var(--text-xs);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+  .card-detail-btn:hover{background:var(--hover);color:var(--ink)}
+  .card-detail-btn:active{background:var(--press)}
 }
 @media (max-width:640px){
   .col{padding-left:max(var(--s3),env(safe-area-inset-left,0px));padding-right:max(var(--s3),env(safe-area-inset-right,0px))}
@@ -2133,6 +2137,38 @@ const PAGE_SCRIPT = String.raw`
   var railItems = Object.create(null);
   function isWideDetail() { return typeof window.innerWidth === 'number' && window.innerWidth >= 1440; }
   var wasWideDetail = isWideDetail();
+  var railDraftFocus = null;
+  function syncRailDraftFocus() {
+    var rail = document.getElementById('detail-rail');
+    var active = document.activeElement;
+    if (rail && active && active.getAttribute && active.getAttribute('data-key')) {
+      for (var node = active; node; node = node.parentNode) {
+        if (node === rail) {
+          railDraftFocus = { key: active.getAttribute('data-key'), start: active.selectionStart, end: active.selectionEnd };
+          return;
+        }
+      }
+    }
+  }
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('focusin', function (event) {
+      var rail = document.getElementById('detail-rail');
+      var target = event && event.target;
+      var inRail = false;
+      if (rail && target) for (var node = target; node; node = node.parentNode) if (node === rail) { inRail = true; break; }
+      if (!inRail) { railDraftFocus = null; return; }
+      syncRailDraftFocus();
+    });
+    ['input', 'keyup', 'mouseup', 'select', 'selectionchange'].forEach(function (name) {
+      document.addEventListener(name, syncRailDraftFocus);
+    });
+    document.addEventListener('pointerdown', function (event) {
+      var rail = document.getElementById('detail-rail');
+      var target = event && event.target;
+      if (rail && target) for (var node = target; node; node = node.parentNode) if (node === rail) return;
+      railDraftFocus = null;
+    }, true);
+  }
   function closeDetailRail(restoreFocus) {
     var prevKey = selectedKey;
     var rail = document.getElementById('detail-rail');
@@ -2176,7 +2212,7 @@ const PAGE_SCRIPT = String.raw`
     rail.hidden = false;
     shell.setAttribute('data-detail', '1');
     if (entry.node) toggleClass(entry.node, 'selected', true);
-    if (entry.kind === 'row' && entry.trigger) entry.trigger.setAttribute('aria-expanded', 'true');
+    if (entry.trigger) entry.trigger.setAttribute('aria-expanded', 'true');
   }
   // The first screen describes work, so diagnostic identifiers and logs stay out of its labels.
   function clean(value) {
@@ -2356,7 +2392,16 @@ const PAGE_SCRIPT = String.raw`
     add(card, markOf(ref));
     var body = el('div', 'c-body');
     var project = clean(ref.repo || ask.project);
-    add(body, add(el('div', 'c-meta'), el('span', 'who', id === 'own' ? w('pgOwnTodo') : agentName(agent)), project ? el('span', '', project) : null, el('span', '', ageOf(ref))));
+    var meta = add(el('div', 'c-meta'), el('span', 'who', id === 'own' ? w('pgOwnTodo') : agentName(agent)), project ? el('span', '', project) : null, el('span', '', ageOf(ref)));
+    var detailBtn = navButton(w('pgDetailRail'), function () {
+      selectedKey = selectedKey === ref.key ? '' : ref.key;
+      if (pg.model) draw(pg.model);
+    });
+    detailBtn.className = 'card-detail-btn';
+    detailBtn.setAttribute('aria-expanded', String(isWideDetail() && selectedKey === ref.key));
+    detailBtn.setAttribute('aria-label', w('pgDetailRail') + ': ' + clean(isStuck ? ask.title : ask.text));
+    add(meta, detailBtn);
+    add(body, meta);
     var text = clean(isStuck ? ask.title : ask.text);
     var question = el('p', 'q', text);
     question.setAttribute('title', text);
@@ -2517,7 +2562,7 @@ const PAGE_SCRIPT = String.raw`
       kind: 'card',
       ref: ref,
       node: card,
-      trigger: card,
+      trigger: detailBtn,
       title: text,
       meta: [id === 'own' ? w('pgOwnTodo') : agentName(agent), project, ageOf(ref)].filter(Boolean).join(' · '),
       renderBody: function () {
@@ -3230,13 +3275,6 @@ const PAGE_SCRIPT = String.raw`
     if (drawerBtn) drawerBtn.setAttribute('aria-expanded', String(drawerOpen));
     var side = document.getElementById('side');
     if (side) side.inert = !hasSide && !drawerOpen;
-    var foot = document.getElementById('pfoot');
-    // The footer lives at the foot of the sidebar when it is shown full, or in the drawer when that is open; otherwise under the work.
-    var inSide = (hasSide && !isRail) || (!hasSide && drawerOpen);
-    var home = inSide ? document.getElementById('side-foot') : document.querySelector('main');
-    if (!foot || !home || foot.parentNode === home) return;
-    if (inSide) home.appendChild(foot);
-    else home.insertBefore(foot, document.getElementById('note'));
     var wideNow = isWideDetail();
     if (wideNow !== wasWideDetail) {
       wasWideDetail = wideNow;
@@ -3245,6 +3283,13 @@ const PAGE_SCRIPT = String.raw`
         if (pg.model) draw(pg.model);
       }
     }
+    var foot = document.getElementById('pfoot');
+    // The footer lives at the foot of the sidebar when it is shown full, or in the drawer when that is open; otherwise under the work.
+    var inSide = (hasSide && !isRail) || (!hasSide && drawerOpen);
+    var home = inSide ? document.getElementById('side-foot') : document.querySelector('main');
+    if (!foot || !home || foot.parentNode === home) return;
+    if (inSide) home.appendChild(foot);
+    else home.insertBefore(foot, document.getElementById('note'));
   }
   // While a row is open the list it is in keeps its order, so what is being read does not move; anything new comes first.
   function settle(name, refs) {
@@ -3652,6 +3697,11 @@ const PAGE_SCRIPT = String.raw`
     var active = document.activeElement;
     var focused = active && active.getAttribute && active.getAttribute('data-key');
     var caret = focused ? [active.selectionStart, active.selectionEnd] : null;
+    if (!focused && railDraftFocus && selectedKey && !isWideDetail()) {
+      focused = railDraftFocus.key;
+      caret = [railDraftFocus.start, railDraftFocus.end];
+      railDraftFocus = null;
+    }
     pg.model = model;
     latest = model;
     view.agents.forEach(function (agent) { if (pg.ids.indexOf(agent.agent) === -1) pg.ids.push(agent.agent); });
