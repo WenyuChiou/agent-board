@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -8,6 +8,7 @@ import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
+import { setupAgents as SETUP_AGENT_IDS } from './setup-discovery.mjs'
 
 export const SHAPES = ['S', 'P']
 export const CHECKS = ['a', 'b', 'c', 'd']
@@ -84,14 +85,42 @@ export const defaultCliFor = (overrides = {}) => surface => {
     ?? overrides[surface.name]
     ?? process.env[`AGENT_BOARD_MATRIX_CLI_${surface.id.replace(/[^a-z0-9]+/gi, '_').toUpperCase()}`]
   if (override) {
-    if (typeof override === 'object' && override.command) return override
+    if (typeof override === 'object' && override.command) return { isVendorCli: false, ...override }
     const raw = String(override).trim()
     const parts = raw.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map(p => p.replace(/^["']|["']$/g, '')) ?? []
-    if (parts.length > 0) return { command: parts[0], args: parts.slice(1) }
+    if (parts.length > 0) return { command: parts[0], args: parts.slice(1), isVendorCli: false }
   }
   const binaryPath = findOnPath(surface.binary)
   if (!binaryPath) return null
-  return { command: binaryPath, args: surface.args ?? [] }
+  return { command: binaryPath, args: surface.args ?? [], isVendorCli: true }
+}
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const SETUP_AGENT_SCRIPT = join(REPO_ROOT, 'scripts', 'setup-agent.mjs')
+const MATRIX_SETUP_AGENTS = ['codex', 'antigravity', 'deepseek'].filter(id => SETUP_AGENT_IDS.includes(id))
+
+export const matrixTaskPrompt = ({ surface, shape, question, progress }) =>
+  `Run this agent-board parity check (${surface.name}, shape ${shape}): use progress file ${progress}, ask the user "${question}", wait for their board reply, and continue once the reply arrives.`
+
+// Supplies host-specific task-prompt CLI arguments for real vendor binaries while preserving custom stand-in overrides.
+export const buildCliInvocation = (surface, cli, prompt) => {
+  if (!cli) return null
+  const baseArgs = Array.isArray(cli.args) ? cli.args.map(arg => String(arg)) : []
+  if (cli.isVendorCli !== true) return { command: cli.command, args: baseArgs }
+  if (surface.id === 'claude-cli') {
+    return { command: cli.command, args: baseArgs.at(-1) === '-p' ? [...baseArgs, prompt] : [...baseArgs, '-p', prompt] }
+  }
+  if (surface.id === 'codex-cli') {
+    return { command: cli.command, args: baseArgs.includes('exec') ? [...baseArgs, prompt] : ['exec', ...baseArgs, prompt] }
+  }
+  if (surface.id === 'agy') {
+    return { command: cli.command, args: baseArgs.at(-1) === '-p' ? [...baseArgs, prompt] : [...baseArgs, '-p', prompt] }
+  }
+  if (surface.id === 'deepseek') {
+    const cleanArgs = baseArgs.filter(arg => arg !== 'web')
+    return { command: cli.command, args: cleanArgs.at(-1) === '-p' ? [...cleanArgs, prompt] : [...cleanArgs, '-p', prompt] }
+  }
+  return { command: cli.command, args: [...baseArgs, prompt] }
 }
 
 const killChild = async child => {
@@ -129,7 +158,7 @@ const killChild = async child => {
 }
 
 // Builds an isolated throwaway home for Shape S (setup) or Shape P (plugin connector), never touching the real home.
-export const buildThrowawayHome = ({ shape, tempBase } = {}) => {
+export const buildThrowawayHome = ({ shape, surface, tempBase } = {}) => {
   if (!SHAPES.includes(shape)) throw new Error(`Unsupported install shape: ${String(shape)}`)
   const root = mkdtempSync(join(tempBase ?? tmpdir(), `agent-board-matrix-${shape.toLowerCase()}-`))
   const home = join(root, 'home')
@@ -172,15 +201,6 @@ export const buildThrowawayHome = ({ shape, tempBase } = {}) => {
   mkdirSync(messagesDir, { recursive: true })
   mkdirSync(inboxDir, { recursive: true })
   writeFileSync(progress, '', 'utf8')
-  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${BOARD_SCRIPT}`, 'utf8')
-
-  if (shape === 'P') {
-    writeFileSync(
-      join(claudeDir, 'settings.json'),
-      JSON.stringify({ enabledPlugins: { 'agent-board@agent-board': true }, connector: { progressPath: progress } }, null, 2),
-      'utf8',
-    )
-  }
 
   const env = {
     ...process.env,
@@ -209,6 +229,54 @@ export const buildThrowawayHome = ({ shape, tempBase } = {}) => {
   }
   for (const key of ['AGENT_BOARD_ROUTES', 'AGENT_BOARD_RUNTIME_FOLDER', 'AGENT_BOARD_MESSAGES_DIR', 'CODEX_THREAD_ID', 'AGENT_BOARD_AGENT', 'AGENT_BOARD_SESSION_ID']) {
     delete env[key]
+  }
+
+  if (shape === 'P') {
+    const version = currentPackageVersion()
+    const pluginInstallDir = join(claudeDir, 'plugins', 'cache', 'agent-board', 'agent-board', version)
+    mkdirSync(join(claudeDir, 'plugins'), { recursive: true })
+    mkdirSync(join(pluginInstallDir, '.claude-plugin'), { recursive: true })
+    const manifestSrc = join(REPO_ROOT, '.claude-plugin', 'plugin.json')
+    if (existsSync(manifestSrc)) cpSync(manifestSrc, join(pluginInstallDir, '.claude-plugin', 'plugin.json'))
+    const hooksSrc = join(REPO_ROOT, 'hooks')
+    if (existsSync(hooksSrc)) cpSync(hooksSrc, join(pluginInstallDir, 'hooks'), { recursive: true })
+    writeFileSync(
+      join(claudeDir, 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ version: 2, plugins: { 'agent-board@agent-board': [{ scope: 'user', version, installPath: pluginInstallDir }] } }, null, 2),
+      'utf8',
+    )
+    writeFileSync(
+      join(claudeDir, 'settings.json'),
+      JSON.stringify({ enabledPlugins: { 'agent-board@agent-board': true }, connector: { progressPath: progress } }, null, 2),
+      'utf8',
+    )
+  }
+
+  const setupTargets = surface?.agent
+    ? (MATRIX_SETUP_AGENTS.includes(surface.agent) ? [surface.agent] : [])
+    : MATRIX_SETUP_AGENTS
+  if (setupTargets.length > 0) {
+    const setupRes = spawnSync(
+      process.execPath,
+      [
+        SETUP_AGENT_SCRIPT,
+        '--agent', setupTargets.join(','),
+        '--home', home,
+        '--progress-file', progress,
+        '--data-dir', boardDir,
+        '--lang', 'en',
+        '--apply',
+        '--json',
+      ],
+      { env, cwd: root, encoding: 'utf8', timeout: 30_000, windowsHide: true },
+    )
+    if (setupRes.status !== 0) {
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+      throw new Error(`setup-agent failed for ${setupTargets.join(',')} (status ${setupRes.status}): ${setupRes.stderr || setupRes.stdout}`)
+    }
+  }
+  if (!existsSync(script)) {
+    writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${BOARD_SCRIPT}`, 'utf8')
   }
 
   return {
@@ -322,7 +390,7 @@ export const runCliJourney = async ({
     }))
   }
 
-  const home = buildThrowawayHome({ shape, tempBase })
+  const home = buildThrowawayHome({ shape, surface, tempBase })
   const rows = []
   let server = null
   let cliChild = null
@@ -330,6 +398,7 @@ export const runCliJourney = async ({
   let cliSpawnError = null
   const session = `matrix-${surface.id}-${shape.toLowerCase()}-${randomBytes(4).toString('hex')}`
   const question = `Proceed with ${surface.name} (${shape}) check?`
+  const prompt = matrixTaskPrompt({ surface, shape, question, progress: home.progress })
   const replyText = `Yes, proceed for ${session}`
 
   try {
@@ -371,10 +440,12 @@ export const runCliJourney = async ({
       AGENT_BOARD_MATRIX_SESSION: session,
       AGENT_BOARD_MATRIX_PROGRESS: home.progress,
       AGENT_BOARD_MATRIX_QUESTION: question,
+      AGENT_BOARD_MATRIX_PROMPT: prompt,
       AGENT_BOARD_MATRIX_REPLY: replyText,
     }
     try {
-      const spec = spawnSpecFor(cli)
+      const invocation = buildCliInvocation(surface, cli, prompt)
+      const spec = spawnSpecFor(invocation)
       cliChild = spawn(spec.command, spec.args, {
         env: cliEnv,
         cwd: dirname(home.root),

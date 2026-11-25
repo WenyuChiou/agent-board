@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 import { pathToFileURL } from 'node:url'
-import { CHECKS, DESKTOP_CHECKLIST_PATH, SHAPES, SURFACES, buildThrowawayHome, formatMatrixTable, runMatrix, spawnSpecFor } from '../../scripts/matrix-runner.mjs'
+import { CHECKS, DESKTOP_CHECKLIST_PATH, SHAPES, SURFACES, buildCliInvocation, buildThrowawayHome, formatMatrixTable, runMatrix, spawnSpecFor } from '../../scripts/matrix-runner.mjs'
+import { hasBoardPlugin } from '../../scripts/setup-discovery.mjs'
 
 const tempRoots = []
 const makeTempDir = prefix => {
@@ -174,8 +175,17 @@ test('the runner builds a throwaway home for each install shape and never writes
       assert.ok(h.env.XDG_RUNTIME_DIR.startsWith(h.root), `XDG_RUNTIME_DIR must stay inside throwaway root`)
       assert.notEqual(h.env.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR)
       assert.equal(existsSync(h.script), true)
-      if (shape === 'S') assert.equal(h.progress, join(h.home, '.agent-board', 'progress.md'))
-      else assert.equal(h.progress, join(h.home, '.claude', 'agent-board', 'progress.md'))
+      // Real integrations (Codex, Antigravity, DeepSeek setup files + Shape P installed plugin) are wired in the throwaway home.
+      assert.equal(existsSync(join(h.home, '.codex', 'hooks.json')), true, `shape ${shape} installs Codex hooks`)
+      assert.equal(existsSync(join(h.home, '.gemini', 'config', 'hooks.json')), true, `shape ${shape} installs Antigravity hooks`)
+      assert.equal(existsSync(join(h.home, '.dsh', 'skills', 'agent-board', 'SKILL.md')), true, `shape ${shape} installs DeepSeek skill`)
+      if (shape === 'S') {
+        assert.equal(h.progress, join(h.home, '.agent-board', 'progress.md'))
+        assert.equal(hasBoardPlugin(join(h.home, '.claude')), false)
+      } else {
+        assert.equal(h.progress, join(h.home, '.claude', 'agent-board', 'progress.md'))
+        assert.equal(hasBoardPlugin(join(h.home, '.claude')), true)
+      }
     }
     assert.notEqual(homes[0].root, homes[1].root)
     for (const h of homes) h.cleanup()
@@ -187,6 +197,26 @@ test('the runner builds a throwaway home for each install shape and never writes
     if (prevProgress === undefined) delete process.env.CLAUDE_PROGRESS_FILE; else process.env.CLAUDE_PROGRESS_FILE = prevProgress
     if (prevRuntime === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = prevRuntime
   }
+})
+
+test('real vendor CLIs receive host-specific question-producing task prompts', () => {
+  const prompt = 'Ask the board: Proceed with check?'
+  const cases = [
+    ['claude-cli', ['-p', prompt]],
+    ['codex-cli', ['exec', prompt]],
+    ['agy', ['-p', prompt]],
+    ['deepseek', ['-p', prompt]],
+  ]
+  for (const [id, expectedArgs] of cases) {
+    const surface = SURFACES.find(one => one.id === id)
+    const built = buildCliInvocation(surface, { command: surface.binary, args: surface.args, isVendorCli: true }, prompt)
+    assert.deepEqual(built, { command: surface.binary, args: expectedArgs })
+  }
+  const standIn = SURFACES.find(one => one.id === 'claude-cli')
+  assert.deepEqual(
+    buildCliInvocation(standIn, { command: process.execPath, args: ['standin.mjs'] }, prompt),
+    { command: process.execPath, args: ['standin.mjs'] },
+  )
 })
 
 test("a stand-in CLI that receives the board's reply marks its cell PASS, and one that never does marks FAIL with the step it stopped at", { timeout: 60_000 }, async () => {
