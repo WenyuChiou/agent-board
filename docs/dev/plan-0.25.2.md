@@ -2,6 +2,8 @@
 
 **Status:** draft for the owner's approval in its pull request. Not in force until he approves it.
 
+**Superseded (2026-11-24):** there is no separate 0.25.2 release. The owner chose "Mainstream first": the next release makes the mainstream AIs work end to end, and because its routes change hooks (R7) it is 0.26.0. This plan's no-hook part continues there, see [plan-0.26.0.md](plan-0.26.0.md), section 1; the self-update (U1 to U4) moves to 0.27.0.
+
 **Where it comes from:** a Fable 5.2 review of the whole project after 0.25.1, the owner's five decisions of 2026-11-24 ([#209](https://github.com/WenyuChiou/agent-board/issues/209#issuecomment-7140347947)), a draft plan, and two outside reviews of that draft (Claude Opus and Codex Sol, 13 must-fix findings, all held after a check at the tag; see "Changes from draft 1"). Code read at tag `agent-board--v0.25.1` (`8ccb458b`); nothing was run.
 
 **Fixed inputs:** the Top 10 of the Fable 5.2 diagnosis after 0.25.1, in its order, and its Part D (extensions and the roadmap; both kept outside the repository, their findings cited here by file and issue); the owner's five decisions (#209 comment 7140347947). **Reused:** the self-update design of `docs/dev/plan-0.25.1.md` M3. **Words:** *hook change*, *a person's open*, *release build*, *candidate*, *stand-in* as in `plan-0.25.1.md`. *Step*: learning there is something to do, starting it, answering a question, running a trust command, restarting a host, or opening the board again to check (#1313). *Gate item*: one of Top 10 items 1 to 6.
