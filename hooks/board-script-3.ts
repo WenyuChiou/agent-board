@@ -8266,7 +8266,7 @@ export const LINES = [
 "    var body = el('div', 'shelf-body');",
 "    items.forEach(function (one) {",
 "      var item = el('div', 'hid');",
-"      var line = [one.project, one.agent ? agentName(one.agent) : ''].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : '');",
+"      var line = [one.project, one.isOwn && !one.agent ? '' : agentName(one.agent)].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : '');",
 "      add(item, el('p', 'c-meta', line), el('p', 'q', one.text));",
 "      if (!hasActiveRestore(one.key)) add(item, add(el('div', 'acts'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));",
 "      resultSlot(item, one.key, one.text, one.task);",

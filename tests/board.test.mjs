@@ -11627,6 +11627,15 @@ test('a Claude Code card says Claude Code, a hand-kept card shows a round check 
   assert.ok(chips.some(([id, name]) => id === 'claude' && name.startsWith('Claude Code')), JSON.stringify(chips))
   assert.ok(!chips.some(([id]) => id === 'own'), JSON.stringify(chips))
   assert.ok(!dom.node('side-agents').childNodes.some(node => node.getAttribute('data-agent') === 'own'))
+  const hiddenModel = cardsModel('')
+  hiddenModel.hidden = [
+    { key: 'hid-claude', project: 'demo', agent: '', task: 'Claude task', text: 'Hidden Claude question?' },
+    { key: 'hid-own', project: 'Home', agent: '', isOwn: true, task: 'Own task', text: 'Hidden own item' },
+  ]
+  const hiddenDom = await pageDom(await sourcePage(), hiddenModel)
+  const hiddenLines = pressWalk(hiddenDom.node('board')).filter(node => node.className === 'hid').map(node => node.textContent)
+  assert.ok(hiddenLines.some(line => line.includes('Hidden Claude question?') && line.includes('Claude Code')), JSON.stringify(hiddenLines))
+  assert.ok(hiddenLines.some(line => line.includes('Hidden own item') && !line.includes('Claude Code') && !line.includes('Your own')), JSON.stringify(hiddenLines))
 })
 
 test('an agent without a brand name keeps its own name', async () => {
