@@ -299,16 +299,22 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
       if (callback.name === 'refresh') {
         pollMs = ms
         scheduled = callback
-      } else if (callback.name !== '') waiting.push({ name: callback.name, ms, run: callback })
+      } else if (callback.name !== '') {
+        const wait = { name: callback.name, ms, run: callback }
+        waiting.push(wait)
+        return wait
+      }
       return 1
     },
-    clearTimeout: () => {},
+    // A wait the page clears is no longer due.
+    clearTimeout: wait => { const at = waiting.indexOf(wait); if (at !== -1) waiting.splice(at, 1) },
     fetch: async (target, options) => {
       if (target.startsWith('/api/board')) return { ok: true, json: async () => ({ model, now: 1 }) }
       const request = { path: target, body: JSON.parse(options.body) }
       requests.push(request)
       const promise = post(request)
-      pending.push(promise)
+      // A request the test holds open (no answer, no close) is not waited for by the flush.
+      if (promise?.isHeld !== true) pending.push(promise)
       return promise
     },
   }, { timeout: 1000 })

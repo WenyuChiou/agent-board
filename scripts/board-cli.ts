@@ -2018,6 +2018,8 @@ const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 
     // A closed session is started to take it, and answers only once it is done.
     const res = await fetch(`http://127.0.0.1:${running.port}/api/act`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(route.mode === 'send' ? 300_000 : 5000) })
     const data = (await res.json().catch(() => null)) as { note?: unknown } | null
+    // A body cut off on its way is no answer: the board may have stored the message, so the same key keeps its id (#1843).
+    if (data === null && res.ok) return { note: s.messagesFailed, tone: 'alert' }
     // The board answered: whatever it said, the next press is a new answer.
     answerAttempts.delete(slot)
     const note = typeof data?.note === 'string' && data.note !== '' ? data.note : res.ok ? s.messagesQueued : s.messagesFailed

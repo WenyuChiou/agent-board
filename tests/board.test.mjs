@@ -3927,6 +3927,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   let scheduled, pollMs
   const delays = []
   const timedOut = []
+  // A send to a connected session that gets no answer is tried again every 2 s (#1843); a test fires the next try.
+  const retries = []
   const windowEvents = {}
   const win = {
     confirm, isSecureContext: !!clipboard,
@@ -3958,6 +3960,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       if (run.name === 'refresh') { scheduled = run; pollMs = delay }
       // A press that gets no answer sets its own timer (#1830); a test fires it by name.
       if (run.name === 'actTimedOut') timedOut.push(run)
+      if (run.name === 'retrySend') retries.push(run)
       return 1
     },
     clearTimeout: () => {},
@@ -4020,6 +4023,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     title: () => document.title,
     delays,
     timePress: () => { timedOut.splice(0).forEach(run => run()) },
+    retrySend: () => { retries.splice(0).forEach(run => run()) },
     get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: event => windowEvents.pagehide?.(event),
@@ -5769,6 +5773,16 @@ test('a press that finds the board gone keeps the typed reply', async () => {
       dom.boxes()[0].value = draft
       dom.send().click()
       await dom.settle()
+      // A send to a connected session tries again every 2 s under the same id, for 30 s, before it says it failed (#1843, B3.1).
+      const tries = mode === 'connected' ? 15 : 1
+      if (mode === 'connected') {
+        assert.equal(dom.node('offline').textContent, '', mode)
+        for (let left = tries - 1; left > 0; left--) { dom.retrySend(); await dom.settle() }
+        assert.equal(dom.requests.length, tries)
+        assert.equal(new Set(dom.requests.map(one => one.body.id)).size, 1)
+        dom.retrySend()
+        await dom.settle()
+      }
       assert.equal(dom.boxes()[0].value, draft, mode)
       assert.equal(dom.node('note').textContent, '', mode)
       // The failed press also says so beside its own card, in words the page was given.
@@ -5776,15 +5790,15 @@ test('a press that finds the board gone keeps the typed reply', async () => {
       // A message that did not go carries Send again and Copy message under its line.
       assert.ok(pageCardResults(dom, model.asks[0].key).some(node => node.textContent.startsWith(mode === 'connected' ? words.messagesFailed : words.serveOffline)), mode)
       assert.ok(dom.node('offline').textContent.includes('agent-board'))
-      assert.equal(dom.requests.length, 1)
+      assert.equal(dom.requests.length, tries)
       isReachable = true
       await dom.redraw(model)
       await dom.settle()
       assert.equal(dom.boxes()[0].value, draft)
-      assert.equal(dom.requests.length, 1, 'recovery never replays the failed reply')
+      assert.equal(dom.requests.length, tries, 'recovery never replays the failed reply')
       dom.send().click()
       await dom.settle()
-      assert.equal(dom.requests.length, 2, 'an explicit retry is allowed')
+      assert.equal(dom.requests.length, tries + 1, 'an explicit retry is allowed')
     }
     for (const ok of [false, true]) {
       model.asks[0].send = 'send'
@@ -8909,7 +8923,9 @@ test('an answer key the page refuses shows the page note, sends nothing and neve
   }
 })
 
-test('the terminal board resends a lost answer under the same id', { timeout: 60_000 }, async () => {
+// A page in front of the real one loses the first answer press's answer after the board stored it: 'drop' closes the
+// connection before any answer, 'cut' sends the answer's head and half its body, then closes (#1843, B3.1).
+const terminalLostAnswer = async lose => {
   const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
   const board = await page(`
 ## Demo
@@ -8922,7 +8938,15 @@ test('the terminal board resends a lost answer under the same id', { timeout: 60
   const ids = []
   const forward = (req, res, body, isLost) => {
     const back = request({ host: '127.0.0.1', port: board.port, method: req.method, path: req.url, headers: { ...req.headers, host: `127.0.0.1:${board.port}` }, agent: false }, answer => {
-      if (isLost) return answer.resume().on('end', () => req.socket.destroy())
+      if (isLost && lose === 'drop') return answer.resume().on('end', () => req.socket.destroy())
+      if (isLost) {
+        const parts = []
+        return answer.on('data', part => parts.push(part)).on('end', () => {
+          const whole = Buffer.concat(parts)
+          res.writeHead(answer.statusCode ?? 502, { ...answer.headers, 'content-length': String(whole.length) })
+          res.write(whole.subarray(0, Math.floor(whole.length / 2)), () => setTimeout(() => req.socket.destroy(), 50))
+        })
+      }
       res.writeHead(answer.statusCode ?? 502, answer.headers)
       answer.pipe(res)
     })
@@ -8960,7 +8984,11 @@ test('the terminal board resends a lost answer under the same id', { timeout: 60
     await board.close()
     rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
-})
+}
+
+test('the terminal board resends a lost answer under the same id', { timeout: 60_000 }, () => terminalLostAnswer('drop'))
+
+test('the terminal board keeps the answer's id when its reply is cut off', { timeout: 60_000 }, () => terminalLostAnswer('cut'))
 
 test('t on the terminal board archives what finished at once and leaves the work in progress', () => {
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z')

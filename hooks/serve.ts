@@ -1732,7 +1732,8 @@ const PAGE_SCRIPT = String.raw`
     if (signal) init.signal = signal;
     return fetch(path, init).then(function (res) {
       if (path === '/api/board' && res.status === 304) return { ok: true, unchanged: true };
-      return res.json().catch(function () { return {}; }).then(function (data) {
+      // isUnread: the body was cut off or was not JSON, so a send knows it got no answer it can trust (#1843).
+      return res.json().catch(function () { return { isUnread: true }; }).then(function (data) {
         data.ok = res.ok && data.ok !== false;
         if (requestPage === pageId && path === '/api/board') boardEtag = data.ok && data.model && res.headers ? res.headers.get('etag') || '' : '';
         return data;
@@ -1905,13 +1906,45 @@ const PAGE_SCRIPT = String.raw`
   function reopenQueued(agent, isAfterAppQuit) {
     return isAfterAppQuit ? w('serveReopenWaitingCodexApp') : w('serveReopenRunning', agentName(agent));
   }
+  // A send that gets no answer within 2 s is sent again under the same id, while the earlier tries may still answer: the
+  // first answer wins, and the board answers an id it knows with the message it stored, so a lost or late answer never
+  // makes a second message. After 15 tries and 30 s with no answer the send failed. It stops when the page has moved,
+  // or when the person pressed other words (#1843, B3.1).
+  function sendTries(attempt, body) {
+    return new Promise(function (resolve, reject) {
+      var tries = 0, isSettled = false, wait = 0;
+      function settle(isAnswer, data) {
+        if (isSettled) return;
+        isSettled = true;
+        clearTimeout(wait);
+        attempt.sending = null;
+        if (isAnswer) resolve(data); else reject();
+      }
+      function tryOnce() {
+        if (isSettled) return;
+        if (attempt.isStopped || isClosed) { settle(true, null); return; }
+        if (tries >= SEND_TRIES) { settle(false); return; }
+        tries++;
+        call('/api/act', body, undefined, false, true).then(function (data) {
+          // A body cut off on its way is no answer the page can trust; a refusal with one is an answer.
+          if (!(data.isUnread && data.ok)) settle(true, data);
+        }, function () {});
+        wait = setTimeout(function retrySend() { tryOnce(); }, SEND_RETRY_MS);
+      }
+      tryOnce();
+    });
+  }
   function nativeAct(key, text, delivery, session, asked, fp, go, line) {
     if (isUnreachable) return Promise.resolve(false);
     // One press, one message: the same words to the same question of the same session keep their id, whatever connection
     // or line the card shows by then, so a press made again after the receiver reconnected is the same message (#1843, B3.1).
     var slot = JSON.stringify([key, session, asked]);
     var attempt = messageAttempts[slot];
-    if (!attempt || attempt.text !== text) attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
+    if (!attempt || attempt.text !== text) {
+      // Other words are another message: a send of the earlier words still trying stops, and its answer says nothing.
+      if (attempt) attempt.isStopped = true;
+      attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
+    }
     var who = agentName(delivery.agent);
     var waitingText = line === 'nextTurn'
       ? w('serveQueuingNextTurn', who)
@@ -1927,17 +1960,10 @@ const PAGE_SCRIPT = String.raw`
     busyOn(go);
     say(waitingText, 'wait', key);
     var body = { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp };
-    // A try with no answer goes again under the same id: the board answers an id it knows with the message it stored, so an
-    // answer lost on its way back never makes a second message (#1843, B3.1).
-    var tries = 0;
-    function send() {
-      tries++;
-      return call('/api/act', body, undefined, false, true).catch(function (error) {
-        if (tries >= SEND_TRIES) throw error;
-        return new Promise(function (done) { setTimeout(function retrySend() { done(send()); }, SEND_RETRY_MS); });
-      });
-    }
-    return send().then(function (data) {
+    // A press made again while its send still tries joins that send: one send per message on this page (#1843, B3.1).
+    if (!attempt.sending) attempt.sending = sendTries(attempt, body);
+    return attempt.sending.then(function (data) {
+      if (attempt.isStopped || !data) { busyOff(go, false); return false; }
       var receiptStatus = data.receipt && data.receipt.status;
       var tone = !data.ok || receiptStatus === 'rejected'
         ? 'alert'

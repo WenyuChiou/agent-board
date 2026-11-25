@@ -1202,10 +1202,13 @@ export const startServer = (o: ServeOptions): void => {
         }
         // A press made again under an id the board stored is answered with that message, before the card is checked: its
         // receiver may have connected again since, under a connection the press no longer names. Only for the session it was
-        // sent to, and only with the same words; the store refuses other words (#1843, B3.1).
+        // sent to, and only with the same words; the store refuses other words (#1843, B3.1). The session is the pressed
+        // card's: its agent and the session it names, so another agent's card with the same session id is refused.
         const known = text(body.type) === 'message' ? state?.messages.find(one => one.id === body.id) : undefined
         if (known !== undefined) {
-          if (known.from !== 'board' || known.to !== address(agentOf(known.to), text(body.session))) return json(res, 409, { note: o.s.messagesConflict })
+          const card = boardItems(o.view(), o.pending(), true, false).find(one => one.key === text(body.key))
+          const cardAgent = card?.type === 'ask' ? card.ask.agent : card?.type === 'row' ? card.row.agent : undefined
+          if (cardAgent === undefined || known.from !== 'board' || known.to !== address(cardAgent || 'claude', text(body.session))) return json(res, 409, { note: o.s.messagesConflict })
           const live = state?.connections.find(one => one.id === known.target)
           return sendMessage({ id: known.id, target: known.target, turn: known.turn, text: replyText(text(body.text)) }, agentOf(known.to), live?.surface === SURFACE_IDS.codexApp)
         }
