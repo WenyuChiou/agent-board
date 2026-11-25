@@ -3714,12 +3714,11 @@ test('a second press on the page for the first of two hand-kept tasks with the s
 
 // The page draws from the model's `view` (what the server groups by agent). A model written by hand, with
 // asks, groups and the shelves only, gets the same view the server would give it: every non-own item
-// belongs to Claude Code unless it names an agent, nothing has worked in the last 30 minutes, and the
-// person's own items are their own.
+// belongs to Claude Code unless it names an agent, and hand-kept items carry their writing AI if named.
 const viewed = model => {
   if (!model || model.view) return model
-  const agentOf = item => String(item.agent || 'claude').toLowerCase()
-  const ref = (kind, item, project) => ({ key: item.key, kind, agent: item.isOwn ? '' : agentOf(item), project: project ?? item.project ?? '', repo: project ?? item.project ?? '', at: 0 })
+  const agentOf = item => item.isOwn ? (item.agent ? String(item.agent).toLowerCase() : '') : String(item.agent || 'claude').toLowerCase()
+  const ref = (kind, item, project) => ({ key: item.key, kind, agent: agentOf(item), project: project ?? item.project ?? '', repo: project ?? item.project ?? '', at: 0 })
   const asks = (model.asks ?? []).map(item => ({ item, ref: ref('question', item) }))
   const older = [...(model.reminder ?? []), ...(model.older ?? [])].map(item => ({ item, ref: ref('question', item) }))
   const open = (model.groups ?? []).flatMap(group => group.rows.map(item => ({ item, ref: ref('task', item, group.project) })))
@@ -3731,10 +3730,9 @@ const viewed = model => {
     const [cards, rows, shelf, back, done] = [asks, open, stopped, older, finished].map(list => list.filter(one => pick(one.item)).map(one => one.ref))
     return { counts: { open: rows.length, needs: cards.length, stopped: shelf.length, done: done.length, older: back.length }, cards, open: rows, stopped: shelf, done, older: back }
   }
-  const ids = [...new Set([...asks, ...open, ...stopped, ...older, ...finished].filter(one => !one.item.isOwn).map(one => agentOf(one.item)))]
-  const agents = ids.map(id => ({ agent: id, name: id, icon: id, last: 0, isUnreadable: false, ...bucket(item => !item.isOwn && agentOf(item) === id) }))
-  const all = bucket(item => !item.isOwn)
-  const own = bucket(item => item.isOwn === true)
+  const ids = [...new Set([...asks, ...open, ...stopped, ...older, ...finished].map(one => agentOf(one.item)).filter(Boolean))]
+  const agents = ids.map(id => ({ agent: id, name: id, icon: id, last: 0, isUnreadable: false, ...bucket(item => agentOf(item) === id) }))
+  const all = bucket(() => true)
   const cards = asks.map(one => one.ref)
   return {
     ...model,
@@ -3743,7 +3741,7 @@ const viewed = model => {
       now: 0, n: cards.length, questions: cards.length, stuck: 0, versions: { board: '0.0.0', package: null }, agents,
       // The server lists the cards whose answer is on its way (sent, or queued) and not refused or timed out (#1296).
       needs: { n: cards.length, questions: cards.length, stuck: 0, cards, older: older.map(one => one.ref), handled: asks.filter(one => one.item.isSending === true && !(one.item.receipt && (one.item.receipt.status === 'rejected' || one.item.receipt.status === 'uncertain' && one.item.receipt.hasAccepted !== true && /TIMEOUT/.test(one.item.receipt.error || '')))).map(one => one.ref.key) },
-      working: [], all: { ...all, isHidden: agents.length < 2 }, own, projects: [],
+      working: [], all: { ...all, isHidden: agents.length < 2 }, projects: [],
     },
   }
 }
@@ -10891,21 +10889,19 @@ test('the size warning is one sentence with one Clean up button and its numbers 
           return { ok: response.status === 200, json: async () => response.json() }
         },
       })
-      const paragraphs = dom.node('board').childNodes.filter(node => node.tag === 'p')
-      assert.equal(paragraphs.filter(node => node.textContent === s.boardLarge).length, 1)
-      const warning = paragraphs.find(node => node.textContent === s.boardLarge)
-      // The numbers sit in the quiet details line of the notices block, which comes after the warning.
-      const notices = dom.node('board').childNodes.find(node => node.className === 'notices')
-      const details = pressWalk(notices).find(node => node.tag === 'p' && node.textContent === model.details)
-      assert.ok(details && details.className.includes('t-quiet'))
-      assert.ok(dom.node('board').childNodes.indexOf(notices) > dom.node('board').childNodes.indexOf(warning))
-      assert.doesNotMatch(warning.textContent, /\d/)
-      const buttons = dom.buttons().filter(button => button.textContent === s.cleanUp)
+      const boardText = dom.node('board').textContent
+      assert.ok(!boardText.includes(s.boardLarge))
+      assert.ok(!boardText.includes(model.details))
+      const storage = dom.node('settings-storage')
+      const storageActs = dom.node('settings-storage-acts')
+      assert.equal(storage.hidden, false)
+      assert.equal(dom.node('settings-storage-line').textContent, model.details)
+      const buttons = pressWalk(storageActs).filter(node => node.tag === 'button' && node.textContent === s.cleanUp)
       assert.equal(buttons.length, 1)
       buttons[0].click()
       await dom.settle()
       assert.deepEqual(dom.requests.map(request => request.path), ['/api/clean'])
-      assert.ok(dom.node('board').textContent.includes(s.tidyMoved(3)))
+      assert.ok(storageActs.textContent.includes(s.tidyMoved(3)))
       assert.equal(readFileSync(board.path, 'utf8'), source.replace('### Finished one\n- [x] Last step\n### Finished two\n- [x] Last step\n', ''))
       const archive = readFileSync(join(board.dir, 'progress-archive-2026-10.md'), 'utf8')
       assert.ok(archive.includes('### Finished agent block'))
@@ -10946,11 +10942,13 @@ test('Clean up archives the finished hand-kept tasks it counted and nothing open
           return { ok: response.status === 200, json: async () => response.json() }
         },
       })
-      assert.equal(dom.buttons().filter(button => button.textContent === s.cleanUp).length, 1)
-      dom.buttons().find(button => button.textContent === s.cleanUp).click()
+      const storageActs = dom.node('settings-storage-acts')
+      const cleanButtons = () => pressWalk(storageActs).filter(node => node.tag === 'button' && node.textContent === s.cleanUp)
+      assert.equal(cleanButtons().length, 1)
+      cleanButtons()[0].click()
       await dom.settle()
       assert.deepEqual(dom.requests.map(request => request.path), ['/api/clean'])
-      assert.ok(dom.node('board').textContent.includes(s.tidyMoved(3)))
+      assert.ok(storageActs.textContent.includes(s.tidyMoved(3)))
       assert.equal(readFileSync(board.path, 'utf8'), `## Synthetic\n${remaining}`)
       const archive = readFileSync(join(board.dir, 'progress-archive-2026-10.md'), 'utf8')
       const done = new Date(TIDY_NOW - 4 * day)
@@ -10961,9 +10959,9 @@ test('Clean up archives the finished hand-kept tasks it counted and nothing open
       assert.ok(!model.details.includes(s.canArchive(1)) && !model.details.includes(s.canArchive(2)), model.details)
       const snapshot = () => Object.fromEntries(readdirSync(board.dir).filter(name => statSync(join(board.dir, name)).isFile()).map(name => [name, readFileSync(join(board.dir, name))]))
       const before = snapshot()
-      dom.buttons().find(button => button.textContent === s.cleanUp).click()
+      cleanButtons()[0].click()
       await dom.settle()
-      assert.ok(dom.node('board').textContent.includes(s.tidyScheduledNothing))
+      assert.ok(storageActs.textContent.includes(s.tidyScheduledNothing))
       assert.deepEqual(snapshot(), before)
     } finally { await board.close() }
   }
@@ -11021,6 +11019,48 @@ test('a small page offers Clean up for its archive count and keeps the result af
     assert.equal(model.details, undefined)
     assert.equal(dom.buttons().filter(button => button.textContent === EN.cleanUp).length, 0)
     assert.ok(dom.node('board').textContent.includes(EN.tidyMoved(2)))
+  } finally { await board.close() }
+})
+
+test('Settings cleanup keeps button focus across redraws and keeps its result when crossing below the size limit', { timeout: 15_000 }, async () => {
+  const { seen } = largeManualBoard()
+  const bigFinished = `## Synthetic\n### Finished one\n> Context: ${'synthetic '.repeat(60_000)}\n- [x] Last step\n### Finished two\n- [x] Last step\n### Still open\n- [ ] Next step\n`
+  const board = await page('', {}, [], TIDY_NOW)
+  try {
+    writeFileSync(board.path, bigFinished)
+    writeFileSync(join(board.dir, 'progress-seen.json'), seen)
+    let model = (await board.call('GET', '/api/board')).json().model
+    assert.equal(model.isLarge, true)
+    assert.equal(model.isCleanable, true)
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const dom = await pageDom(html, model, {
+      currentModel: () => model,
+      post: async ({ path, body }) => {
+        if (path !== '/api/clean') return { ok: true, json: async () => ({ ok: true, agents: [] }) }
+        const response = await board.call('POST', path, { body })
+        model = (await board.call('GET', '/api/board')).json().model
+        return { ok: response.status === 200, json: async () => response.json() }
+      },
+    })
+    dom.node('settings-toggle').click()
+    const storageActs = dom.node('settings-storage-acts')
+    const button = pressWalk(storageActs).find(node => node.tag === 'button' && node.textContent === EN.cleanUp)
+    assert.ok(button)
+    button.focus()
+    assert.equal(dom.active(), button)
+    await dom.redraw({ ...model })
+    assert.equal(dom.active(), button, 'Clean up button keeps focus across board redraws')
+    const sameButton = pressWalk(storageActs).find(node => node.tag === 'button' && node.textContent === EN.cleanUp)
+    assert.equal(sameButton, button)
+
+    button.click()
+    await dom.settle()
+    assert.equal(model.isLarge, undefined)
+    assert.equal(dom.node('settings-storage').hidden, false, 'Settings keeps cleanup result visible after crossing below size limit')
+    assert.ok(storageActs.textContent.includes(EN.tidyMoved(2)))
+    assert.ok(!dom.node('board').textContent.includes(EN.tidyMoved(2)))
+    dom.node('settings-close').click()
+    assert.equal(dom.node('settings-storage').hidden, true)
   } finally { await board.close() }
 })
 
@@ -11625,16 +11665,29 @@ test('the page names each agent by its brand name on questions, older questions,
   }
 })
 
-test('a Claude Code card says Claude Code and a hand-kept task names no agent', async () => {
+test('a Claude Code card says Claude Code, a hand-kept card shows a round check and its writing AI mark with no 你的待辦 group', async () => {
   const model = cardsModel('')
-  model.asks.push({ ...model.asks[0], key: 'own-ask', task: 'My checklist', isOwn: true, canTick: true, answers: [] })
-  model.groups[0].rows.push({ ...model.groups[0].rows[0], key: 'own-row', title: 'My task', isOwn: true })
+  model.asks.push({ ...model.asks[0], key: 'own-ask', project: 'Home', task: 'My checklist', text: 'Check the valve', agent: '', isOwn: true, canTick: true, tickFp: 'fp-own-ask', fileLine: 12, answers: [] })
+  model.asks.push({ ...model.asks[0], key: 'own-codex-ask', project: 'reservoir-paper', task: 'Paper sync', text: 'Reconnect the board', agent: 'codex', isOwn: true, canTick: true, tickFp: 'fp-codex-ask', fileLine: 25, answers: [] })
+  model.groups[0].rows.push({ ...model.groups[0].rows[0], key: 'own-row', title: 'My task', agent: '', isOwn: true })
   const dom = await pageDom(await sourcePage(), model)
   const whoOf = key => pressWalk(cardWithKey(dom, key)).find(node => node.className === 'who').textContent
   assert.equal(whoOf('ask'), 'Claude Code')
-  assert.equal(whoOf('own-ask'), EN.pgOwnTodo)
-  assert.ok(!cardRoot(cardWithKey(dom, 'own-ask')).textContent.includes('Claude Code'))
-  // A row carries its agent's mark, and a hand-kept one the person's own.
+  const ownCard = cardRoot(cardWithKey(dom, 'own-ask'))
+  assert.ok(!ownCard.textContent.includes('Claude Code'))
+  assert.ok(!ownCard.textContent.includes('Your own') && !ownCard.textContent.includes('你的待辦'))
+  assert.equal(pressWalk(ownCard).filter(node => node.className === 'chk').length, 1)
+  const codexOwnCard = cardRoot(cardWithKey(dom, 'own-codex-ask'))
+  const codexCheck = pressWalk(codexOwnCard).find(node => node.className === 'chk')
+  assert.ok(codexCheck)
+  const codexBody = pressWalk(codexOwnCard).find(node => node.className === 'c-body')
+  assert.equal(codexBody.childNodes[0].className, 'q')
+  assert.equal(codexBody.childNodes[1].className, 'c-meta')
+  assert.ok(pressWalk(codexBody.childNodes[1]).some(node => String(node.className).includes('ag-codex')))
+  codexCheck.click()
+  await dom.flush()
+  assert.ok(dom.requests.some(req => req.body.type === 'tick' && req.body.key === 'own-codex-ask' && req.body.line === 25))
+  // A row carries its agent's mark, and an anonymous hand-kept one the person's own.
   const rowMark = key => pressWalk(cardRoot(cardWithKey(dom, key))).find(node => node.className?.startsWith('ag ')).className
   assert.equal(rowMark('row'), 'ag ag-claude-code')
   assert.equal(rowMark('own-row'), 'ag ag-own')
@@ -11642,7 +11695,17 @@ test('a Claude Code card says Claude Code and a hand-kept task names no agent', 
   assert.ok(!rowText('own-row').includes('Claude Code'))
   const chips = dom.node('chips').childNodes.map(node => [node.getAttribute('data-agent'), pressWalk(node).find(one => one.className === 'c-name').textContent])
   assert.ok(chips.some(([id, name]) => id === 'claude' && name.startsWith('Claude Code')), JSON.stringify(chips))
-  assert.ok(chips.some(([id, name]) => id === 'own' && name === EN.pgOwn), JSON.stringify(chips))
+  assert.ok(!chips.some(([id]) => id === 'own'), JSON.stringify(chips))
+  assert.ok(!dom.node('side-agents').childNodes.some(node => node.getAttribute('data-agent') === 'own'))
+  const hiddenModel = cardsModel('')
+  hiddenModel.hidden = [
+    { key: 'hid-claude', project: 'demo', agent: '', task: 'Claude task', text: 'Hidden Claude question?' },
+    { key: 'hid-own', project: 'Home', agent: '', isOwn: true, task: 'Own task', text: 'Hidden own item' },
+  ]
+  const hiddenDom = await pageDom(await sourcePage(), hiddenModel)
+  const hiddenLines = pressWalk(hiddenDom.node('board')).filter(node => node.className === 'hid').map(node => node.textContent)
+  assert.ok(hiddenLines.some(line => line.includes('Hidden Claude question?') && line.includes('Claude Code')), JSON.stringify(hiddenLines))
+  assert.ok(hiddenLines.some(line => line.includes('Hidden own item') && !line.includes('Claude Code') && !line.includes('Your own')), JSON.stringify(hiddenLines))
 })
 
 test('an agent without a brand name keeps its own name', async () => {
@@ -12049,10 +12112,11 @@ test("the page opens on Needs you, then Working now, then projects, with each ca
 })
 
 test("the agent row shows each agent's counts and filters the page to that agent", async () => {
-  const { board, model, html } = await groupedPage()
+  const quietClaude = groupedBlock('47700300', 'claude', 'working', 'shared-repo', 'Claude open task', ['- [~] Working on it'], 10)
+  const { board, model, html } = await groupedPage(`${groupedSource()}\n${quietClaude}`)
   try {
     const dom = await pageDom(html, model)
-    assert.deepEqual(dom.node('chips').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
+    assert.deepEqual(dom.node('chips').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['codex', 'gemini', 'cursor', 'claude'])
     // Each icon names its agent, its state and how many questions wait; the badge carries the number.
     assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label'), `${EN.agentNames.codex} · ${EN.pgTipWorking}: ${EN.pgTipNeedsOne}`)
     // Gemini wrote its waiting block 3 minutes ago, so it is open (not heard from: the reply test).
@@ -12069,13 +12133,13 @@ test("the agent row shows each agent's counts and filters the page to that agent
     assert.equal(dom.node('count-needs').textContent, '1')
     assert.ok(!sectionWords(dom, 'working').includes('Unblock'), sectionWords(dom, 'working'))
     // An agent with nothing waiting says so; pressing the icon again shows every agent again.
-    rowAgent(dom, 'own').click()
-    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestionsElsewhere(EN.pgOwn, model.view.needs.n)), shownWords(dom.node('needs')))
-    rowAgent(dom, 'own').click()
+    rowAgent(dom, 'claude').click()
+    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestionsElsewhere(EN.agentNames.claude, model.view.needs.n)), shownWords(dom.node('needs')))
+    rowAgent(dom, 'claude').click()
     const all = shownWords(dom.node('needs'))
     assert.ok(all.includes('Blue or green?') && all.includes('Short or detailed?'), all)
     assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
-    assert.equal(rowAgent(dom, 'own').getAttribute('aria-pressed'), 'false')
+    assert.equal(rowAgent(dom, 'claude').getAttribute('aria-pressed'), 'false')
   } finally { await board.close() }
 })
 
@@ -12708,7 +12772,7 @@ test('an agent with a recently finished task and no closed session shows as open
   assert.equal(node.getAttribute('aria-label'), `Codex · ${EN.pgStateOpen}: No work yet`)
 })
 
-test('the own tasks chip label shows open task counts instead of empty when to-dos are open', async () => {
+test('no own tasks chip is shown when hand-kept to-dos exist, and AI-authored hand-kept questions count under that AI', async () => {
   const model = redesignModel()
   // A hand-kept task with open steps (isOwn: true)
   model.groups = [{
@@ -12718,12 +12782,10 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
     ],
   }]
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
-  const ownNode = rowAgent(dom, 'own')
-  assert.ok(ownNode, 'own chip exists')
-  assert.equal(ownNode.getAttribute('aria-label'), 'Your own tasks: 1 open')
-  assert.equal(ownNode.getAttribute('title'), 'Your own tasks: 1 open')
+  assert.equal(rowAgent(dom, 'own'), undefined)
+  assert.equal(sideAgent(dom, 'own'), undefined)
 
-  // Multiple open tasks show the plural count
+  // Multiple open hand-kept tasks still create no own chip
   const multiModel = redesignModel()
   multiModel.groups = [{
     project: 'compost-rota',
@@ -12733,11 +12795,9 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
     ],
   }]
   const multiDom = await pageDom(await sourcePage(), multiModel, { width: 1280 })
-  const multiOwn = rowAgent(multiDom, 'own')
-  assert.equal(multiOwn.getAttribute('aria-label'), 'Your own tasks: 2 open')
-  assert.equal(multiOwn.getAttribute('title'), 'Your own tasks: 2 open')
+  assert.equal(rowAgent(multiDom, 'own'), undefined)
 
-  // A hand-kept task with a question shows needs you, not open count (finding 4: view.own.open.length avoids double-counting)
+  // A hand-kept task written by Codex counts under Codex's badge (`needs you`, not `open`) and creates no own chip.
   const questionModel = {
     ...redesignModel(),
     asks: [{
@@ -12745,6 +12805,7 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
       project: 'compost-rota',
       task: 'Turn the compost heap',
       text: 'Which bin, OK?',
+      agent: 'codex',
       isOwn: true,
     }],
     groups: [],
@@ -12754,25 +12815,38 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
       questions: 1,
       stuck: 0,
       versions: { board: '0.0.0', package: null },
-      agents: [],
-      needs: { n: 1, questions: 1, stuck: 0, cards: [{ key: 'ask:own:1', kind: 'question', agent: '', project: 'compost-rota', repo: 'compost-rota', at: 0 }], older: [] },
-      working: [],
-      all: { counts: { open: 1, needs: 1, stopped: 0, done: 0, older: 0 }, cards: [], open: [], stopped: [], done: [], older: [], isHidden: true },
-      own: {
+      agents: [{
+        agent: 'codex',
+        name: 'Codex',
+        icon: 'codex',
+        last: 0,
+        isUnreadable: false,
         counts: { open: 1, needs: 1, stopped: 0, done: 0, older: 0 },
-        cards: [{ key: 'ask:own:1', kind: 'question', agent: '', project: 'compost-rota', repo: 'compost-rota', at: 0 }],
+        cards: [{ key: 'ask:own:1', kind: 'question', agent: 'codex', project: 'compost-rota', repo: 'compost-rota', at: 0 }],
         open: [],
         stopped: [],
         done: [],
         older: [],
+      }],
+      needs: { n: 1, questions: 1, stuck: 0, cards: [{ key: 'ask:own:1', kind: 'question', agent: 'codex', project: 'compost-rota', repo: 'compost-rota', at: 0 }], older: [] },
+      working: [],
+      all: {
+        counts: { open: 1, needs: 1, stopped: 0, done: 0, older: 0 },
+        cards: [{ key: 'ask:own:1', kind: 'question', agent: 'codex', project: 'compost-rota', repo: 'compost-rota', at: 0 }],
+        open: [],
+        stopped: [],
+        done: [],
+        older: [],
+        isHidden: true,
       },
       projects: [],
     },
   }
   const questionDom = await pageDom(await sourcePage(), questionModel, { width: 1280 })
-  const questionOwn = rowAgent(questionDom, 'own')
-  assert.equal(questionOwn.getAttribute('aria-label'), 'Your own tasks: 1 needs you')
-  assert.equal(questionOwn.getAttribute('title'), 'Your own tasks: 1 needs you')
+  assert.equal(rowAgent(questionDom, 'own'), undefined)
+  const codexChip = rowAgent(questionDom, 'codex')
+  assert.equal(badgeOf(codexChip).textContent, '1')
+  assert.match(codexChip.getAttribute('aria-label'), /1 needs you/)
 })
 
 test('a hand-written own task with one unfinished step shows no Last: for it and one Done button per step', async () => {
@@ -13105,8 +13179,8 @@ test('on a wide screen the sidebar lists views, agents and projects', async () =
     assert.equal(dom.node('count-working').textContent, heading('working-now'))
     assert.ok(Number(dom.node('count-others').textContent) > 0)
     // The agents of the icon row, with the same labels and numbers, and the projects that have something open.
-    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
-    for (const id of ['own', 'codex', 'gemini', 'cursor']) assert.equal(sideAgent(dom, id).getAttribute('aria-label'), rowAgent(dom, id).getAttribute('aria-label'), id)
+    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['codex', 'gemini', 'cursor'])
+    for (const id of ['codex', 'gemini', 'cursor']) assert.equal(sideAgent(dom, id).getAttribute('aria-label'), rowAgent(dom, id).getAttribute('aria-label'), id)
     assert.equal(badgeOf(sideAgent(dom, 'codex')).textContent, '1')
     assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => node.getAttribute('data-project')), ['client-repo', 'deep-project', 'docs-repo', 'shared-repo'])
     assert.equal(projectCount(dom, 'docs-repo'), '1')
@@ -13199,7 +13273,7 @@ test('a project in the sidebar counts its questions, working tasks and other wor
     // shared-fix-project: two questions and one stuck task wait on the person (3), one task is working, one is hand-kept
     // (the stopped task is not open); other-fix-project has one working task.
     assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => `${node.getAttribute('data-project')}:${projectCount(dom, node.getAttribute('data-project'))}`), ['other-fix-project:1', 'shared-fix-project:5'])
-    assert.equal(model.view.all.stopped.length + model.view.own.stopped.length, 1)
+    assert.equal(model.view.all.stopped.length, 1)
     // The Other work view counts the stopped task apart from its open one.
     assert.equal(dom.node('count-others').textContent, '2')
     // A stopped task with a question: the question is a card on the sheet, counted once as waiting, and the task is not also a row.
@@ -13209,8 +13283,8 @@ test('a project in the sidebar counts its questions, working tasks and other wor
     const seen = { [runtime.taskFingerprint(project, projects[0].tasks[0])]: groupedNow - runtime.IDLE_MS - 1 }
     const view = runtime.buildView(projects, [], null, groupedNow, 0, {}, EN, [], seen)
     const idle = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null } })
-    assert.equal(idle.view.own.stopped.length, 1)
-    assert.equal(idle.view.own.open.length, 0)
+    assert.equal(idle.view.all.stopped.length, 1)
+    assert.equal(idle.view.all.open.length, 0)
     const stopped = await pageDom(runtime.servePage(EN, 'synthetic', false, 0, true), idle, { width: 1280 })
     assert.equal(projectCount(stopped, project), '1')
     assert.equal(stopped.node('count-needs').textContent, '1')
@@ -13227,7 +13301,7 @@ test('the tab title, the Needs you flag, the agent badges and the sidebar show t
     assert.equal(dom.node('count-needs').textContent, String(expected))
     const flags = dom.node('board').querySelectorAll('[data-needs-count]')
     assert.ok(flags.length > 0 && flags.every(flag => Number(flag.getAttribute('data-needs-count')) === expected))
-    const badges = ['own', 'codex', 'gemini', 'cursor'].map(id => Number(badgeOf(rowAgent(dom, id))?.textContent ?? 0))
+    const badges = ['codex', 'gemini', 'cursor'].map(id => Number(badgeOf(rowAgent(dom, id))?.textContent ?? 0))
     assert.equal(badges.reduce((sum, one) => sum + one, 0), expected)
     // Nothing waiting: the title goes back to the plain name, the sidebar number and the badges leave, and the icons keep their order.
     const next = structuredClone(model)
@@ -13237,8 +13311,6 @@ test('the tab title, the Needs you flag, the agent badges and the sidebar show t
     next.view.needs.stuck = 0
     next.view.needs.cards = []
     next.view.agents.forEach(agent => { agent.counts.needs = 0; agent.cards = [] })
-    next.view.own.counts.needs = 0
-    next.view.own.cards = []
     await dom.redraw(next)
     await dom.settle()
     assert.equal(dom.title(), 'Agent Board')
@@ -13602,7 +13674,7 @@ test('under 560 px the sidebar opens as a drawer from the button at the top left
     assert.equal(dom.node('pfoot').parentNode, dom.node('side-foot'))
     // The drawer shows the same views, agents and projects as the wide sidebar, with the same counts.
     assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
-    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
+    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['codex', 'gemini', 'cursor'])
     assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => node.getAttribute('data-project')), ['client-repo', 'deep-project', 'docs-repo', 'shared-repo'])
     // The button again shuts it, and focus goes back to the button.
     btn.click()
@@ -14850,15 +14922,15 @@ test('#1085: a style picked on the page is written to the settings file with its
   } finally { await board.close() }
 })
 
-test('Settings has one labelled button and five accessible sections in every language and keeps focus inside until closed', async () => {
+test('Settings has one labelled button and six accessible sections in every language and keeps focus inside until closed', async () => {
   for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
     const html = await sourcePage(lang)
     assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
     assert.doesNotMatch(html, /data-theme-toggle|data-look-menu/)
     assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
     const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
-    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsApprovals, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
-    assert.equal((panel.match(/<section\b/g) ?? []).length, 5)
+    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsApprovals, words.settingsStorage, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 6)
     const dom = await pageDom(html, redesignModel(), { width: 375 })
     assert.equal(dom.node('settings').hidden, true)
     dom.node('settings-toggle').click()

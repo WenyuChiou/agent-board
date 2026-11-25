@@ -126,7 +126,7 @@ test('L7 page: the copy status never shows a session id, and a refused copy leav
       const bucket = one => ({ ...one, counts: { open: 0, needs: 0, stopped: 0, done: 0, older: 0 }, cards: [], open: [], stopped: [], done: [], older: [] })
       await late.redraw({
         ...model, asks: [], hidden: [], idle: [], stopped: [], groups: [], turns: [], recent: [],
-        view: { ...model.view, n: 0, questions: 0, stuck: 0, agents: [], working: [], projects: [], needs: { n: 0, questions: 0, stuck: 0, cards: [], older: [] }, all: bucket(model.view.all), own: bucket(model.view.own) },
+        view: { ...model.view, n: 0, questions: 0, stuck: 0, agents: [], working: [], projects: [], needs: { n: 0, questions: 0, stuck: 0, cards: [], older: [] }, all: bucket(model.view.all) },
       })
       const lostField = () => late.inputs(resultSlot(late.cards().find(card => card.textContent.includes('Review gateway'))))[0]
       lostField().setSelectionRange(2, 7)
