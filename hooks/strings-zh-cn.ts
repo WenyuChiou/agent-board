@@ -654,6 +654,7 @@ export const ZH_CN: Strings = {
   pressPending: '处理中…',
   pressDone: '操作完成。',
   pressFailed: '这次操作未能完成，请重试。',
+  pressTimedOut: '看板没有及时回应。这一项可能已经保存，页面正在重新确认。',
   settingSaveFailed: '无法保存这个设置，所以没有更改。请重试。',
   pressCopyFallback: '无法复制，请手动复制下方文字。',
   pressHidden: '已在这台电脑上隐藏。',

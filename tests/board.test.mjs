@@ -3928,6 +3928,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   let clockNow = now === undefined ? Date.now() : now
   let scheduled, pollMs
   const delays = []
+  const timedOut = []
   const windowEvents = {}
   const win = {
     confirm, isSecureContext: !!clipboard,
@@ -3957,6 +3958,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       delays.push(delay)
       // Identify the shipped refresh callback, independently of its delay or motion timers.
       if (run.name === 'refresh') { scheduled = run; pollMs = delay }
+      // A press that gets no answer sets its own timer (#1830); a test fires it by name.
+      if (run.name === 'actTimedOut') timedOut.push(run)
       return 1
     },
     clearTimeout: () => {},
@@ -4018,6 +4021,7 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     active: () => document.activeElement,
     title: () => document.title,
     delays,
+    timePress: () => { timedOut.splice(0).forEach(run => run()) },
     get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: event => windowEvents.pagehide?.(event),
@@ -5469,6 +5473,86 @@ test('every press on a page whose server restarted with a new key shows the offl
       assert.equal(refreshes, 1, `${action}: refreshes without waiting for a poll`)
       assert.ok(dom.allButtons().filter(button => button.getAttribute('data-local') === null).every(button => button.disabled), action)
     }
+  } finally { await board.close() }
+})
+
+// #1830: "Answered, hide" stayed at "Working…" with no result and no reason, in every language.
+for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+  const hideCase = () => {
+    const ask = { key: 'hide-card', task: 'Synthetic task', project: 'Demo', text: 'Keep it, OK?', kind: 'confirm', answers: [], canTick: false, canHide: true, unhideKey: 'hidden:hide-card', command: null, reopen: null, link: null, send: 'copy', fp: 'before' }
+    const base = { counts: { waiting: 1, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [ask] }
+    const hidden = { ...base, counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [{ key: 'hidden:hide-card', task: 'Synthetic task', text: ask.text, project: 'Demo' }] }
+    return { ask, base, hidden }
+  }
+  test(`#1830 (${lang}): a hide the board never answers says why on the card instead of staying at Working…`, async () => {
+    const board = await page('', {}, ['--lang', lang])
+    try {
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+      const { ask, base } = hideCase()
+      const dom = await pageDom(html, base, { post: () => new Promise(() => {}) })
+      dom.buttons().find(button => button.textContent === words.answeredHide).click()
+      await dom.flush()
+      assert.equal(pageCardResults(dom, ask.key)[0].textContent, words.pressPending)
+      dom.timePress()
+      await dom.flush()
+      const line = pageCardResults(dom, ask.key)[0]
+      assert.equal(line.textContent, words.pressTimedOut)
+      assert.notEqual(words.pressTimedOut, undefined)
+      assert.match(line.className, /alert/)
+    } finally { await board.close() }
+  })
+  test(`#1830 (${lang}): a hide the board wrote leaves Needs you on the next draw and leaves no Working… behind`, async () => {
+    const board = await page('', {}, ['--lang', lang])
+    try {
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+      const { base, hidden } = hideCase()
+      const dom = await pageDom(html, base, { post: () => new Promise(() => {}) })
+      dom.buttons().find(button => button.textContent === words.answeredHide).click()
+      await dom.flush()
+      await dom.redraw(hidden)
+      assert.equal(pressWalk(dom.node('board')).filter(node => node.getAttribute('data-card-key') === 'hide-card').length, 0)
+      assert.ok(!dom.node('board').textContent.includes(words.pressPending), dom.node('board').textContent)
+      // The timer firing after the hidden draw adds no warning.
+      dom.timePress()
+      await dom.flush()
+      assert.ok(!dom.node('board').textContent.includes(words.pressTimedOut), dom.node('board').textContent)
+    } finally { await board.close() }
+  })
+}
+
+test('#1830: a hide that times out and is then written leaves no timed-out warning once the hidden shelf shows it', async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const ask = { key: 'hide-card', task: 'Synthetic task', project: 'Demo', text: 'Keep it, OK?', kind: 'confirm', answers: [], canTick: false, canHide: true, unhideKey: 'hidden:hide-card', command: null, reopen: null, link: null, send: 'copy', fp: 'before' }
+    const base = { counts: { waiting: 1, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [ask] }
+    const hidden = { ...base, counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [{ key: 'hidden:hide-card', task: 'Synthetic task', text: ask.text, project: 'Demo' }] }
+    const dom = await pageDom(html, base, { post: () => new Promise(() => {}) })
+    dom.buttons().find(button => button.textContent === words.answeredHide).click()
+    await dom.flush()
+    dom.timePress()
+    await dom.flush()
+    assert.equal(pageCardResults(dom, ask.key)[0].textContent, words.pressTimedOut)
+    await dom.redraw(hidden)
+    assert.ok(!dom.node('board').textContent.includes(words.pressTimedOut), dom.node('board').textContent)
+    assert.ok(!dom.node('board').textContent.includes(words.pressPending), dom.node('board').textContent)
+  } finally { await board.close() }
+})
+
+test('#1830: a hide the board refuses says the reason on the card', async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const ask = { key: 'refuse-card', task: 'Synthetic task', project: 'Demo', text: 'Keep it, OK?', kind: 'confirm', answers: [], canTick: false, canHide: true, unhideKey: 'hidden:refuse-card', command: null, reopen: null, link: null, send: 'copy', fp: 'before' }
+    const base = { counts: { waiting: 1, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [ask] }
+    const dom = await pageDom(html, base, { post: async () => ({ ok: false, json: async () => ({ note: 'Could not save that it was answered.' }) }) })
+    dom.buttons().find(button => button.textContent === words.answeredHide).click()
+    await dom.settle()
+    assert.equal(pageCardResults(dom, ask.key)[0].textContent, 'Could not save that it was answered.')
   } finally { await board.close() }
 })
 

@@ -657,6 +657,7 @@ export const EN: Strings = {
   pressPending: 'Working…',
   pressDone: 'Action completed.',
   pressFailed: 'Could not complete this action. Please try again.',
+  pressTimedOut: 'The board did not answer in time. It may still have saved this; the page is checking again.',
   settingSaveFailed: 'Couldn\'t save this setting, so it is unchanged. Please try again.',
   pressCopyFallback: 'Could not copy; here is the text to copy by hand.',
   pressHidden: 'Hidden on this computer.',
