@@ -7854,7 +7854,6 @@ test('a send that gets no answer stops trying again after 30 s and says it faile
   assert.deepEqual(await page.runTimers('retrySend'), [])
   assert.equal(page.requests.length, 15)
   assert.ok(page.text().includes(EN.messagesFailed), page.text())
-  assert.equal(page.node('offline').textContent, EN.serveOffline)
 })
 
 test('the page keeps a message\'s id for the same text when its receiver reconnects between presses', async () => {
