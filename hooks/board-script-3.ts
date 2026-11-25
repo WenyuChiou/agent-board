@@ -7187,6 +7187,7 @@ export const LINES = [
 "    var card = el('article', 'card');",
 "    card.setAttribute('data-ref-key', ref.key);",
 "    if (isOwnCard && ask.canTick) {",
+"      card.setAttribute('data-card-key', key);",
 "      var chk = button('', function () { act(key, 'tick', '', '', '', '', ask.tickFp, undefined, ask.fileLine); }, 'chk');",
 "      chk.setAttribute('aria-label', w('pgDone'));",
 "      chk.setAttribute('title', w('pgDone'));",
