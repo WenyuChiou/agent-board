@@ -224,6 +224,8 @@ export type ServeAsk = {
   unhideKey?: string
   archiveNote: string
   send: SendMode
+  // Live delivery connection surface (used for CLI vs App interface filtering).
+  surface?: string
   // The session a reply goes to: the page sends it back with the reply, so a line that now
   // belongs to another session is refused.
   session: string
@@ -290,6 +292,7 @@ export type ServeRow = {
   nextFileLine?: number
   // A hand-kept task, the person's own (its agent is '', as Claude Code's is); absent otherwise.
   isOwn?: true
+  surface?: string
   canArchive: boolean
   canConfirm: boolean
   archiveNote: string
@@ -619,6 +622,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         canHide: ask.hideKey !== '' && ask.canHide !== false,
         ...(ask.hideKey !== '' && ask.canHide !== false ? { unhideKey: `hidden:${ask.hideKey}` } : {}),
         send,
+        ...(found?.surface === undefined ? {} : { surface: found.surface }),
         session: connection?.session ?? ask.target?.session ?? '',
         fp: fingerprint(item, items),
         tickFp: fingerprint(item, items, true),
@@ -705,6 +709,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         isAsking: row.question !== null,
         question: row.question ?? '',
         send,
+        ...(found?.surface === undefined ? {} : { surface: found.surface }),
         session: connection?.session ?? row.target?.session ?? '',
         fp: fingerprint(item, items),
         tickFp: fingerprint(item, items, true),
@@ -1023,6 +1028,7 @@ const PAGE_WORDS = [
   'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent', 'settingsApprovals', 'approvalSwitchFailed',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'pgSearchPlaceholder', 'pgSearchLabel', 'pgFilterBar', 'pgFilterAgent', 'pgFilterProject', 'pgFilterInterface', 'pgInterfaceCli', 'pgInterfaceApp', 'pgFilterClear', 'pgSearchEmpty',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -1264,7 +1270,27 @@ ${ICON_CSS}
 .s-agent[data-presence="notseen"] .ag::after{background:linear-gradient(var(--muted),var(--muted)) center/6px 2px no-repeat var(--ground)}
 .s-agent.working .ag::after{border-color:var(--ground);border-radius:var(--radius-round);background:var(--alive)}
 .s-agent[aria-pressed="true"].working .ag::after,.s-agent[aria-pressed="true"][data-presence="offline"] .ag::after,.s-agent[aria-pressed="true"][data-presence="notseen"] .ag::after{border-color:var(--current)}
-.shell[data-empty="1"] :is(.s-views,.s-projects){display:none}
+.shell[data-empty="1"] :is(.s-views,.s-projects,.s-search,.f-bar){display:none}
+.s-search{position:relative;display:flex;align-items:center;gap:var(--s2);min-height:var(--hit);padding:0 var(--s2);border:1px solid var(--line-strong);border-radius:var(--radius-m);background:var(--inset)}
+.s-search:focus-within{border-color:var(--accent);outline:2px solid var(--accent);outline-offset:-1px}
+.s-search svg.i{flex:none;width:16px;height:16px;color:var(--muted)}
+.s-search input{flex:1 1 auto;width:100%;min-width:0;border:0;background:transparent;color:var(--ink);font:inherit;font-size:var(--text-sm);line-height:1.4;padding:0;outline:none}
+.s-search input::placeholder{color:var(--muted)}
+.s-search-key{flex:none;padding:0 var(--s1);border:1px solid var(--line);border-radius:var(--radius-s);color:var(--muted);font-family:var(--font-mono);font-size:var(--text-xs);line-height:1.4}
+.f-bar{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);min-width:0}
+.f-group{position:relative}
+button.f-chip{display:inline-flex;align-items:center;gap:var(--s1);min-height:var(--hit);padding:0 var(--s3);border:1px solid var(--btn-line);border-radius:var(--radius-round);background:var(--surface);color:var(--ink);font:inherit;font-size:var(--text-xs);line-height:1.4;cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out)}
+button.f-chip:hover{background:var(--hover)}
+button.f-chip[data-active="1"]{border-color:var(--accent);background:var(--current);font-weight:600}
+button.f-chip::after{content:"";width:6px;height:6px;margin-left:2px;border-right:1.5px solid var(--muted);border-bottom:1.5px solid var(--muted);transform:translateY(-1px) rotate(45deg)}
+button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135deg)}
+.f-menu{position:absolute;top:calc(100% + var(--s1));left:0;z-index:6;min-width:184px;max-width:260px;max-height:280px;overflow:auto;display:grid;gap:2px;padding:var(--s1);border:1px solid var(--line-strong);border-radius:var(--radius-m);background:var(--ground)}
+.f-menu[hidden]{display:none}
+.f-opt{display:flex;align-items:center;justify-content:space-between;gap:var(--s3);width:100%;min-height:var(--hit);padding:var(--s1) var(--s2);border:0;border-radius:var(--radius-s);background:transparent;color:var(--ink);font:inherit;font-size:var(--text-xs);line-height:1.4;text-align:left;cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out)}
+.f-opt:hover{background:var(--hover)}
+.f-opt[aria-checked="true"]{background:var(--current);font-weight:600}
+.f-opt-n{flex:none;color:var(--muted);font-variant-numeric:tabular-nums}
+.f-bar .quiet{min-height:var(--hit);padding:0 var(--s2);font-size:var(--text-xs)}
 /* Settings occupies the reserved sidebar row and follows the work when the sidebar folds. */
 .s-foot{margin-top:auto;position:sticky;bottom:0;background:var(--ground);padding:var(--s3) 0 max(var(--s2),env(safe-area-inset-bottom,0px));border-top:1px solid var(--line)}
 .side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
@@ -1306,7 +1332,7 @@ ${ICON_CSS}
   .col{max-width:1040px}
   /* the rail: the views and the agents as 44px icons with their badges; names in the tooltip; the project link, the theme and Close the board in the footer */
   .shell[data-rail="1"] .side{padding:var(--s3) 10px;align-items:center}
-  .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-logo){display:none}
+  .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-logo,.s-search){display:none}
   .shell[data-rail="1"] .s-brand .b-icon{display:block}
   .shell[data-rail="1"] .s-brand{flex-direction:column;gap:var(--s2);padding:0}
   .shell[data-rail="1"] .s-group{align-items:center;width:100%}
@@ -1367,7 +1393,7 @@ ${ICON_CSS}
 }
 /* A finger, not the width, decides target size: a narrow window with a mouse keeps the desktop sizes. */
 @media (pointer:coarse){
-  .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.s-item{min-height:44px}
+  .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.s-item,.f-chip,.f-opt,.f-bar .quiet{min-height:44px}
   .link{min-height:44px}
   .answers button,.answers .btn{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet{flex:0 0 auto;min-height:44px}
@@ -1416,6 +1442,7 @@ ${settingsCss}
 <aside class="side" id="side" aria-label="Agent Board">
 <button type="button" class="s-item drawer-close" id="drawer-close" data-local><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg><span class="s-txt">${esc(s.sideClose)}</span></button>
 <div class="s-brand"><span class="b-logo">${boardLogo(esc(s.serveLiveHint))}</span><span class="b-icon">${boardIcon(28, esc(s.serveLiveHint))}</span><button type="button" class="s-toggle" id="side-toggle" data-local aria-expanded="true" aria-label="${esc(s.pgSideFold)}" title="${esc(s.pgSideFold)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6.5 2.5v11"/></svg></button></div>
+<div class="s-search" id="side-search-wrap"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5"/><path d="M10.5 10.5 14 14"/></svg><input type="search" id="side-search" autocomplete="off" spellcheck="false" placeholder="${esc(s.pgSearchPlaceholder)}" aria-label="${esc(s.pgSearchLabel)}"><kbd class="s-search-key" aria-hidden="true">/</kbd></div>
 <nav class="s-group s-views" id="side-views" aria-label="${esc(s.pgViews)}">${sideView('all', s.pgOverview, false)}${sideView('needs', s.pgNeeds, true)}${sideView('working', s.pgWorking, true)}${sideView('others', s.pgOthers, true)}${sideView('done', s.pgDone, true)}</nav>
 <div class="s-group s-agents" id="side-agent-group" role="group" aria-labelledby="side-agents-label" hidden><p class="s-label" id="side-agents-label">${esc(s.pgAgents)}</p><div class="s-group" id="side-agents"></div></div>
 <div class="s-group s-projects" id="side-project-group" role="group" aria-labelledby="side-projects-label" hidden><p class="s-label" id="side-projects-label">${esc(s.pgProjects)}</p><div class="s-group" id="side-projects"></div></div>
@@ -1428,6 +1455,7 @@ ${settingsCss}
 <div id="offline" role="status" aria-live="polite"></div>
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
+<div class="f-bar" id="filter-bar" role="region" aria-label="${esc(s.pgFilterBar)}"></div>
 <div id="board"></div>
 <details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><svg class="i" viewBox="0 0 16 16" role="img" aria-label="GitHub"><path d="${GITHUB_PATH}"/></svg><span id="versions"></span></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${settingsToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static aria-label="${esc(s.serveClose)}" title="${esc(s.serveClose)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="${POWER_PATH}"/></svg></button></footer>
 <div id="note" role="status" aria-live="polite"></div>
@@ -2181,7 +2209,7 @@ const PAGE_SCRIPT = String.raw`
     node.setAttribute('aria-hidden', 'true');
     return node;
   }
-  var pg = { filter: '', project: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
+  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
   var cardState = {};
   var cardParts = {};
   var cardChoices = Object.create(null);
@@ -2235,9 +2263,49 @@ const PAGE_SCRIPT = String.raw`
   function nameOf(id) { return agentName(id); }
   // The project a card or a row belongs to, as the page names it.
   function projectOf(ref) { return clean(ref.repo || source(ref).project || ''); }
-  // The agent filter (icon row or sidebar) and the project filter (sidebar) both apply; either may be empty.
-  function matchesAgent(id) { return !pg.filter || pg.filter === id; }
-  function matches(id, project) { return matchesAgent(id) && (!pg.project || pg.project === project); }
+  // Interface classification: app/IDE/web vs CLI/TUI, inferred from live surface or agent kind.
+  function interfaceOf(ref) {
+    var one = source(ref);
+    if (one.delivery && one.delivery.isAfterAppQuit) return 'app';
+    var surface = String(one.surface || '');
+    if (surface === 'Codex desktop app' || surface === 'IDE' || surface === 'IDE (Composer)' || surface === 'Web') return 'app';
+    if (surface && surface !== 'unknown') return 'cli';
+    var id = agentOf(ref);
+    if (one.isOwn || ref.isOwn || !id || id === '?') return '';
+    if (id === 'antigravity' || id === 'cursor' || id === 'claude-web' || id === 'chatgpt' || id === 'gemini-web' || id === 'grok-web') return 'app';
+    return 'cli';
+  }
+  // Search folding adapted from T3 Code (paletteSearch): NFKD + strip combining marks + apostrophe fold + case-fold.
+  function foldSearchText(value) {
+    var text = String(value || '');
+    if (typeof text.normalize === 'function') text = text.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+    return text.replace(/[\u2018\u2019]/g, "'").toLowerCase();
+  }
+  function searchHaystack(ref) {
+    var one = source(ref);
+    var chunks = [projectOf(ref), ref.project, one.project, one.title, one.task, one.text, one.note, one.context];
+    if (Array.isArray(one.steps)) one.steps.forEach(function (step) { chunks.push(step.text, step.note); });
+    if (Array.isArray(one.questions)) one.questions.forEach(function (q) { chunks.push(q); });
+    return foldSearchText(chunks.filter(Boolean).join(' '));
+  }
+  function queryTokens() {
+    var raw = foldSearchText(pg.query).trim();
+    return raw ? raw.split(/\s+/) : [];
+  }
+  function matchesTokens(haystack, tokens) {
+    if (!tokens || !tokens.length) return true;
+    var hay = haystack || '';
+    return tokens.every(function (tok) { return hay.indexOf(tok) !== -1; });
+  }
+  function matchesAgent(id) { return !pg.filters.agents.length || pg.filters.agents.indexOf(id) !== -1; }
+  function matchesProject(project) { return !pg.filters.projects.length || pg.filters.projects.indexOf(project) !== -1; }
+  function matchesInterface(iface) { return !pg.filters.interfaces.length || pg.filters.interfaces.indexOf(iface) !== -1; }
+  function hasActiveFilters() {
+    return !!(pg.query.trim() || pg.filters.agents.length || pg.filters.projects.length || pg.filters.interfaces.length);
+  }
+  function matches(id, project, iface, hay, tokens) {
+    return matchesAgent(id) && matchesProject(project) && matchesInterface(iface) && matchesTokens(hay, tokens !== undefined ? tokens : queryTokens());
+  }
   function receiptFailed(receipt) {
     return !!receipt && (receipt.isSurfaceLost === true || receipt.status === 'rejected' || receipt.status === 'uncertain' && receipt.hasAccepted !== true && /TIMEOUT/.test(receipt.error || ''));
   }
@@ -2797,7 +2865,10 @@ const PAGE_SCRIPT = String.raw`
   }
   function paintFilter() {
     [pg.chips, pg.sideChips].forEach(function (set) {
-      Object.keys(set).forEach(function (id) { set[id].node.setAttribute('aria-pressed', String(pg.filter === id)); });
+      Object.keys(set).forEach(function (id) {
+        var pressed = pg.filters.agents.indexOf(id) !== -1;
+        set[id].node.setAttribute('aria-pressed', String(pressed));
+      });
     });
   }
   // A pressed icon widens to show its name; once it has, the row brings it into view and the edge fade is worked out again.
@@ -2866,7 +2937,7 @@ const PAGE_SCRIPT = String.raw`
     var finishedKeys = [];
     view.all.done.forEach(function (ref) {
       if (snap.done[ref.key]) return;
-      if (!matches(agentOf(ref), projectOf(ref))) return;
+      if (!matches(agentOf(ref), projectOf(ref), interfaceOf(ref), searchHaystack(ref))) return;
       finished += 1;
       finishedKeys.push(ref.key);
     });
@@ -2976,7 +3047,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function drawNote(entries) {
     var box = document.getElementById('agent-note');
-    var shown = entries.filter(function (one) { return one.unreadable && (!pg.filter || pg.filter === one.id); });
+    var shown = entries.filter(function (one) { return one.unreadable && (!pg.filters.agents.length || pg.filters.agents.indexOf(one.id) !== -1); });
     var signature = JSON.stringify(shown.map(function (one) { return one.id; }));
     if (box.getAttribute('data-sig') === signature) return;
     box.setAttribute('data-sig', signature);
@@ -2987,15 +3058,158 @@ const PAGE_SCRIPT = String.raw`
       add(box, add(el('div'), el('p', '', w('pgUnreadable', one.name)), how));
     });
   }
+  function syncFilterMirrors() {
+    pg.filter = pg.filters.agents.length === 1 ? pg.filters.agents[0] : '';
+    pg.project = pg.filters.projects.length === 1 ? pg.filters.projects[0] : '';
+  }
   function setFilter(id) {
-    pg.filter = id;
-    saveFilter(id);
+    pg.filters.agents = !id || (pg.filters.agents.length === 1 && pg.filters.agents[0] === id) ? [] : [id];
+    syncFilterMirrors();
+    saveFilter(pg.filter);
     paintFilter();
     if (latest && latest.view) drawNote(chipEntries(latest.view));
     layout();
     peekChip();
     // A pick made in the drawer applies at once and closes it.
     if (drawerOpen) setDrawer(false);
+  }
+  function toggleFilterValue(kind, value) {
+    var list = pg.filters[kind];
+    if (!list) return;
+    var index = list.indexOf(value);
+    if (index === -1) list.push(value);
+    else list.splice(index, 1);
+    syncFilterMirrors();
+    if (kind === 'agents') {
+      saveFilter(pg.filter);
+      paintFilter();
+      if (latest && latest.view) drawNote(chipEntries(latest.view));
+    }
+    layout();
+  }
+  function resetAllFilters() {
+    pg.query = '';
+    var search = document.getElementById('side-search');
+    if (search) search.value = '';
+    pg.filters.agents = [];
+    pg.filters.projects = [];
+    pg.filters.interfaces = [];
+    pg.openMenu = '';
+    syncFilterMirrors();
+    saveFilter('');
+    paintFilter();
+    if (latest && latest.view) drawNote(chipEntries(latest.view));
+    layout();
+  }
+  var filterUi = null;
+  function ensureFilterBar() {
+    var bar = document.getElementById('filter-bar');
+    if (!bar) return null;
+    if (filterUi && filterUi.bar === bar) return filterUi;
+    var groups = Object.create(null);
+    [
+      { kind: 'agent', filterKey: 'agents', labelKey: 'pgFilterAgent' },
+      { kind: 'project', filterKey: 'projects', labelKey: 'pgFilterProject' },
+      { kind: 'interface', filterKey: 'interfaces', labelKey: 'pgFilterInterface' },
+    ].forEach(function (spec) {
+      var wrap = el('div', 'f-group');
+      wrap.setAttribute('data-filter-kind', spec.kind);
+      var chip = navButton(w(spec.labelKey), function () {
+        pg.openMenu = pg.openMenu === spec.kind ? '' : spec.kind;
+        paintFilterMenus();
+      });
+      chip.className = 'f-chip';
+      chip.setAttribute('aria-haspopup', 'menu');
+      chip.setAttribute('aria-expanded', 'false');
+      var menu = el('div', 'f-menu');
+      menu.setAttribute('role', 'menu');
+      menu.hidden = true;
+      add(wrap, chip, menu);
+      add(bar, wrap);
+      groups[spec.kind] = { kind: spec.kind, filterKey: spec.filterKey, labelKey: spec.labelKey, wrap: wrap, chip: chip, menu: menu, opts: Object.create(null) };
+    });
+    var clearBtn = navButton(w('pgFilterClear'), function () { resetAllFilters(); });
+    clearBtn.id = 'filter-clear';
+    clearBtn.className = 'quiet';
+    clearBtn.hidden = true;
+    add(bar, clearBtn);
+    filterUi = { bar: bar, groups: groups, clearBtn: clearBtn };
+    return filterUi;
+  }
+  function paintFilterMenus() {
+    if (!filterUi) return;
+    Object.keys(filterUi.groups).forEach(function (kind) {
+      var g = filterUi.groups[kind];
+      var isOpen = pg.openMenu === kind;
+      g.menu.hidden = !isOpen;
+      g.chip.setAttribute('aria-expanded', String(isOpen));
+    });
+  }
+  function drawFilterBar(tokens) {
+    var ui = ensureFilterBar();
+    if (!ui) return;
+    var items = pg.lis.filter(function (one) { return one.list !== 'older'; }).map(function (one) {
+      return { id: one.id, project: one.project, iface: one.iface, hay: one.hay };
+    }).concat((pg.olderRefs || []).map(function (ref) {
+      return { id: agentOf(ref), project: projectOf(ref), iface: interfaceOf(ref), hay: searchHaystack(ref) };
+    }));
+    var agentCounts = Object.create(null);
+    var projectCounts = Object.create(null);
+    var ifaceCounts = Object.create(null);
+    pg.ids.forEach(function (id) { agentCounts[id] = 0; });
+    ifaceCounts.cli = 0;
+    ifaceCounts.app = 0;
+    items.forEach(function (one) {
+      if (!matchesTokens(one.hay, tokens)) return;
+      if (matchesProject(one.project) && matchesInterface(one.iface)) agentCounts[one.id] = (agentCounts[one.id] || 0) + 1;
+      if (one.project && matchesAgent(one.id) && matchesInterface(one.iface)) projectCounts[one.project] = (projectCounts[one.project] || 0) + 1;
+      if (one.iface && matchesAgent(one.id) && matchesProject(one.project)) ifaceCounts[one.iface] = (ifaceCounts[one.iface] || 0) + 1;
+    });
+    var agentOpts = Object.keys(agentCounts).filter(function (id) { return agentCounts[id] > 0 || pg.filters.agents.indexOf(id) !== -1 || pg.ids.indexOf(id) !== -1; }).map(function (id) {
+      return { value: id, label: nameOf(id), count: agentCounts[id] || 0 };
+    });
+    var projectOpts = Object.keys(projectCounts).sort().map(function (name) {
+      return { value: name, label: name, count: projectCounts[name] || 0 };
+    });
+    var ifaceOpts = [
+      { value: 'cli', label: w('pgInterfaceCli'), count: ifaceCounts.cli || 0 },
+      { value: 'app', label: w('pgInterfaceApp'), count: ifaceCounts.app || 0 },
+    ];
+    [
+      { group: ui.groups.agent, options: agentOpts },
+      { group: ui.groups.project, options: projectOpts },
+      { group: ui.groups.interface, options: ifaceOpts },
+    ].forEach(function (spec) {
+      var g = spec.group;
+      var selected = pg.filters[g.filterKey];
+      setText(g.chip, selected.length ? w(g.labelKey) + ' · ' + selected.length : w(g.labelKey));
+      g.chip.setAttribute('data-active', selected.length ? '1' : '0');
+      var wanted = [];
+      spec.options.forEach(function (opt) {
+        var btn = g.opts[opt.value];
+        if (!btn) {
+          btn = g.opts[opt.value] = navButton('', (function (filterKey, value) {
+            return function () { toggleFilterValue(filterKey, value); };
+          })(g.filterKey, opt.value));
+          btn.className = 'f-opt';
+          btn.setAttribute('role', 'menuitemcheckbox');
+          add(btn, el('span', 'f-opt-lbl'), el('span', 'f-opt-n'));
+        }
+        var checked = selected.indexOf(opt.value) !== -1;
+        btn.setAttribute('aria-checked', String(checked));
+        setText(btn.childNodes[0], opt.label);
+        setText(btn.childNodes[1], opt.count);
+        wanted.push(btn);
+      });
+      Object.keys(g.opts).forEach(function (value) {
+        if (wanted.indexOf(g.opts[value]) === -1) { g.opts[value].remove(); delete g.opts[value]; }
+      });
+      wanted.forEach(function (node, index) {
+        if (g.menu.childNodes[index] !== node) g.menu.insertBefore(node, g.menu.childNodes[index] || null);
+      });
+    });
+    ui.clearBtn.hidden = !hasActiveFilters();
+    paintFilterMenus();
   }
   function chipEntries(view) {
     var entries = [];
@@ -3011,8 +3225,9 @@ const PAGE_SCRIPT = String.raw`
     var count = { cards: 0, shown: 0, older: 0, working: 0, others: 0, stopped: 0, done: 0 };
     var projects = [];
     var byProject = Object.create(null);
+    var tokens = queryTokens();
     pg.lis.forEach(function (one) {
-      one.show = matches(one.id, one.project);
+      one.show = matches(one.id, one.project, one.iface, one.hay, tokens);
       if (one.show) {
         // cards: the number that waits for the person leaves out an answer already sent; shown counts every card on the sheet
         if (one.list === 'cards') count.shown += 1;
@@ -3033,33 +3248,39 @@ const PAGE_SCRIPT = String.raw`
     });
     setText(pg.nodes.needsCount, count.cards);
     if (pg.nodes.needsCount) pg.nodes.needsFlag.setAttribute('data-needs-count', String(count.cards));
-    var isFiltered = !!(pg.filter || pg.project);
+    var isFiltered = hasActiveFilters();
     // A filter that hides every question must not read as "nothing needs you" while some wait elsewhere (#1144).
-    var scope = pg.filter ? nameOf(pg.filter) : pg.project;
+    var scopeParts = [];
+    if (pg.filters.agents.length) scopeParts.push(pg.filters.agents.map(nameOf).join(', '));
+    if (pg.filters.projects.length) scopeParts.push(pg.filters.projects.join(', '));
+    if (pg.filters.interfaces.length) scopeParts.push(pg.filters.interfaces.map(function (v) { return w(v === 'app' ? 'pgInterfaceApp' : 'pgInterfaceCli'); }).join(', '));
+    var scope = scopeParts.join(' · ');
     var elsewhere = isFiltered ? Math.max(0, (pg.waitingNow || 0) - count.cards) : 0;
-    setText(pg.nodes.needsText, !isFiltered ? w('pgNothing') : elsewhere > 0 ? w('pgNoQuestionsElsewhere', scope, elsewhere) : w('pgNoQuestions', scope));
+    var searchOnly = pg.query.trim() && !scope;
+    setText(pg.nodes.needsText, !isFiltered ? w('pgNothing') : searchOnly ? w('pgSearchEmpty', pg.query.trim()) : elsewhere > 0 ? w('pgNoQuestionsElsewhere', scope, elsewhere) : w('pgNoQuestions', scope));
     setText(pg.nodes.needsSub, isFiltered ? '' : w('pgNothingHint'));
     reveal(pg.nodes.needsEmpty, count.shown === 0);
     pg.nodes.needsClear = clearFilters(pg.nodes.needsEmpty, pg.nodes.needsClear, isFiltered);
     // The Other work view says so when it has nothing, here or on the Stopped shelf; Overview leaves the empty section out.
-    setText(pg.nodes.othersText, isFiltered ? w('pgNoOthersFor', pg.filter ? nameOf(pg.filter) : pg.project) : w('pgNoOthers'));
+    setText(pg.nodes.othersText, !isFiltered ? w('pgNoOthers') : searchOnly ? w('pgSearchEmpty', pg.query.trim()) : w('pgNoOthersFor', scope));
     reveal(pg.nodes.othersEmpty, count.others === 0);
     pg.nodes.othersClear = clearFilters(pg.nodes.othersEmpty, pg.nodes.othersClear, isFiltered);
     // The tab title counts what the page shows, so a filter that hides questions is not a count the page lacks.
     var waitingShown = isFiltered ? count.cards : pg.waitingNow;
     document.title = waitingShown ? w('pgTabTitle', waitingShown) : 'Agent Board';
     if (pg.model && pg.model.view) setText(pg.nodes.workingEmpty, quietLine(pg.model.view.quiet, pg.model.view.now));
-    reveal(pg.nodes.workingEmpty, count.working === 0 && !pg.filter && !pg.project);
+    reveal(pg.nodes.workingEmpty, count.working === 0 && !isFiltered);
     // The line counts every older question the filters allow, drawn or not.
-    if (pg.olderRefs) count.older = pg.olderRefs.filter(function (ref) { return matches(agentOf(ref), projectOf(ref)); }).length;
+    if (pg.olderRefs) count.older = pg.olderRefs.filter(function (ref) { return matches(agentOf(ref), projectOf(ref), interfaceOf(ref), searchHaystack(ref), tokens); }).length;
     if (pg.nodes.olderLine) setText(pg.nodes.olderLine, plural('pgOlder', count.older));
     reveal(pg.nodes.olderBlock, count.older > 0);
     Object.keys(pg.nodes.counts).forEach(function (name) { setText(pg.nodes.counts[name], name === 'done' ? w('pgDoneWeek', count.done) : count[name]); });
     pg.sections.forEach(function (section) {
       var isOthersView = section.list === 'others' && pg.view === 'others' && count.stopped === 0;
-      reveal(section.block, count[section.list] > 0 || section.list === 'working' && !pg.filter && !pg.project || isOthersView);
+      reveal(section.block, count[section.list] > 0 || section.list === 'working' && !isFiltered || isOthersView);
     });
     drawSide(count, projects);
+    drawFilterBar(tokens);
   }
   // The sidebar's numbers come from the same counts as the headings, so every number on the page agrees.
   function drawSide(count, projects) {
@@ -3071,7 +3292,10 @@ const PAGE_SCRIPT = String.raw`
     var group = document.getElementById('side-project-group');
     var list = document.getElementById('side-projects');
     if (!list) return;
-    if (pg.project && !projects.some(function (one) { return one.name === pg.project; })) pg.project = '';
+    if (pg.filters.projects.length) {
+      pg.filters.projects = pg.filters.projects.filter(function (name) { return projects.some(function (one) { return one.name === name; }); });
+      syncFilterMirrors();
+    }
     projects.sort(function (a, b) { return a.name < b.name ? -1 : a.name > b.name ? 1 : 0; });
     var wanted = projects.map(function (one) {
       var held = pg.projectNodes['p:' + one.name];
@@ -3084,7 +3308,7 @@ const PAGE_SCRIPT = String.raw`
         add(node, held.name, held.n);
       }
       setText(held.n, one.n > 0 ? one.n : '');
-      held.node.setAttribute('aria-pressed', String(pg.project === one.name));
+      held.node.setAttribute('aria-pressed', String(pg.filters.projects.indexOf(one.name) !== -1));
       return held.node;
     });
     Object.keys(pg.projectNodes).forEach(function (key) {
@@ -3106,14 +3330,14 @@ const PAGE_SCRIPT = String.raw`
     if (node) return node;
     // Local, so it works without the server, but not a navigation button: those are the sheet's own See all and Show all.
     var made = button(w('clearFilters'), function () {
-      pg.project = '';
-      setFilter('');
+      resetAllFilters();
     }, 'btn', true, true);
     add(box, made);
     return made;
   }
   function setProject(name) {
-    pg.project = pg.project === name ? '' : name;
+    pg.filters.projects = !name || (pg.filters.projects.length === 1 && pg.filters.projects[0] === name) ? [] : [name];
+    syncFilterMirrors();
     layout();
     // A pick made in the drawer applies at once and closes it.
     if (drawerOpen) setDrawer(false);
@@ -3238,7 +3462,7 @@ const PAGE_SCRIPT = String.raw`
     return ordered;
   }
   function entry(li, block, ref, list) {
-    var one = { li: li, block: block, id: agentOf(ref), project: projectOf(ref), list: list, show: true, key: ref.key, sent: list === 'cards' && isSent(ref) };
+    var one = { li: li, block: block, id: agentOf(ref), project: projectOf(ref), iface: interfaceOf(ref), hay: searchHaystack(ref), list: list, show: true, key: ref.key, sent: list === 'cards' && isSent(ref) };
     pg.lis.push(one);
     return one;
   }
@@ -3632,7 +3856,11 @@ const PAGE_SCRIPT = String.raw`
     var questionKeys = Object.create(null);
     (model.asks || []).forEach(function (ask) { questionKeys[ask.key] = true; });
     Object.keys(cardChoices).forEach(function (key) { if (!questionKeys[key]) delete cardChoices[key]; });
-    if (!hasDrawn) pg.filter = savedFilter();
+    if (!hasDrawn) {
+      var initialAgent = savedFilter();
+      pg.filter = initialAgent;
+      pg.filters.agents = initialAgent ? [initialAgent] : [];
+    }
     // An answer that was sent stops counting as waiting for the person (tab title, flag, agent badges) until it comes back.
     pg.sentBy = Object.create(null);
     pg.sentTotal = 0;
@@ -3930,10 +4158,51 @@ const PAGE_SCRIPT = String.raw`
     beginPress();
     importBlock(text, true);
   });
+  var sideSearchInput = document.getElementById('side-search');
+  if (sideSearchInput && typeof sideSearchInput.addEventListener === 'function') {
+    sideSearchInput.addEventListener('input', function () {
+      pg.query = sideSearchInput.value || '';
+      layout();
+    });
+    sideSearchInput.addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape') return;
+      if (typeof e.stopPropagation === 'function') e.stopPropagation();
+      if (sideSearchInput.value) {
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+        sideSearchInput.value = '';
+        pg.query = '';
+        layout();
+      } else {
+        sideSearchInput.blur();
+      }
+    });
+  }
+  if (typeof document.addEventListener === 'function') document.addEventListener('click', function (event) {
+    if (!pg.openMenu || !filterUi) return;
+    for (var node = event.target; node; node = node.parentNode) if (node === filterUi.bar) return;
+    pg.openMenu = '';
+    paintFilterMenus();
+  });
   if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function (event) {
     // Let Settings own Escape and Tab while it sits modal above an open drawer.
     var settings = document.getElementById('settings');
     if (event.defaultPrevented || (settings && !settings.hidden)) return;
+    var activeFocus = document.activeElement;
+    var activeFocusTag = activeFocus && activeFocus.tagName ? activeFocus.tagName.toLowerCase() : '';
+    if (event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey && activeFocusTag !== 'input' && activeFocusTag !== 'textarea' && activeFocusTag !== 'select' && !(activeFocus && activeFocus.isContentEditable)) {
+      var searchBox = document.getElementById('side-search');
+      if (searchBox) {
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        var width = window.innerWidth;
+        if (typeof width === 'number' && width < 560 && !drawerOpen) setDrawer(true, true);
+        else if (sidePick === 'rail' || (sidePick !== 'full' && typeof width === 'number' && width < 800)) {
+          sidePick = 'full';
+          fitSide();
+        }
+        searchBox.focus();
+        return;
+      }
+    }
     // The drawer takes Esc to close and keeps Tab inside it; the page behind is not reachable while it is open.
     if (drawerOpen) {
       if (event.key === 'Escape') { setDrawer(false); return; }
@@ -3950,6 +4219,13 @@ const PAGE_SCRIPT = String.raw`
       return;
     }
     if (event.key !== 'Escape') return;
+    if (pg.openMenu && filterUi) {
+      var openGroup = filterUi.groups[pg.openMenu];
+      pg.openMenu = '';
+      paintFilterMenus();
+      if (openGroup && openGroup.chip) openGroup.chip.focus();
+      return;
+    }
     // Only the panel the focus is in (or its More button) closes; with no focus anywhere, every open one does.
     // A reply being typed elsewhere is left alone.
     var active = document.activeElement;
