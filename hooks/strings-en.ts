@@ -1106,4 +1106,5 @@ export const EN: Strings = {
   pgTipOpen: (n: number): string => `${n} open`,
   pgTipOpenOne: '1 open',
   pgTipCantRead: "its progress file can't be read",
+  pgDetailRail: 'Details',
 }

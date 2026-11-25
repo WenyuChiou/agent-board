@@ -1099,4 +1099,5 @@ export const ZH_CN: Strings = {
   pgTipOpen: (n: number): string => `${n} 件待办`,
   pgTipOpenOne: '1 件待办',
   pgTipCantRead: '读不到它的进度文件',
+  pgDetailRail: '详情',
 }
