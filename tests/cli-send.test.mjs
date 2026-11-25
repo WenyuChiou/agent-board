@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFileSync, spawn } from 'node:child_process'
 import { once } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { registerHooks } from 'node:module'
 import { hostname, tmpdir } from 'node:os'
@@ -64,14 +64,28 @@ const getSharedWorkRoot = () => {
   return sharedWorkRoot
 }
 
+const addressFolderFor = runtimeDir => (
+  process.platform === 'win32' ? join(runtimeDir, 'agent-board') : runtimeDir
+)
+
+const writeAddressFile = (file, text) => {
+  if (process.platform === 'win32') writePrivateRuntimeFile(file, text)
+  else writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
+}
+
 let sharedRuntimeDir
 const getSharedRuntimeDir = () => {
   if (!sharedRuntimeDir) {
-    sharedRuntimeDir = join(getSharedWorkRoot(), 'runtime')
-    mkdirSync(sharedRuntimeDir, { recursive: true, mode: 0o700 })
-    const cacheDir = process.platform === 'win32' ? join(sharedRuntimeDir, 'agent-board') : sharedRuntimeDir
+    const candidate = join(getSharedWorkRoot(), 'runtime')
+    mkdirSync(candidate, { recursive: true, mode: 0o700 })
+    const cacheDir = addressFolderFor(candidate)
     mkdirSync(cacheDir, { recursive: true, mode: 0o700 })
-    privateRuntimeFolder(cacheDir)
+    if (process.platform === 'win32') privateRuntimeFolder(cacheDir)
+    else {
+      chmodSync(candidate, 0o700)
+      chmodSync(cacheDir, 0o700)
+    }
+    sharedRuntimeDir = candidate
   }
   return sharedRuntimeDir
 }
@@ -148,10 +162,10 @@ const runCli = async (root, cliArgs, { cwd = root, env = {}, omit = [], timeoutM
   }
 }
 
-const closeServer = server => new Promise(done => {
+const closeServer = server => (server.listening ? new Promise(done => {
   server.close(() => done())
   server.closeAllConnections?.()
-})
+}) : Promise.resolve())
 
 const postJson = async (url, token, action, payload) => {
   const base = new URL(url)
@@ -163,10 +177,6 @@ const postJson = async (url, token, action, payload) => {
   const data = await res.json().catch(() => ({}))
   return { status: res.status, data }
 }
-
-const addressFolderFor = runtimeDir => (
-  process.platform === 'win32' ? join(runtimeDir, 'agent-board') : runtimeDir
-)
 
 const startHub = async (root, {
   progressPath = join(root, 'progress.md'),
@@ -209,23 +219,36 @@ const startHub = async (root, {
     res.writeHead(404, { 'content-type': 'application/json' })
     res.end('{}')
   })
-  await new Promise(done => server.listen(0, '127.0.0.1', done))
-  const { port } = server.address()
-  const url = `http://127.0.0.1:${port}/?t=${token}`
-  const resolvedProgress = resolve(progressPath)
-  const addressFile = join(cacheDir, addressFileName(resolvedProgress))
-  writePrivateRuntimeFile(addressFile, JSON.stringify({ pid: process.pid, port, url, path: resolvedProgress, built: '' }))
-  store.recordOwner(port, url)
-  return {
-    store,
-    url,
-    token,
-    port,
-    post: (action, payload) => postJson(url, token, action, payload),
-    close: async () => {
-      await closeServer(server)
-      store.close()
-    },
+  try {
+    await new Promise((done, fail) => {
+      const onError = error => fail(error)
+      server.once('error', onError)
+      server.listen(0, '127.0.0.1', () => {
+        server.off('error', onError)
+        done()
+      })
+    })
+    const { port } = server.address()
+    const url = `http://127.0.0.1:${port}/?t=${token}`
+    const resolvedProgress = resolve(progressPath)
+    const addressFile = join(cacheDir, addressFileName(resolvedProgress))
+    writeAddressFile(addressFile, JSON.stringify({ pid: process.pid, port, url, path: resolvedProgress, built: '' }))
+    store.recordOwner(port, url)
+    return {
+      store,
+      url,
+      token,
+      port,
+      post: (action, payload) => postJson(url, token, action, payload),
+      close: async () => {
+        await closeServer(server)
+        store.close()
+      },
+    }
+  } catch (error) {
+    await closeServer(server).catch(() => {})
+    try { store.close() } catch {}
+    throw error
   }
 }
 
@@ -253,6 +276,7 @@ const startServeHub = async (root, {
 } = {}) => {
   mkdirSync(messagesDir, { recursive: true })
   mkdirSync(runtimeDir, { recursive: true, mode: 0o700 })
+  if (process.platform !== 'win32') chmodSync(runtimeDir, 0o700)
   mkdirSync(homeDir, { recursive: true })
   const scriptPath = getSharedBoardScript()
   const env = baseChildEnv(root, { HOME: homeDir, USERPROFILE: homeDir, XDG_RUNTIME_DIR: runtimeDir })
@@ -825,7 +849,7 @@ test('--send retried with the same --id delivers once', async () => {
     const lostLockStore = createMessaging(lostMessages, false)
     try {
       const resolvedLost = resolve(lostProgress)
-      writePrivateRuntimeFile(join(lostCacheDir, addressFileName(resolvedLost)), JSON.stringify({ pid: process.pid, port: lostPort, url: lostUrl, path: resolvedLost, built: '' }))
+      writeAddressFile(join(lostCacheDir, addressFileName(resolvedLost)), JSON.stringify({ pid: process.pid, port: lostPort, url: lostUrl, path: resolvedLost, built: '' }))
       lostLockStore.recordOwner(lostPort, lostUrl)
       const lostRes = await runCli(root, ['--lang', 'en', '--progress-file', lostProgress, '--messages-dir', lostMessages, '--send', 'claude', 'Maybe delivered', '--id', 'lost-resp-001'], {
         cwd: ws,
@@ -868,7 +892,7 @@ test('--send refuses --id without a value', async () => {
     const url = `http://127.0.0.1:${port}/?t=no-hit`
     trackerLockStore = createMessaging(messagesDir, false)
     const resolvedProgress = resolve(progressPath)
-    writePrivateRuntimeFile(join(cacheDir, addressFileName(resolvedProgress)), JSON.stringify({ pid: process.pid, port, url, path: resolvedProgress, built: '' }))
+    writeAddressFile(join(cacheDir, addressFileName(resolvedProgress)), JSON.stringify({ pid: process.pid, port, url, path: resolvedProgress, built: '' }))
     trackerLockStore.recordOwner(port, url)
 
     const uncreatedDir = join(root, 'must-not-read-or-create')
