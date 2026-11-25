@@ -99,7 +99,7 @@ test('grouping puts every task and question under its agent with open, needs, st
   expect(nothing.needs).toEqual({ n: 0, questions: 0, stuck: 0, cards: [], older: [] })
   expect(nothing.all.isHidden).toBe(true)
   expect(nothing.all.counts).toEqual({ open: 0, needs: 0, stopped: 0, done: 0, older: 0 })
-  expect(nothing.own.counts).toEqual({ open: 0, needs: 0, stopped: 0, done: 0, older: 0 })
+  expect('own' in nothing).toBe(false)
   expect(nothing.working).toEqual([])
   expect(nothing.projects).toEqual([])
 
@@ -143,7 +143,7 @@ test('grouping puts every task and question under its agent with open, needs, st
   expect(cursor?.counts).toEqual({ open: 0, needs: 0, stopped: 0, done: 0, older: 0 })
   expect(cursor?.isUnreadable).toBe(true)
   expect(claude?.isUnreadable).toBe(false)
-  expect(result.own.counts).toEqual({ open: 1, needs: 1, stopped: 0, done: 1, older: 0 })
+  expect('own' in result).toBe(false)
 
   // Brand name and icon from the tables; an unknown agent keeps its id and gets a letter tile.
   expect([claude?.name, claude?.icon]).toEqual(['Claude Code', 'claude-code'])
@@ -162,18 +162,18 @@ test('grouping puts every task and question under its agent with open, needs, st
   expect(titles(codex?.done ?? [])).toEqual(['Rename the synthetic module'])
   expect(titles(claude?.done ?? [])).toEqual([])
   expect(codex?.cards.map(card => card.type)).toEqual(['question'])
-  expect(result.own.cards.map(card => [card.agent, card.isOwn])).toEqual([['', true]])
+  expect(result.all.cards.filter(card => card.isOwn).map(card => [card.agent, card.isOwn])).toEqual([['', true]])
 
-  // All holds every agent's rows, each tagged with its agent, and not the hand-kept ones.
+  // All holds every row, including anonymous hand-kept ones.
   expect(result.all.isHidden).toBe(false)
-  expect(result.all.counts).toEqual({ open: 6, needs: 1, stopped: 5, done: 2, older: 0 })
+  expect(result.all.counts).toEqual({ open: 7, needs: 2, stopped: 5, done: 3, older: 0 })
   expect(result.all.stopped.map(one => one.agent)).toEqual(['dot', 'robo-7', 'codex', 'claude', 'codex'])
   // A finished task with no agent is in All and under nobody: it makes no group and is not Claude Code's.
-  expect(titles(result.all.done)).toEqual(['Ship the synthetic demo', 'Rename the synthetic module'])
+  expect(titles(result.all.done)).toEqual(['Ship the synthetic demo', 'Call the synthetic plumber', 'Rename the synthetic module'])
   expect(result.all.done[0]?.agent).toBe('')
   expect(result.all.done[0]?.isOwn).toBe(false)
   expect(result.agents.reduce((sum, group) => sum + group.counts.stopped, 0)).toBe(result.all.counts.stopped)
-  // Needs you spans the hand-kept question too.
+  // Needs you spans anonymous hand-kept questions too.
   expect(result.needs.n).toBe(2)
 
   // One agent only: the group is still there, and All is hidden.
@@ -186,10 +186,8 @@ test('grouping puts every task and question under its agent with open, needs, st
   // A finished task whose agent is not said makes no group of its own and is not credited to anyone; a hand-kept one is the person's.
   const unsaid = groupBoard(board({ recent: [done('demo', 'Unsaid synthetic task', { at: ago(HOUR) }), done('Home', 'Water the synthetic plants', { isOwn: true, at: ago(HOUR) })] }), NOW, none, EN)
   expect(unsaid.agents).toEqual([])
-  expect(unsaid.all.counts.done).toBe(1)
-  expect(titles(unsaid.all.done)).toEqual(['Unsaid synthetic task'])
-  expect(unsaid.own.counts.done).toBe(1)
-  expect(titles(unsaid.own.done)).toEqual(['Water the synthetic plants'])
+  expect(unsaid.all.counts.done).toBe(2)
+  expect(titles(unsaid.all.done)).toEqual(['Unsaid synthetic task', 'Water the synthetic plants'])
 
   // An explicit empty agent is Claude Code's wire value, and an unassigned task sets nobody's time.
   const explicit = groupBoard(board({ recent: [done('demo', 'Ship the synthetic demo', { at: ago(HOUR) }), done('demo', 'Finish the synthetic notes', { agent: '', at: ago(2 * HOUR) })] }), NOW, none, EN)
@@ -276,9 +274,9 @@ test('grouping puts every task and question under its agent with open, needs, st
   expect(matched.agents.map(group => group.agent)).toEqual(['codex', 'gemini', 'claude'])
   expect(matched.all.stopped.map(task => task.key)).toEqual(['stopped:other-agent', 'stopped:claude', 'row:demo::Outside the week', 'row:demo::Unmatched key'])
   expect(matched.needs.stuck).toBe(0)
-  expect(matched.all.done.map(task => task.key)).toEqual(['done::demo::Exactly a week', 'done::demo::Shared finish', 'done::demo::Shared finish#2', 'done::demo::Unassigned finish', 'missing:row', 'done::demo::Open finish'])
-  expect(matched.all.counts.done).toBe(6)
-  expect(titles(matched.own.done)).toEqual(['Own finish'])
+  expect(matched.all.done.map(task => task.key)).toEqual(['done::demo::Exactly a week', 'done::demo::Shared finish', 'done::demo::Shared finish#2', 'done::Home::Own finish', 'done::demo::Unassigned finish', 'missing:row', 'done::demo::Open finish'])
+  expect(matched.all.counts.done).toBe(7)
+  expect(matched.all.done.some(task => task.title === 'Own finish' && task.isOwn)).toBe(true)
   expect(titles(matched.all.open)).toEqual(['Open finish'])
   const noFinished = groupBoard(board({ recent: [done('demo', 'Ignored synthetic recent', { agent: 'codex' })], finished: [] }), NOW, none, EN)
   expect(noFinished.all.done).toEqual([])
@@ -636,10 +634,10 @@ test('grouping on the synthetic big board adds up to the board\'s totals', () =>
 
   // Each agent's counts are the ones counted while the board was built.
   for (const group of result.agents) expect([group.agent, group.counts]).toEqual([group.agent, { open: 0, needs: 0, stopped: 0, done: 0, older: 0, ...tally.get(group.agent) }])
-  expect(result.own.counts).toEqual({ open: 0, needs: 0, stopped: 0, done: 0, older: 0, ...tally.get('') })
+  expect('own' in result).toBe(false)
 
   // And together they are the board's totals: 300 open, 200 stopped, 500 older, 14 finished this week.
-  const sum = (field: keyof Tally): number => result.agents.reduce((total, group) => total + group.counts[field], 0) + result.own.counts[field]
+  const sum = (field: keyof Tally): number => result.agents.reduce((total, group) => total + group.counts[field], 0) + (tally.get('')?.[field] ?? 0)
   expect(sum('open')).toBe(300)
   expect(sum('stopped')).toBe(200)
   expect(sum('older')).toBe(500)
@@ -650,7 +648,7 @@ test('grouping on the synthetic big board adds up to the board\'s totals', () =>
   expect(result.needs.questions).toBe(11)
   expect(result.needs.stuck).toBe(3)
   expect(result.needs.older).toHaveLength(500)
-  expect(result.all.counts).toEqual({ open: 295, needs: 12, stopped: 199, done: 12, older: 500 })
+  expect(result.all.counts).toEqual({ open: 300, needs: 14, stopped: 200, done: 14, older: 500 })
   expect(result.all.isHidden).toBe(false)
   // The same finished tasks given as `finished` count the same as given as `recent`.
   expect(groupBoard({ ...model, finished: model.recent }, NOW, repoOf, EN).all.counts).toEqual(result.all.counts)
@@ -742,4 +740,35 @@ test('two asking sessions with the same title and question keep separate cards (
   const ag = result.agents.find(group => group.agent === 'antigravity')
   expect(ag?.counts).toEqual({ open: 2, needs: 2, stopped: 0, done: 0, older: 0 })
   expect(ag?.open).toEqual([])
+})
+
+test('a hand-kept task is listed under the AI that wrote it; there is no 你的待辦 group', () => {
+  const model = board({
+    asks: [
+      ask('codex', 'reservoir-paper', 'Figure tuning', 'Reconnect board and check card', { isOwn: true, at: ago(3 * MIN) }),
+      ask('claude', 'demo', 'Claude checklist', 'Check release notes', { isOwn: true, at: ago(5 * MIN) }),
+      ask('', 'Home', 'Unassigned todo', 'Water plants', { isOwn: true, at: ago(10 * MIN) }),
+    ],
+    groups: grouped([
+      row('codex', 'reservoir-paper', 'Figure tuning', { isOwn: true, at: ago(3 * MIN) }),
+      row('codex', 'reservoir-paper', 'Follow-up note', { isOwn: true, at: ago(6 * MIN) }),
+    ]),
+    recent: [
+      done('reservoir-paper', 'Old manual step', { agent: 'codex', isOwn: true, at: ago(HOUR) }),
+    ],
+  })
+  const result = groupBoard(model, NOW, none, ZH_TW)
+  expect('own' in result).toBe(false)
+  expect(result.agents.every(group => group.agent !== 'own' && group.name !== '你的待辦' && group.name !== 'Your own tasks')).toBe(true)
+  expect(result.agents.map(group => group.agent)).toEqual(['codex', 'claude'])
+  const codex = result.agents.find(group => group.agent === 'codex')
+  expect(codex?.counts).toEqual({ open: 2, needs: 1, stopped: 0, done: 1, older: 0 })
+  expect(codex?.cards.map(card => [card.agent, card.isOwn, card.task])).toEqual([['codex', true, 'Figure tuning']])
+  expect(codex?.open.map(task => [task.agent, task.isOwn, task.title])).toEqual([['codex', true, 'Follow-up note']])
+  expect(codex?.done.map(task => [task.agent, task.isOwn, task.title])).toEqual([['codex', true, 'Old manual step']])
+  const claude = result.agents.find(group => group.agent === 'claude')
+  expect(claude?.counts).toEqual({ open: 1, needs: 1, stopped: 0, done: 0, older: 0 })
+  expect(result.needs.n).toBe(3)
+  expect(result.all.counts).toEqual({ open: 4, needs: 3, stopped: 0, done: 1, older: 0 })
+  expect(result.working).toEqual([])
 })

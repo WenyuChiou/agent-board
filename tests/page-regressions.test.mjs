@@ -400,7 +400,7 @@ test('the page and JSON keep completions five minutes and two days old on the sa
   const f = await fixture(`## demo\n${block('a1000001', titles[0], NOW - 5 * 60000)}${block('a1000002', titles[1], NOW - 2 * 24 * 60 * 60000)}`)
   try {
     const model = await f.api()
-    const refs = [...model.view.all.done, ...model.view.own.done]
+    const refs = [...model.view.all.done]
     assert.equal(refs.length, 2)
     assert.deepEqual(refs.map(ref => model.finished.find(one => one.key === ref.key).title).sort(), [...titles].sort())
     const dom = await pageDom(f.runtime.servePage(EN, 'synthetic'), model)
@@ -548,7 +548,10 @@ test('the production page API renders the measured store warning and cleared cou
     assert.ok(model.pruned?.includes(EN.prunedAgents(2)), JSON.stringify(model))
     assert.ok(model.pruned?.includes(EN.prunedSessions(3)), JSON.stringify(model))
     const dom = await pageDom(f.runtime.servePage(EN, 'synthetic'), model)
-    assert.ok(dom.node('board').readText.includes(model.warning))
+    assert.ok(!dom.node('board').readText.includes(model.warning))
+    assert.ok(!dom.node('board').readText.includes(EN.storeLarge('2.0', '1.5')))
+    assert.equal(dom.node('settings-storage').hidden, false)
+    assert.equal(dom.node('settings-storage-line').textContent, EN.storeLarge('2.0', '1.5'))
     assert.ok(dom.node('board').readText.includes(model.pruned))
   } finally { await f.close() }
 })
