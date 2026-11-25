@@ -65,8 +65,8 @@ details > summary .i{width:12px;height:12px;transition:transform 150ms var(--eas
 details[open] > summary .i{transform:rotate(90deg)}
 .ai-row{display:flex;align-items:center;gap:8px;width:calc(100% - 16px);height:30px;margin:0 8px;padding:0 8px;border:0;border-radius:var(--r-s);background:none;font-size:var(--t-sec);text-align:left;transition:background-color 140ms var(--ease-out),opacity 140ms var(--ease-out)}
 .ai-row[aria-pressed=true]{background:var(--sel)}
-.ai-row.is-off{color:var(--muted);opacity:.62}
-.ai-row.is-off .mk{opacity:.7;filter:grayscale(1)}
+.ai-row.is-off{color:var(--muted)}
+.ai-row.is-off .mk,.m-ai .chip.is-off .mk{opacity:.65;filter:grayscale(1)}
 .ai-row .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .surf{font-size:var(--t-meta);color:var(--muted);font-weight:400;margin-left:4px}
 .st{width:8px;height:8px;border-radius:50%;flex:none;margin-right:5px}
@@ -104,6 +104,7 @@ details[open] > summary .i{transform:rotate(90deg)}
 .txt-btn:active{transform:scale(0.97)}
 .txt-btn.mute{color:var(--muted)}
 .stale{display:flex;align-items:center;gap:8px;margin:-4px 0 16px;padding:6px 10px;border-radius:var(--r-s);background:color-mix(in oklab,var(--waiting-fill) 10%,var(--surface));color:var(--waiting-text);font-size:var(--t-sec)}
+.stale .txt-btn{color:var(--waiting-text);font-weight:600;text-decoration:underline;text-underline-offset:3px}
 #content.is-stale .list,#content.is-stale .others{opacity:.55;transition:opacity 180ms var(--ease-out)}
 
 .sec + .sec{margin-top:28px}
@@ -239,7 +240,7 @@ details[open] > summary .i{transform:rotate(90deg)}
   .m-ai::-webkit-scrollbar{display:none}
   .m-ai .chip{height:34px;flex:none;gap:6px;padding:0 10px 0 6px}
   .m-ai .chip.all{padding:0 12px}
-  .m-ai .chip.is-off{opacity:.62;color:var(--muted)}
+  .m-ai .chip.is-off{color:var(--muted)}
   .m-tabs{display:flex;gap:4px;position:sticky;top:52px;z-index:9;margin:0 12px 12px;padding:3px;border-radius:var(--r-m);background:color-mix(in oklab,var(--ink) 6%,var(--ground))}
   .m-tabs button{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;height:36px;border:0;border-radius:8px;background:none;font-size:var(--t-sec);color:var(--muted);white-space:nowrap}
   .m-tabs button[aria-current=true]{background:var(--surface);color:var(--ink);font-weight:600;box-shadow:0 1px 2px rgb(0 0 0 / .08)}
@@ -325,7 +326,8 @@ const AI = {
   codex:{n:'Codex',m:'Cx',conn:true},
   antigravity:{n:'Antigravity',m:'Ag',conn:true},
   deepseek:{n:'DeepSeek',m:'Ds',conn:true},
-  cursor:{n:'Cursor',m:'Cu',conn:false,tip:'Cursor 尚未連上這個看板；回覆需貼到它的對話'}
+  cursor:{n:'Cursor',m:'Cu',conn:false,tip:'Cursor 尚未連上這個看板；回覆需貼到它的對話'},
+  opencode:{n:'OpenCode',m:'Oc',conn:false,tip:'OpenCode 尚未連上這個看板；目前無待辦'}
 };
 const age = m => m < 1 ? '剛剛' : m < 60 ? `${m} 分` : m < 1440 ? `${Math.round(m/60)} 小時` : `${Math.round(m/1440)} 天`;
 
@@ -386,7 +388,7 @@ function detailHTML(it, where){
   h += stepsHTML(it);
   if (it.cmd) h += `<div class="cmd"><code>${esc(it.cmd)}</code><button class="ib" data-act="copy-cmd" data-v="${esc(it.cmd)}" title="複製指令" aria-label="複製指令">${I.copy}</button></div>`;
   if (it.kind === 'ask' && !S.status[it.id]) {
-    if (where === 'sheet') h += `<div class="big">${it.opts.map(o => `<button class="btn" data-act="ans" data-id="${it.id}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div>`;
+    if (where === 'sheet') h += `<div class="big">${it.opts.map(o => `<button class="btn" data-act="ans" data-id="${it.id}" data-v="${esc(o)}">${it.pasteTip ? `複製「${esc(o)}」` : esc(o)}</button>`).join('')}</div>`;
     h += `<div class="reply"><textarea id="rt-${where}-${it.id}" rows="1" placeholder="自己寫…"></textarea><button class="btn pri" data-act="send" data-id="${it.id}" data-where="${where}">${it.pasteTip ? '複製' : '送出'}</button></div>`;
   }
   if (it.kind === 'mine' && where === 'sheet') h += `<div class="big"><button class="btn pri" data-act="check" data-id="${it.id}" style="grid-column:1/-1">完成</button></div>`;
@@ -408,7 +410,9 @@ function itemHTML(it){
   if (st) acts = dlv(st);
   else if (it.kind === 'ask') {
     if (it.pasteTip) {
-      acts = `<span class="acts">${pasteTagHTML(it)}<button class="btn" data-act="copy-ans" data-id="${it.id}" data-v="${esc(it.opts[0] || it.title)}">複製</button><button class="btn ghost" data-act="reply" data-id="${it.id}">回覆</button></span>`;
+      const firstOpt = it.opts[0];
+      const copyLab = firstOpt ? `複製「${firstOpt}」` : '複製';
+      acts = `<span class="acts">${pasteTagHTML(it)}<button class="btn" data-act="copy-ans" data-id="${it.id}" data-v="${esc(firstOpt || it.title)}">${esc(copyLab)}</button><button class="btn ghost" data-act="reply" data-id="${it.id}">回覆</button></span>`;
     } else {
       acts = `<span class="acts">${it.opts.slice(0,2).map(o => `<button class="btn" data-act="ans" data-id="${it.id}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}<button class="btn ghost" data-act="reply" data-id="${it.id}">回覆</button></span>`;
     }
@@ -520,7 +524,7 @@ function render(){
     $('#app').classList.add('has-rail');
     const railActs = selIt.kind === 'ask' && !S.status[selIt.id]
       ? (selIt.pasteTip
-          ? `<div class="acts" style="margin:0 0 6px"><button class="btn" data-act="copy-ans" data-id="${selIt.id}" data-v="${esc(selIt.opts[0] || selIt.title)}">複製</button></div>`
+          ? `<div class="acts" style="margin:0 0 6px">${(selIt.opts.length ? selIt.opts : [selIt.title]).map(o => `<button class="btn" data-act="copy-ans" data-id="${selIt.id}" data-v="${esc(o)}">${selIt.opts.length ? `複製「${esc(o)}」` : '複製'}</button>`).join('')}</div>`
           : `<div class="acts" style="margin:0 0 6px">${selIt.opts.map(o => `<button class="btn" data-act="ans" data-id="${selIt.id}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div>`)
       : selIt.kind === 'mine'
         ? `<div class="acts" style="margin:0 0 6px"><button class="btn pri" data-act="check" data-id="${selIt.id}">完成</button></div>`
