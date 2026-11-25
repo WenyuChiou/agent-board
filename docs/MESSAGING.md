@@ -76,7 +76,9 @@ named that is still uncertain with no error, and a message a hook handed back wi
 become `uncertain` / `BOARD_RESTARTED` with their text, and every claim a hook named that is still
 uncertain loses its name (one with an error keeps the error): nothing a hook was handed before a
 board start is handed out after it, whatever receipts its session sends later, and the page shows
-them as no reply confirmed. OpenCode's claims keep
+them as no reply confirmed. The rule holds from the next board start: with no board running, a hook
+takes from the store itself, and a claim an earlier board run made is handed out again once its
+lease passes, until a board starts (#1868). OpenCode's claims keep
 their own rules (below). While a claim stays open as uncertain (not yet `EXPIRED` or
 `DISMISSED`), none of the session's queued messages is handed out. A claim is taken again only when
 every message that holds the session (the condition is under "stdio MCP") is one of this mailbox's
