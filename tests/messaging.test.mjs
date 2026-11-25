@@ -3802,6 +3802,36 @@ test('an existing card sends only to its exact live receiver and preserves mark 
   assert.equal((await board.call('/api/board')).body.model.asks.length, 1)
 }))
 
+test('a retry of a known message id after its receiver reconnected returns the first message', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555', other = '66666666-7777-4888-8999-aaaaaaaaaaaa'
+  const block = (id, session, title) => `<!-- auto session=${id} agent=codex resume=${session} state=waiting updated=${new Date().toISOString()} -->\n### ${title}\n- [?] Blue or green?\n<!-- /auto session=${id} -->\n`
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n${block('abcdef01', thread, 'Retry fixture')}${block('abcdef02', other, 'Other fixture')}`)
+  const register = (session, turn) => board.call('/api/messages/register', { agent: 'codex', session, turn, surface: SURFACE_IDS.cli, unclaimed: true }).then(one => one.body)
+  const first = await register(thread, 'turn1')
+  await register(other, 'turn1')
+  const asks = (await board.call('/api/board')).body.model.asks
+  const ask = asks.find(one => one.session === thread), otherAsk = asks.find(one => one.session === other)
+  const request = { key: ask.key, type: 'message', id: 'AB-RECONNECT-1', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn }
+  assert.equal((await board.call('/api/act', request)).status, 200)
+  // The receiver goes and comes back under a new connection before the page hears the answer; the page sends the same press again.
+  assert.equal((await board.call('/api/messages/disconnect', { connection: first.id, secret: first.secret, turn: 'turn1' })).status, 200)
+  const again = await register(thread, 'turn2')
+  assert.notEqual(again.id, first.id)
+  const retried = await board.call('/api/act', request)
+  assert.deepEqual([retried.status, retried.body.receipt?.id, retried.body.receipt?.status], [200, 'AB-RECONNECT-1', 'queued'])
+  // The page drew the card again with the new connection: the same id still answers with the first message.
+  const redrawn = (await board.call('/api/board')).body.model.asks.find(one => one.session === thread)
+  assert.equal(redrawn.delivery.id, again.id)
+  const pressed = await board.call('/api/act', { ...request, fp: redrawn.fp, connection: redrawn.delivery.id, turn: redrawn.delivery.turn })
+  assert.deepEqual([pressed.status, pressed.body.receipt?.id], [200, 'AB-RECONNECT-1'])
+  // Other words under that id, and the same id on another session's card, are refused.
+  assert.equal((await board.call('/api/act', { ...request, text: 'Green' })).status, 409)
+  const crossed = await board.call('/api/act', { ...request, key: otherAsk.key, session: otherAsk.session, asked: otherAsk.text, fp: otherAsk.fp, connection: otherAsk.delivery.id, turn: otherAsk.delivery.turn })
+  assert.deepEqual([crossed.status, crossed.body.note], [409, EN.messagesConflict])
+  const stored = (await board.call('/api/board')).body.messaging.messages
+  assert.deepEqual(stored.map(one => [one.id, one.to, one.status]), [['AB-RECONNECT-1', `codex:${thread}`, 'queued']])
+}))
+
 test('after an answer reaches its session, that question leaves Needs you when the agent rewrites its report, and the next question starts with no receipt (#725)', async () => fixture(async (board, dir) => {
   const thread = '11111111-2222-4333-8444-555555555555'
   const block = steps => `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Answer fixture\n${steps}\n<!-- /auto session=abcdef01 -->\n`
@@ -7767,6 +7797,76 @@ test('1486 a Claude row allocates a fresh id after ACK_MISSING and stays blocked
   assert.equal(uncertainPage.buttons(blockedCard).find(one => one.textContent === EN.serveSend('Claude')).disabled, true)
   assert.throws(() => queueMessage(uncertainDelivery, { id: 'AB-BLOCKED', target: connection.id, turn: connection.turn, text: 'Continue' }, 'board', connection, now + 4), /PAIR_BUSY/)
   assert.deepEqual(claimMessages(uncertainDelivery, connection, now + 5, 'fedcba').messages, [])
+})
+
+// One page with one Claude row, for the page's own retry of a send (#1843, B3.1).
+const retryPage = async (post, connection) => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now()
+  const rowFile = `## Synthetic\n<!-- auto session=abcdef01 agent=claude resume=claude-session state=waiting updated=${new Date(now).toISOString()} -->\n### Claude row delivery\n- [ ] Next step\n<!-- /auto session=abcdef01 -->\n`
+  const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
+  const rowView = buildView(parseProgress(rowFile), [], null, now, 0, {}, EN)
+  const modelOf = (messages, live = connection) => serveModel(rowView, [], EN, new Set(), false, { connections: [live], messages }, false, group)
+  const page = await pageDom(servePage(EN, 'synthetic'), modelOf([]), post)
+  const press = async text => {
+    const card = page.cards().find(one => page.inputs(one).length)
+    page.inputs(card)[0].value = text
+    page.buttons(card).find(one => one.textContent === EN.serveSend('Claude')).click()
+    await page.flush()
+  }
+  return { page, press, modelOf }
+}
+const claudeLive = (id = 'c1') => ({ id, agent: 'claude', session: 'claude-session', surface: SURFACE_IDS.claude, turn: 'session', scope: 'session', expires: Date.now() + 120000 })
+
+test('a lost response retries with the same id and shows one message', async () => {
+  const { shownMessage } = await import('../hooks/messaging.ts')
+  const connection = claudeLive()
+  // The board stores the message, then the answer to the first request is lost on its way to the page.
+  let store = { messages: [] }, isLost = true
+  const { page, press } = await retryPage(async request => {
+    const { id, text, connection: target, turn } = request.body
+    store = queueMessage(store, { id, target, turn, text }, 'board', connection, Date.now()).state
+    if (isLost) { isLost = false; throw new Error('synthetic lost response') }
+    return { ok: true, json: async () => ({ note: EN.messagesQueued, receipt: shownMessage(store.messages.find(one => one.id === id)) }) }
+  }, connection)
+  await press('Continue')
+  assert.equal(page.requests.length, 1)
+  assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.equal(page.requests.length, 2)
+  assert.equal(page.requests[1].body.id, page.requests[0].body.id)
+  assert.equal(store.messages.length, 1)
+  assert.ok(!page.text().includes(EN.messagesFailed), page.text())
+  // The retry answered: nothing is left to try again.
+  assert.deepEqual(await page.runTimers('retrySend'), [])
+  assert.equal(page.requests.length, 2)
+})
+
+test('a send that gets no answer stops trying again after 30 s and says it failed', async () => {
+  const { page, press } = await retryPage(async () => { throw new Error('synthetic board gone') }, claudeLive())
+  await press('Continue')
+  // Every 2 s for 30 s: the first try and 14 more, all under the first press's id.
+  for (let i = 0; i < 14; i++) assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.equal(page.requests.length, 15)
+  assert.equal(new Set(page.requests.map(one => one.body.id)).size, 1)
+  assert.deepEqual(await page.runTimers('retrySend'), [])
+  assert.equal(page.requests.length, 15)
+  assert.ok(page.text().includes(EN.messagesFailed), page.text())
+})
+
+test('the page keeps a message\'s id for the same text when its receiver reconnects between presses', async () => {
+  // The first press meets a busy store; before the person presses again, the receiver connects again under a new id.
+  let answers = 0
+  const { page, press, modelOf } = await retryPage(async () => {
+    answers++
+    return answers === 1 ? { ok: false, json: async () => ({ error: 'MESSAGE_STORE_BUSY' }) } : { ok: true, json: async () => ({ note: EN.messagesQueued }) }
+  }, claudeLive('c1'))
+  await press('Continue')
+  await page.redraw(modelOf([], claudeLive('c2')))
+  await press('Continue')
+  assert.equal(page.requests.length, 2)
+  assert.deepEqual(page.requests.map(one => one.body.connection), ['c1', 'c2'])
+  assert.equal(page.requests[1].body.id, page.requests[0].body.id)
 })
 
 test('1486 reconnect preserves ended-uncertain receipt and lets next receiver claim newly queued message', () => {

@@ -8909,6 +8909,59 @@ test('an answer key the page refuses shows the page note, sends nothing and neve
   }
 })
 
+test('the terminal board resends a lost answer under the same id', { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, ROUTES_ENV, ['--messages-dir', messages])
+  // A page in front of the real one: the first answer press reaches the board, and its answer is lost on the way back.
+  const ids = []
+  const forward = (req, res, body, isLost) => {
+    const back = request({ host: '127.0.0.1', port: board.port, method: req.method, path: req.url, headers: { ...req.headers, host: `127.0.0.1:${board.port}` }, agent: false }, answer => {
+      if (isLost) return answer.resume().on('end', () => req.socket.destroy())
+      res.writeHead(answer.statusCode ?? 502, answer.headers)
+      answer.pipe(res)
+    })
+    back.end(body)
+  }
+  const front = createServer((req, res) => {
+    const chunks = []
+    req.on('data', chunk => chunks.push(chunk)).on('end', () => {
+      const body = Buffer.concat(chunks)
+      if (req.url === '/api/act') ids.push(JSON.parse(body.toString('utf8')).id)
+      forward(req, res, body, req.url === '/api/act' && ids.length === 1)
+    })
+  })
+  await new Promise(done => front.listen(0, '127.0.0.1', done))
+  const served = readFileSync(board.served, 'utf8')
+  const address = JSON.parse(served)
+  const url = new URL(address.url)
+  url.port = String(front.address().port)
+  writeFileSync(board.served, JSON.stringify({ ...address, url: url.href, ...('port' in address ? { port: Number(url.port) } : {}) }))
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  // Not spawnSync: the page in front answers from this process.
+  const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
+  try {
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
+    // The same key twice: the first answer gets no reply, the second is the same message again.
+    const out = await play('y y')
+    assert.equal(ids.length, 2, out)
+    assert.equal(ids[1], ids[0])
+    assert.ok(out.includes('You answered “Yes, go ahead”.'), out)
+    const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
+    assert.deepEqual(polled.messages.map(message => message.text), ['Yes, go ahead'])
+  } finally {
+    writeFileSync(board.served, served)
+    await new Promise(done => front.close(done))
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
 test('t on the terminal board archives what finished at once and leaves the work in progress', () => {
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
   const file = `# Progress
