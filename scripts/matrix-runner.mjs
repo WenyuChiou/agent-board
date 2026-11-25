@@ -95,14 +95,37 @@ export const defaultCliFor = (overrides = {}) => surface => {
 }
 
 const killChild = async child => {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return
-  const exited = new Promise(done => child.once('close', done))
-  try { child.kill() } catch {}
-  await Promise.race([exited, pause(2000)])
+  if (!child) return
+  const closed = new Promise(done => {
+    if (child.exitCode !== null || child.signalCode !== null) done()
+    else child.once('close', done)
+  })
   if (child.exitCode === null && child.signalCode === null) {
-    try { child.kill('SIGKILL') } catch {}
-    await Promise.race([exited, pause(1000)])
+    if (process.platform === 'win32' && child.pid) {
+      spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 3000 })
+    } else {
+      if (child.pid) {
+        try { process.kill(-child.pid, 'SIGTERM') } catch {}
+      }
+      try { child.kill() } catch {}
+    }
+    await Promise.race([closed, pause(2000)])
+    if (child.exitCode === null && child.signalCode === null) {
+      if (process.platform === 'win32' && child.pid) {
+        spawnSync('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore', timeout: 3000 })
+      } else {
+        if (child.pid) {
+          try { process.kill(-child.pid, 'SIGKILL') } catch {}
+        }
+        try { child.kill('SIGKILL') } catch {}
+      }
+      await Promise.race([closed, pause(1000)])
+    }
   }
+  try { child.stdout?.destroy() } catch {}
+  try { child.stderr?.destroy() } catch {}
+  try { child.stdin?.destroy() } catch {}
+  await Promise.race([closed, pause(200)])
 }
 
 // Builds an isolated throwaway home for Shape S (setup) or Shape P (plugin connector), never touching the real home.
@@ -355,6 +378,7 @@ export const runCliJourney = async ({
       cliChild = spawn(spec.command, spec.args, {
         env: cliEnv,
         cwd: dirname(home.root),
+        detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
         ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       })

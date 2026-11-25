@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -263,6 +263,33 @@ test("a stand-in CLI that receives the board's reply marks its cell PASS, and on
     assert.equal(winRun.rows.length, 4)
     for (const row of winRun.rows) assert.equal(row.result, 'PASS', `Windows .cmd wrapper failed ${row.check}: ${row.evidence}`)
   }
+
+  // Timed-out CLI processes (including Windows .cmd grandchild trees) are terminated before home cleanup.
+  const pidFile = join(tempBase, 'hung-worker.pid')
+  const sleeperScript = join(tempBase, 'hung-worker.mjs')
+  writeFileSync(sleeperScript, `import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(pidFile)}, String(process.pid))\nsetInterval(() => {}, 1000)\n`)
+  const hungCli = process.platform === 'win32'
+    ? (() => {
+        const cmdPath = join(tempBase, 'hung-cli.cmd')
+        writeFileSync(cmdPath, `@echo off\r\n"${process.execPath}" "${sleeperScript}"\r\n`)
+        return { command: cmdPath }
+      })()
+    : { command: process.execPath, args: [sleeperScript] }
+  const timedOutRun = await runMatrix({
+    shapes: ['S'],
+    surfaces: [SURFACES.find(one => one.id === 'claude-cli')],
+    cliFor: () => hungCli,
+    version: '0.26.0-test',
+    date: '2026-11-24',
+    timeoutMs: 700,
+    tempBase,
+  })
+  assert.equal(timedOutRun.rows[0].result, 'PASS')
+  assert.equal(timedOutRun.rows[1].result, 'FAIL')
+  assert.match(timedOutRun.rows[1].evidence, /stopped at b:/i)
+  const workerPid = Number(readFileSync(pidFile, 'utf8').trim())
+  assert.ok(Number.isInteger(workerPid) && workerPid > 0)
+  assert.throws(() => process.kill(workerPid, 0), /ESRCH|EPERM/)
 })
 
 test('the table has one row per cell with date, version, shape, result and evidence', { timeout: 120_000 }, async () => {
