@@ -14755,15 +14755,15 @@ test('#1085: a style picked on the page is written to the settings file with its
   } finally { await board.close() }
 })
 
-test('Settings has one labelled button and five accessible sections in every language and keeps focus inside until closed', async () => {
+test('Settings has one labelled button and six accessible sections in every language and keeps focus inside until closed', async () => {
   for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
     const html = await sourcePage(lang)
     assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
     assert.doesNotMatch(html, /data-theme-toggle|data-look-menu/)
     assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
     const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
-    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsApprovals, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
-    assert.equal((panel.match(/<section\b/g) ?? []).length, 5)
+    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsApprovals, words.settingsStorage, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 6)
     const dom = await pageDom(html, redesignModel(), { width: 375 })
     assert.equal(dom.node('settings').hidden, true)
     dom.node('settings-toggle').click()
