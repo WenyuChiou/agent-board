@@ -4462,7 +4462,7 @@ export const LINES = [
 "      const clock = observedTime(task.auto, now, seen);",
 "      const updated = clock.updated;",
 "      const when = clock.isFuture ? updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(updated, now, s)) : relativeTime(updated, now, s);",
-"      const isWorkFinished = task.auto !== null && task.auto.state !== \"done\" && task.auto.state !== \"working\" && isWorkDone(task.steps);",
+"      const isWorkFinished = task.auto !== null && task.auto.state === \"waiting\" && isWorkDone(task.steps);",
 "      const isComplete = isTaskComplete(task) || task.auto?.state === \"done\" || isWorkFinished;",
 "      const isManual = task.auto === null;",
 "      const scope = scopeOf(project.name, task.auto?.agent ?? \"manual\", task.auto?.session ?? task.title, task.auto?.resume);",

@@ -126,7 +126,7 @@ export const folderProject = (cwd: unknown): string => {
 export const sessionTitle = (folder: string, fallback: string, distinct = ''): string =>
   line(folder || (distinct === '' ? fallback : `${fallback} · ${distinct}`))
 
-// The hook's own placeholder step and its words live in lifecycle-steps.ts (blocks.ts needs them too, and codex.ts imports blocks.ts).
+// The hook's own placeholder step and its words live in lifecycle-steps.ts (view.ts and row-state.ts read them without pulling in this module's writers).
 export { isLifecycleStep, LIFECYCLE_STEPS } from './lifecycle-steps'
 import { isLifecycleStep } from './lifecycle-steps'
 

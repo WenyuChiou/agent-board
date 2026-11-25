@@ -1021,8 +1021,8 @@ export const buildView = (
       const updated = clock.updated
       const when = clock.isFuture ? updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(updated, now, s)) : relativeTime(updated, now, s)
       // A hook-written block still holds its own placeholder step open at turn end (state=waiting), so its finished work
-      // counts without it (#1839). One at work keeps its row: the agent may tick the last step and carry on.
-      const isWorkFinished = task.auto !== null && task.auto.state !== 'done' && task.auto.state !== 'working' && isWorkDone(task.steps)
+      // counts without it (#1839). One at work keeps its row (the agent may tick the last step and carry on), and an ended one keeps its Stopped row, which holds its Archive.
+      const isWorkFinished = task.auto !== null && task.auto.state === 'waiting' && isWorkDone(task.steps)
       const isComplete = isTaskComplete(task) || task.auto?.state === 'done' || isWorkFinished
       const isManual = task.auto === null
       const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)

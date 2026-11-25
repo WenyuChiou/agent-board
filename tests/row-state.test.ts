@@ -220,18 +220,20 @@ test('a block leaves waiting when its last real step is ticked, whatever the hoo
   expect(view.overview.active).toBe(0)
 })
 
-test('a Done row is never Stopped and an ended session never reads Still running', () => {
-  for (const state of ['waiting', 'ended']) {
-    const view = viewOf(state)
-    // Done, and on no other shelf: not Stopped, not Idle, no live row that could say Still running.
-    expect(view.finished).toHaveLength(1)
-    expect(view.stopped).toEqual([])
-    expect(view.idle).toEqual([])
-    expect(view.groups.flatMap(group => group.rows)).toEqual([])
-  }
-  // A block that still has real work open keeps its row, and a block at work keeps it even with its steps ticked.
+test('a finished waiting block is Done, not Stopped, and leaves no live row to read Still running', () => {
+  const view = viewOf('waiting')
+  // Done, and on no other shelf: not Stopped, not Idle, no live row that could say Still running.
+  expect(view.finished).toHaveLength(1)
+  expect(view.stopped).toEqual([])
+  expect(view.idle).toEqual([])
+  expect(view.groups.flatMap(group => group.rows)).toEqual([])
+  // A block that still has real work open keeps its row, a block at work keeps it even with its steps ticked,
+  // and an ended block keeps its Stopped row, which carries its Archive.
   const live = viewOf('waiting', ['- [ ] Waiting for the next instruction', '- [x] Read the file', '- [ ] Count the lines'])
   expect(live.finished ?? []).toEqual([])
   expect(live.groups.flatMap(group => group.rows)[0]?.auto).toBe('waiting')
   expect(viewOf('working').finished ?? []).toEqual([])
+  const ended = viewOf('ended')
+  expect(ended.finished ?? []).toEqual([])
+  expect(ended.stopped[0]?.archive).not.toBeNull()
 })
