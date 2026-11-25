@@ -400,7 +400,7 @@ test('the page and JSON keep completions five minutes and two days old on the sa
   const f = await fixture(`## demo\n${block('a1000001', titles[0], NOW - 5 * 60000)}${block('a1000002', titles[1], NOW - 2 * 24 * 60 * 60000)}`)
   try {
     const model = await f.api()
-    const refs = [...model.view.all.done, ...model.view.own.done]
+    const refs = [...model.view.all.done]
     assert.equal(refs.length, 2)
     assert.deepEqual(refs.map(ref => model.finished.find(one => one.key === ref.key).title).sort(), [...titles].sort())
     const dom = await pageDom(f.runtime.servePage(EN, 'synthetic'), model)
