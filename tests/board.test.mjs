@@ -8990,6 +8990,35 @@ test('the terminal board resends a lost answer under the same id', { timeout: 60
 
 test("the terminal board keeps the answer's id when its reply is cut off", { timeout: 60_000 }, () => terminalLostAnswer('cut'))
 
+test("a terminal answer to a question whose page answer is still open is refused with the first one's status", { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, ROUTES_ENV, ['--messages-dir', messages])
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
+  try {
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
+    const ask = (await board.call('GET', '/api/board')).json().model.asks[0]
+    const press = { key: ask.key, type: 'message', id: 'AB-PAGE-1', text: 'Yes, from the page', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn }
+    assert.equal((await board.call('POST', '/api/act', { body: press })).status, 200)
+    // The receiver takes the page's answer and has said nothing of it yet (#1843, B3.2).
+    const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
+    assert.deepEqual(polled.messages.map(message => message.id), ['AB-PAGE-1'])
+    const out = await play('y')
+    assert.ok(out.includes(EN.messagesUncertain), out)
+    const stored = (await board.call('GET', '/api/board')).json().messaging.messages
+    assert.deepEqual(stored.map(one => one.id), ['AB-PAGE-1'])
+  } finally {
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
 test('t on the terminal board archives what finished at once and leaves the work in progress', () => {
   const now = new Date().toISOString().replace(/\.\d+Z$/, 'Z')
   const file = `# Progress
