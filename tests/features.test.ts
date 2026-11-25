@@ -5051,7 +5051,7 @@ test('the idle shelf keeps terminal and page row actions without putting its que
   expect(serveAction(boardItems(view, []), { key: row?.key ?? '', type: 'archive', text: '', session: '', fp: row?.fp }, STRINGS.en).type).toBe('archive')
   // The page lists an idle task on its closed Stopped shelf, not among the questions, and draws it with the same row buttons.
   const grouped = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, { now: NOW, repoOf: () => null, versions: { board: '', package: null }, unreadable: [] }).view
-  expect([...(grouped?.all.stopped ?? []), ...(grouped?.own.stopped ?? [])].map(one => one.key)).toEqual([row?.key])
+  expect((grouped?.all.stopped ?? []).map(one => one.key)).toEqual([row?.key])
   expect(grouped?.needs.cards).toEqual([])
   const page = servePage(STRINGS.en, 'nonce')
   expect(page).toContain("shelf('stopped', w('pgStopped')")

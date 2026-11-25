@@ -164,9 +164,9 @@ test('the board document and the page give the same Needs-you count and cards fo
     }
     assert.deepEqual(document.working.map(one => [one.agent, one.project]), model.view.working.map(one => [one.agent, one.repo]))
     const working = new Set(model.view.working.map(one => one.key))
-    assert.equal(document.waiting.length, [...model.view.all.open, ...model.view.own.open].filter(one => !working.has(one.key)).length)
-    assert.equal(document.stopped.length, model.view.all.stopped.length + model.view.own.stopped.length)
-    assert.equal(document.doneRecently.length, model.view.all.done.length + model.view.own.done.length)
+    assert.equal(document.waiting.length, model.view.all.open.filter(one => !working.has(one.key)).length)
+    assert.equal(document.stopped.length, model.view.all.stopped.length)
+    assert.equal(document.doneRecently.length, model.view.all.done.length)
   }
 })
 

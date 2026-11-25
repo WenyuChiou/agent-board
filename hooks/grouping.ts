@@ -150,9 +150,8 @@ export type Grouping = {
   unsure: GroupedTask[]
   // Why Working now is empty; only `none` may say that no agent did anything (#612).
   quiet: Quiet
-  // Every agent's rows, not the hand-kept ones. Hidden below two agents.
+  // Every row, card and done task in one bucket. Hidden below two agents.
   all: Bucket & { isHidden: boolean }
-  own: Bucket
   projects: Array<{ name: string; open: number }>
 }
 
@@ -204,12 +203,14 @@ type Asker = { agent: string; isOwn?: true; isRun?: true; parent?: string }
 
 const holderOf = (item: Asker): Holder => ({ agent: item.agent ?? '', isOwn: item.isOwn === true, isRun: item.isRun === true, parent: item.parent })
 
-export const identity = (agent: string, isOwn: boolean, project: string, title: string, dir: string | null | undefined): string => JSON.stringify([isOwn ? '' : keyOf(agent), project, title, folderOf(dir ?? '')])
+export const identity = (agent: string, isOwn: boolean, project: string, title: string, dir: string | null | undefined): string => JSON.stringify([isOwn ? `own:${agent.trim() === '' ? '' : keyOf(agent)}` : keyOf(agent), project, title, folderOf(dir ?? '')])
 
 // Whether a stopped row is the one a finished task came from, when the task has no key: the task
 // says whose it was, or nothing, and then any agent's row fits.
 const isHers = (item: GroupingDone, row: GroupingRow): boolean =>
-  item.isOwn === true ? row.isOwn === true : item.agent === undefined || (row.isOwn !== true && keyOf(row.agent) === keyOf(item.agent))
+  item.isOwn === true
+    ? row.isOwn === true && (item.agent === undefined || item.agent.trim() === '' || keyOf(row.agent) === keyOf(item.agent))
+    : item.agent === undefined || (row.isOwn !== true && keyOf(row.agent) === keyOf(item.agent))
 
 // A question card stands for an agent that waits on the person, whatever its age; a stopped or
 // finished task counts only inside the Working now window.
@@ -247,8 +248,10 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
 
     return key
   }
+  const ownAgent = (owner: { agent: string; isOwn: boolean }): string =>
+    owner.isOwn ? (owner.agent.trim() === '' ? '' : note(owner.agent)) : note(owner.agent)
   const tag = (owner: { agent: string; isOwn: boolean }, project: string, dir: string | null | undefined, at: number | undefined): Tagged => ({
-    agent: owner.isOwn ? '' : note(owner.agent),
+    agent: ownAgent(owner),
     isOwn: owner.isOwn,
     project,
     repo: repoName(project, dir),
@@ -445,13 +448,13 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
   }
 
   const lastOf = new Map<string, number>()
-  // A finished task under no agent sets nobody's time.
-  for (const one of [...sortedTasks, ...cards, ...sortedOlder]) if (!one.isOwn && one.agent !== '') lastOf.set(one.agent, Math.max(lastOf.get(one.agent) ?? 0, one.at))
+  // A task under no agent sets nobody's time.
+  for (const one of [...sortedTasks, ...cards, ...sortedOlder]) if (one.agent !== '') lastOf.set(one.agent, Math.max(lastOf.get(one.agent) ?? 0, one.at))
   const agents = [...spelled.keys()]
     .map((agent, index) => ({ agent, index, last: lastOf.get(agent) ?? 0 }))
     .sort((a, b) => b.last - a.last || a.index - b.index)
     .map(({ agent, last }): AgentGroup => ({
-      ...bucketOf(one => !one.isOwn && one.agent === agent),
+      ...bucketOf(one => one.agent === agent),
       agent,
       name: agentLabel(spelled.get(agent) ?? agent, s),
       icon: iconOf(agent),
@@ -503,8 +506,7 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
       return typeof source === 'object' && source !== null && 'rowState' in source && source.rowState === 'unsure'
     }),
     quiet: quietOf(cards, sortedTasks, now),
-    all: { ...bucketOf(one => !one.isOwn), isHidden: agents.length < 2 },
-    own: bucketOf(one => one.isOwn),
+    all: { ...bucketOf(() => true), isHidden: agents.length < 2 },
     projects: newestFirst([...projects.values()]).map(({ name, open }) => ({ name, open })),
   }
 }
