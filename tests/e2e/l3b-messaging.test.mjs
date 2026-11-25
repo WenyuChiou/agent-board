@@ -162,9 +162,8 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     for (const [surface, output] of Object.entries(surfaces)) {
       assert.ok(output.includes(receiver.title), `${surface}: receiver card missing`)
       noMachineIds(output, hub.world)
-      await knownFailure(232, () => {
-        assert.match(output, /Replied|message (?:arrived|answered)|ACK AB-synthetic-message/i, `${surface}: receiver card has no receipt: ${output}`)
-      })
+      // The receiver's row carries its message's status line, in the words the page uses (#232, #1843 B4).
+      assert.match(output, /^\s*(?:Delivered · |Read(?: · |$)|Answered · )/m, `${surface}: receiver card has no receipt: ${output}`)
     }
   }))
 
