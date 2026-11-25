@@ -2268,6 +2268,7 @@ const PAGE_SCRIPT = String.raw`
     var isAfter = state.mode === 'copied' || state.mode === 'sent' || state.mode === 'queued';
     if (state.mode === 'write' && parts.openCard) parts.openCard();
     reveal(parts.ask, state.mode === 'ask');
+    if (parts.askMore) reveal(parts.askMore, state.mode === 'ask');
     reveal(parts.reply, state.mode === 'write');
     reveal(parts.routeNote, !isAfter && !parts.hasReceipt);
     reveal(parts.after, isAfter && !hasReceiptAfter);
@@ -2425,6 +2426,7 @@ const PAGE_SCRIPT = String.raw`
     }
     var choiceArea = answers;
     var pickerSend = null;
+    var askExtras = [];
     var others = [];
     var canWrite = false;
     var hideBtn = null;
@@ -2475,7 +2477,7 @@ const PAGE_SCRIPT = String.raw`
           return node;
         };
         options.slice(0, 2).forEach(function (answer, index) { add(choiceArea, makeChoice(answer, index)); });
-        options.slice(2).forEach(function (answer, index) { others.push(makeChoice(answer, index + 2)); });
+        options.slice(2).forEach(function (answer, index) { askExtras.push(makeChoice(answer, index + 2)); });
         var isCopyMode = !sends(mode);
         pickerSend = button(isCopyMode ? w('pgCopyChoice') : '↑', function () { if (selected >= 0) pressAnswer(ask, key, options[selected], pickerSend); }, 'answer-send', isCopyMode);
         pickerSend.setAttribute('aria-label', w(isCopyMode ? 'pgCopyChoice' : 'pgSendChoice'));
@@ -2486,7 +2488,7 @@ const PAGE_SCRIPT = String.raw`
       var write = navButton(w('pgWriteOwn'), function () { setMode(key, 'write'); });
       write.className = 'quiet';
       if (options.length) {
-        others.push(write);
+        askExtras.push(write);
       } else {
         add(answers, write);
       }
@@ -2514,6 +2516,7 @@ const PAGE_SCRIPT = String.raw`
       late: lateWord(agentPresence[id]) !== '',
       routeNote: routeNote || null,
       hideBtn: hideBtn || null,
+      askMore: null,
       detailActs: null,
       hasReceipt: false,
       receiptActs: null,
@@ -2523,6 +2526,10 @@ const PAGE_SCRIPT = String.raw`
     if (pickerSend) add(answers, pickerSend);
     parts.ask = fx(answers);
     add(body, add(el('div', 'c-line2'), meta, parts.ask));
+    if (askExtras.length) {
+      parts.askMore = fx(add.apply(null, [el('div', 'acts')].concat(askExtras)), true);
+      add(detailHost, parts.askMore);
+    }
     if (others.length) {
       detailActs = add.apply(null, [el('div', 'acts')].concat(others));
       parts.detailActs = detailActs;
