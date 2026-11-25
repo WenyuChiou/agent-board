@@ -3,7 +3,7 @@ import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, 
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
-import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, rebindMessages, restartMessages, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
+import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, openAnswer, originOf, pruneMessages, queueMessage, rebindMessages, restartMessages, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
@@ -125,7 +125,8 @@ export const moveLockAside = (lock: string, recorded: string, claim: MessageStor
 
 // Only a host adapter can register a receiving session. Registrations and secrets die with
 // this server; message ids and receipts survive restart so uncertainty is never auto-retried.
-export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined }
+// reportedAt: when the session last reported, -1 for never (one answer per question, #1843).
+export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined; reportedAt?: (agent: string, session: string) => number }
 
 const openMessaging = (directory: string, isDefault = false, gate?: MessageGate) => {
   const root = resolve(directory)
@@ -434,6 +435,12 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
           target = decision.target
           line = decision.line
           surface = decision.target.surface
+          // One open answer per question (#1843, B3.2): a second answer, from another page or the terminal, is refused with the
+          // first one's receipt, so it shows what came of the first instead of starting the question's turn twice.
+          if (isAnswersId(input.answers)) {
+            const first = openAnswer(state, address(target.agent, target.session), input.answers, gate?.reportedAt?.(target.agent, target.session) ?? -1)
+            if (first !== undefined) throw Object.assign(new Error('ANSWER_OPEN'), { receipt: shownMessage(first) })
+          }
         }
         const queued = queueMessage(state, input, from, target, now, sender?.origin ?? 'local', undefined, line, surface)
         save(queued.state, now)

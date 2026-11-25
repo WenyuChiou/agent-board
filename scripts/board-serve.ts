@@ -353,7 +353,13 @@ const lineOf = (value: unknown): number | undefined => (typeof value === 'number
 
 export const startServer = (o: ServeOptions): void => {
   const messaging = (() => {
-    try { return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory, { routes: o.routes ?? RECEIVER_ROUTES, stateOfSession: (agent, session) => sessionState(o.view(), agent, session) }) }
+    try {
+      return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory, {
+        routes: o.routes ?? RECEIVER_ROUTES, stateOfSession: (agent, session) => sessionState(o.view(), agent, session),
+        // Read only when the board sends an answer to a question (#1843, B3.2).
+        reportedAt: (agent, session) => Math.max(-1, ...(o.reports?.() ?? []).filter(one => one.agent === agent && one.session === session).map(one => one.updated)),
+      })
+    }
     // The code (EACCES, EPERM) goes along, so the person gets advice that fits the cause.
     catch (error) { throw Object.assign(new Error(error instanceof Error ? error.message : '', { cause: 'MESSAGE_STORE_FAILED' }), { code: error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined }) }
   })()
@@ -1170,25 +1176,31 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/act') {
         const state = isLan ? undefined : messaging.snapshot(Date.now())
         // A message sent, and what came of it, as the page shows it. The press's agent words the queued line.
+        // A message's status in words, for the card of the press's agent.
+        const statusNote = (receipt: ReturnType<typeof messaging.act>, agent: string, isAfterAppQuit: boolean): string => {
+          const receiptLine = 'line' in receipt ? receipt.line : undefined
+          const agentName = agentLabel(agent, o.s)
+          const queuedNote = receiptLine === 'nextTurn'
+            ? o.s.serveQueuedNextTurn(agentName)
+            : receiptLine === 'chatOpen'
+              ? o.s.serveQueuedNextOpen(agentName)
+              : receiptLine === 'reopen'
+                // A Codex desktop app conversation runs only once the app has let go of it (#557).
+                ? isAfterAppQuit ? o.s.serveReopenWaitingCodexApp : o.s.serveReopenRunning(agentName)
+                : o.s.messagesQueued
+          const acceptedNote = receiptLine === 'reopen' ? o.s.serveReopenRunning(agentName) : o.s.messagesAccepted
+          const acknowledgedNote = receiptLine === 'reopen' ? o.s.serveReopenDone(agentName) : o.s.messagesAcknowledged
+          const notes = { queued: queuedNote, uncertain: o.s.messagesUncertain, accepted: acceptedNote, acknowledged: acknowledgedNote, rejected: o.s.messagesRejected }
+          return 'status' in receipt ? notes[receipt.status] : o.s.messagesFailed
+        }
         const sendMessage = (input: Record<string, unknown>, agent: string, isAfterAppQuit: boolean) => {
           try {
             const receipt = messaging.act('send', input, Date.now())
-            const receiptLine = 'line' in receipt ? receipt.line : undefined
-            const agentName = agentLabel(agent, o.s)
-            const queuedNote = receiptLine === 'nextTurn'
-              ? o.s.serveQueuedNextTurn(agentName)
-              : receiptLine === 'chatOpen'
-                ? o.s.serveQueuedNextOpen(agentName)
-                : receiptLine === 'reopen'
-                  // A Codex desktop app conversation runs only once the app has let go of it (#557).
-                  ? isAfterAppQuit ? o.s.serveReopenWaitingCodexApp : o.s.serveReopenRunning(agentName)
-                  : o.s.messagesQueued
-            const acceptedNote = receiptLine === 'reopen' ? o.s.serveReopenRunning(agentName) : o.s.messagesAccepted
-            const acknowledgedNote = receiptLine === 'reopen' ? o.s.serveReopenDone(agentName) : o.s.messagesAcknowledged
-            const notes = { queued: queuedNote, uncertain: o.s.messagesUncertain, accepted: acceptedNote, acknowledged: acknowledgedNote, rejected: o.s.messagesRejected }
-            const note = 'status' in receipt ? notes[receipt.status] : o.s.messagesFailed
-            return json(res, 200, { note, receipt })
+            return json(res, 200, { note: statusNote(receipt, agent, isAfterAppQuit), receipt })
           } catch (error) {
+            // A second answer to a question whose first is still open shows the first one's status (#1843, B3.2).
+            const first = (error as { receipt?: ReturnType<typeof messaging.act> } | null)?.receipt
+            if (error instanceof Error && error.message === 'ANSWER_OPEN' && first !== undefined) return json(res, 409, { note: statusNote(first, agent, isAfterAppQuit), receipt: first })
             const code = (error as { code?: unknown } | null)?.code
             if (['EPERM', 'EBUSY', 'EAGAIN'].includes(String(code))) return json(res, 503, { error: 'MESSAGE_STORE_BUSY' })
             const decision = (error as { decision?: SendDecision } | null)?.decision
