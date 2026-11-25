@@ -50,8 +50,32 @@ const findOnPath = binary => {
   const locator = process.platform === 'win32' ? 'where.exe' : 'which'
   const probe = spawnSync(locator, [binary], { encoding: 'utf8', timeout: 3000 })
   if (probe.error || probe.status !== 0) return null
-  const first = probe.stdout.split(/\r?\n/).find(line => line.trim() !== '')
-  return first ? first.trim() : null
+  const lines = probe.stdout.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  if (lines.length === 0) return null
+  if (process.platform !== 'win32') return lines[0]
+  for (const ext of ['.exe', '.com', '.cmd', '.bat']) {
+    const match = lines.find(line => line.toLowerCase().endsWith(ext))
+    if (match) return match
+  }
+  return lines[0]
+}
+
+// Wraps Windows .cmd/.bat CLI wrappers through cmd.exe so child_process.spawn starts them cleanly.
+export const spawnSpecFor = (cli, platform = process.platform) => {
+  const command = String(cli?.command ?? '')
+  const args = (cli?.args ?? []).map(arg => String(arg))
+  if (platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
+    for (const part of [command, ...args]) {
+      if (/[\r\n]/.test(part)) throw new Error('CLI wrapper arguments cannot contain newlines.')
+    }
+    const quote = part => `"${part.replace(/"/g, '""')}"`
+    return {
+      command: process.env.ComSpec || 'cmd.exe',
+      args: ['/d', '/s', '/c', `"${[command, ...args].map(quote).join(' ')}"`],
+      windowsVerbatimArguments: true,
+    }
+  }
+  return { command, args, windowsVerbatimArguments: false }
 }
 
 // Resolves a runnable CLI command for a CLI surface from overrides, environment, or PATH binaries.
@@ -327,7 +351,13 @@ export const runCliJourney = async ({
       AGENT_BOARD_MATRIX_REPLY: replyText,
     }
     try {
-      cliChild = spawn(cli.command, cli.args ?? [], { env: cliEnv, cwd: dirname(home.root), stdio: ['ignore', 'pipe', 'pipe'] })
+      const spec = spawnSpecFor(cli)
+      cliChild = spawn(spec.command, spec.args, {
+        env: cliEnv,
+        cwd: dirname(home.root),
+        stdio: ['ignore', 'pipe', 'pipe'],
+        ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+      })
     } catch (error) {
       return failRemaining({ date, version, shape, surface, fromIndex: 1, step: 'b', reason: error instanceof Error ? error.message : String(error), prior: rows, s })
     }

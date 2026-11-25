@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 import { pathToFileURL } from 'node:url'
-import { CHECKS, DESKTOP_CHECKLIST_PATH, SHAPES, SURFACES, buildThrowawayHome, formatMatrixTable, runMatrix } from '../../scripts/matrix-runner.mjs'
+import { CHECKS, DESKTOP_CHECKLIST_PATH, SHAPES, SURFACES, buildThrowawayHome, formatMatrixTable, runMatrix, spawnSpecFor } from '../../scripts/matrix-runner.mjs'
 
 const tempRoots = []
 const makeTempDir = prefix => {
@@ -240,6 +240,29 @@ test("a stand-in CLI that receives the board's reply marks its cell PASS, and on
   assert.equal(mixedRun.rows[1].result, 'FAIL')
   assert.match(mixedRun.rows[1].evidence, /stopped at b:/i)
   for (const row of mixedRun.rows.slice(4)) assert.equal(row.result, 'PASS', `expected matrix to continue after spawn error, got ${row.result}: ${row.evidence}`)
+
+  const winSpec = spawnSpecFor({ command: 'C:\\Users\\demo\\AppData\\Roaming\\npm\\codex.cmd', args: ['--flag', 'a b'] }, 'win32')
+  assert.match(winSpec.command, /cmd(?:\.exe)?$/i)
+  assert.equal(winSpec.windowsVerbatimArguments, true)
+  assert.deepEqual(winSpec.args.slice(0, 3), ['/d', '/s', '/c'])
+  assert.match(winSpec.args[3], /codex\.cmd/)
+  assert.throws(() => spawnSpecFor({ command: 'C:\\demo\\bad.cmd', args: ['line1\nline2'] }, 'win32'))
+
+  if (process.platform === 'win32') {
+    const cmdWrapper = join(tempBase, 'standin-cli.cmd')
+    writeFileSync(cmdWrapper, `@echo off\r\n"${process.execPath}" "${responder}" %*\r\n`)
+    const winRun = await runMatrix({
+      shapes: ['S'],
+      surfaces: [SURFACES.find(one => one.id === 'claude-cli')],
+      cliFor: () => ({ command: cmdWrapper }),
+      version: '0.26.0-test',
+      date: '2026-11-24',
+      timeoutMs: 8000,
+      tempBase,
+    })
+    assert.equal(winRun.rows.length, 4)
+    for (const row of winRun.rows) assert.equal(row.result, 'PASS', `Windows .cmd wrapper failed ${row.check}: ${row.evidence}`)
+  }
 })
 
 test('the table has one row per cell with date, version, shape, result and evidence', { timeout: 120_000 }, async () => {
