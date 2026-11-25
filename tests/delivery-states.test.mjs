@@ -155,6 +155,58 @@ test('nothing a hook was handed before a board start goes out after it, whatever
   assert.deepEqual(wrong, [], wrong.join('\n'))
 })
 
+test('nothing a hook was handed goes out again after its lease, whatever receipts its session sends since, in any state of the table', () => {
+  const wrong = []
+  let checked = 0
+  for (const name of DELIVERY_STATES) {
+    for (const shape of shapeNames(name)) {
+      const { message, binding, state } = sampleOf(name, shape)
+      // A claim a hook holds: a mailbox message with an ACK code, not queued. OpenCode's keep their own rules (#724, #1366),
+      // and DeepSeek's keep the lease rule for now (#1843 answer 3, #1870).
+      if (!isMailboxTarget(message.target) || message.nonce === '' || message.status === 'queued' || /^(opencode|deepseek):/.test(message.to) || !isOpen(message)) continue
+      for (const errors of [[undefined], ['TIMEOUT', undefined], ['TURN_ABORTED', undefined]]) {
+        // Any write after the lease prunes the store first.
+        const lapsed = Math.max(message.claimed, message.updated) + MAILBOX_LEASE_MS
+        let after = pruneMessages(state, lapsed)
+        for (const [index, error] of errors.entries()) {
+          try {
+            after = messageReceipt(after, binding, { id: message.id, nonce: message.nonce, status: 'uncertain', ...(error === undefined ? {} : { error }) }, lapsed + 1000 * (index + 1))
+          } catch (failure) {
+            assert.ok(isBoardError(failure), `${label(name, shape)}: ${failure.stack}`)
+          }
+        }
+        // Sent again: its own binding takes it, before or after a prune, or its hook hands back its old claim first.
+        const own = { ...binding, surface: message.surface ?? binding.surface }
+        const late = lapsed + 10 * MAILBOX_LEASE_MS
+        const back = releaseMailboxMessage(after, binding.agent, binding.session, message.ref ?? '', late)
+        const isSentAgain = [[after, lapsed + 5000], [after, late], [pruneMessages(after, late), late], [back, late + 1000]]
+          .some(([store, now]) => claimMessages(store, own, now, 'd4e5f6', 'ba9876543210').messages.some(item => item.id === message.id))
+        if (isSentAgain) wrong.push(`${label(name, shape)}: sent again after its lease, then ${errors.map(error => error ?? 'no error').join(', ')}`)
+        checked++
+      }
+    }
+  }
+  assert.ok(checked > 20, `only ${checked} checked`)
+  assert.deepEqual(wrong, [], wrong.join('\n'))
+})
+
+test('the page keeps the attempt id of a message that reads HOLDER_LOST', () => {
+  // A hook's claim whose lease passed, as the store holds it once a write pruned it.
+  const { message, binding, state } = sampleOf('leased')
+  const pruned = pruneMessages(state, message.claimed + MAILBOX_LEASE_MS)
+  const lost = pruned.messages.find(one => one.id === message.id)
+  assert.deepEqual([lost.status, lost.error, lost.text], ['uncertain', 'HOLDER_LOST', message.text])
+  // The card reads Unsure, and the page keeps the id its press made, so a press again sends that id and not a new message.
+  assert.equal(cardOf('holderLost', undefined, 'codex'), 'messagesUncertain')
+  pageScope.messageAttempts.k = { id: lost.id, text: lost.text }
+  pageScope.releaseFinishedAttempt({ id: lost.id, status: lost.status, error: lost.error, isMailbox: true }, false)
+  assert.equal(pageScope.messageAttempts.k?.id, lost.id)
+  delete pageScope.messageAttempts.k
+  const again = queueMessage(pruned, { id: lost.id, target: lost.target, turn: lost.turn, text: lost.text }, 'board', binding, message.claimed + MAILBOX_LEASE_MS + 1)
+  assert.equal(again.message, lost)
+  assert.equal(again.state, pruned)
+})
+
 test('combined flag shapes predict both card and transitions when independent flags interact (#1560)', () => {
   assert.ok('acceptedBefore+onHook' in shapesOf('turnEnded'))
   const hookAfterAccept = rowOf('turnEnded', 'acceptedBefore+onHook')
@@ -202,13 +254,15 @@ test('short random event orders never lose a message, never send one twice, neve
     const hex = size => Array.from({ length: size }, () => Math.floor(random() * 16).toString(16)).join('')
     const codexBox = sampleBinding('codex', 'mailbox')
     const opencodeBox = sampleBinding('opencode', 'mailbox')
+    const deepseekBox = sampleBinding('deepseek', 'mailbox')
     let live = sampleBinding('codex', 'live')
-    let state = { messages: [], mailboxes: [codexBox, opencodeBox] }
+    let state = { messages: [], mailboxes: [codexBox, opencodeBox, deepseekBox] }
     let now = SAMPLE_NOW
-    // Each order sends and takes through some of the receivers: all three, or one alone, so a hook's claim can lapse to its last repeat.
-    const using = pick([['live', 'codexBox', 'opencodeBox'], ['live', 'codexBox'], ['codexBox'], ['opencodeBox']])
-    const receiver = () => ({ live, codexBox, opencodeBox })[pick(using)]
-    // Some orders only send, claim and wait, so a hook's claim can lapse to its last repeat.
+    // Each order sends and takes through some of the receivers: all of them, or one alone, so a DeepSeek claim can lapse to its
+    // last repeat and another hook's claim can read HOLDER_LOST.
+    const using = pick([['live', 'codexBox', 'opencodeBox', 'deepseekBox'], ['live', 'codexBox'], ['codexBox'], ['opencodeBox'], ['deepseekBox']])
+    const receiver = () => ({ live, codexBox, opencodeBox, deepseekBox })[pick(using)]
+    // Some orders only send, claim and wait, so a DeepSeek claim can lapse to its last repeat.
     const kinds = pick([EVERY_KIND, EVERY_KIND, EVERY_KIND, ['send', 'claim', 'claim', 'tick']])
     const seen = new Map()
     for (let step = 0; step < 40; step++) {
@@ -225,7 +279,7 @@ test('short random event orders never lose a message, never send one twice, neve
           seen.set(id, { handed: 0, nonce: '', isAccepted: false, redelivered: 0, handedBeforeStart: false })
         } else if (kind === 'claim' || kind === 'pull') {
           // A claim by a receiver, named as a hook names it; or the agent's own MCP pull, an unnamed claim on its mailbox.
-          const binding = kind === 'pull' ? { ...pick([codexBox, opencodeBox]), surface: MCP_SURFACE } : receiver()
+          const binding = kind === 'pull' ? { ...pick([codexBox, opencodeBox, deepseekBox]), surface: MCP_SURFACE } : receiver()
           const result = claimMessages(state, binding, now, hex(6), kind === 'claim' && binding.scope === 'mailbox' ? hex(12) : undefined)
           state = result.state
           sent = result.messages
@@ -242,7 +296,7 @@ test('short random event orders never lose a message, never send one twice, neve
             where += ` ${event} ${one.id}`
             const status = { accept: 'accepted', ack: 'acknowledged', reject: 'rejected', fail: 'uncertain', timeout: 'uncertain', unsure: 'uncertain' }[event]
             const error = { fail: 'TURN_ABORTED', timeout: 'TIMEOUT' }[event]
-            const binding = one.to.startsWith('opencode:') ? opencodeBox : live
+            const binding = one.to.startsWith('opencode:') ? opencodeBox : one.to.startsWith('deepseek:') ? deepseekBox : live
             state = event === 'dismiss' ? dismissMessage(state, one.id, now) : messageReceipt(state, binding, {
               id: one.id, nonce: one.nonce, status, ...(event === 'ack' ? { reply: `ACK ${one.nonce}` } : {}), ...(error === undefined ? {} : { error }),
             }, now)
@@ -252,7 +306,7 @@ test('short random event orders never lose a message, never send one twice, neve
           // hook hands its claim back (OpenCode's plugin says when it never sent it), or a caller that can ACK takes it.
           const one = pick(state.messages.filter(message => isMailboxTarget(message.target) && message.nonce !== ''))
           if (one !== undefined) {
-            const agent = one.to.startsWith('opencode:') ? 'opencode' : 'codex'
+            const agent = one.to.startsWith('opencode:') ? 'opencode' : one.to.startsWith('deepseek:') ? 'deepseek' : 'codex'
             const action = pick(agent === 'opencode' ? ['mailbox-attempt', 'mailbox-release', 'mailbox-accept'] : ['mailbox-release', 'mailbox-accept'])
             body = action === 'mailbox-accept' ? { agent, session: 's1', id: one.id, nonce: one.nonce, awaitsAck: true }
               : { agent, session: 's1', ref: one.ref ?? hex(12), ...(action === 'mailbox-release' && agent === 'opencode' && random() < 0.5 ? { unsent: true } : {}) }
@@ -265,7 +319,7 @@ test('short random event orders never lose a message, never send one twice, neve
           live = { ...live, id: `c${run}x${step}`, turn: `t${run}x${step}` }
           if (kind === 'leave') state = rebindMessages(state, live, id => id === live.id)
         } else if (kind === 'endMailbox') {
-          state = disconnectMessages(state, pick([codexBox, opencodeBox]).id, now)
+          state = disconnectMessages(state, pick([codexBox, opencodeBox, deepseekBox]).id, now)
         } else if (kind === 'restart') {
           // The board starts again and loads the store (#1407).
           state = restartMessages(state, now)
@@ -309,6 +363,8 @@ test('short random event orders never lose a message, never send one twice, neve
           if (earlier.status === 'queued') assert.equal(one.redelivered ?? 0, record.redelivered, `${where}: ${one.id} came back with ${one.redelivered} repeats`)
           else {
             assert.equal(earlier.attempted, undefined, `${where}: ${one.id}, a started wake, went out again`)
+            // Only DeepSeek's and OpenCode's claims are taken again; any other hook's reads HOLDER_LOST after its lease (#1843).
+            assert.ok(/^(opencode|deepseek):/.test(one.to), `${where}: ${one.id}, a hook's claim, went out again after its lease`)
             if (!one.to.startsWith('opencode:')) assert.ok(one.redelivered === record.redelivered + 1 && one.redelivered <= MAILBOX_REDELIVERIES, `${where}: ${one.id} went out again ${one.redelivered} times`)
           }
         }
