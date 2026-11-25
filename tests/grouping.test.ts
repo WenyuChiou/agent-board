@@ -4,6 +4,7 @@ import type { Grouping, GroupingAsk, GroupingDone, GroupingInput, GroupingRetain
 import type { ServeModel } from '../hooks/serve'
 import { EN } from '../hooks/strings-en'
 import { ZH_TW } from '../hooks/i18n'
+import { ZH_CN } from '../hooks/strings-zh-cn'
 
 const NOW = Date.parse('2026-10-28T12:00:00Z')
 const MIN = 60_000
@@ -771,4 +772,181 @@ test('a hand-kept task is listed under the AI that wrote it; there is no 你的�
   expect(result.needs.n).toBe(3)
   expect(result.all.counts).toEqual({ open: 4, needs: 3, stopped: 0, done: 1, older: 0 })
   expect(result.working).toEqual([])
+})
+
+test("an AI's question comes before a hand-kept step", () => {
+  const ownNew = ask('codex', 'Home', 'Check mail', 'Reply to synthetic mail', { isOwn: true, at: ago(MIN) })
+  const aiOld = ask('codex', 'demo', 'Ship docs', 'Publish synthetic docs, OK?', { at: ago(10 * MIN) })
+  const ownOlder = ask('', 'Home', 'Pay bill', 'Pay synthetic bill', { isOwn: true, at: ago(30 * MIN) })
+  const aiNew = ask('claude', 'demo', 'Run build', 'Deploy synthetic app, OK?', { at: ago(2 * MIN) })
+  const stuckRow = row('gemini', 'demo', 'Blocked synthetic task', { at: ago(5 * MIN), stuck: { reason: 'Waiting for token' } })
+  const model = board({
+    asks: [ownNew, aiOld, ownOlder, aiNew],
+    groups: grouped([stuckRow]),
+  })
+  const result = groupBoard(model, NOW, none, EN)
+
+  expect(result.needs.cards.map(card => card.key)).toEqual([
+    aiOld.key,
+    'stuck:row:demo::Blocked synthetic task',
+    aiNew.key,
+    ownOlder.key,
+    ownNew.key,
+  ])
+  const codex = result.agents.find(group => group.agent === 'codex')
+  expect(codex?.cards.map(card => card.key)).toEqual([aiOld.key, ownNew.key])
+})
+
+test('the oldest waiting question comes first', () => {
+  const unknown = ask('claude', 'demo', 'Undated ask', 'Which undated option?')
+  const recent = ask('codex', 'demo', 'Recent ask', 'Which recent option?', { at: ago(5 * MIN) })
+  const tieOne = ask('claude', 'demo', 'Tie first', 'First tied question?', { at: ago(10 * MIN) })
+  const tieTwo = ask('gemini', 'demo', 'Tie second', 'Second tied question?', { at: ago(10 * MIN) })
+  const oldest = ask('codex', 'demo', 'Oldest ask', 'Which oldest option?', { at: ago(25 * MIN) })
+  const middle = ask('claude', 'demo', 'Middle ask', 'Which middle option?', { at: ago(15 * MIN) })
+  const model = board({
+    asks: [unknown, recent, tieOne, tieTwo, oldest, middle],
+    groups: grouped([
+      row('claude', 'demo', 'Older open row', { at: ago(20 * MIN) }),
+      row('claude', 'demo', 'Newer open row', { at: ago(2 * MIN) }),
+    ]),
+    stopped: [
+      row('codex', 'demo', 'Older stopped row', { at: ago(2 * DAY) }),
+      row('codex', 'demo', 'Newer stopped row', { at: ago(DAY) }),
+    ],
+    recent: [
+      done('demo', 'Older done row', { agent: 'codex', at: ago(2 * HOUR) }),
+      done('demo', 'Newer done row', { agent: 'codex', at: ago(HOUR) }),
+    ],
+  })
+  const result = groupBoard(model, NOW, none, EN)
+
+  expect(result.needs.cards.map(card => card.key)).toEqual([
+    oldest.key,
+    middle.key,
+    tieOne.key,
+    tieTwo.key,
+    recent.key,
+    unknown.key,
+  ])
+  expect(titles(result.working)).toEqual(['Newer open row', 'Older open row'])
+  expect(titles(result.all.open)).toEqual(['Newer open row', 'Older open row'])
+  expect(titles(result.all.stopped)).toEqual(['Newer stopped row', 'Older stopped row'])
+  expect(titles(result.all.done)).toEqual(['Newer done row', 'Older done row'])
+})
+
+test('waiting approvals come before AI questions and own steps; window approvals are excluded', () => {
+  const ownOld = ask('codex', 'Home', 'Own step', 'Check synthetic notes', { isOwn: true, at: ago(30 * MIN) })
+  const aiOld = ask('claude', 'demo', 'AI ask', 'Ship synthetic release, OK?', { at: ago(15 * MIN) })
+  const askApproval = ask('gemini', 'demo', 'Ask approval', 'Allow synthetic command?', { isApproval: true, at: ago(3 * MIN) } as Partial<GroupingAsk>)
+  const stuckRow = row('codex', 'demo', 'Stuck AI task', { at: ago(20 * MIN), stuck: { reason: 'Needs input' } })
+  const model = board({
+    asks: [ownOld, aiOld, askApproval],
+    groups: grouped([stuckRow]),
+    approvals: [
+      { id: 'apr-win', agent: 'claude', state: 'window', tool: 'Bash', command: 'echo skip', project: 'demo', task: 'Window prompt', at: ago(25 * MIN) },
+      { id: 'apr-new', agent: 'codex', state: 'asking', tool: 'Edit', command: 'file.ts', project: 'demo', task: 'Edit file', at: ago(MIN) },
+      { id: 'apr-old', agent: 'claude', state: 'shown', tool: 'Bash', command: 'npm test', project: 'demo', task: 'Run tests', at: ago(4 * MIN) },
+    ],
+  } as Partial<GroupingInput>)
+  const result = groupBoard(model, NOW, none, EN)
+
+  expect(result.needs.n).toBe(6)
+  expect(result.needs.questions).toBe(5)
+  expect(result.needs.stuck).toBe(1)
+  expect(result.needs.cards.map(card => card.key)).toEqual([
+    'approval:apr-old',
+    askApproval.key,
+    'approval:apr-new',
+    'stuck:row:demo::Stuck AI task',
+    aiOld.key,
+    ownOld.key,
+  ])
+  expect(result.needs.cards.slice(0, 3).map(card => [card.type, (card as { isApproval?: boolean }).isApproval])).toEqual([
+    ['question', true],
+    ['question', true],
+    ['question', true],
+  ])
+  const codex = result.agents.find(group => group.agent === 'codex')
+  expect(codex?.cards.map(card => card.key)).toEqual([
+    'approval:apr-new',
+    'stuck:row:demo::Stuck AI task',
+    ownOld.key,
+  ])
+  const claude = result.agents.find(group => group.agent === 'claude')
+  expect(claude?.cards.map(card => card.key)).toEqual(['approval:apr-old', aiOld.key])
+})
+
+test('steps waiting on others fold out of Needs you into waitingOthers with localized labels', () => {
+  const active = ask('codex', 'demo', 'Active task', 'Deploy to staging, OK?', { at: ago(2 * MIN) })
+  const waitNew = ask('codex', 'demo', 'Wait new', 'Waiting for reviewer reply', { kind: 'wait', at: ago(5 * MIN) })
+  const waitOld = ask('codex', 'demo', 'Wait old', 'Waiting for CI check', { kind: 'wait', at: ago(15 * MIN) })
+  const waitOwn = ask('', 'Home', 'Wait own', 'Waiting for colleague email', { kind: 'wait', isOwn: true, at: ago(25 * MIN) })
+  const model = board({ asks: [active, waitNew, waitOld, waitOwn] })
+
+  const tw = groupBoard(model, NOW, none, ZH_TW)
+  expect(tw.needs.n).toBe(1)
+  expect(tw.needs.questions).toBe(1)
+  expect(tw.needs.cards.map(card => card.key)).toEqual([active.key])
+  expect(tw.needs.waitingOthers.map(item => item.key)).toEqual([waitOwn.key, waitOld.key, waitNew.key])
+  expect(tw.needs.waitingOthersLabel).toBe('等別人 3')
+  const codexTw = tw.agents.find(group => group.agent === 'codex')
+  expect(codexTw?.counts.needs).toBe(1)
+  expect(codexTw?.waitingOthers.map(item => item.key)).toEqual([waitOld.key, waitNew.key])
+  expect(codexTw?.waitingOthersLabel).toBe('等別人 2')
+
+  const cn = groupBoard(model, NOW, none, ZH_CN)
+  expect(cn.needs.waitingOthersLabel).toBe('等别人 3')
+
+  const en = groupBoard(model, NOW, none, EN)
+  expect(en.needs.waitingOthersLabel).toBe('Waiting on others 3')
+
+  const empty = groupBoard(board(), NOW, none, EN)
+  expect(empty.needs.waitingOthers).toEqual([])
+  expect(empty.needs.waitingOthersLabel).toBe('')
+})
+
+test('questions first seen over three days ago fold into older with localized labels', () => {
+  const exactlyThreeDays = ask('claude', 'demo', 'Boundary task', 'Still within 3 days?', { firstObserved: ago(3 * DAY), at: ago(3 * MIN) } as Partial<GroupingAsk>)
+  const overThreeDays = ask('codex', 'demo', 'Overdue task', 'Seen over 3 days ago?', { firstObserved: ago(3 * DAY + 1), at: ago(5 * MIN) } as Partial<GroupingAsk>)
+  const rem = retained('codex', 'demo', 'Rem task', 'Reminder question?', { at: ago(4 * DAY) })
+  const old = retained('gemini', 'demo', 'Old task', 'Oldest retained question?', { at: ago(6 * DAY) })
+  const model = board({
+    asks: [exactlyThreeDays, overThreeDays],
+    reminder: [rem],
+    older: [old],
+  })
+
+  const tw = groupBoard(model, NOW, none, ZH_TW)
+  expect(tw.needs.n).toBe(1)
+  expect(tw.needs.cards.map(card => card.key)).toEqual([exactlyThreeDays.key])
+  expect(tw.needs.older.map(item => item.key)).toEqual([old.key, rem.key, overThreeDays.key])
+  expect(tw.needs.olderLabel).toBe('更早 3')
+
+  const cn = groupBoard(model, NOW, none, ZH_CN)
+  expect(cn.needs.olderLabel).toBe('更早 3')
+
+  const en = groupBoard(model, NOW, none, EN)
+  expect(en.needs.olderLabel).toBe('Earlier 3')
+
+  const empty = groupBoard(board(), NOW, none, EN)
+  expect(empty.needs.older).toEqual([])
+  expect(empty.needs.olderLabel).toBe('')
+})
+
+test('item timestamp and age prefer updated over at and clamp future timestamps to now', () => {
+  const byMs = ask('codex', 'demo', 'By updated ms', 'Question one?', { at: ago(20 * MIN), updated: ago(4 * MIN) } as Partial<GroupingAsk>)
+  const byIso = ask('codex', 'demo', 'By updated iso', 'Question two?', { at: ago(20 * MIN), updated: new Date(ago(7 * MIN)).toISOString() } as Partial<GroupingAsk>)
+  const invalidIso = ask('codex', 'demo', 'Invalid updated', 'Question three?', { at: ago(12 * MIN), updated: 'not-a-timestamp' } as Partial<GroupingAsk>)
+  const future = ask('codex', 'demo', 'Future updated', 'Question four?', { at: ago(10 * MIN), updated: NOW + 5 * MIN } as Partial<GroupingAsk>)
+  const undated = ask('codex', 'demo', 'Undated', 'Question five?')
+  const result = groupBoard(board({ asks: [byMs, byIso, invalidIso, future, undated] }), NOW, none, EN)
+
+  expect(result.needs.cards.map(card => [card.key, card.at, card.age])).toEqual([
+    [invalidIso.key, ago(12 * MIN), 12 * MIN],
+    [byIso.key, ago(7 * MIN), 7 * MIN],
+    [byMs.key, ago(4 * MIN), 4 * MIN],
+    [future.key, NOW, 0],
+    [undated.key, 0, null],
+  ])
 })
