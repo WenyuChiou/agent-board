@@ -32,20 +32,14 @@ npx @wenyuchiou/agent-board@next
 
 ## 你会得到什么
 
-- **提问排最前面。** agent 在等你回复的提问会排到最上面；它给的选项读得出来，就每个选项一个按钮，否则自己输入回复。
-- **每个 agent 留在原来的地方。** agent 继续在自己的终端里运行，看板读的是它们 hooks 的汇报。
+- **提问排最前面。** 不管是哪个 agent 问的，在等你回复的提问都会排到最上面；它给的选项读得出来，就每个选项一个按钮，否则自己输入回复。
+- **每个 agent 留在原来的地方。** agent 继续在自己的终端和 Codex、Antigravity 桌面 app 里运行，登录和计费都不变；看板读的是它们 hooks 的汇报，关掉看板也不会停掉任何 session。
 - **在本机、纯文本。** 一个你可以自己看、自己改的 Markdown 文件，只在 127.0.0.1 的网页，看板本身不调用模型。
 - **一个命令装、一个命令卸载。** `setup` 写入前先列出要改什么；`remove` 去掉 setup 写的东西，不动你自己的设置。
 
+[T3 Code](https://github.com/pingdotgg/t3code) 这类工具把每个 agent session 放在工具自己里面运行，所以只看得到在那里运行的 session。Agent Board 显示的是你已经在各家自己的终端或桌面 app 里运行的 session，工作不用搬到新工具。
+
 <img alt="看板网页：“需要你”里是 Claude Code 的提问，附答案按钮；“进行中”列出 Codex、Antigravity 和 OpenCode 的任务和步骤。合成数据。" src="docs/images/page-zh-CN-dark.png" width="860">
-
-## 和 T3 Code 等工具的区别
-
-[T3 Code](https://github.com/pingdotgg/t3code) 这类工具把每个 agent session 放在工具自己里面运行，所以只看得到在那里运行的 session。Agent Board 走另一条路：它显示你已经在各家自己的终端或桌面 app 里运行的 session，工作不用搬到新工具。
-
-- **session 还是你的。** 登录、计费和各家自己的窗口都不变。关掉看板，每个 session 照样运行。
-- **桌面 app 也算。** Codex 和 Antigravity 桌面 app 里的 session，和终端里的排在一起。
-- **所有 agent 一页看完。** 不管是哪个 AI 问的，等你回答的都排在最前面。
 
 ## 支持的 agent
 

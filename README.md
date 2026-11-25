@@ -32,20 +32,14 @@ npx @wenyuchiou/agent-board@next
 
 ## What you get
 
-- **Questions first.** A question an agent is waiting on goes to the top, with a button for each option it can read, or you write your own answer.
-- **Every agent stays where it is.** Agents keep running in their own terminals; the board reads what their hooks report.
+- **Questions first.** A question an agent is waiting on goes to the top, whichever agent asked, with a button for each option it can read, or you write your own answer.
+- **Every agent stays where it is.** Agents keep running in their own terminals and in the Codex and Antigravity desktop apps, with your sign-in and billing unchanged; the board reads what their hooks report, and closing it stops no session.
 - **Local and plain.** One Markdown file you can read and edit, a page on 127.0.0.1 only, and no model calls by the board.
 - **One command to install, one to remove.** `setup` shows what it will change before it writes; `remove` takes out what setup wrote and leaves your own settings alone.
 
+Tools such as [T3 Code](https://github.com/pingdotgg/t3code) run each agent session inside the tool itself, so they show only the sessions running there. Agent Board shows the sessions you already run in each vendor's own terminal or desktop app, so nothing moves to a new tool.
+
 <img alt="The board's page: Needs you shows a question from Claude Code with answer buttons; Working now lists tasks from Codex, Antigravity and OpenCode with their steps. Synthetic data." src="docs/images/page-en-dark.png" width="860">
-
-## Compared with T3 Code and similar tools
-
-Tools such as [T3 Code](https://github.com/pingdotgg/t3code) run each agent session inside the tool itself, so they show only the sessions running there. Agent Board works the other way: it shows the sessions you already run in each vendor's own terminal or desktop app, so nothing moves to a new tool.
-
-- **Your sessions stay yours.** Sign-in, billing and the vendor's own window stay as they are. Close the board and every session keeps running.
-- **Desktop apps too.** Sessions in the Codex and Antigravity desktop apps show next to the terminal ones.
-- **One page for every agent.** Whatever is waiting on you comes first, whichever AI asked.
 
 ## Supported agents
 
