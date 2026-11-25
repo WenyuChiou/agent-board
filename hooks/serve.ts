@@ -1106,8 +1106,9 @@ ${sheetCss}
 .c-meta .who{color:var(--ink);font-weight:600}
 .q-toggle{display:block;width:100%;max-width:100%;min-width:0;padding:0;border:0;background:transparent;text-align:left;cursor:pointer}
 .q-toggle:hover{background:transparent}
-.q{margin:0;font-size:var(--text-sm);line-height:1.3;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.card.open .q{white-space:normal;overflow-wrap:anywhere}
+.q{margin:0;font-size:var(--text-sm);line-height:1.3;font-weight:600;overflow-wrap:anywhere}
+.q-toggle .q{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.card.open .q-toggle .q{white-space:normal;overflow:visible;text-overflow:clip}
 .c-line2{display:flex;align-items:center;gap:var(--s2);min-width:0;font-size:var(--text-xs);line-height:1.4;color:var(--muted)}
 .c-line2 .c-meta{flex:1 1 auto;min-width:0;flex-wrap:nowrap;gap:var(--s2);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .c-line2 .answers{margin-left:auto;flex:none;padding-top:0;gap:var(--s1)}
@@ -2156,13 +2157,19 @@ const PAGE_SCRIPT = String.raw`
     add(box, add(el('summary'), el('span', 'short', short || whole), el('span', 'whole', whole)));
     return box;
   }
-  function agentMark(agent) {
+  function agentMark(agent, label) {
     var first = String(agent || '').toLowerCase().split(/\s+/)[0];
     var aliases = ${JSON.stringify(AGENT_ALIASES)};
     var hasIcon = Object.prototype.hasOwnProperty.call(aliases, first);
     var key = hasIcon ? aliases[first] : first ? 'other' : 'own';
     var node = el('span', 'ag ag-' + key, !hasIcon && first ? Array.from(first)[0].toUpperCase() : '');
-    node.setAttribute('aria-hidden', 'true');
+    if (label) {
+      node.setAttribute('title', label);
+      node.setAttribute('role', 'img');
+      node.setAttribute('aria-label', label);
+    } else {
+      node.setAttribute('aria-hidden', 'true');
+    }
     return node;
   }
   var pg = { filter: '', project: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
@@ -2197,9 +2204,8 @@ const PAGE_SCRIPT = String.raw`
   function markOf(ref) {
     var id = agentOf(ref);
     var own = !!(source(ref).isOwn || ref.isOwn);
-    var node = agentMark(id !== '?' ? ref.agent : own ? '' : '?');
-    if (id !== '?' || !own) node.setAttribute('title', agentName(ref.agent));
-    return node;
+    var label = id !== '?' || !own ? agentName(ref.agent) : '';
+    return agentMark(id !== '?' ? ref.agent : own ? '' : '?', label);
   }
   // isSameName in view.ts: a row whose title is its project's name names it once (#612).
   function sameName(project, title) {
@@ -2388,11 +2394,8 @@ const PAGE_SCRIPT = String.raw`
     }
     var meta;
     if (isOwnCard) {
-      var smallMark = agent ? agentMark(agent) : null;
-      if (smallMark) {
-        smallMark.className += ' ag-sm';
-        smallMark.setAttribute('title', agentName(agent));
-      }
+      var smallMark = agent ? agentMark(agent, agentName(agent)) : null;
+      if (smallMark) smallMark.className += ' ag-sm';
       var age = ageOf(ref);
       meta = add(el('div', 'c-meta'), smallMark, project ? el('span', '', project) : null, age ? el('span', '', age) : null);
     } else {
@@ -2408,7 +2411,7 @@ const PAGE_SCRIPT = String.raw`
     else {
       if (ask.note) add(detailHost, clipped(clean(ask.noteLine || ask.note), ask.note, 'note', 'note:' + key));
       var askTask = clean(String(ask.task || ''));
-      if (ask.context && (!isOlder || !ask.note || askTask && (pg.titleCounts && pg.titleCounts[askTask] || 0) > 1)) add(detailHost, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
+      if (ask.context && (!ask.note || askTask && (pg.titleCounts && pg.titleCounts[askTask] || 0) > 1)) add(detailHost, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
     }
     if (!isStuck && !isOlder && Array.isArray(ask.steps) && ask.steps.length) {
       add(detailHost, stepList(ask.steps, { key: key, steps: ask.steps, isOwn: false, nextFileLine: null, next: null, tickFp: ask.tickFp }));

@@ -3600,7 +3600,7 @@ test('with explicit legacy opt-in a reply goes into a closed Grok session once, 
     }
     assert.equal(replies.length, 1, JSON.stringify(replies))
     assert.equal(replies[0].ok, true)
-    assert.equal(replies[0].note, 'Sent to Grok Build · Pick the cache. It replied: Redis it is; wiring it up now.')
+    assert.equal(replies[0].note, 'Sent. Reply: Redis it is; wiring it up now.')
     assert.equal((await rows()).find(row => row.key === key)?.isSending, false)
     const ran = JSON.parse(readFileSync(join(board.dir, 'grok-ran.json'), 'utf8'))
     assert.deepEqual(ran.args, ['-r', GROK_ID, '--single=About "Redis or Memcached?": Redis'])
@@ -13450,7 +13450,7 @@ test("one press on an agent shows only that agent's work, and a refresh keeps it
     const box = dom.boxes()[0]
     assert.ok(box)
     box.value = 'Keep this draft across refresh'
-    const row = dom.node('board').querySelectorAll('[data-k]')[0]
+    const row = dom.node('board').querySelectorAll('[data-k]').find(one => String(one.className ?? '').split(' ').includes('row'))
     const press = row.querySelector('button')
     assert.ok(press)
     press.click()
@@ -15237,7 +15237,7 @@ test('#1363: a waiting card keeps one hide button named answeredHide across Copy
         assert.equal(hides.length, 1, `${label}: exactly one hide button`)
         assert.equal(btns.some(btn => btn.textContent === s.pgAnswered), false, `${label}: never pgAnswered`)
         assert.equal(insideClass(hides[0], 'state'), expectInState, `${label}: inside .state === ${expectInState}`)
-        assert.equal(insideClass(hides[0], 'more'), !expectInState, `${label}: inside .more === ${!expectInState}`)
+        assert.equal(insideClass(hides[0], 'card-fold'), !expectInState, `${label}: inside .card-fold === ${!expectInState}`)
       }
       checkHideState(false, `${variant.key} initial`)
       const writeBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === s.pgWriteOwn)

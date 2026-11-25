@@ -15806,6 +15806,7 @@ test('asking Antigravity row and working twin with the same title show start tim
   const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
     now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },
   }))
+  for (const btn of dom.buttons(dom.node('board')).filter(b => String(b.className ?? '').split(' ').includes('q-toggle'))) btn.click()
   const visible = dom.visible()
   assert.ok(visible.includes(rAsk.context), visible)
   assert.ok(visible.includes(rWork.context), visible)
@@ -15881,6 +15882,7 @@ test('upgrading a pre-#1401 Antigravity record preserves its legacy start time, 
   })
   assert.equal(model.view?.needs.cards.length, 2)
   const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), model)
+  for (const btn of dom.buttons(dom.node('board')).filter(b => String(b.className ?? '').split(' ').includes('q-toggle'))) btn.click()
   const visible = dom.visible()
   assert.ok(visible.includes(rOne.context), visible)
   assert.ok(visible.includes(rTwo.context), visible)
@@ -15977,6 +15979,7 @@ test('two asking Antigravity sessions with question notes keep start times visib
   })
   assert.equal(model.view?.needs.cards.length, 2)
   const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), model)
+  for (const btn of dom.buttons(dom.node('board')).filter(b => String(b.className ?? '').split(' ').includes('q-toggle'))) btn.click()
   const visible = dom.visible()
   assert.ok(visible.includes('should I proceed?'), visible)
   assert.ok(visible.includes(rOne.context), visible)

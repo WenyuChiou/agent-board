@@ -529,7 +529,7 @@ test("a waiting question's folded item is two lines at 1280 px", async () => {
     '### Compare rainfall model error rates across stations',
     '> Context: Need the Q4 report pick before Friday review.',
     '- [x] Load station series',
-    '- [?] Choose model for the forecast? — Run `bun run compare-models`',
+    '- [?] Choose model for `bun run compare-models`?',
     '<!-- options=["ECMWF","Local model","Hybrid","Skip"] -->',
     '<!-- /auto session=aa11bb22 -->',
     '',
@@ -547,12 +547,15 @@ test("a waiting question's folded item is two lines at 1280 px", async () => {
   const descendants = walk(card)
   const mark = descendants.find(node => String(node.className ?? '').split(' ').includes('ag'))
   assert.equal(mark?.getAttribute('title'), 'Codex', 'AI mark tooltip carries the AI name')
+  assert.equal(mark?.getAttribute('role'), 'img', 'AI mark exposes role="img" to screen readers')
+  assert.equal(mark?.getAttribute('aria-label'), 'Codex', 'AI mark exposes AI name to screen readers')
+  assert.equal(mark?.getAttribute('aria-hidden'), null, 'AI mark is not hidden from screen readers')
   assert.equal(descendants.some(node => String(node.className ?? '').split(' ').includes('who')), false, 'folded item carries no inline AI name word')
   const toggle = descendants.find(node => node.tag === 'button' && String(node.className ?? '').split(' ').includes('q-toggle'))
   assert.ok(toggle, 'line 1 question uses a collapsible toggle button')
   assert.equal(toggle.getAttribute('aria-expanded'), 'false', 'waiting question item starts folded')
   const qNode = descendants.find(node => String(node.className ?? '').split(' ').includes('q'))
-  assert.ok(qNode?.textContent.includes('Choose model for the forecast?'), qNode?.textContent)
+  assert.ok(qNode?.textContent.includes('Choose model for'), qNode?.textContent)
   const line2 = descendants.find(node => String(node.className ?? '').split(' ').includes('c-line2'))
   assert.ok(line2, 'folded item has line 2 container (.c-line2)')
   assert.ok(line2.textContent.includes('weather-model') && line2.textContent.includes('7'), 'line 2 shows project and age')
@@ -619,7 +622,9 @@ test('no text inside an item is over 14 px', () => {
   const qRule = rules.find(rule => rule.selector === '.q')
   assert.equal(resolveFontPx(qRule?.declarations.find(d => d.property === 'font-size')?.value), 14, '.q question title is 14 px')
   assert.equal(qRule?.declarations.find(d => d.property === 'font-weight')?.value, '600', '.q question title weight is 600')
-  assert.equal(qRule?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap', '.q folded question stays one line')
+  assert.notEqual(qRule?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap', '.q without .q-toggle (Older cards) wraps instead of truncating')
+  const toggleQRule = rules.find(rule => rule.selector === '.q-toggle .q')
+  assert.equal(toggleQRule?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap', '.q-toggle .q folded question stays one line')
   const line2Rule = rules.find(rule => rule.selector === '.c-line2')
   assert.equal(resolveFontPx(line2Rule?.declarations.find(d => d.property === 'font-size')?.value), 13, '.c-line2 second line is 13 px')
   for (const viewSel of ['.sec-head h2', '.flag']) {
