@@ -4096,7 +4096,7 @@ export const LINES = [
 "};",
 "var isStale = (auto, now, updated = auto?.updated ?? 0, staleMs = STALE_MS) => auto !== null && (auto.state === \"working\" || auto.state === \"waiting\") && updated > 0 && now - updated > staleMs;",
 "var isStopped = (auto, now, updated = auto?.updated ?? 0, staleMs = STALE_MS, gone = new Set) => isStale(auto, now, updated, staleMs) || auto !== null && (auto.state === \"working\" || auto.state === \"waiting\") && gone.has(blockKey(auto));",
-"var CODEX_MAY_BE_CLOSED_MS = 120000;",
+"var CODEX_MAY_BE_CLOSED_MS = 30 * 60000;",
 "var isMaybeClosed = (auto, steps, now, updated = auto?.updated ?? 0, isFuture = false) => auto !== null && auto.agent === \"codex\" && auto.state === \"waiting\" && auto.isRun !== true && !isFuture && agentClaimOf(auto) === null && steps.some((step) => step.status === \"waiting\") && Number.isFinite(updated) && updated > 0 && updated <= now && now - updated > CODEX_MAY_BE_CLOSED_MS;",
 "var doneKey = (project, title) => `done:${project}::${title}`;",
 "var baseName = (path) => path.replace(/[\\\\/]+$/, \"\").split(/[\\\\/]/).pop() ?? \"\";",
