@@ -41,7 +41,7 @@ npx @wenyuchiou/agent-board@next
 
 ## Compared with T3 Code and similar tools
 
-Tools such as [T3 Code](https://github.com/pingdotgg/t3code) start each agent session themselves and work only with the sessions they started. Agent Board works the other way: it shows the sessions you already run in each vendor's own terminal or desktop app, so nothing moves to a new tool.
+Tools such as [T3 Code](https://github.com/pingdotgg/t3code) run each agent session inside the tool itself, so they show only the sessions running there. Agent Board works the other way: it shows the sessions you already run in each vendor's own terminal or desktop app, so nothing moves to a new tool.
 
 - **Your sessions stay yours.** Sign-in, billing and the vendor's own window stay as they are. Close the board and every session keeps running.
 - **Desktop apps too.** Sessions in the Codex and Antigravity desktop apps show next to the terminal ones.

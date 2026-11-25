@@ -41,7 +41,7 @@ npx @wenyuchiou/agent-board@next
 
 ## 和 T3 Code 等工具的区别
 
-[T3 Code](https://github.com/pingdotgg/t3code) 这类工具会自己启动每个 agent session，也只能操作自己启动的 session。Agent Board 走另一条路：它显示你已经在各家自己的终端或桌面 app 里运行的 session，工作不用搬到新工具。
+[T3 Code](https://github.com/pingdotgg/t3code) 这类工具把每个 agent session 放在工具自己里面运行，所以只看得到在那里运行的 session。Agent Board 走另一条路：它显示你已经在各家自己的终端或桌面 app 里运行的 session，工作不用搬到新工具。
 
 - **session 还是你的。** 登录、计费和各家自己的窗口都不变。关掉看板，每个 session 照样运行。
 - **桌面 app 也算。** Codex 和 Antigravity 桌面 app 里的 session，和终端里的排在一起。
