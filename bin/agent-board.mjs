@@ -23,12 +23,40 @@ const langOf = value => {
   if (/^en(?:\b|_)|english|英文|英語|英语/.test(text)) return 'en'
   return null
 }
-// The options that open the board and take no value, against the board's own grammar in scripts/board-cli.ts
-// (BOOL_FLAGS, VALUE_FLAGS); tests/npm-package.test.mjs keeps the two in step. A view option that takes a value, and
-// every other option, which picks a board, reads data, presses keys or manages something, is not one (#1783; #1789).
+// The options that open the board, against the board's own grammar in scripts/board-cli.ts
+// (BOOL_FLAGS, VALUE_FLAGS); tests/npm-package.test.mjs keeps the two in step. Every other option,
+// which picks a board, reads data, presses keys or manages something, is not one (#1783; #1789).
 const boardViews = new Set(['--print', '--watch', '--html', '--serve', '--all', '--plain', '--no-color', '--no-open', '--quiet-board', '--lan'])
-// Any other option, any value (an address after `--lan` too), `--` and any other word make the list something else.
-const isBoardView = list => list.every(word => boardViews.has(word))
+const boardValueViews = new Set(['--port', '--idle-minutes', '--lang', '--theme'])
+const isPort = value => typeof value === 'string' && /^[1-9]\d*$/.test(value) && Number(value) >= 1 && Number(value) <= 65535
+const isIdleMinutes = value => typeof value === 'string' && /^\d+(?:\.\d+)?$/.test(value) && Number.isFinite(Number(value)) && Number(value) <= 525600
+// Read in the original argument order with --data-dir <folder> taken where it stands, checking each value
+// the way scripts/board-cli.ts checks it: a line the board rejects keeps the notice (#1789).
+const isBoardView = list => {
+  for (let i = 0; i < list.length; i++) {
+    const word = list[i]
+    if (word === '--data-dir') {
+      const value = list[++i]
+      if (!value || value.startsWith('--')) return false
+      continue
+    }
+    if (word === '--lan') {
+      const next = list[i + 1]
+      if (next !== undefined && /^[\d.]+$/.test(next)) i++
+      continue
+    }
+    if (boardViews.has(word)) continue
+    if (boardValueViews.has(word)) {
+      const value = list[++i]
+      if (word === '--port') { if (!isPort(value)) return false }
+      else if (word === '--idle-minutes') { if (!isIdleMinutes(value)) return false }
+      else if (typeof value !== 'string' || value === '' || value.startsWith('-')) return false
+      continue
+    }
+    return false
+  }
+  return true
+}
 // Windows usually has no LANG, so independent commands also check the system locale.
 const systemLang = env => {
   const language = langOf(env)
@@ -324,17 +352,18 @@ if ((!isChat && !args.includes('--status')) || args.includes('--json')) {
           if (typeof owned.config !== 'string') return false
           return same(depth === 1 ? dirname(owned.config) : dirname(dirname(owned.config)), process.env[variable] || join(home, usual))
         })
-        if (process.stdin.isTTY && process.stdout.isTTY && isBoardView(passArgs) && isLaidOut()) {
+        if (process.stdin.isTTY && process.stdout.isTTY && isBoardView(args) && isLaidOut()) {
           // The board is chosen already, so a progress file the environment names may be another board's: setup keeps
           // the one the install's own record names (#1783).
           const setupEnv = { ...process.env, AGENT_BOARD_SETUP_COMMAND: `npx ${name}@${v} setup` }
           for (const key of Object.keys(setupEnv)) if (key.toUpperCase() === 'CLAUDE_PROGRESS_FILE') delete setupEnv[key]
-          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : [])], { stdio: 'inherit', env: setupEnv, windowsHide: true })
+          const update = spawnSync(process.execPath, [join(pkg, 'scripts/setup-agent.mjs'), '--update', '--from-launcher', ...(agents.length ? ['--agent', agents.join(',')] : []), ...(root !== join(home, '.agent-board') ? ['--data-dir', root] : [])], { stdio: 'inherit', env: setupEnv, windowsHide: true })
           if (update.signal) { process.kill(process.pid, update.signal); process.exit(1) }
-          // A setup that could not start printed nothing, and one that did not finish (a no, a conflict, an install it does
+          // A setup that could not start printed nothing, and one that did not finish (a conflict, an install it does
           // not find from here) may leave the older script as it was: then the notice names the command too (#1783).
+          // When the person just declined setup's question, setup already printed how to run --update later (#1802).
           const stillOld = () => { try { return hash(readFileSync(installed, 'utf8')) === digest } catch { return true } }
-          if (update.error || stillOld()) console.error(notice)
+          if (update.error || (update.status !== 4 && stillOld())) console.error(notice)
         } else console.error(notice)
       } else {
         console.error(old
