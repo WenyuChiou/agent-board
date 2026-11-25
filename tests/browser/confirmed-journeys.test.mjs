@@ -732,4 +732,29 @@ process.stdout.write('Redis it is; wiring it up now.\\n')
   test('releasing a press held on a lost-result button across a background reply still fires its click (#1473)', { concurrency: false, timeout: 120_000 }, async () => {
     await heldLostPress('lost-result-press-reply-click', 'click')
   })
+
+  test("the sidebar footer's bottom equals the window's bottom", { concurrency: false, timeout: 60_000 }, async () => {
+    await browserFixture('sidebar-footer-bottom', async ({ page, progress, startServer }) => {
+      writeProgress(progress, '## Synthetic project\n### Synthetic task\n- [ ] Check sidebar footer\n')
+      const board = new BoardPage(page)
+      await page.setViewportSize({ width: 1280, height: 800 })
+      await board.open(await startServer())
+      await page.locator('#side-foot > #pfoot').waitFor({ state: 'visible' })
+      const desktop = await page.evaluate(() => ({
+        bottom: document.getElementById('side-foot').getBoundingClientRect().bottom,
+        innerHeight: window.innerHeight,
+      }))
+      assert.ok(Math.abs(desktop.bottom - desktop.innerHeight) <= 1, `desktop footer bottom (${desktop.bottom}) did not equal window height (${desktop.innerHeight})`)
+
+      await page.setViewportSize({ width: 375, height: 812 })
+      await page.locator('#drawer-btn').click()
+      await page.locator('#side-foot > #pfoot').waitFor({ state: 'visible' })
+      await page.waitForFunction(() => Math.abs(document.getElementById('side').getBoundingClientRect().left) < 0.5)
+      const phone = await page.evaluate(() => ({
+        bottom: document.getElementById('side-foot').getBoundingClientRect().bottom,
+        innerHeight: window.innerHeight,
+      }))
+      assert.ok(Math.abs(phone.bottom - phone.innerHeight) <= 1, `phone footer bottom (${phone.bottom}) did not equal window height (${phone.innerHeight})`)
+    })
+  })
 })
