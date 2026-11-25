@@ -1641,11 +1641,13 @@ const PAGE_SCRIPT = String.raw`
       if (slot) slot.node.textContent = '';
     });
   }
-  function say(text, tone, key, copyText, canRetry) {
+  // unhideKey: a written hide's Show again. It is part of the result before the first paint, because a card the
+  // board already drew away paints the result once, as a lost card, and never again (#1786).
+  function say(text, tone, key, copyText, canRetry, unhideKey) {
     if (key) {
       var slot = resultSlots[key];
       var previous = results[key];
-      results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, canRetry: canRetry === true, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '' };
+      results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, canRetry: canRetry === true, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '', unhideKey: unhideKey };
       paintResult(key);
       if (!slot) keepCopyFocus(drawLostResults);
       return;
@@ -1857,11 +1859,7 @@ const PAGE_SCRIPT = String.raw`
       answered = true;
       clearTimeout(waitTimer);
       delete hideWaiting[key];
-      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok);
-      if (data.ok && type === 'hide' && unhideKey && results[key]) {
-        results[key].unhideKey = unhideKey;
-        paintResult(key);
-      }
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok, data.ok && type === 'hide' && unhideKey ? unhideKey : undefined);
       busyOff(go, data.ok);
       return data.ok;
     }, function () {
