@@ -5514,9 +5514,33 @@ for (const lang of ['en', 'zh-TW', 'zh-CN']) {
       await dom.redraw(hidden)
       assert.equal(pressWalk(dom.node('board')).filter(node => node.getAttribute('data-card-key') === 'hide-card').length, 0)
       assert.ok(!dom.node('board').textContent.includes(words.pressPending), dom.node('board').textContent)
+      // The timer firing after the hidden draw adds no warning.
+      dom.timePress()
+      await dom.flush()
+      assert.ok(!dom.node('board').textContent.includes(words.pressTimedOut), dom.node('board').textContent)
     } finally { await board.close() }
   })
 }
+
+test('#1830: a hide that times out and is then written leaves no timed-out warning once the hidden shelf shows it', async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const ask = { key: 'hide-card', task: 'Synthetic task', project: 'Demo', text: 'Keep it, OK?', kind: 'confirm', answers: [], canTick: false, canHide: true, unhideKey: 'hidden:hide-card', command: null, reopen: null, link: null, send: 'copy', fp: 'before' }
+    const base = { counts: { waiting: 1, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [ask] }
+    const hidden = { ...base, counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [{ key: 'hidden:hide-card', task: 'Synthetic task', text: ask.text, project: 'Demo' }] }
+    const dom = await pageDom(html, base, { post: () => new Promise(() => {}) })
+    dom.buttons().find(button => button.textContent === words.answeredHide).click()
+    await dom.flush()
+    dom.timePress()
+    await dom.flush()
+    assert.equal(pageCardResults(dom, ask.key)[0].textContent, words.pressTimedOut)
+    await dom.redraw(hidden)
+    assert.ok(!dom.node('board').textContent.includes(words.pressTimedOut), dom.node('board').textContent)
+    assert.ok(!dom.node('board').textContent.includes(words.pressPending), dom.node('board').textContent)
+  } finally { await board.close() }
+})
 
 test('#1830: a hide the board refuses says the reason on the card', async () => {
   const board = await page()
