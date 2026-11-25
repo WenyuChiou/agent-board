@@ -108,5 +108,49 @@ test("the AI chip set to Codex hides the other AIs' cards", { concurrency: false
     await cardShown(page, 'Approve Claude diff?')
     await cardShown(page, 'Merge Antigravity fix?')
     await page.locator('#filter-clear').waitFor({ state: 'hidden' })
+
+    // Narrow drawer: Tab moves forward and backward across Close <-> #side-search <-> Overview without trapping.
+    await page.setViewportSize({ width: 400, height: 800 })
+    await page.locator('#drawer-btn').click()
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'drawer-close')
+    await page.keyboard.press('Tab')
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'side-search')
+    await page.keyboard.press('Tab')
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'view-all')
+    await page.keyboard.press('Shift+Tab')
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'side-search')
+    await page.keyboard.press('Shift+Tab')
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'drawer-close')
+  })
+})
+
+test('done-only project selection persists and stays uncheckable when zero-count with another AI', { concurrency: false, timeout: 120_000 }, async () => {
+  await browserFixture('done-project-filter', async ({ page, progress, startServer }) => {
+    writeProgress(progress, [
+      block('s1848021', 'codex', 'done', 'done-only-repo', 'Completed migration', ['- [x] Finish schema update']),
+      block('s1848022', 'claude', 'waiting', 'active-repo', 'Pending review', ['- [?] Merge PR now?']),
+    ].join('\n\n'))
+    await page.setViewportSize({ width: 1280, height: 800 })
+    const board = new BoardPage(page)
+    await board.open(await startServer())
+    await board.question('Merge PR now?').waitFor({ state: 'visible' })
+
+    const projectChip = page.locator('#filter-bar [data-filter-kind="project"] button.f-chip')
+    const projectMenu = page.locator('#filter-bar [data-filter-kind="project"] .f-menu')
+    await projectChip.click()
+    const doneOpt = projectMenu.getByRole('menuitemcheckbox', { name: /done-only-repo/ })
+    await doneOpt.click()
+    assert.equal(await doneOpt.getAttribute('aria-checked'), 'true')
+    assert.equal(await projectChip.getAttribute('data-active'), '1')
+    await cardHidden(page, 'Merge PR now?')
+
+    await page.locator('#filter-bar [data-filter-kind="agent"] button.f-chip').click()
+    await page.locator('#filter-bar [data-filter-kind="agent"] .f-menu').getByRole('menuitemcheckbox', { name: /Claude/ }).click()
+    await projectChip.click()
+    await doneOpt.waitFor({ state: 'visible' })
+    assert.equal(await doneOpt.getAttribute('aria-checked'), 'true')
+    await doneOpt.click()
+    assert.equal(await projectChip.getAttribute('data-active'), '0')
+    await cardShown(page, 'Merge PR now?')
   })
 })
