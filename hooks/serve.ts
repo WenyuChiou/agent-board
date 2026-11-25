@@ -1952,7 +1952,10 @@ const PAGE_SCRIPT = String.raw`
   // A draft that was sent is gone from the box on the page now, whatever redraw happened since it was pressed.
   function clearDraft(draftKey) {
     pg.drafts[draftKey] = '';
-    board.querySelectorAll('textarea[data-key]').forEach(function (box) { if (box.getAttribute('data-key') === draftKey) box.value = ''; });
+    var detailRailEl = document.getElementById('detail-rail');
+    [board, detailRailEl].forEach(function (rootEl) {
+      if (rootEl) rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) { if (box.getAttribute('data-key') === draftKey) box.value = ''; });
+    });
   }
   function brand(agent) {
     if (!agent) return '';

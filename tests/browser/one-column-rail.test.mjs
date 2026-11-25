@@ -176,3 +176,50 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     assert.deepEqual(preserved, { value: 'draft keep caret', isFocused: true, start: 5, end: 5 })
   })
 })
+
+test('at 1440x900 sending a message from the detail rail clears its draft across redraws', { timeout: 180_000 }, async () => {
+  await browserFixture('one-column-1440-rail-clear-draft', async ({ page, progress, startServer }) => {
+    const md = FIXTURE_MD()
+    writeProgress(progress, md)
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.route('**/api/board', async route => {
+      let response
+      try { response = await route.fetch({ maxRetries: 0 }) } catch (error) {
+        if (/disposed|closed|aborted/i.test(String(error?.message ?? error))) return
+        throw error
+      }
+      if (response.status() === 304) { await route.fulfill({ response }).catch(() => undefined); return }
+      const body = await response.json()
+      for (const row of [...(body.model?.stopped ?? []), ...(body.model?.idle ?? []), ...(body.model?.groups ?? []).flatMap(group => group.rows)]) {
+        if (row.title === 'Verify stopped draft persistence') row.send = 'send'
+      }
+      await route.fulfill({ response, json: body }).catch(() => undefined)
+    })
+    const sends = []
+    await page.route('**/api/act', async route => {
+      const payload = route.request().postDataJSON()
+      if (payload.type !== 'send') { await route.continue(); return }
+      sends.push(payload.text)
+      await route.fulfill({ json: { ok: true, note: 'Synthetic send accepted.' } })
+    })
+    const board = new BoardPage(page)
+    await board.open(await startServer())
+    await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
+    await board.openTask('Verify stopped draft persistence')
+    const box = page.locator('#detail-rail textarea[data-key]')
+    await box.waitFor({ state: 'visible' })
+    await box.fill('Rail message once')
+    await page.locator('#detail-rail button.primary').click()
+    await page.waitForFunction(() => document.querySelector('#detail-rail textarea[data-key]')?.value === '')
+    assert.deepEqual(sends, ['Rail message once'])
+    const redraw = page.waitForResponse(async res => {
+      if (new URL(res.url()).pathname !== '/api/board' || res.status() !== 200) return false
+      const body = await res.json().catch(() => null)
+      return JSON.stringify(body?.model ?? {}).includes('Parse updated CSV schema')
+    })
+    writeProgress(progress, md.replace('Parse CSV schema', 'Parse updated CSV schema'))
+    await redraw
+    await page.waitForFunction(() => document.body.textContent.includes('Build export worker'))
+    assert.equal(await box.inputValue(), '')
+  })
+})
