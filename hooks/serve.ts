@@ -2145,7 +2145,7 @@ const PAGE_SCRIPT = String.raw`
       .replace(/\bsession\s*[=:]\s*[\da-f]{8,}/gi, '…')
       .replace(/\b[\da-f]{7,}\b/gi, function (one) { return one.length === 40 || /\d/.test(one) && /[a-f]/i.test(one) ? '…' : one; })
       .replace(/(?:[A-Z]:[\\/]|\/(?:Users|home)\/)[^\s<>"'\x60|]*/gi, '…')
-      .replace(/#\d+\b/g, '').replace(/\s+/g, ' ').trim()).slice(0, 220).join('');
+      .replace(/\s+/g, ' ').trim()).slice(0, 220).join('');
   }
   function source(ref) { return pg.sources[ref.sourceKey || ref.key] || pg.sources[ref.key.replace(/^stuck:/, '')] || {}; }
   function fullTitle(ref) { var one = source(ref); return String(one.title || one.task || one.text || ''); }
