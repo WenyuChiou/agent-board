@@ -10,9 +10,10 @@ registerHooks({ resolve(specifier, context, next) {
   }
 } })
 
-const { DELIVERY_EVENTS, DELIVERY_STATES, DELIVERY_TABLE, SAMPLE_NOW, SUSPECT_CELLS, applyEvent, isDoubleSend, observe, observeHolds, rowOf, sampleBinding, sampleOf, shapesOf, stateOf } = await import('../hooks/delivery-states.ts')
+const { DELIVERY_EVENTS, DELIVERY_STATES, DELIVERY_TABLE, SAMPLE_NOW, SUSPECT_CELLS, applyEvent, observe, observeHolds, rowOf, sampleBinding, sampleOf, shapesOf, stateOf } = await import('../hooks/delivery-states.ts')
 const { FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, MCP_SURFACE, OPEN_LIMIT_MS, claimMessages, disconnectMessages, dismissMessage, isMailboxSurfaceLost, isMailboxTarget, isOpen, messageReceipt, pruneMessages, queueMessage, rebindMessages, shownMessage } = await import('../hooks/messaging.ts')
 const { releaseMailboxMessage } = await import('../hooks/hook-messages.ts')
+const { restartMessages } = await import('../hooks/messaging.ts')
 const { mailboxAction } = await import('../scripts/board-messaging.ts')
 const { servePage } = await import('../hooks/serve.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
@@ -93,7 +94,7 @@ test('every card line in the delivery table is the one the page picks (#1543)', 
   assert.deepEqual(wrong, [], wrong.join('\n'))
 })
 
-test('isDoubleSend names exactly the uncertain receipts that send a message accepted before again (#1553)', () => {
+test('no uncertain receipt sends again a message its host accepted before, in any state of the table (#1553, #1407)', () => {
   const wrong = []
   for (const name of DELIVERY_STATES) {
     for (const shape of shapeNames(name)) {
@@ -115,11 +116,42 @@ test('isDoubleSend names exactly the uncertain receipts that send a message acce
         isSentAgain = [[after, at], [after, one.claimed + MAILBOX_LEASE_MS], [back(false), at + 1000], [back(true), at + 1000]]
           .some(([store, now]) => claimMessages(store, own, now, 'd4e5f6', binding.scope === 'mailbox' ? 'ba9876543210' : undefined).messages.some(item => item.id === message.id))
       }
-      const expected = (message.status === 'accepted' || message.hasAccepted === true) && isSentAgain
-      if (isDoubleSend(message, 'unsure') !== expected) wrong.push(`${label(name, shape)}: isDoubleSend ${isDoubleSend(message, 'unsure')}, accepted before and sent again ${expected}`)
-      for (const event of DELIVERY_EVENTS) if (event !== 'unsure' && isDoubleSend(message, event)) wrong.push(`${label(name, shape)}: isDoubleSend names ${event}`)
+      if ((message.status === 'accepted' || message.hasAccepted === true) && isSentAgain) wrong.push(`${label(name, shape)}: accepted before and sent again`)
     }
   }
+  assert.deepEqual(wrong, [], wrong.join('\n'))
+})
+
+test('nothing a hook was handed before a board start goes out after it, whatever receipts its session sends since, in any state of the table (#1407)', () => {
+  const wrong = []
+  let checked = 0
+  for (const name of DELIVERY_STATES) {
+    for (const shape of shapeNames(name)) {
+      const { message, binding, state } = sampleOf(name, shape)
+      // Handed to a hook: a mailbox message with an ACK code. OpenCode's keep their own rules (#724, #1366).
+      if (!isMailboxTarget(message.target) || message.nonce === '' || message.to.startsWith('opencode:') || !isOpen(message)) continue
+      for (const errors of [[undefined], ['TIMEOUT', undefined], ['TURN_ABORTED', undefined]]) {
+        const start = message.updated + 1000
+        let after = restartMessages(state, start)
+        for (const [index, error] of errors.entries()) {
+          try {
+            after = messageReceipt(after, binding, { id: message.id, nonce: message.nonce, status: 'uncertain', ...(error === undefined ? {} : { error }) }, start + 1000 * (index + 1))
+          } catch (failure) {
+            assert.ok(isBoardError(failure), `${label(name, shape)}: ${failure.stack}`)
+          }
+        }
+        // Sent again: its own binding takes it, at once or after its lease, or its hook hands back its old claim first.
+        const own = { ...binding, surface: message.surface ?? binding.surface }
+        const late = start + 10 * MAILBOX_LEASE_MS
+        const back = releaseMailboxMessage(after, binding.agent, binding.session, message.ref ?? '', late)
+        const isSentAgain = [[after, start + 5000], [after, late], [back, late + 1000]]
+          .some(([store, now]) => claimMessages(store, own, now, 'd4e5f6', 'ba9876543210').messages.some(item => item.id === message.id))
+        if (isSentAgain) wrong.push(`${label(name, shape)}: sent again after a start, then ${errors.map(error => error ?? 'no error').join(', ')}`)
+        checked++
+      }
+    }
+  }
+  assert.ok(checked > 30, `only ${checked} checked`)
   assert.deepEqual(wrong, [], wrong.join('\n'))
 })
 
@@ -158,7 +190,7 @@ const generator = seed => () => {
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296
 }
 
-const EVERY_KIND = ['send', 'send', 'claim', 'claim', 'claim', 'pull', 'wake', 'receipt', 'receipt', 'hook', 'hook', 'dismiss', 'disconnect', 'leave', 'endMailbox', 'tick', 'tick', 'tick']
+const EVERY_KIND = ['send', 'send', 'claim', 'claim', 'claim', 'pull', 'wake', 'receipt', 'receipt', 'hook', 'hook', 'dismiss', 'disconnect', 'leave', 'endMailbox', 'restart', 'tick', 'tick', 'tick']
 
 test('short random event orders never lose a message, never send one twice, never start one in a running turn, and never open a finished one (#1543)', () => {
   const reached = new Set()
@@ -190,7 +222,7 @@ test('short random event orders never lose a message, never send one twice, neve
           const binding = receiver()
           const id = `m${run}x${step}`
           state = queueMessage(state, { id, target: binding.id, turn: binding.turn, text: `words ${step}` }, 'board', binding, now).state
-          seen.set(id, { handed: 0, nonce: '', isAccepted: false, redelivered: 0 })
+          seen.set(id, { handed: 0, nonce: '', isAccepted: false, redelivered: 0, handedBeforeStart: false })
         } else if (kind === 'claim' || kind === 'pull') {
           // A claim by a receiver, named as a hook names it; or the agent's own MCP pull, an unnamed claim on its mailbox.
           const binding = kind === 'pull' ? { ...pick([codexBox, opencodeBox]), surface: MCP_SURFACE } : receiver()
@@ -211,12 +243,9 @@ test('short random event orders never lose a message, never send one twice, neve
             const status = { accept: 'accepted', ack: 'acknowledged', reject: 'rejected', fail: 'uncertain', timeout: 'uncertain', unsure: 'uncertain' }[event]
             const error = { fail: 'TURN_ABORTED', timeout: 'TIMEOUT' }[event]
             const binding = one.to.startsWith('opencode:') ? opencodeBox : live
-            // The one receipt that sends a message twice today (#1553) is left out.
-            if (!isDoubleSend(one, event)) {
-              state = event === 'dismiss' ? dismissMessage(state, one.id, now) : messageReceipt(state, binding, {
-                id: one.id, nonce: one.nonce, status, ...(event === 'ack' ? { reply: `ACK ${one.nonce}` } : {}), ...(error === undefined ? {} : { error }),
-              }, now)
-            }
+            state = event === 'dismiss' ? dismissMessage(state, one.id, now) : messageReceipt(state, binding, {
+              id: one.id, nonce: one.nonce, status, ...(event === 'ack' ? { reply: `ACK ${one.nonce}` } : {}), ...(error === undefined ? {} : { error }),
+            }, now)
           }
         } else if (kind === 'hook') {
           // A hook's own call on a mailbox message, through the board's handler: OpenCode's plugin marks the wake it starts, a
@@ -237,6 +266,10 @@ test('short random event orders never lose a message, never send one twice, neve
           if (kind === 'leave') state = rebindMessages(state, live, id => id === live.id)
         } else if (kind === 'endMailbox') {
           state = disconnectMessages(state, pick([codexBox, opencodeBox]).id, now)
+        } else if (kind === 'restart') {
+          // The board starts again and loads the store (#1407).
+          state = restartMessages(state, now)
+          for (const record of seen.values()) if (record.handed > 0) record.handedBeforeStart = true
         } else {
           // Mostly short steps and lease ends, so a hook's claim can lapse up to its last repeat.
           now += pick([1000, MAILBOX_LEASE_MS, MAILBOX_LEASE_MS, MAILBOX_LEASE_MS, OPEN_LIMIT_MS + 1000, FINISHED_KEEP_MS + 1000])
@@ -268,8 +301,10 @@ test('short random event orders never lose a message, never send one twice, neve
         // Never sent twice: a message goes out again only while nobody took it, with its first ACK code. Taken again after its
         // lease passed, a started wake never goes, and a hook's claim says it is a repeat, up to the last; handed back by its
         // hook, it goes as it was.
+        // Nothing handed out before a board start goes out after it, but OpenCode's, which keep their own rules (#1407).
+        if (!one.to.startsWith('opencode:')) assert.ok(!record.handedBeforeStart, `${where}: ${one.id} was handed out before a board start and again after it`)
         if (record.handed > 0) {
-          assert.ok(!record.isAccepted, `${where}: ${one.id} was handed out again after it was accepted`)
+          assert.ok(!record.isAccepted,`${where}: ${one.id} was handed out again after it was accepted`)
           assert.equal(one.nonce, record.nonce, `${where}: ${one.id} went out again under a new ACK code`)
           if (earlier.status === 'queued') assert.equal(one.redelivered ?? 0, record.redelivered, `${where}: ${one.id} came back with ${one.redelivered} repeats`)
           else {

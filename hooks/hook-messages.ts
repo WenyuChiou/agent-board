@@ -1,4 +1,4 @@
-import { address, claimMessages, disconnectMessages, MAILBOX_LEASE_MS, messageReceipt } from './messaging'
+import { address, claimMessages, disconnectMessages, isAcceptedOnce, MAILBOX_LEASE_MS, messageReceipt } from './messaging'
 import type { Connection, Message, MessageState } from './messaging'
 import { sha256 } from './sha256'
 
@@ -37,18 +37,19 @@ export const takeMailboxMessage = (state: MessageState, agent: string, session: 
 // A started OpenCode wake (marked by attemptMailboxMessage) is handed back only with isUnsent, which the plugin sets
 // when it knows the host was never called (#724); a plain release leaves it as it is. Only an active started wake goes back:
 // once it reads "sent, not confirmed" (after 30 minutes) it is the person's to copy, and the board never hands it out again,
-// so a hand resend cannot run twice (#1366 review).
+// so a hand resend cannot run twice (#1366 review). A message its host accepted is never queued again (#1407).
 export const releaseMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number, isUnsent = false): MessageState => {
   const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && message.error === '')
-  if (one === undefined || one.attempted !== undefined && !isUnsent) return state
+  if (one === undefined || one.attempted !== undefined && !isUnsent || isAcceptedOnce(one)) return state
   const { ref: _ref, attempted: _attempted, ...kept } = one
   return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, error: '', claimed: 0, updated: now } : message) }
 }
 // The OpenCode plugin tells the board it is about to wake the session with the message it holds under ref. Only the
-// current claim can be marked; asking again with the same ref answers the same, and any other ref has lost the claim.
+// current claim can be marked; asking again with the same ref answers the same, and any other ref has lost the claim. A
+// message its host accepted, even one a later receipt made uncertain, has lost it too: waking for it again would run it twice (#1407).
 export const attemptMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number): MessageState => {
   const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref)
-  if (one === undefined) throw new Error('CLAIM_LOST')
+  if (one === undefined || isAcceptedOnce(one)) throw new Error('CLAIM_LOST')
   // Answered again only while it is still an active started wake; a message dismissed or read "sent, not confirmed"
   // since is offered to the person to copy, so a receiver that repeats its attempt must not wake it.
   if (one.attempted !== undefined) {

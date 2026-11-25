@@ -69,10 +69,17 @@ stops waiting can hand its claim back, and a claim handed back is queued again. 
 named that is still uncertain with no error can be handed out again after 30 seconds, with the
 same ACK code and a line saying it may be a repeat: at most three times for one message (a claim
 after a hand-back does not count), and not while it has an error (`EXPIRED` and `DISMISSED` are
-final; a later receipt from the session can clear a disconnected mark). That includes a message a
-hook accepted if a later receipt from its session made it uncertain with no error, and such a
-message can also be handed back; the board's own receivers send `uncertain` only with an error, so
-this takes another client (#1407). While a claim stays open as uncertain (not yet `EXPIRED` or
+final; a later receipt from the session can clear a disconnected mark). A message its host accepted
+is never handed out or handed back again, even after a later receipt from its session makes it
+uncertain with no error, and dismissing it keeps the mark (#1407). At a board start, a claim a hook
+named that is still uncertain with no error, and a message a hook handed back with its ACK code,
+become `uncertain` / `BOARD_RESTARTED` with their text, and every claim a hook named that is still
+uncertain loses its name (one with an error keeps the error): nothing a hook was handed before a
+board start is handed out after it, whatever receipts its session sends later, and the page shows
+them as no reply confirmed. The rule holds from the next board start: with no board running, a hook
+takes from the store itself, and a claim an earlier board run made is handed out again once its
+lease passes, until a board starts (#1868). OpenCode's claims keep
+their own rules (below). While a claim stays open as uncertain (not yet `EXPIRED` or
 `DISMISSED`), none of the session's queued messages is handed out. A claim is taken again only when
 every message that holds the session (the condition is under "stdio MCP") is one of this mailbox's
 claims that can be handed out again (above); then a
@@ -125,7 +132,7 @@ A started wake the host never confirms (the model's `agent_board_ack`), and one 
 model never acknowledged, read "sent, not confirmed" on the card after 30 minutes and keep their text, so you can copy it;
 an accept or an ack that comes later is still taken. From then on the message no longer holds the session's next message,
 and a day later it expires like any other open message and its text goes. A repeated `attempt` is answered ok only while the message is
-still an active started wake. Each workspace the host loads the plugin for has its own receiver. `release` answers
+still an active started wake; once its host accepted it, an attempt answers `CLAIM_LOST`, even after a later receipt (#1407). Each workspace the host loads the plugin for has its own receiver. `release` answers
 `NOT_HELD` for a ref the board does not hold and `WAKE_STARTED` for a marked one without `--unsent`; `end` answers
 `ok: false` with a code when its write fails, and the tick asks again, a few times. The plugin reads no message of the
 conversation to decide any of this.
@@ -314,7 +321,7 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 
 | State | Evidence |
 | --- | --- |
-| queued | Stored locally and not handed out since. A message an automatic Codex receiver left behind stays queued with the time it was left (see Codex daemon receiver), and one whose claim the Codex daemon receiver gave back with an `unsent` receipt before asking Codex for anything is queued again with its text (#1578), as is one whose claim it never said `starting` for when its connection ended (#1507). One whose claim the Codex desktop app's receiver gave back with a `held` receipt (Codex refused a second writer while the app holds the conversation) is queued again with the time of the first such refusal, and from 30 minutes after it is never handed out again and is refused as not sent (`APP_STILL_OPEN`); a receiver of another surface that takes it over starts no such time (#557). A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain (#1407) |
+| queued | Stored locally and not handed out since. A message an automatic Codex receiver left behind stays queued with the time it was left (see Codex daemon receiver), and one whose claim the Codex daemon receiver gave back with an `unsent` receipt before asking Codex for anything is queued again with its text (#1578), as is one whose claim it never said `starting` for when its connection ended (#1507). One whose claim the Codex desktop app's receiver gave back with a `held` receipt (Codex refused a second writer while the app holds the conversation) is queued again with the time of the first such refusal, and from 30 minutes after it is never handed out again and is refused as not sent (`APP_STILL_OPEN`); a receiver of another surface that takes it over starts no such time (#557). A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain; a board start makes it `uncertain` / `BOARD_RESTARTED` (#1407) |
 | uncertain | Claimed durably with no acceptance on record: before delivery, or after a disconnect or timeout. Also an accepted message that a later receipt reports uncertain (for a hook's message, #1407), or that expired or was dismissed |
 | accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is not sent again while it stays accepted |
 | acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
@@ -358,8 +365,8 @@ it waits for the turn; after disconnect, the 30-minute limit applies. The page c
 to show expired messages as no reply confirmed. The one exception is a wake the OpenCode
 plugin started: at 30 minutes it reads "sent, not confirmed" (`uncertain` / `UNCONFIRMED`)
 instead, keeps its text and takes a late accept or ACK, and becomes `EXPIRED` a day later.
-Only the board writes `UNCONFIRMED`; a receipt that sends it, like one that sends `EXPIRED`
-or `DISMISSED`, fails with `INVALID_RECEIPT`.
+Only the board writes `UNCONFIRMED` and `BOARD_RESTARTED`; a receipt that sends either, like one
+that sends `EXPIRED` or `DISMISSED`, fails with `INVALID_RECEIPT`.
 
 The store holds at most 1,000 open messages (`MESSAGE_LIMIT`); finished ones do not count,
 so a store full of finished messages still accepts new ones, short of the 2,000-record
@@ -452,7 +459,8 @@ hub's reserved `EXPIRED` or `DISMISSED` errors. Send and claim still require the
 A restart hands out nothing by itself; a later hook can still claim, as "Next-turn mailbox" says.
 It applies the age limit, and it marks disconnected, as a disconnect would, the open messages whose
 target is gone: a live receiver's connection, or a mailbox whose session ended or which expired.
-Messages of a mailbox that is still enrolled get no mark. A restart or a disconnect gives an
+Messages of a mailbox that is still enrolled get no disconnected mark; what a hook was handed before
+the start reads Unsure, as "Next-turn mailbox" says. A restart or a disconnect gives an
 uncertain message no extra time. After expiry or dismissal that message no longer stops the card from sending.
 Stores are saved as version 2, which earlier releases cannot read: before going back to one,
 move both `messages.json` and `server.lock` out of the folder, since 0.24.0 and earlier take

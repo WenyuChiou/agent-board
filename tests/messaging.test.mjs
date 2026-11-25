@@ -35,14 +35,14 @@ registerHooks({ resolve(specifier, context, next) {
     return next(`${specifier}.ts`, context)
   }
 } })
-const { createMessaging: openTestMessaging, moveLockAside } = await import('../scripts/board-messaging.ts')
+const { createMessaging: openTestMessaging, mailboxAction, moveLockAside } = await import('../scripts/board-messaging.ts')
 const { hookMailbox, parseMessageStore } = await import('../scripts/board-messaging.ts')
-const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
+const { acceptMailboxMessage, deliveryTargets, endMailbox, enrollMailbox, expireMailboxes, mailboxId, releaseMailboxMessage, takeMailboxMessage } = await import('../hooks/hook-messages.ts')
 const { serveModel: realServeModel, serveAction: realServeAction } = await import('../hooks/serve.ts')
 const { boardRequestWords, deliveryRequestWords, isBoardRequest } = await import('../hooks/board-commands.ts')
 const { isBoardTurn, readTurn } = await import('../hooks/inbox.ts')
 const { RECEIVER_ROUTES } = await import('../hooks/receiver-routes.ts')
-const { MCP_SURFACE, sendDecision, SURFACE_IDS } = await import('../hooks/messaging.ts')
+const { isAcceptedOnce, MCP_SURFACE, restartMessages, sendDecision, SURFACE_IDS } = await import('../hooks/messaging.ts')
 // The page's Send paths are tested with every route the receivers name taken as shown live; the
 // tests of what the real records allow (the end of this file) pass RECEIVER_ROUTES themselves.
 // tests/helpers/recorded-routes.json holds them, so the e2e worlds can hand the same table to a board they start.
@@ -62,7 +62,7 @@ const routeOf = (records, agent, kind, state, surface = '') => {
 }
 const serveModel = (view, pending, s, sending, isLan, messaging, allowResume, group, routes = recorded) => realServeModel(view, pending, s, sending, isLan, messaging, allowResume, group, routes)
 const serveAction = (items, request, s, isLan, connections, isMessaging, allowResume, routes = recorded) => realServeAction(items, request, s, isLan, connections, isMessaging, allowResume, routes)
-const { parseProgress } = await import('../hooks/parse.ts')
+const { parseProgress, STALE_MS } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
 const { EN } = await import('../hooks/strings-en.ts')
 const { ZH_TW } = await import('../hooks/i18n.ts')
@@ -137,6 +137,8 @@ test('a mailbox message a hook claimed but never accepted is handed out again af
   const take = (at, nonce, ref = 'a1b2c3d4e5f6') => takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', at, 43_200_000, nonce, ref)
   let taken = take(now, 'abcdef')
   state = taken.state
+  // Never accepted, so the accepted-once rule (#1407) does not hold it back.
+  assert.equal(isAcceptedOnce(state.messages[0]), false)
   assert.equal(taken.message.redelivered, undefined)
   assert.doesNotMatch(deliveryText(taken.message), /Sent again/)
   // Inside the lease the session waits, and the message behind it does too.
@@ -196,7 +198,7 @@ test("a hook takes its session's lapsed claim again before a queued message, eve
   assert.equal(taken.state.messages.find(one => one.id === 'bound-queued').status, 'queued')
 })
 
-test('when two claims of a session are in doubt, a hook takes the older again once both have lapsed, as before', () => {
+test('a mailbox message its host accepted is not handed out again after an uncertain receipt with no error, once the lease has passed', () => {
   const now = Date.now()
   let state = mailboxQueue(mailboxQueue(mailboxSeed(now), 'first', 'board', now), 'second', 'gemini:sender-session', now)
   state = mailboxHook(state, SURFACE_IDS.cli, now, 'abcdef').state
@@ -206,9 +208,345 @@ test('when two claims of a session are in doubt, a hook takes the older again on
   assert.equal(taken.message.id, 'second')
   // A same-session receipt with no error reports the accepted message uncertain again (#1407).
   state = messageReceipt(state, state.mailboxes[0], { id: 'first', nonce: 'abcdef', status: 'uncertain' }, now + 3)
-  assert.equal(mailboxHook(state, SURFACE_IDS.cli, now + MAILBOX_LEASE_MS, '222222').message, null)
-  taken = mailboxHook(state, SURFACE_IDS.cli, now + 2 + MAILBOX_LEASE_MS, '333333')
-  assert.deepEqual([taken.message.id, taken.message.redelivered], ['first', 1])
+  assert.equal(state.messages[0].hasAccepted, true)
+  for (const at of [now + MAILBOX_LEASE_MS, now + 2 + MAILBOX_LEASE_MS, now + 2 + 4 * MAILBOX_LEASE_MS]) assert.equal(mailboxHook(state, SURFACE_IDS.cli, at, '333333').message, null)
+})
+
+// A board start in its own folder: `reopen` closes the hub and starts a new one on the same store, and `saved` reads a
+// message as the store holds it, ACK code and claim name included (#1407).
+const startHub = fn => {
+  const dir = mkdtempSync(join(tmpdir(), 'board-start-'))
+  let hub = createMessaging(dir)
+  const reopen = () => { hub.close(); hub = createMessaging(dir); return hub }
+  const store = () => JSON.parse(readFileSync(join(dir, 'messages.json'), 'utf8'))
+  const saved = id => store().messages.find(one => one.id === id)
+  try { return fn(() => hub, reopen, saved, store) } finally { hub.close(); rmSync(dir, { recursive: true, force: true }) }
+}
+const HOOK_SESSION = { agent: 'codex', session: 'mailbox-session', surface: 'CLI' }
+const hookSend = (hub, id, now) => hub.act('send', { id, target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: `words ${id}` }, now)
+const hookTake = (hub, now, ref = 'a1b2c3d4e5f6') => hub.act('mailbox-turn', { ...HOOK_SESSION, ref }, now).message
+const hookRelease = (hub, now, ref = 'a1b2c3d4e5f6') => hub.act('mailbox-release', { agent: 'codex', session: 'mailbox-session', ref }, now)
+// What a board start writes, spelled out, for the rows that must also hold on a store an earlier board wrote.
+const asRestarted = (state, id, fields = {}) => ({ ...state, messages: state.messages.map(one => one.id === id ? { ...one, error: 'BOARD_RESTARTED', ...fields } : one) })
+
+test('a hook claim saved before a board start reads Unsure after it, with its text and its claim time as they were', () => startHub((hub, reopen, saved) => {
+  const now = Date.now()
+  hub().act('mailbox-turn', HOOK_SESSION, now)
+  hookSend(hub(), 'AB-1407-1', now)
+  assert.equal(hookTake(hub(), now + 1).id, 'AB-1407-1')
+  const before = saved('AB-1407-1')
+  reopen()
+  // Only its name goes: no later receipt can make it a claim to hand out again.
+  const { ref: _ref, ...unnamed } = before
+  assert.deepEqual(saved('AB-1407-1'), { ...unnamed, error: 'BOARD_RESTARTED' })
+  // The same for a claim handed out again, one its host accepted before, and one whose lease passed long ago.
+  for (const fields of [{ redelivered: 2 }, { hasAccepted: true }, { claimed: now - 20 * MAILBOX_LEASE_MS, updated: now - 20 * MAILBOX_LEASE_MS }]) {
+    assert.deepEqual(restartMessages({ messages: [{ ...before, ...fields }] }, now + 5).messages[0], { ...unnamed, ...fields, error: 'BOARD_RESTARTED' })
+  }
+}))
+
+test('a hook claim made before a board start is not handed out again after it, however long ago its lease passed', () => startHub((hub, reopen, saved) => {
+  const now = Date.now()
+  hub().act('mailbox-turn', HOOK_SESSION, now)
+  hookSend(hub(), 'AB-1407-2', now)
+  hookTake(hub(), now + 1)
+  reopen()
+  for (const at of [now + 2 + MAILBOX_LEASE_MS, now + 2 + 4 * MAILBOX_LEASE_MS]) assert.equal(hookTake(hub(), at, 'b2c3d4e5f6a1'), null)
+  assert.deepEqual([saved('AB-1407-2').error, saved('AB-1407-2').redelivered], ['BOARD_RESTARTED', undefined])
+}))
+
+test('a message a hook handed back before a board start is not handed out after it, and gets no claim time', () => startHub((hub, reopen, saved) => {
+  const now = Date.now()
+  hub().act('mailbox-turn', HOOK_SESSION, now)
+  hookSend(hub(), 'AB-1407-3', now)
+  hookTake(hub(), now + 1)
+  hookRelease(hub(), now + 2)
+  const back = saved('AB-1407-3')
+  assert.deepEqual([back.status, back.claimed, back.nonce.length], ['queued', 0, 6])
+  const start = Date.now()
+  reopen()
+  const after = saved('AB-1407-3')
+  assert.deepEqual([after.status, after.error, after.claimed, after.nonce, after.text], ['uncertain', 'BOARD_RESTARTED', 0, back.nonce, 'words AB-1407-3'])
+  // Stamped with the start, so its text is kept for the open limit.
+  assert.ok(after.updated >= start)
+  assert.equal(hookTake(hub(), Math.max(now + 3, Date.now()), 'b2c3d4e5f6a1'), null)
+}))
+
+test('a handed-back message whose mailbox ran out before a board start reads Unsure, not refused as not delivered', () => startHub((hub, reopen, saved) => {
+  const old = Date.now() - STALE_MS - 60_000
+  hub().act('mailbox-turn', HOOK_SESSION, old)
+  hookSend(hub(), 'AB-1407-4', old)
+  hookTake(hub(), old + 1)
+  hookRelease(hub(), old + 2)
+  reopen()
+  assert.equal(hub().snapshot(Date.now()).mailboxes.length, 0)
+  assert.deepEqual([saved('AB-1407-4').status, saved('AB-1407-4').error, saved('AB-1407-4').text], ['uncertain', 'BOARD_RESTARTED', 'words AB-1407-4'])
+}))
+
+test('a board start changes no mailbox message but a named hook claim and a handed-back one', () => {
+  const now = Date.now()
+  const queued = mailboxQueue(mailboxSeed(now), 'never-handed', 'board', now)
+  const [base] = queued.messages
+  const others = [
+    base,
+    { ...base, id: 'pulled', status: 'uncertain', claimed: now, nonce: 'aaaaaa' },
+    { ...base, id: 'handed', status: 'accepted', claimed: now, nonce: 'bbbbbb', ref: 'a1b2c3d4e5f6' },
+    { ...base, id: 'answered', status: 'acknowledged', claimed: now, nonce: 'cccccc', reply: 'ACK cccccc', text: '' },
+  ]
+  const state = { ...queued, messages: others }
+  assert.equal(restartMessages(state, now + 1), state)
+  // A named claim with an error keeps it and all else, and loses only its name.
+  for (const named of [
+    { ...base, id: 'given-up', status: 'uncertain', error: 'EXPIRED', claimed: now, nonce: 'dddddd', ref: 'a1b2c3d4e5f6', text: '' },
+    { ...base, id: 'timed-out', status: 'uncertain', error: 'TIMEOUT', claimed: now, nonce: 'eeeeee', ref: 'a1b2c3d4e5f6' },
+  ]) {
+    const { ref: _ref, ...unnamed } = named
+    assert.deepEqual(restartMessages({ ...queued, messages: [named] }, now + 1).messages, [unnamed])
+  }
+  // The message never handed out goes once after a start, with no repeat line.
+  startHub((hub, reopen) => {
+    hub().act('mailbox-turn', HOOK_SESSION, now)
+    hookSend(hub(), 'AB-1407-5', now)
+    reopen()
+    const taken = hookTake(hub(), Math.max(now + 1, Date.now()))
+    assert.deepEqual([taken.id, taken.redelivered], ['AB-1407-5', undefined])
+    assert.equal(hookTake(hub(), Math.max(now + 2, Date.now()) + MAILBOX_LEASE_MS / 2, 'b2c3d4e5f6a1'), null)
+  })
+})
+
+// OpenCode's mailbox: its plugin takes under a name, marks the wake it starts, and hands back what it never sent (#724).
+const ocSeed = now => enrollMailbox({ messages: [] }, 'opencode', 'oc-session', 'CLI', now, 43_200_000)
+const ocQueue = (state, id, now) => queueMessage(state, { id, target: mailboxId('opencode', 'oc-session'), turn: 'session', text: id }, 'board', state.mailboxes[0], now).state
+const ocTake = (state, now, ref) => takeMailboxMessage(state, 'opencode', 'oc-session', 'CLI', now, 43_200_000, 'abcdef', ref)
+const ocAct = (state, action, body, now) => mailboxAction(state, action, { agent: 'opencode', session: 'oc-session', ...body }, now).state
+
+test('a board start leaves an OpenCode claim, a wake handed back as unsent and a started wake as they were (#724, #1366)', () => {
+  const now = Date.now()
+  const unmarked = ocTake(ocQueue(ocSeed(now), 'oc-1', now), now, 'a1b2c3d4e5f6').state
+  const handedBack = ocAct(unmarked, 'mailbox-release', { ref: 'a1b2c3d4e5f6', unsent: true }, now + 1)
+  const started = ocAct(unmarked, 'mailbox-attempt', { ref: 'a1b2c3d4e5f6' }, now + 1)
+  const accepted = ocAct(started, 'mailbox-accept', { id: 'oc-1', nonce: 'abcdef', awaitsAck: true }, now + 2)
+  assert.deepEqual([handedBack.messages[0].status, handedBack.messages[0].nonce], ['queued', 'abcdef'])
+  for (const state of [unmarked, handedBack, started, accepted]) assert.equal(restartMessages(state, now + 3), state)
+  // The unmarked claim still goes back to the queue at its lease, and an attempt inside the lease still marks it.
+  assert.equal(pruneMessages(restartMessages(unmarked, now + 3), now + MAILBOX_LEASE_MS).messages[0].status, 'queued')
+  assert.equal(ocAct(restartMessages(unmarked, now + 3), 'mailbox-attempt', { ref: 'a1b2c3d4e5f6' }, now + 4).messages[0].attempted, now + 4)
+  // A started wake is never handed out again.
+  assert.equal(ocTake(restartMessages(started, now + 3), now + 4 * MAILBOX_LEASE_MS, 'b2c3d4e5f6a1').message, null)
+})
+
+// A hook's claim, then a board start; a second message waits behind it (#1407).
+const restartedClaim = now => {
+  let state = mailboxQueue(mailboxQueue(mailboxSeed(now), 'restart-a', 'board', now), 'restart-b', 'gemini:sender-session', now)
+  state = mailboxHook(state, SURFACE_IDS.cli, now, 'abcdef').state
+  return restartMessages(state, now + 1)
+}
+
+test('an accept that arrives after a board start made its message Unsure is taken, and the message is never handed out again', () => {
+  const now = Date.now()
+  let state = restartedClaim(now)
+  assert.deepEqual([state.messages[0].status, state.messages[0].error], ['uncertain', 'BOARD_RESTARTED'])
+  assert.equal(mailboxHook(state, SURFACE_IDS.cli, now + 2, '111111').message, null)
+  const acked = messageReceipt(state, state.mailboxes[0], { id: 'restart-a', nonce: 'abcdef', status: 'acknowledged', reply: 'ACK abcdef' }, now + 3)
+  assert.equal(acked.messages[0].status, 'acknowledged')
+  state = acceptMailboxMessage(state, 'codex', 'mailbox-session', 'restart-a', 'abcdef', now + 3)
+  assert.deepEqual([state.messages[0].status, state.messages[0].error], ['accepted', ''])
+  const taken = mailboxHook(state, SURFACE_IDS.cli, now + 4, '222222')
+  assert.equal(taken.message.id, 'restart-b')
+  assert.equal(mailboxHook(taken.state, SURFACE_IDS.cli, now + 4 * MAILBOX_LEASE_MS, '333333').message?.id === 'restart-a', false)
+})
+
+test('a hand-back that arrives after a board start does not queue the message again', () => {
+  const now = Date.now()
+  const state = restartedClaim(now)
+  const { state: after, result } = mailboxAction(state, 'mailbox-release', { agent: 'codex', session: 'mailbox-session', ref: 'a1b2c3d4e5f6' }, now + 2)
+  assert.deepEqual(result, { ok: true })
+  assert.equal(after, state)
+})
+
+test('an uncertain receipt with no error does not clear what a board start wrote, and the message is not handed out again', () => {
+  const now = Date.now()
+  const live = { id: 'live-1', agent: 'codex', session: 'mailbox-session', surface: SURFACE_IDS.cli, turn: 'turn1', expires: now + 10 * MAILBOX_LEASE_MS }
+  const state = messageReceipt(restartedClaim(now), live, { id: 'restart-a', nonce: 'abcdef', status: 'uncertain' }, now + 2)
+  assert.deepEqual([state.messages[0].status, state.messages[0].error], ['uncertain', 'BOARD_RESTARTED'])
+  assert.equal(mailboxHook(state, SURFACE_IDS.cli, now + 3 + MAILBOX_LEASE_MS, '111111').message, null)
+})
+
+// The same session's own receiver, and its receipts with no error, an error, or one then the other (#1407 review).
+const sameSession = now => ({ id: 'live-1', agent: 'codex', session: 'mailbox-session', surface: SURFACE_IDS.cli, turn: 'turn1', expires: now + 100 * MAILBOX_LEASE_MS })
+const unsureReceipts = (state, errors, now) => errors.reduce((next, error, index) => messageReceipt(next, sameSession(now), {
+  id: 'restart-a', nonce: 'abcdef', status: 'uncertain', ...(error === undefined ? {} : { error }) }, now + index), state)
+// Neither a later take nor a hand-back of the old claim sends it again; the message behind it waits.
+const assertNeverAgain = (state, now, where) => {
+  assert.equal(state.messages[0].ref, undefined, `${where}: kept its name`)
+  assert.equal(mailboxHook(state, SURFACE_IDS.cli, now + 10 * MAILBOX_LEASE_MS, '111111').message, null, `${where}: handed out again`)
+  assert.equal(mailboxAction(state, 'mailbox-release', { agent: 'codex', session: 'mailbox-session', ref: 'a1b2c3d4e5f6' }, now + 10 * MAILBOX_LEASE_MS).state, state, `${where}: queued again`)
+}
+
+test('a hook claim made before a board start is never handed out again after it, whatever receipts its session sends since', () => {
+  const now = Date.now()
+  for (const errors of [['TIMEOUT', undefined], ['TURN_ABORTED', undefined], ['TIMEOUT', 'TURN_ABORTED', undefined]]) {
+    assertNeverAgain(unsureReceipts(restartedClaim(now), errors, now + 2), now, errors.join(' then '))
+  }
+})
+
+test('a hook claim with an error before a board start is not handed out again after it when a later receipt clears the error', () => {
+  const now = Date.now()
+  let claimed = mailboxQueue(mailboxQueue(mailboxSeed(now), 'restart-a', 'board', now), 'restart-b', 'gemini:sender-session', now)
+  claimed = mailboxHook(claimed, SURFACE_IDS.cli, now, 'abcdef').state
+  // Its receiver timed out or its turn ended, or its mailbox's session ended, before the start.
+  const errored = [
+    ['timed out', unsureReceipts(claimed, ['TIMEOUT'], now + 1)],
+    ['turn ended', unsureReceipts(claimed, ['TURN_ABORTED'], now + 1)],
+    ['mailbox ended', endMailbox(claimed, 'codex', 'mailbox-session', now + 1)],
+  ]
+  for (const [where, before] of errored) {
+    const started = restartMessages(before, now + 2)
+    assert.deepEqual([started.messages[0].status, started.messages[0].error], [before.messages[0].status, before.messages[0].error], where)
+    assertNeverAgain(unsureReceipts(started, [undefined], now + 3), now, where)
+  }
+})
+
+test('an OpenCode attempt is refused for a wake its host accepted, after a later receipt with no error', () => {
+  const now = Date.now()
+  const claimed = ocTake(ocQueue(ocSeed(now), 'oc-1', now), now, 'a1b2c3d4e5f6').state
+  const started = ocAct(claimed, 'mailbox-attempt', { ref: 'a1b2c3d4e5f6' }, now + 1)
+  // Accepted with no attempt mark, or after one; then the plugin asks to wake it, inside the lease.
+  for (const [where, before] of [['no attempt mark', claimed], ['attempt marked', started]]) {
+    const accepted = ocAct(before, 'mailbox-accept', { id: 'oc-1', nonce: 'abcdef', awaitsAck: true }, now + 2)
+    const unsure = messageReceipt(accepted, accepted.mailboxes[0], { id: 'oc-1', nonce: 'abcdef', status: 'uncertain' }, now + 3)
+    assert.deepEqual([unsure.messages[0].status, unsure.messages[0].error, unsure.messages[0].hasAccepted], ['uncertain', '', true], where)
+    assert.throws(() => ocAct(unsure, 'mailbox-attempt', { ref: 'a1b2c3d4e5f6' }, now + 4), /CLAIM_LOST/, where)
+  }
+})
+
+test('a receiver cannot send BOARD_RESTARTED, as it cannot send EXPIRED or DISMISSED', () => {
+  const now = Date.now()
+  const live = { ...target, expires: now + 60_000 }
+  const queued = queueMessage({ messages: [] }, input, 'board', live, now).state
+  const claimed = claimMessages(queued, live, now + 1, 'abcdef').state
+  for (const error of ['BOARD_RESTARTED', 'EXPIRED', 'DISMISSED']) assert.throws(() => messageReceipt(claimed, live, { id: input.id, nonce: 'abcdef', status: 'uncertain', error }, now + 2), /INVALID_RECEIPT/)
+})
+
+test('a message made Unsure at a board start can be dismissed, and the next message is handed out', () => {
+  const now = Date.now()
+  let state = restartedClaim(now)
+  assert.equal(state.messages[0].error, 'BOARD_RESTARTED')
+  state = dismissMessage(state, 'restart-a', now + 2)
+  assert.deepEqual([state.messages[0].status, state.messages[0].error], ['uncertain', 'DISMISSED'])
+  assert.throws(() => acceptMailboxMessage(state, 'codex', 'mailbox-session', 'restart-a', 'abcdef', now + 3), /MESSAGE_DISMISSED/)
+  assert.equal(mailboxHook(state, SURFACE_IDS.cli, now + 4, '111111').message.id, 'restart-b')
+})
+
+test('a message made Unsure at a board start expires at the open limit and outlasts the finished count without a claim time', () => {
+  const now = Date.now()
+  const queued = mailboxQueue(mailboxSeed(now), 'restart-a', 'board', now)
+  const start = now + 10
+  const state = asRestarted(queued, 'restart-a', { status: 'uncertain', nonce: 'abcdef', claimed: 0, updated: start })
+  const expired = pruneMessages(state, start + OPEN_LIMIT_MS + 1)
+  assert.deepEqual([expired.messages[0].error, expired.messages[0].text], ['EXPIRED', ''])
+  // A full count of newer finished messages: the one handed out before the start is kept, as any message in doubt is.
+  const [base] = queued.messages
+  const done = Array.from({ length: FINISHED_KEEP_COUNT }, (_, i) => ({ ...base, id: `done-${i}`, status: 'acknowledged', nonce: 'cccccc', reply: 'ACK cccccc', text: '', updated: start + OPEN_LIMIT_MS + 2 + i }))
+  const kept = pruneMessages({ ...expired, messages: [...expired.messages, ...done] }, start + OPEN_LIMIT_MS + 2 + FINISHED_KEEP_COUNT)
+  assert.ok(kept.messages.some(one => one.id === 'restart-a'))
+  assert.equal(kept.messages.length, FINISHED_KEEP_COUNT)
+})
+
+test('a message made Unsure at a board start with no claim time never orders the hop count', () => {
+  const now = Date.now()
+  const base = mailboxQueue(mailboxSeed(now), 'one-hop', 'board', now)
+  const [message] = base.messages
+  const delivered = { ...message, id: 'two-hop', status: 'acknowledged', hops: 2, claimed: now + 10, nonce: 'aaaaaa', reply: 'ACK aaaaaa', text: '', updated: now + 10 }
+  // Handed back with its ACK code before the start, so the start makes it Unsure with no claim time.
+  const handedBack = { ...message, status: 'queued', claimed: 0, nonce: 'bbbbbb', updated: now + 20 }
+  const state = restartMessages({ ...base, messages: [handedBack, delivered] }, now + 30)
+  assert.deepEqual([state.messages[0].status, state.messages[0].error, state.messages[0].claimed], ['uncertain', 'BOARD_RESTARTED', 0])
+  const other = { id: 'live-other', agent: 'claude', session: 'other-session', surface: SURFACE_IDS.cli, turn: 'turn1', expires: now + 10 * MAILBOX_LEASE_MS }
+  assert.throws(() => queueMessage(state, { id: 'third-hop', target: other.id, turn: other.turn, text: 'third' }, 'codex:mailbox-session', other, now + 31), /HOP_LIMIT/)
+})
+
+test('a second board start changes nothing in a message the first made Unsure', () => startHub((hub, reopen, saved) => {
+  const now = Date.now()
+  hub().act('mailbox-turn', HOOK_SESSION, now)
+  hookSend(hub(), 'AB-1407-17', now)
+  hookTake(hub(), now + 1)
+  reopen()
+  const first = saved('AB-1407-17')
+  assert.equal(first.error, 'BOARD_RESTARTED')
+  reopen()
+  assert.deepEqual(saved('AB-1407-17'), first)
+}))
+
+// What 0.25.1's store reader knows of a message: its fields and its route lines (hooks/messaging.ts at agent-board--v0.25.1).
+const FIELDS_0_25_1 = ['id', 'target', 'turn', 'from', 'to', 'text', 'hash', 'origin', 'status', 'updated', 'reply', 'error', 'hasAccepted', 'hops', 'claimed', 'nonce', 'framingNonce', 'awaitsAck', 'ref', 'redelivered', 'attempted', 'answers', 'line', 'surface', 'awaitsStart', 'leftAt', 'heldSince']
+const LINES_0_25_1 = ['now', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
+
+test('a store saved after a board start holds no field and no line value that 0.25.1 does not know', () => startHub((hub, reopen, saved, store) => {
+  const now = Date.now()
+  hub().act('mailbox-turn', HOOK_SESSION, now)
+  hookSend(hub(), 'AB-1407-18', now)
+  hookTake(hub(), now + 1)
+  reopen()
+  const file = store()
+  assert.equal(saved('AB-1407-18').error, 'BOARD_RESTARTED')
+  for (const one of file.messages) {
+    assert.deepEqual(Object.keys(one).filter(key => !FIELDS_0_25_1.includes(key)), [], one.id)
+    if (one.line !== undefined) assert.ok(LINES_0_25_1.includes(one.line), one.line)
+  }
+  assert.equal(parseMessageStore(JSON.stringify(file), Date.now()).messages.find(one => one.id === 'AB-1407-18').error, 'BOARD_RESTARTED')
+}))
+
+test('a hand-back does not queue again a message its host accepted', () => {
+  const now = Date.now()
+  let state = mailboxHook(mailboxQueue(mailboxSeed(now), 'first', 'board', now), SURFACE_IDS.cli, now, 'abcdef').state
+  state = acceptMailboxMessage(state, 'codex', 'mailbox-session', 'first', 'abcdef', now + 1)
+  state = messageReceipt(state, state.mailboxes[0], { id: 'first', nonce: 'abcdef', status: 'uncertain' }, now + 2)
+  assert.equal(releaseMailboxMessage(state, 'codex', 'mailbox-session', 'a1b2c3d4e5f6', now + 3), state)
+  assert.equal(releaseMailboxMessage(state, 'codex', 'mailbox-session', 'a1b2c3d4e5f6', now + 3, true), state)
+})
+
+test('release --unsent does not take back an OpenCode wake its host accepted', () => {
+  const now = Date.now()
+  let state = ocTake(ocQueue(ocSeed(now), 'oc-1', now), now, 'a1b2c3d4e5f6').state
+  state = ocAct(state, 'mailbox-attempt', { ref: 'a1b2c3d4e5f6' }, now + 1)
+  state = ocAct(state, 'mailbox-accept', { id: 'oc-1', nonce: 'abcdef', awaitsAck: true }, now + 2)
+  state = messageReceipt(state, state.mailboxes[0], { id: 'oc-1', nonce: 'abcdef', status: 'uncertain' }, now + 3)
+  assert.deepEqual([state.messages[0].status, state.messages[0].hasAccepted], ['uncertain', true])
+  assert.throws(() => ocAct(state, 'mailbox-release', { ref: 'a1b2c3d4e5f6', unsent: true }, now + 4), /WAKE_STARTED/)
+  assert.equal(releaseMailboxMessage(state, 'opencode', 'oc-session', 'a1b2c3d4e5f6', now + 4, true), state)
+})
+
+test('an OpenCode claim its host accepted with no attempt mark is not handed to a new take after an uncertain receipt', () => {
+  const now = Date.now()
+  let state = ocTake(ocQueue(ocSeed(now), 'oc-1', now), now, 'a1b2c3d4e5f6').state
+  state = ocAct(state, 'mailbox-accept', { id: 'oc-1', nonce: 'abcdef', awaitsAck: true }, now + 1)
+  state = messageReceipt(state, state.mailboxes[0], { id: 'oc-1', nonce: 'abcdef', status: 'uncertain' }, now + 2)
+  assert.deepEqual([state.messages[0].attempted, state.messages[0].hasAccepted], [undefined, true])
+  assert.equal(ocTake(state, now + 3, 'b2c3d4e5f6a1').message, null)
+  const pruned = pruneMessages(state, now + 2 + MAILBOX_LEASE_MS)
+  assert.deepEqual([pruned.messages[0].status, pruned.messages[0].error], ['uncertain', ''])
+  assert.equal(ocTake(pruned, now + 3 + MAILBOX_LEASE_MS, 'c3d4e5f6a1b2').message, null)
+})
+
+test('a queued message that carries an acceptance mark is never handed out, and reads Unsure with no claim time', () => {
+  const now = Date.now()
+  const queued = mailboxQueue(mailboxSeed(now), 'handed-back', 'board', now)
+  // Handed back after an accept, as an earlier board could save it.
+  const state = { ...queued, messages: [{ ...queued.messages[0], nonce: 'bbbbbb', hasAccepted: true }] }
+  assert.equal(mailboxTake(state, now + 1).message, null)
+  const [after] = pruneMessages(state, now + 2).messages
+  assert.deepEqual([after.status, after.error, after.claimed, after.hasAccepted, after.text], ['uncertain', '', 0, true, 'handed-back'])
+})
+
+test('a message its host accepted keeps the mark when it is dismissed, so its question still counts as answered', () => {
+  const now = Date.now()
+  const queued = mailboxQueue(mailboxSeed(now), 'answer', 'board', now)
+  const [base] = queued.messages
+  for (const fields of [{ status: 'accepted', claimed: now, nonce: 'abcdef' }, { status: 'uncertain', claimed: now, nonce: 'abcdef', hasAccepted: true }, { status: 'queued', nonce: 'abcdef', hasAccepted: true }]) {
+    const [after] = dismissMessage({ ...queued, messages: [{ ...base, answers: 'question-1', ...fields }] }, 'answer', now + 1).messages
+    assert.deepEqual([after.status, after.error, after.hasAccepted], ['uncertain', 'DISMISSED', true], fields.status)
+  }
 })
 
 test('a saved message with no claim time never counts as the latest delivery, so the hop limit still holds', () => {
@@ -219,7 +557,10 @@ test('a saved message with no claim time never counts as the latest delivery, so
   // Handed back after an accept, as an earlier board could save it: no claim time, updated after the two-hop delivery.
   const handedBack = { ...message, status: 'queued', claimed: 0, nonce: 'bbbbbb', hasAccepted: true, updated: now + 20 }
   const loaded = parseMessageStore(JSON.stringify({ version: 2, ...base, messages: [handedBack, delivered] }), now + 30)
-  const other = { id: 'live-other', agent: 'claude', session: 'other-session', surface: SURFACE_IDS.cli, turn: 'turn1', expires: now + 10 * MAILBOX_LEASE_MS }
+  // Its mark keeps it from ever being handed out: it reads Unsure with no claim time (#1407).
+  const kept = loaded.messages.find(one => one.id === 'one-hop')
+  assert.deepEqual([kept.status, kept.claimed, kept.hasAccepted], ['uncertain', 0, true])
+  const other ={ id: 'live-other', agent: 'claude', session: 'other-session', surface: SURFACE_IDS.cli, turn: 'turn1', expires: now + 10 * MAILBOX_LEASE_MS }
   assert.throws(() => queueMessage(loaded, { id: 'third-hop', target: other.id, turn: other.turn, text: 'third' }, 'codex:mailbox-session', other, now + 31), /HOP_LIMIT/)
 })
 
@@ -311,6 +652,8 @@ test('a hook that stops waiting after a running board claimed its message hands 
     const took = Date.now() - started
     assert.equal(mailbox.hasDeferred, true)
     const held = parseMessageStore(readFileSync(join(dir, 'messages.json'), 'utf8'), Date.now()).messages[0]
+    // Never accepted, so the accepted-once rule (#1407) leaves the hand-back and the lease as they were.
+    assert.equal(isAcceptedOnce(held), false)
     if (held.status === 'uncertain') {
       // Only a machine that stalled past the hand-back's own 150 ms limit leaves the claim to the lease;
       // a hook that skipped the hand-back returns after its first 150 ms.
@@ -2019,7 +2362,8 @@ test('the person can dismiss an uncertain message and the next message is handed
     const dismissed = dismissMessage(state, input.id, 1002)
     assert.equal(state.messages[0].status, status)
     assert.equal(state.messages[0].error, '')
-    assert.deepEqual(dismissed.messages[0], { ...state.messages[0], status: 'uncertain', error: 'DISMISSED', updated: 1002, text: '' })
+    // A message its host accepted keeps the mark when it is dismissed (#1407).
+    assert.deepEqual(dismissed.messages[0], { ...state.messages[0], status: 'uncertain', error: 'DISMISSED', updated: 1002, text: '', ...(status === 'accepted' ? { hasAccepted: true } : {}) })
     assert.equal(pruneMessages(dismissed, 1002 + OPEN_LIMIT_MS + 1), dismissed)
     assert.equal(disconnectMessages(dismissed, target.id, 1003).messages[0], dismissed.messages[0])
     const next = queueMessage(dismissed, { ...input, id: 'after-dismiss' }, 'board', target, 1003).state
@@ -5197,6 +5541,8 @@ test('an unsent receipt from the connection that holds a claim puts the message 
   const other = { ...target, id: 'synthetic-other-binding' }
   const queued = queueMessage({ messages: [] }, { id: 'unsent-one', target: target.id, turn: target.turn, text: 'Check the build.' }, 'board', target, now).state
   const claimed = claimMessages(queued, target, now + 1, 'abcdef').state
+  // Never accepted, so the accepted-once rule (#1407) leaves the unsent receipt as it was.
+  assert.equal(isAcceptedOnce(claimed.messages[0]), false)
   const back = messageReceipt(claimed, target, { id: 'unsent-one', nonce: 'abcdef', status: 'unsent' }, now + 2)
   const one = back.messages[0]
   assert.deepEqual([one.status, one.text, one.claimed, one.error, one.target], ['queued', 'Check the build.', 0, '', target.id])
@@ -7451,6 +7797,37 @@ const m5aHub = fn => {
 const m5aRegister = (hub, now, session = 'm5a-session') => hub.act('register', { agent: 'codex', session, surface: SURFACE_IDS.cli, turn: 'session', scope: 'session', unclaimed: true, marksStart: true }, now)
 const m5aPoll = (hub, one, now) => hub.act('poll', { connection: one.id, secret: one.secret, turn: 'session' }, now).messages
 const m5aOf = (hub, now, id = 'AB-M5A-1') => hub.snapshot(now).messages.find(one => one.id === id)
+
+test('a board start changes no message of a live receiver: a claim nobody said starting for is refused, a left one keeps its stamp, a claimed one still takes its receipt (#1507, #318)', () => startHub((hub, reopen, saved, store) => {
+  const now = Date.now()
+  // A Codex claim nobody said starting for.
+  const starting = m5aRegister(hub(), now)
+  hub().act('send', { id: 'AB-LIVE-1', target: starting.id, turn: 'session', text: 'Check the build.' }, now)
+  m5aPoll(hub(), starting, now + 1)
+  // An automatic receiver that left its queued message.
+  const left = hub().act('register', { agent: 'codex', session: 'left-session', surface: SURFACE_IDS.cli, turn: 'session', scope: 'session', unclaimed: true }, now)
+  hub().act('send', { id: 'AB-LIVE-2', target: left.id, turn: 'session', text: 'Run the tests.' }, now)
+  hub().act('disconnect', { connection: left.id, secret: left.secret, turn: 'session' }, now + 1)
+  // A receiver's claim with no receipt yet.
+  const plain = hub().act('register', { agent: 'codex', session: 'plain-session', surface: SURFACE_IDS.cli, turn: 'turn1' }, now)
+  hub().act('send', { id: 'AB-LIVE-3', target: plain.id, turn: 'turn1', text: 'Read the log.' }, now)
+  const [claim] = hub().act('poll', { connection: plain.id, secret: plain.secret, turn: 'turn1' }, now + 1).messages
+  const before = store()
+  const stamp = before.messages.find(one => one.id === 'AB-LIVE-2').leftAt
+  assert.equal(typeof stamp, 'number')
+  // The start's own step hands back nothing of theirs; the load's other rules do the rest.
+  assert.equal(restartMessages(before, now + 2), before)
+  reopen()
+  assert.deepEqual([saved('AB-LIVE-1').status, saved('AB-LIVE-1').error], ['rejected', 'DISCONNECTED'])
+  assert.deepEqual([saved('AB-LIVE-2').status, saved('AB-LIVE-2').error, saved('AB-LIVE-2').leftAt], ['queued', '', stamp])
+  assert.equal(saved('AB-LIVE-3').status, 'uncertain')
+  const resumed = hub().act('register', { agent: 'codex', session: 'plain-session', surface: SURFACE_IDS.cli, turn: 'turn2' }, now + 3)
+  hub().act('receipt', { connection: resumed.id, secret: resumed.secret, id: 'AB-LIVE-3', nonce: claim.nonce, status: 'acknowledged', reply: `ACK ${claim.nonce}` }, now + 4)
+  assert.equal(saved('AB-LIVE-3').status, 'acknowledged')
+  // The left one is refused once its stamp is LEFT_MS old.
+  const refused = hub().snapshot(stamp + 10 * 60_000 + 1).messages.find(one => one.id === 'AB-LIVE-2')
+  assert.deepEqual([refused.status, refused.error], ['rejected', 'DISCONNECTED'])
+}))
 
 test('a Codex receiver\'s claim whose board lease lapses before it says starting goes back to the queue, not no reply confirmed (#1507)', () => m5aHub(hub => {
   const now = Date.now()
