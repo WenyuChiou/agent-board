@@ -8429,7 +8429,7 @@ export const LINES = [
 "var reporterPs1 = () => powershellReporter(false);",
 "",
 "// hooks/messaging.ts",
-"var ROUTE_LINES = [\"now\", \"stepEnd\", \"nextTurn\", \"chatOpen\", \"reopen\", \"none\"];",
+"var ROUTE_LINES = [\"now\", \"afterWait\", \"stepEnd\", \"nextTurn\", \"chatOpen\", \"reopen\", \"none\"];",
 "var SURFACE_IDS = {",
 "  claude: \"Claude Code\",",
 "  codexProxy: \"Codex local proxy\",",

@@ -55,11 +55,12 @@ export type Message = {
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
-// now (goes in at once), stepEnd (when its current step ends), nextTurn (at its next turn; it does not
-// wake it), chatOpen (when this chat is opened again), reopen (the board reopens the session and sends),
-// none (cannot receive yet). `record` is the docs/validation note that showed the route live, or null.
-export type RouteLine = 'now' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none'
-export const ROUTE_LINES: readonly RouteLine[] = ['now', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
+// now (goes in at once), afterWait (goes in after a wait, such as the Codex daemon's ~10-minute watch, #1814),
+// stepEnd (when its current step ends), nextTurn (at its next turn; it does not wake it), chatOpen (when this
+// chat is opened again), reopen (the board reopens the session and sends), none (cannot receive yet). `record`
+// is the docs/validation note that showed the route live, or null.
+export type RouteLine = 'now' | 'afterWait' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none'
+export const ROUTE_LINES: readonly RouteLine[] = ['now', 'afterWait', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
 export type RowState = 'idle' | 'working' | 'ended'
 export type RouteKind = 'live' | 'mailbox' | 'turn'
 export const SURFACE_IDS = {
@@ -72,7 +73,7 @@ export const MCP_SURFACE = 'mcp'
 // A note covers only the surfaces on which its route was recorded. One route can be recorded by a different
 // note on each surface it covers: `surfaceRecords` names a surface's own note, and `record` covers the rest.
 // Likewise a surface can have its own line (`surfaceLines`), when two receivers of one agent and kind reach a session
-// differently: the Codex daemon starts a turn at once, the Codex desktop app receiver reopens the conversation (#557).
+// differently: the Codex daemon starts a turn after a wait, the Codex desktop app receiver reopens the conversation (#557, #1814).
 export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[]; surfaceRecords?: Readonly<Record<string, string>>; surfaceLines?: Readonly<Record<string, RouteLine>> }
 // A note names a file: text on one line that is not only spaces, the same test the matrix applies.
 export const isNote = (value: unknown): value is string => typeof value === 'string' && value.trim() !== '' && !/[\r\n]/.test(value)

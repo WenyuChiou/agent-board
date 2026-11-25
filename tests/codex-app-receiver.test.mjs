@@ -97,14 +97,14 @@ const receiver = (over = {}) => {
   return { app, client, runs, state, advance: ms => { clock += ms } }
 }
 
-test('the Codex desktop app has its own surface, and its idle route reopens the conversation while the daemon\'s stays "now" (#557)', () => {
+test('the Codex desktop app has its own surface, and its idle route reopens the conversation while the daemon\'s uses "afterWait" (#557, #1814)', () => {
   assert.equal(SURFACE_IDS.codexApp, 'Codex desktop app')
   assert.equal(CODEX_APP_ORIGINATOR, 'Codex Desktop')
   const live = RECEIVER_ROUTES.find(one => one.agent === 'codex' && one.kind === 'live')
   assert.equal(routeLine(live.routes.idle, SURFACE_IDS.codexApp), 'reopen')
-  assert.equal(routeLine(live.routes.idle, SURFACE_IDS.codexDaemon), 'now')
+  assert.equal(routeLine(live.routes.idle, SURFACE_IDS.codexDaemon), 'afterWait')
   const connection = surface => ({ id: 'c-' + surface, agent: 'codex', session: THREAD, surface, turn: 'session', scope: 'session', expires: Date.now() + 60_000 })
-  for (const [surface, line] of [[SURFACE_IDS.codexApp, 'reopen'], [SURFACE_IDS.codexDaemon, 'now']]) {
+  for (const [surface, line] of [[SURFACE_IDS.codexApp, 'reopen'], [SURFACE_IDS.codexDaemon, 'afterWait']]) {
     const one = connection(surface)
     const idle = sendDecision(one.id, [one], [], () => 'idle', RECEIVER_ROUTES, Date.now())
     assert.equal(idle.canSend, true, surface)

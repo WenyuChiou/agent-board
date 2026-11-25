@@ -116,13 +116,10 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
   if (!canSend && line === 'nextTurn' && codexCopyHint(agent, state, s)) return s.serveCodexCopyHint
   if (line === 'none' && !canSend && agent === 'codex' && state === 'ended') return codexResumeHint(agent, state, s)
-  // Codex's daemon receiver starts a message only once it has watched the thread for at least 10 minutes, or one unload delay
-  // when Codex's config sets a longer one (#1578), and so has read a person's own Codex on it (docs/MESSAGING.md, "How long it
-  // watches first"). An idle Codex card on that surface says so, and that the message stays queued until then, instead of
-  // promising a start right away: with nobody on the thread, or a delay it cannot read, the receiver holds it, and the board
-  // is not told why (#1506). Other Codex surfaces have no such watch.
-  const isWatched = agent === 'codex' && surface === SURFACE_IDS.codexDaemon
-  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : isWatched ? s.serveLineSoon(name) : s.serveLineNow(name))
+  // Codex's daemon receiver takes `afterWait` on idle because it watches the thread for about 10 minutes
+  // (or longer if configured) before starting a message (#1578, #1814). Each route line maps cleanly to its own text.
+  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name))
+    : line === 'afterWait' ? s.serveLineSoon(name)
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
     : line === 'nextTurn' ? s.serveNextTurnHint(name)
     : line === 'chatOpen' ? s.serveNextOpenHint
@@ -1990,7 +1987,7 @@ const PAGE_SCRIPT = String.raw`
     if (isClaudeAgent(agent)) return claudeReceipt(receipt, key, canSend);
     // A session that takes its message the moment it is idle is not handed one at a turn it starts later (#725).
     line = receipt.line;
-    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : !line || line === 'now' || line === 'stepEnd' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
+    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : !line || line === 'now' || line === 'afterWait' || line === 'stepEnd' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     // A mailbox message that was handed over gets no ACK, so its id is done with here: the next send is a new message.
     releaseFinishedAttempt(receipt, false);
     // The server already took a nonce ACK off; a receipt kept from a version 1 store was
@@ -2057,7 +2054,7 @@ const PAGE_SCRIPT = String.raw`
     // a route that waits for a turn or for the chat to open keeps Copy, one that goes in now, at a step's end,
     // or runs in the background does not.
     var line = extras && extras.line;
-    var isWaiting = mode === 'mailbox' && line !== 'now' && line !== 'stepEnd' && line !== 'reopen';
+    var isWaiting = mode === 'mailbox' && line !== 'now' && line !== 'afterWait' && line !== 'stepEnd' && line !== 'reopen';
     var go = mode === 'send' || mode === 'connected' || mode === 'mailbox'
       ? button(w(isWaiting ? (line === 'chatOpen' ? 'serveQueueNextOpen' : 'serveQueueNextTurn') : 'serveSend', mode === 'connected' && isClaudeAgent(agent) ? 'Claude' : agentName(agent)), function () {
         var text = input.value.trim();

@@ -478,7 +478,7 @@ describe('L0 discover and install from the README', () => {
       terminal: { 'Claude Code': ['claude', [S.claude]], Codex: ['codex', [S.cli, S.codexProxy, S.codexSession, S.codexDaemon]], Antigravity: ['antigravity', [S.antigravityTui, S.antigravityStream]], Cursor: ['cursor', [S.cursor]], OpenCode: ['opencode', [S.cli]] },
       desktop: { Codex: ['codex', [S.codexApp]], Antigravity: ['antigravity', [S.antigravityIde]], Cursor: ['cursor', [S.cursor]], OpenCode: ['opencode', [S.cli]] },
     }
-    const CELL = { '': 'none', 'now+stepEnd': 'now', nextTurn: 'next', 'nextTurn+now': 'next', reopen: 'reopen' }
+    const CELL = { '': 'none', 'now+stepEnd': 'now', nextTurn: 'next', 'afterWait+nextTurn+now': 'next', 'nextTurn+now': 'next', reopen: 'reopen' }
     const EXPECT = { terminal: { none: 'paste', now: 'now', next: 'next' }, desktop: { none: 'untested', next: 'appNext', now: 'appNow', reopen: 'appReopen' } }
     const checkCells = routes => {
       for (const [agent, [id, surfaces]] of Object.entries(ROW.terminal)) assert.equal(REPLY[agent], EXPECT.terminal[CELL[noted(routes, id, surfaces)]], `${agent}: the terminal cell follows the recorded routes (${noted(routes, id, surfaces)})`)
