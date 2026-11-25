@@ -385,7 +385,10 @@ test('claude interactive invocation receives initial prompt and stdin pipe, and 
   const isolatedTemp = join(dir, 'throwaway-base')
   mkdirSync(isolatedTemp, { recursive: true })
 
-  writeFileSync(interactiveResponder, `
+  const responderSrc = readFileSync(responder, 'utf8')
+  const splitAt = responderSrc.indexOf('\nconst url =')
+  assert.ok(splitAt > 0, 'expected responder script body')
+  const interactiveGuard = `
 if (process.argv.includes('-p') || process.argv.includes('--print')) {
   process.stderr.write('unexpected print flag')
   process.exit(2)
@@ -399,8 +402,8 @@ if (!process.stdin || process.stdin.readable !== true) {
   process.stderr.write('expected readable stdin pipe for interactive session')
   process.exit(4)
 }
-await import(${JSON.stringify(pathToFileURL(responder).href)})
-`, 'utf8')
+`
+  writeFileSync(interactiveResponder, `${responderSrc.slice(0, splitAt)}\n${interactiveGuard}${responderSrc.slice(splitAt)}`, 'utf8')
 
   writeFileSync(failingSetupScript, `
 process.stderr.write('synthetic setup boom\\n')
