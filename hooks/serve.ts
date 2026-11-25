@@ -592,6 +592,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const openInSession = heldBy === undefined ? 0 : openBy.get(heldBy) ?? 0
       held.set(item.key, sending.has(cardSendKey(item.key)) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, openInSession))
       if (answerFailed(messaging?.messages ?? [], heldBy, ask.questionId, openInSession, isMessageSurfaceLost)) failed.add(item.key)
+      const liveSurface = found?.surface ?? (isManual || !isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)?.surface)
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent, ...(connection.surface === SURFACE_IDS.codexApp ? { isAfterAppQuit: true as const } : {}) } }),
@@ -622,7 +623,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         canHide: ask.hideKey !== '' && ask.canHide !== false,
         ...(ask.hideKey !== '' && ask.canHide !== false ? { unhideKey: `hidden:${ask.hideKey}` } : {}),
         send,
-        ...(found?.surface === undefined ? {} : { surface: found.surface }),
+        ...(liveSurface === undefined ? {} : { surface: liveSurface }),
         session: connection?.session ?? ask.target?.session ?? '',
         fp: fingerprint(item, items),
         tickFp: fingerprint(item, items, true),
@@ -665,6 +666,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       if (answerFailed(messaging?.messages ?? [], heldBy, undefined, rowTurn, isMessageSurfaceLost)) failed.add(item.key)
       const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
+      const rowSurface = found?.surface ?? (row.auto === null || !isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)?.surface)
       rows.push({
         ...(group === undefined ? {} : {
           ...(row.at === undefined ? {} : { at: row.at }),
@@ -709,7 +711,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         isAsking: row.question !== null,
         question: row.question ?? '',
         send,
-        ...(found?.surface === undefined ? {} : { surface: found.surface }),
+        ...(rowSurface === undefined ? {} : { surface: rowSurface }),
         session: connection?.session ?? row.target?.session ?? '',
         fp: fingerprint(item, items),
         tickFp: fingerprint(item, items, true),
@@ -2841,7 +2843,10 @@ const PAGE_SCRIPT = String.raw`
       if (!group) return;
       entries.push({ id: id, name: agentName(id), agent: id, needs: waiting(group.counts.needs, id), working: view.working.filter(function (ref) { return agentOf(ref) === id; }).length, unreadable: group.isUnreadable, presence: agentPresence[id] });
     });
-    if (pg.filter && !entries.some(function (one) { return one.id === pg.filter; })) pg.filter = '';
+    if (pg.filters.agents.length) {
+      pg.filters.agents = pg.filters.agents.filter(function (id) { return entries.some(function (one) { return one.id === id; }); });
+      syncFilterMirrors();
+    }
     nav.hidden = entries.length === 0;
     if (sideGroup) sideGroup.hidden = entries.length === 0;
     var ids = entries.map(function (one) { return one.id; });

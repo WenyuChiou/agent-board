@@ -13424,6 +13424,47 @@ test('filter bar keeps done-only and zero-count selected projects and leaves sha
   assert.ok(!shownWords(dom.node('needs')).includes('Shared Cursor surface?'))
 })
 
+test('stale saved agent filter clears cleanly and LAN models preserve interface classification', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const progress = [
+    '## app-repo',
+    '<!-- auto session=s1848lan1 agent=codex state=waiting updated=' + new Date(now).toISOString() + ' -->',
+    '### Codex desktop task',
+    '- [?] Approve desktop edit?',
+    '<!-- /auto session=s1848lan1 -->',
+    '',
+    '## app-row-repo',
+    '<!-- auto session=s1848lan2 agent=codex state=working updated=' + new Date(now).toISOString() + ' -->',
+    '### Running desktop build',
+    '- [~] Bundle assets',
+    '<!-- /auto session=s1848lan2 -->',
+  ].join('\n')
+  const parsed = runtime.parseProgress(progress)
+  const view = runtime.buildView(parsed, [], null, now, 0, {}, EN)
+  const messaging = {
+    connections: [
+      { id: 'd1', agent: 'codex', session: 's1848lan1', turn: 't1', scope: 'live', surface: 'Codex desktop app', updated: now },
+      { id: 'd2', agent: 'codex', session: 's1848lan2', turn: 't2', scope: 'live', surface: 'Codex desktop app', updated: now },
+    ],
+    mailboxes: [],
+    messages: [],
+  }
+  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, messaging, false, { now, repoOf: () => null, versions: { board: '1.2.3', package: null } })
+  assert.equal(lanModel.asks[0].surface, 'Codex desktop app')
+  assert.equal(lanModel.groups[0].rows[0].surface, 'Codex desktop app')
+  const dom = await pageDom(await sourcePage(), lanModel, { width: 1280, saved: { 'agent-board.filter': 'gemini' } })
+  // Absent stored agent 'gemini' is cleared from pg.filters.agents so Codex questions still show.
+  assert.ok(shownWords(dom.node('needs')).includes('Approve desktop edit?'))
+  assert.equal(dom.node('filter-clear').hidden, true)
+  // On LAN, Codex desktop app session still counts under App (2 items: 1 question + 1 working row).
+  const ifaceOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  assert.equal(ifaceOpt(EN.pgInterfaceApp).childNodes[1].textContent, '2')
+  assert.equal(ifaceOpt(EN.pgInterfaceCli).childNodes[1].textContent, '0')
+  ifaceOpt(EN.pgInterfaceApp).click()
+  assert.ok(shownWords(dom.node('needs')).includes('Approve desktop edit?'))
+})
+
 test('a project in the sidebar counts its questions, working tasks and other work, and leaves its stopped and finished tasks out', async () => {
   const { board, model, html } = await projectBoard()
   try {
