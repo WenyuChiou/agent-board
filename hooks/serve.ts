@@ -76,7 +76,7 @@ const rowReceipt =(agent: string, session: string | undefined, messages: readonl
   return { receipt: { id: one.id, status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), ...(one.isAfterAppQuit === true ? { isAfterAppQuit: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
 }
 // The person's answer to this question reached its session: the session took it, or replied.
-const isAnswerHanded = (messages: readonly Omit<Message, 'nonce' | 'hash'>[], questionId: string): boolean =>
+const isAnswerHanded = (messages: readonly Pick<ShownMessage, 'answers' | 'status' | 'hasAccepted'>[], questionId: string): boolean =>
   messages.some(message => message.answers === questionId && (message.status === 'acknowledged' || message.status === 'accepted' || message.status === 'uncertain' && message.hasAccepted === true))
 const isClaudeAgent = (agent: string): boolean => agent === '' || agent.toLowerCase() === 'claude'
 // The state a card's route is read for: a session whose progress record ended or whose target is closed is
