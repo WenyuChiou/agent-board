@@ -155,9 +155,11 @@ test('the runner builds a throwaway home for each install shape and never writes
   const prevHome = process.env.HOME
   const prevProfile = process.env.USERPROFILE
   const prevProgress = process.env.CLAUDE_PROGRESS_FILE
+  const prevRuntime = process.env.XDG_RUNTIME_DIR
   process.env.HOME = realHome
   process.env.USERPROFILE = realHome
   process.env.CLAUDE_PROGRESS_FILE = join(sentinel, 'progress.md')
+  process.env.XDG_RUNTIME_DIR = join(realHome, 'real-runtime')
 
   try {
     const tempBase = makeTempDir('matrix-throwaway-base-')
@@ -169,6 +171,8 @@ test('the runner builds a throwaway home for each install shape and never writes
       assert.equal(h.env.HOME, h.home)
       assert.equal(h.env.USERPROFILE, h.home)
       assert.equal(h.env.CLAUDE_PROGRESS_FILE, h.progress)
+      assert.ok(h.env.XDG_RUNTIME_DIR.startsWith(h.root), `XDG_RUNTIME_DIR must stay inside throwaway root`)
+      assert.notEqual(h.env.XDG_RUNTIME_DIR, process.env.XDG_RUNTIME_DIR)
       assert.equal(existsSync(h.script), true)
       if (shape === 'S') assert.equal(h.progress, join(h.home, '.agent-board', 'progress.md'))
       else assert.equal(h.progress, join(h.home, '.claude', 'agent-board', 'progress.md'))
@@ -181,6 +185,7 @@ test('the runner builds a throwaway home for each install shape and never writes
     if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome
     if (prevProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevProfile
     if (prevProgress === undefined) delete process.env.CLAUDE_PROGRESS_FILE; else process.env.CLAUDE_PROGRESS_FILE = prevProgress
+    if (prevRuntime === undefined) delete process.env.XDG_RUNTIME_DIR; else process.env.XDG_RUNTIME_DIR = prevRuntime
   }
 })
 
@@ -217,6 +222,24 @@ test("a stand-in CLI that receives the board's reply marks its cell PASS, and on
   assert.match(failRun.rows[2].evidence, /stopped at c:/i)
   assert.equal(failRun.rows[3].result, 'FAIL')
   assert.match(failRun.rows[3].evidence, /stopped at c:/i)
+
+  const twoCliSurfaces = SURFACES.filter(one => one.id === 'claude-cli' || one.id === 'codex-cli')
+  const mixedRun = await runMatrix({
+    shapes: ['S'],
+    surfaces: twoCliSurfaces,
+    cliFor: surface => surface.id === 'claude-cli'
+      ? { command: join(tempBase, 'missing-nonexistent-cli-binary') }
+      : { command: process.execPath, args: [responder] },
+    version: '0.26.0-test',
+    date: '2026-11-24',
+    timeoutMs: 8000,
+    tempBase,
+  })
+  assert.equal(mixedRun.rows.length, 8)
+  assert.equal(mixedRun.rows[0].result, 'PASS')
+  assert.equal(mixedRun.rows[1].result, 'FAIL')
+  assert.match(mixedRun.rows[1].evidence, /stopped at b:/i)
+  for (const row of mixedRun.rows.slice(4)) assert.equal(row.result, 'PASS', `expected matrix to continue after spawn error, got ${row.result}: ${row.evidence}`)
 })
 
 test('the table has one row per cell with date, version, shape, result and evidence', { timeout: 120_000 }, async () => {

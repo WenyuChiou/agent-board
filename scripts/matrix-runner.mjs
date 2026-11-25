@@ -1,32 +1,38 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes, randomUUID } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
+import { ZH_TW } from '../hooks/i18n.ts'
+import { EN } from '../hooks/strings-en.ts'
+import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 
 export const SHAPES = ['S', 'P']
 export const CHECKS = ['a', 'b', 'c', 'd']
 export const DESKTOP_CHECKLIST_PATH = 'docs/validation/matrix-desktop-checklist.md'
 
+const MATRIX_STRINGS = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }
+const stringsFor = (lang = 'en') => MATRIX_STRINGS[lang] ?? EN
+
 // Seven surfaces named in docs/dev/plan-0.26.0.md (section E6a).
 export const SURFACES = [
-  { id: 'claude-cli', name: 'Claude Code CLI', kind: 'cli', agent: 'claude', surface: 'Claude Code', mode: 'live' },
-  { id: 'codex-cli', name: 'Codex CLI', kind: 'cli', agent: 'codex', surface: 'Codex daemon', mode: 'live' },
-  { id: 'agy', name: 'agy', kind: 'cli', agent: 'antigravity', surface: 'agy TUI', mode: 'mailbox' },
-  { id: 'deepseek', name: 'DeepSeek Harness', kind: 'cli', agent: 'deepseek', surface: 'Web', mode: 'mailbox' },
+  { id: 'claude-cli', name: 'Claude Code CLI', kind: 'cli', agent: 'claude', surface: 'Claude Code', mode: 'live', binary: 'claude', args: ['-p'] },
+  { id: 'codex-cli', name: 'Codex CLI', kind: 'cli', agent: 'codex', surface: 'Codex daemon', mode: 'live', binary: 'codex', args: ['exec'] },
+  { id: 'agy', name: 'agy', kind: 'cli', agent: 'antigravity', surface: 'agy TUI', mode: 'mailbox', binary: 'agy', args: [] },
+  { id: 'deepseek', name: 'DeepSeek Harness', kind: 'cli', agent: 'deepseek', surface: 'Web', mode: 'mailbox', binary: 'dsh', args: ['web'] },
   { id: 'claude-app', name: 'Claude desktop app', kind: 'desktop', checklist: DESKTOP_CHECKLIST_PATH },
   { id: 'codex-app', name: 'Codex app', kind: 'desktop', checklist: DESKTOP_CHECKLIST_PATH },
   { id: 'antigravity-app', name: 'Antigravity app', kind: 'desktop', checklist: DESKTOP_CHECKLIST_PATH },
 ]
 
-const CHECK_LABELS = {
-  a: 'a (board opens)',
-  b: 'b (one question card)',
-  c: 'c (reply goes in)',
-  d: 'd (status right and timely)',
-}
+const checkLabel = (check, s) => ({
+  a: s.matrixCheckA,
+  b: s.matrixCheckB,
+  c: s.matrixCheckC,
+  d: s.matrixCheckD,
+}[check])
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
 
@@ -37,6 +43,31 @@ const currentPackageVersion = () => {
   } catch {
     return 'unknown'
   }
+}
+
+const findOnPath = binary => {
+  if (!binary) return null
+  const locator = process.platform === 'win32' ? 'where.exe' : 'which'
+  const probe = spawnSync(locator, [binary], { encoding: 'utf8', timeout: 3000 })
+  if (probe.error || probe.status !== 0) return null
+  const first = probe.stdout.split(/\r?\n/).find(line => line.trim() !== '')
+  return first ? first.trim() : null
+}
+
+// Resolves a runnable CLI command for a CLI surface from overrides, environment, or PATH binaries.
+export const defaultCliFor = (overrides = {}) => surface => {
+  const override = overrides[surface.id]
+    ?? overrides[surface.name]
+    ?? process.env[`AGENT_BOARD_MATRIX_CLI_${surface.id.replace(/[^a-z0-9]+/gi, '_').toUpperCase()}`]
+  if (override) {
+    if (typeof override === 'object' && override.command) return override
+    const raw = String(override).trim()
+    const parts = raw.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map(p => p.replace(/^["']|["']$/g, '')) ?? []
+    if (parts.length > 0) return { command: parts[0], args: parts.slice(1) }
+  }
+  const binaryPath = findOnPath(surface.binary)
+  if (!binaryPath) return null
+  return { command: binaryPath, args: surface.args ?? [] }
 }
 
 const killChild = async child => {
@@ -57,10 +88,20 @@ export const buildThrowawayHome = ({ shape, tempBase } = {}) => {
   const home = join(root, 'home')
   const claudeDir = join(home, '.claude')
   const configDir = join(home, '.config')
+  const runtimeDir = join(root, 'runtime')
+  const dataDir = join(root, 'data')
+  const stateDir = join(root, 'state')
+  const cacheDir = join(root, 'cache')
+  const tempDir = join(root, 'tmp')
   const directories = [
     home,
     claudeDir,
     configDir,
+    runtimeDir,
+    dataDir,
+    stateDir,
+    cacheDir,
+    tempDir,
     join(home, 'AppData', 'Local'),
     join(home, 'AppData', 'Roaming'),
     join(home, '.codex'),
@@ -73,7 +114,7 @@ export const buildThrowawayHome = ({ shape, tempBase } = {}) => {
     join(home, '.dsh'),
     join(home, '.gemini', 'antigravity-cli'),
   ]
-  for (const directory of directories) mkdirSync(directory, { recursive: true })
+  for (const directory of directories) mkdirSync(directory, { recursive: true, mode: 0o700 })
 
   const boardDir = shape === 'S' ? join(home, '.agent-board') : join(claudeDir, 'agent-board')
   const progress = join(boardDir, 'progress.md')
@@ -101,6 +142,13 @@ export const buildThrowawayHome = ({ shape, tempBase } = {}) => {
     LOCALAPPDATA: join(home, 'AppData', 'Local'),
     APPDATA: join(home, 'AppData', 'Roaming'),
     XDG_CONFIG_HOME: configDir,
+    XDG_DATA_HOME: dataDir,
+    XDG_STATE_HOME: stateDir,
+    XDG_CACHE_HOME: cacheDir,
+    XDG_RUNTIME_DIR: runtimeDir,
+    TEMP: tempDir,
+    TMP: tempDir,
+    TMPDIR: tempDir,
     CLAUDE_CONFIG_DIR: claudeDir,
     CLAUDE_PROGRESS_FILE: progress,
     CODEX_HOME: join(home, '.codex'),
@@ -112,7 +160,9 @@ export const buildThrowawayHome = ({ shape, tempBase } = {}) => {
     AGENT_BOARD_TEST_PID: String(process.pid),
     LANG: 'en',
   }
-  delete env.AGENT_BOARD_ROUTES
+  for (const key of ['AGENT_BOARD_ROUTES', 'AGENT_BOARD_RUNTIME_FOLDER', 'AGENT_BOARD_MESSAGES_DIR', 'CODEX_THREAD_ID', 'AGENT_BOARD_AGENT', 'AGENT_BOARD_SESSION_ID']) {
+    delete env[key]
+  }
 
   return {
     root,
@@ -122,6 +172,7 @@ export const buildThrowawayHome = ({ shape, tempBase } = {}) => {
     progress,
     messagesDir,
     inboxDir,
+    runtimeDir,
     script,
     env,
     cleanup: () => rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }),
@@ -181,7 +232,7 @@ const startBoardServer = (home, timeoutMs = 15_000) => new Promise((resolveStart
   child.once('close', status => finishErr(new Error(`board server exited (${status}) before ready: ${stderr || stdout}`)))
 })
 
-const failRemaining = ({ date, version, shape, surface, fromIndex, step, reason, prior }) => {
+const failRemaining = ({ date, version, shape, surface, fromIndex, step, reason, prior, s }) => {
   const rows = [...prior]
   for (let i = fromIndex; i < CHECKS.length; i++) {
     rows.push({
@@ -189,9 +240,9 @@ const failRemaining = ({ date, version, shape, surface, fromIndex, step, reason,
       version,
       shape,
       surface: surface.name,
-      check: CHECK_LABELS[CHECKS[i]],
+      check: checkLabel(CHECKS[i], s),
       result: 'FAIL',
-      evidence: `stopped at ${step}: ${reason}`,
+      evidence: s.matrixStoppedAt(step, reason),
     })
   }
   return rows
@@ -206,19 +257,21 @@ export const runCliJourney = async ({
   cli,
   version = currentPackageVersion(),
   date = new Date().toISOString().slice(0, 10),
+  lang = 'en',
   timeoutMs = 10_000,
   pollMs = 40,
   tempBase,
 } = {}) => {
+  const s = stringsFor(lang)
   if (!cli) {
     return CHECKS.map(check => ({
       date,
       version,
       shape,
       surface: surface.name,
-      check: CHECK_LABELS[check],
+      check: checkLabel(check, s),
       result: 'SKIP',
-      evidence: 'No CLI command configured for this surface',
+      evidence: s.matrixNoCli(surface.binary ?? surface.name),
     }))
   }
 
@@ -227,37 +280,39 @@ export const runCliJourney = async ({
   let server = null
   let cliChild = null
   let cliStderr = ''
+  let cliSpawnError = null
   const session = `matrix-${surface.id}-${shape.toLowerCase()}-${randomBytes(4).toString('hex')}`
   const question = `Proceed with ${surface.name} (${shape}) check?`
   const replyText = `Yes, proceed for ${session}`
 
   try {
-    server = await startBoardServer(home, Math.max(timeoutMs, 10_000))
-    const headers = { 'x-board-token': server.token }
-
-    // Check a: the board opens and serves valid HTML + board model.
+    // Check a: start board server, verify HTML + /api/board model.
     try {
+      server = await startBoardServer(home, Math.max(timeoutMs, 10_000))
+      const headers = { 'x-board-token': server.token }
       const pageRes = await fetch(server.url, { signal: AbortSignal.timeout(timeoutMs) })
       const pageHtml = await pageRes.text()
       const boardRes = await fetch(new URL('/api/board', server.origin), { headers, signal: AbortSignal.timeout(timeoutMs) })
       const boardJson = await boardRes.json()
       if (!pageRes.ok || !pageHtml.includes('Agent Board') || !boardRes.ok || !boardJson?.model?.view) {
-        return failRemaining({ date, version, shape, surface, fromIndex: 0, step: 'a', reason: `page ${pageRes.status} / api ${boardRes.status}`, prior: rows })
+        return failRemaining({ date, version, shape, surface, fromIndex: 0, step: 'a', reason: `page ${pageRes.status} / api ${boardRes.status}`, prior: rows, s })
       }
       rows.push({
         date,
         version,
         shape,
         surface: surface.name,
-        check: CHECK_LABELS.a,
+        check: checkLabel('a', s),
         result: 'PASS',
-        evidence: `${server.origin} HTML 200 and /api/board 200`,
+        evidence: `${server.origin} HTML 200 / /api/board 200`,
       })
     } catch (error) {
-      return failRemaining({ date, version, shape, surface, fromIndex: 0, step: 'a', reason: error instanceof Error ? error.message : String(error), prior: rows })
+      return failRemaining({ date, version, shape, surface, fromIndex: 0, step: 'a', reason: error instanceof Error ? error.message : String(error), prior: rows, s })
     }
 
-    // Check b: start CLI (asks a question + attaches delivery route) and wait for 1 matching card.
+    const headers = { 'x-board-token': server.token }
+
+    // Check b: spawn CLI and wait for 1 deliverable question card.
     const cliEnv = {
       ...home.env,
       AGENT_BOARD_URL: server.url,
@@ -271,12 +326,18 @@ export const runCliJourney = async ({
       AGENT_BOARD_MATRIX_QUESTION: question,
       AGENT_BOARD_MATRIX_REPLY: replyText,
     }
-    cliChild = spawn(cli.command, cli.args ?? [], { env: cliEnv, cwd: dirname(home.root), stdio: ['ignore', 'pipe', 'pipe'] })
+    try {
+      cliChild = spawn(cli.command, cli.args ?? [], { env: cliEnv, cwd: dirname(home.root), stdio: ['ignore', 'pipe', 'pipe'] })
+    } catch (error) {
+      return failRemaining({ date, version, shape, surface, fromIndex: 1, step: 'b', reason: error instanceof Error ? error.message : String(error), prior: rows, s })
+    }
+    cliChild.once('error', error => { cliSpawnError = error })
     cliChild.stderr?.setEncoding('utf8').on('data', chunk => { cliStderr += chunk })
 
     let matchedAsk = null
     const deadlineB = Date.now() + timeoutMs
     while (Date.now() < deadlineB) {
+      if (cliSpawnError) break
       if (cliChild.exitCode !== null && cliChild.exitCode !== 0) break
       const res = await fetch(new URL('/api/board', server.origin), { headers, signal: AbortSignal.timeout(timeoutMs) }).catch(() => null)
       if (res?.ok) {
@@ -291,42 +352,48 @@ export const runCliJourney = async ({
     }
 
     if (!matchedAsk) {
-      const detail = cliChild.exitCode !== null
-        ? `CLI exited (${cliChild.exitCode}) before deliverable ask card appeared${cliStderr ? `: ${cliStderr.trim()}` : ''}`
-        : `question card with deliverable route did not appear within ${timeoutMs}ms`
-      return failRemaining({ date, version, shape, surface, fromIndex: 1, step: 'b', reason: detail, prior: rows })
+      const detail = cliSpawnError
+        ? (cliSpawnError instanceof Error ? cliSpawnError.message : String(cliSpawnError))
+        : cliChild.exitCode !== null
+          ? `CLI exited (${cliChild.exitCode}) before deliverable ask card appeared${cliStderr ? `: ${cliStderr.trim()}` : ''}`
+          : `question card with deliverable route did not appear within ${timeoutMs}ms`
+      return failRemaining({ date, version, shape, surface, fromIndex: 1, step: 'b', reason: detail, prior: rows, s })
     }
     rows.push({
       date,
       version,
       shape,
       surface: surface.name,
-      check: CHECK_LABELS.b,
+      check: checkLabel('b', s),
       result: 'PASS',
-      evidence: `1 card shown (${surface.agent}/${surface.surface})`,
+      evidence: `1 card (${surface.agent}/${surface.surface})`,
     })
 
-    // Check c: board sends reply via POST /api/act and verifies CLI receives and acknowledges it.
+    // Check c: send reply via POST /api/act and wait for acknowledgement from CLI.
     const messageId = randomUUID()
-    const actRes = await fetch(new URL('/api/act', server.origin), {
-      method: 'POST',
-      headers: { ...headers, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        key: matchedAsk.key,
-        type: 'message',
-        id: messageId,
-        text: replyText,
-        session: matchedAsk.session ?? session,
-        asked: matchedAsk.text,
-        fp: matchedAsk.fp ?? '',
-        connection: matchedAsk.delivery.id,
-        turn: matchedAsk.delivery.turn,
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
-    })
-    const actJson = await actRes.json().catch(() => ({}))
-    if (!actRes.ok) {
-      return failRemaining({ date, version, shape, surface, fromIndex: 2, step: 'c', reason: `POST /api/act returned ${actRes.status} (${actJson.note ?? 'refused'})`, prior: rows })
+    try {
+      const actRes = await fetch(new URL('/api/act', server.origin), {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          key: matchedAsk.key,
+          type: 'message',
+          id: messageId,
+          text: replyText,
+          session: matchedAsk.session ?? session,
+          asked: matchedAsk.text,
+          fp: matchedAsk.fp ?? '',
+          connection: matchedAsk.delivery.id,
+          turn: matchedAsk.delivery.turn,
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      })
+      const actJson = await actRes.json().catch(() => ({}))
+      if (!actRes.ok) {
+        return failRemaining({ date, version, shape, surface, fromIndex: 2, step: 'c', reason: `POST /api/act returned ${actRes.status} (${actJson.note ?? 'refused'})`, prior: rows, s })
+      }
+    } catch (error) {
+      return failRemaining({ date, version, shape, surface, fromIndex: 2, step: 'c', reason: error instanceof Error ? error.message : String(error), prior: rows, s })
     }
 
     let finalBoard = null
@@ -343,7 +410,7 @@ export const runCliJourney = async ({
           break
         }
         if (msg?.status === 'rejected') {
-          return failRemaining({ date, version, shape, surface, fromIndex: 2, step: 'c', reason: `reply rejected (${msg.error || 'rejected'})`, prior: rows })
+          return failRemaining({ date, version, shape, surface, fromIndex: 2, step: 'c', reason: `reply rejected (${msg.error || 'rejected'})`, prior: rows, s })
         }
       }
       await pause(pollMs)
@@ -353,19 +420,19 @@ export const runCliJourney = async ({
       const reason = cliChild.exitCode !== null
         ? `CLI exited (${cliChild.exitCode}) without acknowledging reply${cliStderr ? `: ${cliStderr.trim()}` : ''}`
         : `CLI did not receive/acknowledge reply within ${timeoutMs}ms`
-      return failRemaining({ date, version, shape, surface, fromIndex: 2, step: 'c', reason, prior: rows })
+      return failRemaining({ date, version, shape, surface, fromIndex: 2, step: 'c', reason, prior: rows, s })
     }
     rows.push({
       date,
       version,
       shape,
       surface: surface.name,
-      check: CHECK_LABELS.c,
+      check: checkLabel('c', s),
       result: 'PASS',
-      evidence: `message acknowledged (${deliveredMessage.reply || 'ACK'})`,
+      evidence: `acknowledged (${deliveredMessage.reply || 'ACK'})`,
     })
 
-    // Check d: board reflects resolved/accurate state and no uncertain/stuck fallback.
+    // Check d: verify resolved state and accurate status.
     let statusBody = finalBoard
     let resolved = false
     const deadlineD = Date.now() + Math.min(2500, timeoutMs)
@@ -383,16 +450,16 @@ export const runCliJourney = async ({
     }
     if (!resolved) {
       const remainingAsks = findAsk(statusBody?.model?.asks, question)
-      return failRemaining({ date, version, shape, surface, fromIndex: 3, step: 'd', reason: `status mismatch (openAsks=${remainingAsks.length}, unsure=${statusBody?.model?.view?.unsure?.length ?? 0})`, prior: rows })
+      return failRemaining({ date, version, shape, surface, fromIndex: 3, step: 'd', reason: `status mismatch (openAsks=${remainingAsks.length}, unsure=${statusBody?.model?.view?.unsure?.length ?? 0})`, prior: rows, s })
     }
     rows.push({
       date,
       version,
       shape,
       surface: surface.name,
-      check: CHECK_LABELS.d,
+      check: checkLabel('d', s),
       result: 'PASS',
-      evidence: 'question resolved; acknowledged status accurate',
+      evidence: 'acknowledged; resolved',
     })
     return rows
   } finally {
@@ -402,10 +469,11 @@ export const runCliJourney = async ({
   }
 }
 
-export const formatMatrixTable = rows => {
+export const formatMatrixTable = (rows, { lang = 'en' } = {}) => {
+  const s = stringsFor(lang)
   const escCell = text => String(text ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ')
   const lines = [
-    '| Date | Version | Shape | Surface | Check | Result | Evidence |',
+    `| ${s.matrixColDate} | ${s.matrixColVersion} | ${s.matrixColShape} | ${s.matrixColSurface} | ${s.matrixColCheck} | ${s.matrixColResult} | ${s.matrixColEvidence} |`,
     '|---|---|---|---|---|---|---|',
     ...rows.map(row => `| ${escCell(row.date)} | ${escCell(row.version)} | ${escCell(row.shape)} | ${escCell(row.surface)} | ${escCell(row.check)} | ${escCell(row.result)} | ${escCell(row.evidence)} |`),
   ]
@@ -415,13 +483,15 @@ export const formatMatrixTable = rows => {
 export const runMatrix = async ({
   shapes = SHAPES,
   surfaces = SURFACES,
-  cliFor = () => null,
+  cliFor = defaultCliFor(),
   version = currentPackageVersion(),
   date = new Date().toISOString().slice(0, 10),
+  lang = 'en',
   timeoutMs = 10_000,
   pollMs = 40,
   tempBase,
 } = {}) => {
+  const s = stringsFor(lang)
   const rows = []
   for (const shape of shapes) {
     for (const surface of surfaces) {
@@ -432,19 +502,19 @@ export const runMatrix = async ({
             version,
             shape,
             surface: surface.name,
-            check: CHECK_LABELS[check],
+            check: checkLabel(check, s),
             result: 'CHECKLIST',
-            evidence: `Manual checklist: ${surface.checklist ?? DESKTOP_CHECKLIST_PATH}`,
+            evidence: s.matrixManualChecklist(surface.checklist ?? DESKTOP_CHECKLIST_PATH),
           })
         }
         continue
       }
       const cli = typeof cliFor === 'function' ? await cliFor(surface, shape) : cliFor?.[surface.id] ?? null
-      const resultRows = await runCliJourney({ surface, shape, cli, version, date, timeoutMs, pollMs, tempBase })
+      const resultRows = await runCliJourney({ surface, shape, cli, version, date, lang, timeoutMs, pollMs, tempBase })
       rows.push(...resultRows)
     }
   }
-  return { rows, markdown: formatMatrixTable(rows) }
+  return { rows, markdown: formatMatrixTable(rows, { lang }) }
 }
 
 const parseCliArgs = argv => {
@@ -452,19 +522,28 @@ const parseCliArgs = argv => {
     const idx = argv.indexOf(name)
     return idx >= 0 ? argv[idx + 1] : undefined
   }
+  const cliOverrides = {}
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] !== '--cli' || argv[i + 1] === undefined) continue
+    const eq = argv[i + 1].indexOf('=')
+    if (eq > 0) cliOverrides[argv[i + 1].slice(0, eq)] = argv[i + 1].slice(eq + 1)
+  }
   const shapesRaw = pick('--shapes')
   const surfacesRaw = pick('--surfaces')
   const shapes = shapesRaw ? shapesRaw.split(',').map(s => s.trim()).filter(s => SHAPES.includes(s)) : SHAPES
   const surfaceIds = surfacesRaw ? new Set(surfacesRaw.split(',').map(s => s.trim())) : null
   const surfaces = surfaceIds ? SURFACES.filter(one => surfaceIds.has(one.id) || surfaceIds.has(one.name)) : SURFACES
   const version = pick('--version') ?? currentPackageVersion()
+  const lang = pick('--lang') ?? 'en'
   const timeoutMs = Number(pick('--timeout-ms') ?? 10_000)
   return {
     help: argv.includes('--help') || argv.includes('-h'),
     json: argv.includes('--json'),
     shapes,
     surfaces,
+    cliOverrides,
     version,
+    lang,
     timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 10_000,
   }
 }
@@ -472,9 +551,16 @@ const parseCliArgs = argv => {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const opts = parseCliArgs(process.argv.slice(2))
   if (opts.help) {
-    process.stdout.write('Usage: node scripts/matrix-runner.mjs [--shapes S,P] [--surfaces id1,id2] [--version ver] [--timeout-ms ms] [--json]\n')
+    process.stdout.write(`${stringsFor(opts.lang).matrixUsage}\n`)
   } else {
-    const out = await runMatrix({ shapes: opts.shapes, surfaces: opts.surfaces, version: opts.version, timeoutMs: opts.timeoutMs })
+    const out = await runMatrix({
+      shapes: opts.shapes,
+      surfaces: opts.surfaces,
+      cliFor: defaultCliFor(opts.cliOverrides),
+      version: opts.version,
+      lang: opts.lang,
+      timeoutMs: opts.timeoutMs,
+    })
     process.stdout.write(opts.json ? `${JSON.stringify(out, null, 2)}\n` : `${out.markdown}\n`)
   }
 }
