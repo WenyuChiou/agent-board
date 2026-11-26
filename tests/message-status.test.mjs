@@ -27,7 +27,7 @@ try {
     import('../hooks/serve.ts'),
   ])
 } finally { loader.deregister() }
-const { MESSAGE_STATES, NOW_ROUTE_MS, messageStatus } = status
+const { MESSAGE_STATES, NOW_ROUTE_MS, messageStatus, nextStatusDeadline } = status
 const { DELIVERY_STATES, SAMPLE_NOW, sampleOf, shapesOf } = delivery
 const { shownMessages } = store
 const { STRINGS } = strings
@@ -91,6 +91,21 @@ test('a message that read Unsure at 20 s reads Delivered once its acceptance arr
   assert.equal(statusOf(claim, NOW + 30 * SECOND).state, 'unsure')
   const accepted = at(claim, { status: 'accepted', updated: NOW + 31 * SECOND })
   assert.deepEqual(statusOf(accepted, NOW + 32 * SECOND), { state: 'delivered', line: `Delivered · ${en.justNow}`, tone: 'done', updatedAt: NOW + 31 * SECOND })
+})
+
+test('the next status deadline is when the earliest Queued now-route message turns Unsure, and none for a line with no clock', () => {
+  const queued = shown('queued')
+  const later = at(queued, { id: 'AB-LATER', updated: NOW + 5 * SECOND })
+  assert.equal(nextStatusDeadline([queued], NOW), NOW + NOW_ROUTE_MS)
+  assert.equal(nextStatusDeadline([later, queued], NOW + SECOND), NOW + NOW_ROUTE_MS)
+  // A message already Unsure sets none: the next one does.
+  assert.equal(nextStatusDeadline([queued], NOW + NOW_ROUTE_MS), null)
+  assert.equal(nextStatusDeadline([later, queued], NOW + NOW_ROUTE_MS), NOW + 5 * SECOND + NOW_ROUTE_MS)
+  // A fresh claim has the same clock.
+  assert.equal(nextStatusDeadline([shown('claimed')], NOW), NOW + NOW_ROUTE_MS)
+  // A line that waits for a step's end or a turn, a delivered message and no message have no deadline.
+  assert.equal(nextStatusDeadline([at(queued, { line: 'stepEnd' }), shown('queuedForHook'), shown('accepted')], NOW), null)
+  assert.equal(nextStatusDeadline([], NOW), null)
 })
 
 test('a message reads Delivered only from an acceptance on record', () => {
