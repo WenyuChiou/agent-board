@@ -12,7 +12,7 @@ Date: 2026-11-26. Part of #1841 (`docs/dev/plan-0.26.0.md`, L6, spike S2, Q3).
 
 ## Host
 
-- Windows 11, Node 24.12.0, Antigravity CLI (`agy`) 1.5.13.
+- Windows 11, Node 24.12.0, Antigravity CLI (`agy`) 1.5.13 (probes R0–R7 and `-p` E2E) and `agy` 1.5.18 (interactive `--prompt-interactive` ConPTY TUI checks).
 - Isolated throwaway test homes (with `HOME`, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `XDG_CONFIG_HOME`, `XDG_RUNTIME_DIR` pointed into temporary folders) and synthetic prompts/data only; real home directories, sign-ins, and sessions were not touched.
 
 ## Probe runs R0–R7 (`agy 1.5.13` isolated `hooks.json` `Stop` contract)
@@ -37,8 +37,17 @@ Date: 2026-11-26. Part of #1841 (`docs/dev/plan-0.26.0.md`, L6, spike S2, Q3).
 - Model continued the same turn and printed `ACK <nonce>` and `Blue noted.`.
 - **Result (`9.27 s` from send to acknowledged receipt; `10.56 s` from send to exit; `19.55 s` total; `0` errors in `hook-errors.log`):** `messages.json` recorded `status: "acknowledged"`, `reply: "ACK <nonce>"`, `error: ""`, `hops: 1`; `progress.md` checked `- [x] Blue or green?`.
 
-## Not covered / remaining for owner sitting
+## Interactive `agy --prompt-interactive` TUI live checks (`agy 1.5.18`, ConPTY)
 
-- Interactive `agy -i` TUI behavior while `StopWait` holds the turn open (visual indicator, typing in the TUI window during the wait, and `lastUserInput` behavior across multi-turn TUI input; per S2/R0–R7 `Stop` carries `lastUserInput` only and no separate live typing flag).
-- Antigravity 2.0 desktop app wake rows (`hooks/antigravity-sidecar.ts` / PR #1612).
-- `hooks/receivers/hook-mailbox-antigravity.ts` keeps conservative `nextTurn` route metadata until the owner's interactive TUI sitting decides whether `agy TUI` moves to a waiting route line.
+- **Case A — Board reply within `StopWait` window (`agy --prompt-interactive`, PASS):**
+  - After `Stop` #1 wrote `- [?] Blue or green?` to `progress.md`, `agy` TUI continued displaying an active spinner (`Working...` / `Generating...`, `esc to cancel`) while `StopWait` held the turn open.
+  - Sending `"Blue"` via `POST /api/act` (while polling `GET /api/board` with `x-board-visible: 1`) was claimed by `StopWait` in `0.31 s`, continued the same turn (`ACK <nonce>` and `Blue noted.`), checked `- [x] Blue or green?`, and recorded `status: "acknowledged"`, `reply: "ACK <nonce>"`, `error: ""`, `hops: 1` in `6.26 s` from send to acknowledged receipt, with `0` errors in `hook-errors.log`.
+- **Case B — Typing in `agy` TUI while `StopWait` holds the turn open:**
+  - After entering a second turn (`Red or yellow?`) and waiting `2.0 s` into `StopWait`, sending `"Red"` + `Enter` directly to the ConPTY TUI did not block typing and did not cancel `StopWait`.
+  - Instead, `agy 1.5.18` queued the typed input and displayed `▸ Red (alt+m to send immediately)` / `Press up to edit queued messages`, held `"Red"` until `StopWait` exited at its `~28 s` wait cap, and immediately started the next turn (`> Red` -> `Red noted.`).
+- **Late-click check (`43.9 s`):** A board reply sent manually `43.9 s` after `Stop` (after the `28 s` `StopWait` cap expired) stayed `queued` (`line: "nextTurn"`), confirming `agy` has no idle door once `Stop` completes.
+
+## Decision & remaining scope (B1 / Q3)
+
+- **30 s cap & conservative route rationale:** Because `agy` `Stop` hook stdin exposes no field indicating queued TUI input (`▸ ... (alt+m to send immediately)`), extending `StopWait` to 10 minutes would delay normal TUI `Enter` submissions for up to 10 minutes and risk two-answer races (`StopWait` delivering a board answer right before the user's queued `Enter` runs). Keeping `StopWait` at `30 s` (`28 s` internal cap) and `hooks/receivers/hook-mailbox-antigravity.ts` conservative (`nextTurn`) delivers replies in `~6 s` within the wait window without long TUI lockouts, while leaving `Q3` / `--wait-message` visible for 0.27.0.
+- **Out of scope for #1841:** Antigravity 2.0 desktop app wake rows (`hooks/antigravity-sidecar.ts` / PR #1612).
