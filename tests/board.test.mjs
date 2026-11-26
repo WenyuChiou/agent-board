@@ -13474,6 +13474,174 @@ test('a project and an agent filter combine', async () => {
   } finally { await board.close() }
 })
 
+test('filter bar keeps done-only and zero-count selected projects and leaves shared Cursor surface unclassified', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const progress = [
+    '## done-only-repo',
+    '<!-- auto session=s1848d1 agent=codex state=done updated=' + new Date(now).toISOString() + ' -->',
+    '### Shipped feature',
+    '- [x] Merged release',
+    '<!-- /auto session=s1848d1 -->',
+    '',
+    '## active-claude-repo',
+    '<!-- auto session=s1848c1 agent=claude state=waiting updated=' + new Date(now).toISOString() + ' -->',
+    '### Review diff',
+    '- [?] Deploy now?',
+    '<!-- /auto session=s1848c1 -->',
+    '',
+    '## cursor-work',
+    '<!-- auto session=s1848u1 agent=cursor state=waiting updated=' + new Date(now).toISOString() + ' -->',
+    '### Cursor shared session',
+    '- [?] Shared Cursor surface?',
+    '<!-- /auto session=s1848u1 -->',
+    '',
+    '## cursor-cli-work',
+    '<!-- auto session=s1848u2 agent=cursor state=waiting updated=' + new Date(now).toISOString() + ' -->',
+    '### Cursor CLI session',
+    '- [?] Explicit CLI surface?',
+    '<!-- /auto session=s1848u2 -->',
+  ].join('\n')
+  const parsed = runtime.parseProgress(progress)
+  const view = runtime.buildView(parsed, [], null, now, 0, {}, EN)
+  const model = runtime.serveModel(
+    view,
+    [],
+    EN,
+    new Set(),
+    false,
+    {
+      connections: [],
+      mailboxes: [
+        { id: 'c1', agent: 'cursor', session: 's1848u1', turn: 't1', scope: 'mailbox', surface: 'IDE (Composer)', updated: now },
+        { id: 'c2', agent: 'cursor', session: 's1848u2', turn: 't2', scope: 'mailbox', surface: 'cursor-agent CLI', updated: now },
+      ],
+      messages: [],
+    },
+    false,
+    { now, repoOf: () => null, versions: { board: '1.2.3', package: null } },
+  )
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const projOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  const agentOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  const ifaceOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  const projChip = () => dom.node('filter-bar').childNodes.find(n => n.getAttribute('data-filter-kind') === 'project').childNodes[0]
+  // Done-only project stays selected in the Project menu (not cleared by drawSide).
+  projOpt('done-only-repo').click()
+  assert.equal(projOpt('done-only-repo').getAttribute('aria-checked'), 'true')
+  assert.equal(projChip().getAttribute('data-active'), '1')
+  // Choosing an AI with zero items in done-only-repo keeps done-only-repo visible and checked at count 0.
+  agentOpt('Claude Code').click()
+  const stillThere = projOpt('done-only-repo')
+  assert.ok(stillThere)
+  assert.equal(stillThere.getAttribute('aria-checked'), 'true')
+  assert.equal(stillThere.childNodes[1].textContent, '0')
+  stillThere.click()
+  assert.equal(projChip().getAttribute('data-active'), '0')
+  assert.equal(projOpt('done-only-repo'), undefined)
+  dom.node('filter-clear').click()
+  // Cursor IDE (Composer) is shared with cursor-agent CLI and stays out of App; explicit cursor-agent CLI counts under CLI (3 total).
+  assert.equal(ifaceOpt(EN.pgInterfaceApp).childNodes[1].textContent, '0')
+  assert.equal(ifaceOpt(EN.pgInterfaceCli).childNodes[1].textContent, '3')
+  ifaceOpt(EN.pgInterfaceApp).click()
+  assert.ok(!shownWords(dom.node('needs')).includes('Shared Cursor surface?'))
+  ifaceOpt(EN.pgInterfaceApp).click()
+  ifaceOpt(EN.pgInterfaceCli).click()
+  assert.ok(shownWords(dom.node('needs')).includes('Explicit CLI surface?'))
+  assert.ok(!shownWords(dom.node('needs')).includes('Shared Cursor surface?'))
+})
+
+test('stale saved agent filter clears cleanly and LAN models preserve interface classification', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const progress = [
+    '## app-repo',
+    '<!-- auto session=s1848lan1 agent=codex state=waiting updated=' + new Date(now).toISOString() + ' -->',
+    '### Codex desktop task',
+    '- [?] Approve desktop edit?',
+    '<!-- /auto session=s1848lan1 -->',
+    '',
+    '## app-row-repo',
+    '<!-- auto session=s1848lan2 agent=codex state=working updated=' + new Date(now).toISOString() + ' -->',
+    '### Running desktop build',
+    '- [~] Bundle assets',
+    '<!-- /auto session=s1848lan2 -->',
+  ].join('\n')
+  const parsed = runtime.parseProgress(progress)
+  const view = runtime.buildView(parsed, [], null, now, 0, {}, EN)
+  const messaging = {
+    connections: [
+      { id: 'd1', agent: 'codex', session: 's1848lan1', turn: 't1', scope: 'live', surface: 'Codex desktop app', updated: now },
+      { id: 'd2', agent: 'codex', session: 's1848lan2', turn: 't2', scope: 'live', surface: 'Codex desktop app', updated: now },
+    ],
+    mailboxes: [],
+    messages: [],
+  }
+  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, messaging, false, { now, repoOf: () => null, versions: { board: '1.2.3', package: null } })
+  assert.equal(lanModel.asks[0].surface, 'Codex desktop app')
+  assert.equal(lanModel.groups[0].rows[0].surface, 'Codex desktop app')
+  const dom = await pageDom(await sourcePage(), lanModel, { width: 1280, storage: new Map([['agent-board.filter', 'gemini']]) })
+  // Absent stored agent 'gemini' is cleared from pg.filters.agents so Codex questions still show.
+  assert.ok(shownWords(dom.node('needs')).includes('Approve desktop edit?'))
+  assert.equal(dom.node('filter-clear').hidden, true)
+  // On LAN, Codex desktop app session still counts under App (2 items: 1 question + 1 working row).
+  const ifaceOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  assert.equal(ifaceOpt(EN.pgInterfaceApp).childNodes[1].textContent, '2')
+  assert.equal(ifaceOpt(EN.pgInterfaceCli).childNodes[1].textContent, '0')
+  ifaceOpt(EN.pgInterfaceApp).click()
+  assert.ok(shownWords(dom.node('needs')).includes('Approve desktop edit?'))
+})
+
+test('completed Codex desktop task keeps App classification in Done shelf', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const session = '019a0000-0000-7000-8000-000000001848'
+  const session2 = '019a0000-0000-7000-8000-000000001849'
+  const progress = [
+    '## desktop-done-repo',
+    `<!-- auto session=s1848app1 resume=${session} agent=codex state=done updated=${new Date(now).toISOString()} -->`,
+    '### Desktop refactor finished',
+    '- [x] Ship UI update',
+    `<!-- /auto session=s1848app1 -->`,
+    '',
+    '## desktop-stopped-repo',
+    `<!-- auto session=s1848app2 resume=${session2} agent=codex state=ended updated=${new Date(now - 60_000).toISOString()} -->`,
+    '### Earlier ended desktop task',
+    '- [~] Wait for check',
+    `<!-- /auto session=s1848app2 -->`,
+  ].join('\n')
+  const parsed = runtime.parseProgress(progress)
+  const view = runtime.buildView(parsed, [], null, now, 0, {}, EN)
+  assert.equal(runtime.sessionState(view, 'codex', session2), 'ended')
+  const messaging = {
+    connections: [
+      { id: 'd1848', agent: 'codex', session, turn: 't1', scope: 'live', surface: 'Codex desktop app', updated: now },
+      { id: 'd1849', agent: 'codex', session: session2, turn: 't2', scope: 'live', surface: 'Codex desktop app', updated: now },
+    ],
+    mailboxes: [
+      { id: 'm1848', agent: 'codex', session, turn: 't0', scope: 'mailbox', surface: 'Codex desktop app', updated: now },
+    ],
+    messages: [],
+  }
+  const opts = { now, repoOf: () => null, versions: { board: '1.2.3', package: null } }
+  const model = runtime.serveModel(view, [], EN, new Set(), false, messaging, false, opts)
+  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, messaging, false, opts)
+  for (const m of [model, lanModel]) {
+    assert.equal(m.finished.length, 1)
+    assert.equal(m.finished[0].surface, 'Codex desktop app')
+    assert.equal('sessionId' in m.finished[0], false)
+    assert.equal(m.recent[0].surface, 'Codex desktop app')
+  }
+  assert.equal('dir' in lanModel.finished[0], false)
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const ifaceOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  assert.equal(ifaceOpt(EN.pgInterfaceApp).childNodes[1].textContent, '2')
+  assert.equal(ifaceOpt(EN.pgInterfaceCli).childNodes[1].textContent, '0')
+  ifaceOpt(EN.pgInterfaceApp).click()
+  assert.equal(dom.node('count-done').textContent, '1')
+  assert.ok(sectionWords(dom, 'done').includes('Desktop refactor finished'))
+})
+
 test('a project in the sidebar counts its questions, working tasks and other work, and leaves its stopped and finished tasks out', async () => {
   const { board, model, html } = await projectBoard()
   try {
@@ -13947,9 +14115,20 @@ test('Esc and the backdrop close the drawer and focus goes back to its button', 
     dom.node('drawer-close').click()
     assert.equal(shell.getAttribute('data-drawer'), '')
     assert.equal(dom.active(), btn)
-    // Tab stays inside: from the last control it wraps to the first, and back again.
+    // Tab stays inside: from the last control it wraps to the first, and back again; #side-search neither wraps nor traps Tab.
     btn.click()
     assert.equal(dom.active(), dom.node('drawer-close'))
+    const search = dom.node('side-search')
+    assert.ok(search)
+    search.focus()
+    let searchTabPrevented = false
+    dom.key({ key: 'Tab', preventDefault: () => { searchTabPrevented = true } })
+    assert.equal(searchTabPrevented, false)
+    assert.equal(dom.active(), search)
+    let searchShiftPrevented = false
+    dom.key({ key: 'Tab', shiftKey: true, preventDefault: () => { searchShiftPrevented = true } })
+    assert.equal(searchShiftPrevented, false)
+    assert.equal(dom.active(), search)
     const last = dom.node('side-projects').querySelectorAll('[data-project]').at(-1)
     last.focus()
     dom.key({ key: 'Tab' })
