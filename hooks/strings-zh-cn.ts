@@ -1040,6 +1040,8 @@ export const ZH_CN: Strings = {
   pgNothingHint: '代理问你问题或卡住时，会显示在这里，标签页标题也会显示数字。',
   pgOlder: (n: number): string => `${n} 个较早的问题尚未回答（对话已停止）`,
   pgOlderOne: (n: number): string => `${n} 个较早的问题尚未回答（对话已停止）`,
+  pgOlderAnswered: (n: number): string => `${n} 个较早的问题已在看板回复（回执见下方）`,
+  pgOlderAnsweredOne: (n: number): string => `${n} 个较早的问题已在看板回复（回执见下方）`,
   awayForMinutes: (n: number): string => `你离开了 ${n} 分钟`,
   awayForHours: (n: number): string => `你离开了 ${n} 小时`,
   awayAskedNamedOne: (agent: string): string => `${agent} 问了 1 个问题`,

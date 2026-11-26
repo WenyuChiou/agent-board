@@ -1087,6 +1087,8 @@ export const ZH_TW = {
   pgNothingHint: '代理程式問你問題或卡住時，會顯示在這裡，分頁標題也會顯示數字。',
   pgOlder: (n: number): string => `${n} 個較早的問題尚未回答（對話已停止）`,
   pgOlderOne: (n: number): string => `${n} 個較早的問題尚未回答（對話已停止）`,
+  pgOlderAnswered: (n: number): string => `${n} 個較早的問題已在看板回覆（回執見下方）`,
+  pgOlderAnsweredOne: (n: number): string => `${n} 個較早的問題已在看板回覆（回執見下方）`,
   awayForMinutes: (n: number): string => `你離開 ${n} 分鐘`,
   awayForHours: (n: number): string => `你離開 ${n} 小時`,
   awayAskedNamedOne: (agent: string): string => `${agent} 問了 1 個問題`,
