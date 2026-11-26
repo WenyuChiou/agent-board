@@ -5101,7 +5101,7 @@ export const LINES = [
 "  isImplemented: true,",
 "  routes: {",
 "    idle: { line: \"nextTurn\", record: \"docs/validation/2026-11-12-codex-cli-mailbox-live.md\", surfaces: [SURFACE_IDS.cli] },",
-"    working: { line: \"stepEnd\", record: \"docs/validation/2026-11-26-codex-cli-stop-live.md\", surfaces: [SURFACE_IDS.cli] },",
+"    working: { line: \"nextTurn\", record: \"docs/validation/2026-11-26-codex-cli-stop-live.md\", surfaces: [SURFACE_IDS.cli], surfaceLines: { [SURFACE_IDS.cli]: \"stepEnd\" } },",
 "    ended: { line: \"none\", record: null, surfaces: [] }",
 "  }",
 "};",

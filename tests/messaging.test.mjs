@@ -8977,10 +8977,12 @@ test('a question asked while its session is working reads the working route, not
       : { connections: [{ id: 'table-receiver', agent: record.agent, session, surface, turn: record.kind === 'turn' ? 'turn1' : 'session', scope: record.kind === 'turn' ? 'turn' : 'session', expires: now + 60_000 }], messages: [] }
     const ask = realServeModel(view, [], EN, new Set(), false, live, false, group, RECEIVER_ROUTES).asks[0]
     const label = `${record.agent}/${record.kind}`
-    assert.equal(ask.line, route.line, label)
-    assert.equal(ask.canSend, route.line !== 'none' && route.record !== null, label)
+    // The line and note on the card's own surface, read as the send gate reads them (a surface may have its own line).
+    const line = routeLine(route, surface)
+    assert.equal(ask.line, line, label)
+    assert.equal(ask.canSend, line !== 'none' && routeRecord(route, surface) !== null, label)
     assert.equal(ask.send === 'connected' || ask.send === 'mailbox', ask.canSend, label)
-    if (route.line === 'now' && record.agent !== 'claude') assert.ok(!ask.lineText.includes('waiting'), label + ' ' + ask.lineText)
+    if (line === 'now' && record.agent !== 'claude') assert.ok(!ask.lineText.includes('waiting'), label + ' ' + ask.lineText)
     checked += 1
   }
   // Nine records since Gemini CLI's was retired (#1327).
@@ -9610,10 +9612,11 @@ test('shape 27: a Codex live connection takes the mailbox\'s place only on its r
   const daemon = (await w.call('/api/messages/register', { agent: 'codex', session: w.session, surface: SURFACE_IDS.codexDaemon, turn: 'session', scope: 'session', unclaimed: true })).body
   const live = await w.card()
   assert.deepEqual([live.delivery?.id, live.line, live.canSend], [daemon.id, 'afterWait', true])
-  // While the session works, the receiver's route has no note: the card is the one the mailbox gives without the receiver.
+  // While the session works, the receiver's route has no note: the card is the one the mailbox gives without the
+  // receiver, which on the CLI sends at the step end (#319).
   shapeFile = stateFile('codex', 'working', w.session)
   const busy = await w.card()
-  assert.equal(busy.canSend, false)
+  assert.deepEqual([busy.delivery?.id, busy.line, busy.canSend], [w.target.id, 'stepEnd', true])
   assert.equal((await w.call('/api/messages/disconnect', { connection: daemon.id, secret: daemon.secret, turn: 'session' })).status, 200)
   assert.deepEqual(busy, await w.card())
 })
