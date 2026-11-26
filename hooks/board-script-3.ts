@@ -2758,7 +2758,7 @@ export const LINES = [
 "};",
 "",
 "// scripts/board-cli.ts",
-"import { appendFileSync, chmodSync as chmodSync3, closeSync as closeSync13, existsSync as existsSync12, fsyncSync as fsyncSync3, linkSync as linkSync3, lstatSync as lstatSync12, mkdirSync as mkdirSync7, openSync as openSync13, readdirSync as readdirSync10, readFileSync as readFileSync19, readSync as readSync9, renameSync as renameSync7, statSync as statSync12, unlinkSync as unlinkSync12, writeFileSync as writeFileSync9 } from \"node:fs\";",
+"import { appendFileSync, chmodSync as chmodSync3, closeSync as closeSync13, existsSync as existsSync12, fsyncSync as fsyncSync3, linkSync as linkSync3, lstatSync as lstatSync12, mkdirSync as mkdirSync7, openSync as openSync13, readdirSync as readdirSync10, readFileSync as readFileSync19, readSync as readSync9, renameSync as renameSync7, statSync as statSync13, unlinkSync as unlinkSync12, writeFileSync as writeFileSync9 } from \"node:fs\";",
 "import { createHash as createHash9, randomUUID as randomUUID2 } from \"node:crypto\";",
 "import { homedir as homedir6, tmpdir } from \"node:os\";",
 "import { basename as basename9, dirname as dirname12, join as join25, resolve as resolve17 } from \"node:path\";",
