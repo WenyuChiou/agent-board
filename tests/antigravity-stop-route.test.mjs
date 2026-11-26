@@ -31,6 +31,7 @@ const tsMod = await (async () => ({
   ...await importTs('../hooks/local-agents.ts'),
   ...await importTs('../hooks/hook-safety.ts'),
   ...await importTs('../scripts/board-messaging.ts'),
+  ...await importTs('../hooks/strings-en.ts'),
   ...await importTs('../hooks/sha256.ts'),
 }))()
 
@@ -109,11 +110,12 @@ const fixture = async (folder, fn) => {
       ...replies.map(content => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', content })),
     )
 
-    const startStandInServer = async (initialPageAgo = 500) => {
+    const startStandInServer = async (initialPageAgo = 500, opts = {}) => {
       const token = 'synth-token-1841'
       let pageAgo = initialPageAgo
       let store = { messages: [] }
       const mailboxTurnCalls = []
+      const actionCounts = new Map()
       let pingCount = 0
       const now = Date.now()
       const enrolled = tsMod.enrollMailbox(store, 'antigravity', session, 'agy TUI', now, 43_200_000)
@@ -133,6 +135,13 @@ const fixture = async (folder, fn) => {
           req.on('end', () => {
             try {
               const body = JSON.parse(bodyText || '{}')
+              const count = (actionCounts.get(action) ?? 0) + 1
+              actionCounts.set(action, count)
+              const override = opts.onAction?.(action, count, body)
+              if (override) {
+                res.writeHead(override.status, { 'content-type': 'application/json' })
+                return res.end(JSON.stringify(override.body))
+              }
               const out = tsMod.mailboxAction(store, action, body, Date.now())
               store = out.state
               if (action === 'mailbox-turn') mailboxTurnCalls.push({ at: Date.now(), hasMessage: out.result.message !== null })
@@ -243,6 +252,7 @@ test('StopWait fast-exits empty object when no board server is running', () => f
   const t0 = Date.now()
   const res = f.call('StopWait', {}, { deadlineMs: 5000 })
   assert.equal(res.status, 0, res.stderr)
+  assert.equal(res.stderr, '')
   assert.deepEqual(JSON.parse(res.stdout.trim()), {})
   assert.ok(Date.now() - t0 < 2000, 'must fast-exit without running board server')
 }))
@@ -445,7 +455,7 @@ test('StopWait worker preserves complete continue stdout when child exits non-ze
 
     writeFileSync(fakeScript, `globalThis.AGENT_BOARD = {"hookVersion":${tsMod.HOOK_VERSION},"x":1}\nprocess.stdout.write(JSON.stringify({ decision: 'continue', reason: 'Accepted before timeout' }) + '\\n')\nsetTimeout(() => {}, 10000)\n`)
     const resTimeout = spawnSync(process.execPath, [
-      worker, '--hook-version', String(tsMod.HOOK_VERSION), '--hook-event', 'StopWait', '--hook-deadline', String(Date.now() + 300),
+      worker, '--hook-version', String(tsMod.HOOK_VERSION), '--hook-event', 'StopWait', '--hook-deadline', String(Date.now() + 800),
       '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'StopWait', '--progress-file', progress,
     ], { cwd: home, encoding: 'utf8', windowsHide: true, timeout: 10000, input: JSON.stringify({ conversationId: session, hook_event_name: 'Stop' }) })
     assert.equal(resTimeout.status, 0, resTimeout.stderr)
@@ -458,4 +468,54 @@ test('StopWait worker preserves complete continue stdout when child exits non-ze
   } finally {
     try { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) } catch {}
   }
+})
+
+test('StopWait reports immediate mailbox error and deferral to stderr while failing open with empty object', async () => {
+  await fixture('antigravity-cli', async f => {
+    f.say('Blue or green?')
+    mkdirSync(f.directory, { recursive: true })
+    writeFileSync(join(f.directory, 'messages.json'), '{not-json')
+    const res = f.call('StopWait', {}, { deadlineMs: 5000 })
+    assert.equal(res.status, 0, res.stderr)
+    assert.deepEqual(JSON.parse(res.stdout.trim()), {})
+    assert.match(res.stderr, /\([A-Z][A-Z0-9_]+\)/, res.stderr)
+  })
+  await fixture('antigravity-cli', async f => {
+    f.say('Blue or green?')
+    mkdirSync(f.directory, { recursive: true })
+    writeFileSync(join(f.directory, 'server.lock'), 'not-a-pid')
+    const res = f.call('StopWait', {}, { deadlineMs: 5000 })
+    assert.equal(res.status, 0, res.stderr)
+    assert.deepEqual(JSON.parse(res.stdout.trim()), {})
+    assert.ok(res.stderr.includes(tsMod.EN.localAgentMailboxDeferred), res.stderr)
+  })
+})
+
+test('StopWait reports poll-loop turn failure and handOver accept failure to stderr while preserving fail-open behavior', async () => {
+  await fixture('antigravity-cli', async f => {
+    f.say('Blue or green?')
+    f.writeWaitingBlock()
+    await f.startStandInServer(100, {
+      onAction: (action, count) => action === 'mailbox-turn' && count >= 2 ? { status: 500, body: { error: 'POLL_FAIL_TEST' } } : null,
+    })
+    const res = await f.spawnAsync('StopWait', {}, { deadlineMs: 2000 })
+    assert.equal(res.status, 0, res.stderr)
+    assert.deepEqual(JSON.parse(res.stdout.trim()), {})
+    assert.ok(res.stderr.includes(tsMod.EN.localAgentMailboxFailed('POLL_FAIL_TEST')), res.stderr)
+    assert.equal(res.stderr.split('POLL_FAIL_TEST').length - 1, 1, res.stderr)
+  })
+  await fixture('antigravity-cli', async f => {
+    f.say('Blue or green?')
+    f.writeWaitingBlock()
+    const srv = await f.startStandInServer(100, {
+      onAction: action => action === 'mailbox-accept' ? { status: 500, body: { error: 'ACCEPT_FAIL_TEST' } } : null,
+    })
+    srv.queueReply('msg-accept-fail', 'Accept fails reply')
+    const res = await f.spawnAsync('StopWait', {}, { deadlineMs: 5000 })
+    assert.equal(res.status, 0, res.stderr)
+    const out = JSON.parse(res.stdout.trim())
+    assert.equal(out.decision, 'continue')
+    assert.match(out.reason, /Accept fails reply/)
+    assert.ok(res.stderr.includes(tsMod.EN.localAgentMailboxFailed('ACCEPT_FAIL_TEST')), res.stderr)
+  })
 })

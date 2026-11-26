@@ -394,22 +394,42 @@ export const deliverAntigravityStopWait = async (
   const messages = defaultMessagesDirectory(progress, home, process.env, process.platform)
   const owner = hash(`antigravity:${session}`)
 
+  let lastIssue: string | null = null
+  const reportMailbox = (mailbox: ReturnType<typeof hookMailbox> | undefined, setupError: string | null = null, dedupe = true): void => {
+    const issue = mailbox?.hasDeferred ? 'DEFERRED' : (mailbox?.error ?? setupError)
+    if (issue === null || (dedupe && issue === lastIssue)) return
+    if (dedupe) lastIssue = issue
+    if (issue === 'DEFERRED') process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
+    else process.stderr.write(`${s.localAgentMailboxFailed(issue)}\n`)
+  }
+
   const handOver = async (message: NonNullable<Awaited<ReturnType<ReturnType<typeof hookMailbox>['turn']>>>, mailbox: ReturnType<typeof hookMailbox>): Promise<boolean> => {
     const payload = `${JSON.stringify({ decision: 'continue', reason: deliveryText(message, s) })}\n`
-    await new Promise<void>((done, fail) => process.stdout.write(payload, error => error ? fail(error) : done()))
+    try {
+      await new Promise<void>((done, fail) => process.stdout.write(payload, error => error ? fail(error) : done()))
+    } catch { return true }
     if (/^[0-9a-f]{6}$/.test(message.nonce)) saveAntigravityAckClaim(root, messages, owner, raw.transcriptPath, message.id, message.nonce, readLocal, atomic, checkDeadline, s)
-    try { await mailbox.accept('antigravity', session, message.id, message.nonce, Date.now()) } catch {}
+    let isAccepted = false
+    let acceptError: string | null = null
+    try { isAccepted = await mailbox.accept('antigravity', session, message.id, message.nonce, Date.now()) } catch (error) {
+      acceptError = error instanceof Error && error.message ? error.message : 'MAILBOX_FAILED'
+    }
+    if (!isAccepted) reportMailbox(mailbox, acceptError ?? 'MAILBOX_FAILED', false)
     return true
   }
 
   let immediateBox: ReturnType<typeof hookMailbox> | undefined
   let immediate = null
+  let immediateError: string | null = null
   try {
     immediateBox = hookMailbox(messages, Math.min(1500, hookDeadline - Date.now()))
     immediate = await immediateBox.turn('antigravity', session, SURFACE_IDS.antigravityTui, Date.now()) ?? null
-  } catch {}
+  } catch (error) {
+    immediateError = error instanceof Error && error.message ? error.message : 'MAILBOX_FAILED'
+  }
+  reportMailbox(immediateBox, immediateError)
   if (immediate !== null && immediateBox !== undefined) return await handOver(immediate, immediateBox)
-  if (immediateBox?.hasNoFolder) return false
+  if (immediateBox === undefined || immediateBox.hasNoFolder) return false
 
   if (!hasWaitingQuestion(progress, session, readLocal, hash)) return false
   const initialAgo = await boardPageAgo(messages, Math.min(250, Math.max(50, hookDeadline - Date.now())))
@@ -427,11 +447,17 @@ export const deliverAntigravityStopWait = async (
       const ago = await boardPageAgo(messages, Math.min(250, left))
       if (ago === null || ago > STOP_WAIT_VISIBLE_MS) break
     }
+    let pollBox: ReturnType<typeof hookMailbox> | undefined
+    let polled = null
+    let pollError: string | null = null
     try {
-      const pollBox = hookMailbox(messages, Math.min(1500, left))
-      const polled = await pollBox.turn('antigravity', session, SURFACE_IDS.antigravityTui, Date.now()) ?? null
-      if (polled !== null) return await handOver(polled, pollBox)
-    } catch {}
+      pollBox = hookMailbox(messages, Math.min(1500, left))
+      polled = await pollBox.turn('antigravity', session, SURFACE_IDS.antigravityTui, Date.now()) ?? null
+    } catch (error) {
+      pollError = error instanceof Error && error.message ? error.message : 'MAILBOX_FAILED'
+    }
+    reportMailbox(pollBox, pollError)
+    if (polled !== null && pollBox !== undefined) return await handOver(polled, pollBox)
   }
   return false
 }
