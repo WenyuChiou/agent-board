@@ -4332,11 +4332,11 @@ const checkDesktopSurface = async ($: EngineInterface, surfaces?: readonly unkno
   const list = surfaces === undefined ? await surfacesOf($) : surfaces
   if (list?.includes('desktop') !== true) return
   hasDesktopSurface = true
-  if (!isInteractiveSession) {
-    isInteractiveSession = true
-    await saveMine($, one => withRunMark(one, false), true)
-  }
   ensureReceiver($)
+  if (!isInteractiveSession) {
+    await saveMine($, one => withRunMark(one, false), true)
+    isInteractiveSession = true
+  }
 }
 
 export const register: Register = (on, options) => {

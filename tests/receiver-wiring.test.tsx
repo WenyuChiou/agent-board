@@ -358,3 +358,38 @@ test('after a /clear a Code tab desktop session re-registers as Claude Desktop C
   expect(sent.filter(one => one.action === 'disconnect').length).toBe(2)
   expect(sent.length - count).toBe(0)
 })
+
+test('failed store write during late desktop promotion starts receiver and retries promotion on next poll', async ($, on) => {
+  let failNextSave = false
+  const store: Record<string, unknown> = { autoConnectOff: true }
+  const world: World = {
+    files: new Map(), mtime: 1, hasTasks: false, surfaces: [], store,
+    failStore: (op, key) => {
+      if (!failNextSave || op !== 'set' || key !== `mirror:${SESSION}`) return false
+      failNextSave = false
+      return true
+    },
+    reply: () => 'TITLE: Retried desktop task\nCONTEXT: -\nDONE: Recovered\nNEXT: -\nASK: Next step?',
+  }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('tool.call', { tool: 'Edit' }, () => ({ result: 'updated' }))
+  const { sent } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: null, isInteractive: false })
+  await $.turn.start({ text: 'First turn', turnId: 't1' })
+  await $.turn.complete({ answer: 'Ok.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  // First promotion attempt writes isRun: false via store.set and fails once; receiver still starts,
+  // and the next poll retries saveMine, clears isRun, and promotes the session.
+  world.surfaces = ['desktop']
+  failNextSave = true
+  await clock.advance(2100)
+  expect((store[`mirror:${SESSION}`] as ProgressMirror | undefined)?.isRun).toBe(true)
+  await clock.advance(3100)
+  expect(sent.find(one => one.action === 'register')?.body.surface).toBe('Claude Desktop Code')
+  expect((store[`mirror:${SESSION}`] as ProgressMirror | undefined)?.isRun).toBeUndefined()
+  await $.turn.start({ text: 'Second turn', turnId: 't2' })
+  await $.tool.call({ tool: 'Edit', file_path: '/w/api-gateway/a', old_string: '1', new_string: '2' })
+  await $.turn.complete({ answer: 'Done. Next step?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(2100)
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Next step?')
+})
