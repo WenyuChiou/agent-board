@@ -190,11 +190,7 @@ export const ZH_CN: Strings = {
     "updateTrustUnread": "{host}：这次更新读不到看板的 hooks 是否已被批准，所以没有更改任何批准。要确认，先运行 {command} 预览；要批准它们，再加上 --apply 重新运行同一命令。",
     "updateLater": "没有任何更改。要更新，请在终端运行这个命令并回答 y：{command}",
     "updatePlugin": "这个看板来自 Claude Code 插件，setup 不会动它。请用 claude plugin update agent-board@agent-board 更新插件，再开一个新的 Claude Code 会话。",
-    "updateNone": "这里还没设置 Agent Board，所以没有可更新的东西。设置它：{command}",
-    "useVersionCheck": "看板每天向 npm 查询一次最新的版本号。",
-    "useVersionCheckOff": "看板设置里的「检查新版本」。",
-    "useCodexSessions": "看板会读取你的 Codex 会话列表（文件夹、开始时间、id、最后写入时间），从不读取对话内容。",
-    "useCodexSessionsOff": "看板设置里的「显示 Codex 会话」。"
+    "updateNone": "这里还没设置 Agent Board，所以没有可更新的东西。设置它：{command}"
   },
   setupNoAgent: {
     "anywhere": "setup 在这台电脑没有找到 agent。它找过 {home} 里的文件夹、PATH 上的命令和已安装的应用程序。请安装一个 agent 再运行一次 setup，或指定一个：{next}（或 cursor、opencode、grok、muse、hermes、openclaw、antigravity、deepseek、all）。",
