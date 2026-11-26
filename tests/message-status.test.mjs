@@ -129,7 +129,7 @@ test('an answer reads Answered once it was handed over and its session reported 
 test('a delivered message whose holder went away reads Unsure, delivered with no reply confirmed', () => {
   const unsure = { state: 'unsure', line: 'Unsure · delivered, reply not confirmed · check its window', tone: 'alert', updatedAt: NOW }
   const lost = [['acceptedLost'], ['acceptedLost', 'otherError'], ['acceptedLost', 'awaitsAck'], ['acceptedLost', 'onWake'], ['handedLost'], ['handedLost', 'onPull'], ['handedLost', 'onWake'],
-    ['wakeExpired'], ['claimed', 'acceptedBefore'], ['queued', 'acceptedBefore'], ['leased', 'acceptedBefore'], ['inDoubt', 'acceptedBefore'], ['disconnected', 'acceptedBefore'], ['expired', 'acceptedBefore']]
+    ['wakeExpired'], ['claimed', 'acceptedBefore'], ['queued', 'acceptedBefore'], ['leased', 'acceptedBefore'], ['inDoubt', 'acceptedBefore'], ['disconnected', 'acceptedBefore'], ['expired', 'acceptedBefore'], ['rejected', 'acceptedBefore']]
   for (const [name, shape] of lost) {
     assert.deepEqual(statusOf(shown(name, shape), NOW + 10 * MINUTE), unsure, `${name}.${shape}`)
     assert.notEqual(statusOf(shown(name, shape), NOW).state, 'queued', `${name}.${shape}`)
@@ -190,6 +190,7 @@ const OTHERWISE = {
   'claimed.acceptedBefore': 'unsure', 'pulled.acceptedBefore': 'unsure', 'leased.acceptedBefore': 'unsure', 'leaseSpent.acceptedBefore': 'unsure',
   'wakeClaimed.acceptedBefore': 'unsure', 'wakeStarted.acceptedBefore': 'unsure',
   'queuedForHook.otherSurface': 'notDelivered', 'queuedForWake.otherSurface': 'notDelivered',
+  'rejected.acceptedBefore': 'unsure',
 }
 // A shape may join several (`acceptedBefore+otherSurface`): one taken before reads Unsure whatever else it has.
 const expectedOf = (name, shape) => {
@@ -309,12 +310,56 @@ test('--json gives a row and a need the message status in the module\'s words', 
   assert.equal(v.waiting.length, 1)
   const questionId = 'Q-synthetic-1'
   v.waiting[0].questionId = questionId
-  const documentFor = (name, shape) => boardJson.boardDocument(v, [], [], en, '/synthetic-home', false, NOW + MINUTE, group(NOW + MINUTE), undefined, messagingOf(name, shape, { answers: questionId, from: 'board' }))
+  const documentFor = (name, shape) => boardJson.boardDocument(v, [], [], en, '/synthetic-home', false, NOW + MINUTE, group(NOW + MINUTE), undefined, messagingOf(name, shape, { answers: questionId, from: 'board', to: `codex:${SESSION}` }))
   const refused = documentFor('rejected')
   assert.deepEqual(refused.needs.map(one => one.message), [{ state: 'notDelivered', line: 'Not delivered · refused', updatedAt: new Date(NOW).toISOString() }])
   const queued = documentFor('queuedForHook')
   assert.deepEqual(queued.queued.map(one => one.message), [{ state: 'queued', line: `Queued · at its next turn · ${en.minutesAgo(1)}`, updatedAt: new Date(NOW).toISOString() }])
   assert.equal('message' in boardJson.boardDocument(v, [], [], en, '/synthetic-home', false, NOW + MINUTE, group(NOW + MINUTE)).needs[0], false)
+})
+
+// A question a session asked: the session waits on the person, so it has a card and no row.
+const ASKING = `## synthetic-api
+<!-- auto session=c1000001 agent=codex resume=${SESSION} state=waiting updated=${new Date(BLOCK_AT).toISOString()} -->
+### Choose the limit
+- [?] Limit — 100 or 300 a minute?
+<!-- /auto session=c1000001 -->
+`
+const QUESTION = 'Q-synthetic-2'
+const askSurfaces = (messaging, now = NOW + MINUTE) => {
+  const v = viewAt(now, ASKING)
+  v.waiting[0].questionId = QUESTION
+  const o = { width: 120, isColor: false, messaging }
+  return {
+    print: board.boardText(v, [], en, o),
+    watch: board.boardLayout(v, [], board.emptyBoardState, en, o).screen,
+    json: boardJson.boardDocument(v, [], [], en, '/synthetic-home', false, now, group(now), undefined, messaging),
+  }
+}
+
+test("a question waiting on the person shows its answer's status on the terminal board, --print and --json", () => {
+  const toSession = { from: 'board', to: `codex:${SESSION}` }
+  const cases = [
+    // The answer to it, refused.
+    ['rejected', { ...toSession, answers: QUESTION }, 'notDelivered', 'Not delivered · refused'],
+    // A message to its session that answers no question, as the page's card shows it.
+    ['accepted', toSession, 'delivered', `Delivered · ${en.minutesAgo(1)}`],
+    // The answer, accepted before the session last reported.
+    ['accepted', { ...toSession, answers: QUESTION, updated: BLOCK_AT - MINUTE }, 'answered', 'Answered · on the board'],
+  ]
+  for (const [name, fields, state, line] of cases) {
+    const read = askSurfaces(messagingOf(name, undefined, fields))
+    const where = `${name} ${JSON.stringify(fields)}`
+    for (const surface of ['print', 'watch']) assert.ok(linesUnder(read[surface], 'Choose the limit').includes(line), `${surface}, ${where}: no "${line}"
+${read[surface]}`)
+    const card = [...read.json.needs, ...read.json.queued][0]
+    assert.equal(card?.message?.state, state, where)
+    assert.equal(card?.message?.line, line, where)
+  }
+  // An answer to another question of the session is not this card's status.
+  const other = askSurfaces(messagingOf('rejected', undefined, { ...toSession, answers: 'Q-synthetic-other' }))
+  assert.ok(!/Not delivered/.test(other.print), other.print)
+  assert.equal('message' in [...other.json.needs, ...other.json.queued][0], false)
 })
 
 test('the terminal board, --print and --json say the same words for every delivery state', () => {
