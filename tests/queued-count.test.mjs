@@ -423,20 +423,31 @@ Server.prototype.listen = function (...args) { if (args[1] === '192.168.42.2') a
   }
 })
 
-test('a queued answer on a folded waiting-on-others item leaves unanswered Needs you counts at 1', () => {
+test('a queued answer on a folded waiting-on-others item agrees across boardCounts, boardStatus, boardText, boardDocument, and serveModel', () => {
   const waitSource = `${block(first, 'Waiting for reviewer reply', 'abcdef01')}\n${block(second, 'Keep the draft?', 'abcdef02')}`
   const waitView = buildView(parseProgress(waitSource), [], null, now, 0, {}, EN)
   const messaging = shown(stored())
 
-  assert.deepEqual(boardCounts(waitView, [], EN, now, messaging), { needs: 1, queued: 1, working: 0 })
-  assert.equal(boardStatus(waitSource, now, EN, undefined, '', '', [], messaging), `${EN.boardStatusLine(1, 0)} · ${EN.boardQueuedCount(1)}`)
+  assert.deepEqual(boardCounts(waitView, [], EN, now, messaging), { needs: 1, queued: 0, working: 0 })
+  assert.equal(boardStatus(waitSource, now, EN, undefined, '', '', [], messaging), EN.boardStatusLine(1, 0))
 
   const terminal = boardText(waitView, [], EN, { width: 100, isColor: false, messaging }).split('\n')[0]
-  assert.match(terminal, new RegExp(`● 1 ${EN.countWaiting}`))
-  assert.ok(terminal.includes(`◌ ${EN.boardQueuedCount(1)}`), terminal)
+  assert.match(terminal, /● 1 waiting/)
+  assert.ok(!terminal.includes('queued'), terminal)
+
+  const doc = boardDocument(waitView, [], [], EN, '/synthetic-home', false, now, group, undefined, messaging)
+  assert.equal(doc.counts.needs, 1)
+  assert.equal(doc.counts.queued, 0)
+  assert.equal(doc.queued.length, 0)
+  assert.equal(doc.needs.length, 1)
+  assert.equal(doc.needs[0].text, 'Keep the draft?')
+  assert.equal(doc.counts.waiting, 1)
 
   const model = serveModel(waitView, [], EN, new Set(), false, messaging, false, group, recorded)
   assert.equal(model.view.needs.n, 1)
   assert.equal(model.view.needs.waitingOthers.length, 1)
-  assert.ok(model.view.needs.handled.includes(model.view.needs.waitingOthers[0].key))
+  assert.deepEqual(model.view.needs.handled, [])
+  const waitAsk = model.asks.find(ask => ask.key === model.view.needs.waitingOthers[0].key)
+  assert.equal(waitAsk?.isSending, true)
+  assert.notEqual(waitAsk?.receipt, undefined)
 })

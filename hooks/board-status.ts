@@ -35,14 +35,13 @@ export const boardCounts = (
   messaging?: QueuedMessaging,
 ): BoardCounts => {
   const model = pageView(view, pending, s, now, messaging)
-  const page = model.view!
-  const handled = new Set(page.needs.handled)
-  const handledNeeds = page.needs.cards.filter(card => handled.has(card.key)).length
+
+  const queued = model.view!.needs.handled.length
 
   return {
-    needs: Math.max(0, page.n - handledNeeds),
-    queued: page.needs.handled.length,
-    working: page.working.length,
+    needs: Math.max(0, model.view!.n - queued),
+    queued,
+    working: model.view!.working.length,
   }
 }
 

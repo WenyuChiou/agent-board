@@ -5634,7 +5634,7 @@ export const LINES = [
 "    stuck: grouped.needs.stuck,",
 "    versions: group.versions,",
 "    agents: grouped.agents.map((one) => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),",
-"    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), waitingOthers: grouped.needs.waitingOthers.map(ref), handled: handledKeys(model, [...grouped.needs.cards.map(ref), ...grouped.needs.waitingOthers.map(ref)], held, failed) },",
+"    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), waitingOthers: grouped.needs.waitingOthers.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref), held, failed) },",
 "    working: grouped.working.map(ref),",
 "    unsure: grouped.unsure.map(ref),",
 "    quiet: grouped.quiet,",
