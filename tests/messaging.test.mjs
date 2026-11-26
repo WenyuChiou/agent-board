@@ -6154,17 +6154,18 @@ test('terminal gone, thread still listed: not started at the next tick, and star
 }))
 
 test('a thread the daemon closes while the process list is read before the join is not joined, which would load it again (#1652)', () => codexFixture(async (board, dir) => {
-  const person = join(dir, 'person'), closeFlag = join(dir, 'close')
+  const person = join(dir, 'person')
   writeFileSync(person, '')
-  const daemon = codexDaemon(dir, { person, closeFlag, unloadSecs: 'none' })
-  let joins = 0, readAt = null
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  let joins = 0, readAt = null, methodsAtRead = 0
   const clients = async why => {
     if (why === 'join' && ++joins === 1) {
-      // The daemon unloads the thread (its thread/closed) while the read before the join is under way: a read may take seconds.
-      writeFileSync(closeFlag, '')
-      await waitFor(async () => !existsSync(closeFlag))
-      await pause(300)
+      // While the read before the join is under way (a read may take seconds), the person's client leaves the thread, for another
+      // thread in the same window, and the daemon unloads it (thread/closed). The window itself is still there.
+      unlinkSync(person)
+      await pause(1500)
       readAt = Date.now()
+      methodsAtRead = codexMethods(daemon).length
     }
     return [codexClientRow()]
   }
@@ -6174,9 +6175,9 @@ test('a thread the daemon closes while the process list is read before the join 
     await stepped.settle()
     assert.equal(await codexSend(board, connection), 200)
     await waitFor(async () => readAt !== null)
-    // The window is still there, but the thread is not: nothing is joined or started on it right after the read.
+    // Nothing is joined or started on the unloaded thread.
     await pause(1000)
-    assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon)], [false, 0])
+    assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon)], [false, 0], JSON.stringify(codexMethods(daemon).slice(methodsAtRead - 3)))
   } finally { await stepped.receiver.close() }
 }))
 
