@@ -2194,7 +2194,9 @@ const PAGE_SCRIPT = String.raw`
     input.setAttribute('aria-label', placeholder);
     // A draft belongs to its session and its question: a redraw that puts another session's
     // line under the same key starts an empty box, so the text is never sent to that session.
-    input.setAttribute('data-key', [key, session || '', asked || '', delivery ? delivery.id + ':' + delivery.turn : ''].join('\u0001'));
+    // The connection id and turn are not part of it: a receiver that goes away and registers again
+    // changes them, and the person's text stays; a send reads the connection that is drawn at that moment (#782).
+    input.setAttribute('data-key', [key, session || '', asked || ''].join('\u0001'));
     var draftKey = input.getAttribute('data-key');
     // The card's route, from its receiver's record, says what the button is called and whether Copy sits beside it:
     // a route that waits for a turn or for the chat to open keeps Copy, one that goes in now, at a step's end,
