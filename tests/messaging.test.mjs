@@ -8977,10 +8977,12 @@ test('a question asked while its session is working reads the working route, not
       : { connections: [{ id: 'table-receiver', agent: record.agent, session, surface, turn: record.kind === 'turn' ? 'turn1' : 'session', scope: record.kind === 'turn' ? 'turn' : 'session', expires: now + 60_000 }], messages: [] }
     const ask = realServeModel(view, [], EN, new Set(), false, live, false, group, RECEIVER_ROUTES).asks[0]
     const label = `${record.agent}/${record.kind}`
-    assert.equal(ask.line, route.line, label)
-    assert.equal(ask.canSend, route.line !== 'none' && route.record !== null, label)
+    // The line and note on the card's own surface, read as the send gate reads them (a surface may have its own line).
+    const line = routeLine(route, surface)
+    assert.equal(ask.line, line, label)
+    assert.equal(ask.canSend, line !== 'none' && routeRecord(route, surface) !== null, label)
     assert.equal(ask.send === 'connected' || ask.send === 'mailbox', ask.canSend, label)
-    if (route.line === 'now' && record.agent !== 'claude') assert.ok(!ask.lineText.includes('waiting'), label + ' ' + ask.lineText)
+    if (line === 'now' && record.agent !== 'claude') assert.ok(!ask.lineText.includes('waiting'), label + ' ' + ask.lineText)
     checked += 1
   }
   // Nine records since Gemini CLI's was retired (#1327).
@@ -9005,10 +9007,11 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.deepEqual(RECEIVER_ROUTES.find(one => one.agent === 'deepseek').routes.idle.surfaces, ['Web'])
   assert.equal(routeOf(RECEIVER_ROUTES, 'deepseek', 'mailbox', 'idle', 'Web').canSend, true)
   assert.equal(routeOf(RECEIVER_ROUTES, 'deepseek', 'mailbox', 'idle', 'TUI').canSend, false)
-  // The Codex note ran the interactive CLI with the session idle: only that route and surface gain Send (#826).
+  // The Codex notes ran the interactive CLI, one idle (#826) and one working (#319): those routes gain Send on that surface only.
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'CLI').canSend, true)
-  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'CLI').canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'CLI').canSend, true)
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'TUI').canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'TUI').canSend, false)
   // The agy TUI note ran the interactive TUI with the session idle; the desktop app note ran the app idle and
   // working, and the app reads as IDE. The headless `agy` note is no record for any surface.
   assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, true)
@@ -9065,6 +9068,26 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[8], /2026-11-13-antigravity-app-mailbox-live\.md/)
   assert.match(cells(rowOf('Antigravity', 'IDE'))[4], /Implemented/)
   assert.match(cells(rowOf('Antigravity', 'IDE'))[7], /2026-11-13-antigravity-app-mailbox-live\.md/)
+})
+
+test('a working Codex CLI card sends at step end once its record names the live note', async () => {
+  // The live run sent from the page while an interactive Codex CLI turn ran, and its Stop hook handed the message over
+  // at the step end (#319). Only the terminal ran: the desktop app, the background service and a mailbox that names
+  // no surface keep Copy while working.
+  const note = 'docs/validation/2026-11-26-codex-cli-stop-live.md'
+  const mailbox = RECEIVER_ROUTES.find(one => one.agent === 'codex' && one.kind === 'mailbox').routes
+  assert.deepEqual(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', SURFACE_IDS.cli), { line: 'stepEnd', canSend: true })
+  assert.equal(routeRecord(mailbox.working, SURFACE_IDS.cli), note)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', SURFACE_IDS.codexApp).canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', SURFACE_IDS.codexDaemon).canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working').canSend, false)
+  // The idle route keeps its own note, and the generated matrix names the new note in the Working cell.
+  assert.deepEqual(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', SURFACE_IDS.cli), { line: 'nextTurn', canSend: true })
+  assert.equal(routeRecord(mailbox.idle, SURFACE_IDS.cli), 'docs/validation/2026-11-12-codex-cli-mailbox-live.md')
+  const { readReceiverRecords, renderMatrix } = await import('../scripts/messaging-matrix.mjs')
+  const root = join(import.meta.dirname, '..')
+  const row = renderMatrix(await readReceiverRecords(root), 'docs/MESSAGING.md', root).split('\n').find(one => one.startsWith('| Codex | CLI |'))
+  assert.match(row.split(' | ')[8], /^stepEnd · \[docs\/validation\/2026-11-26-codex-cli-stop-live\.md\]/)
 })
 
 test('the line and Send of a route come from its record: no record gives none and Copy', () => {
@@ -9589,10 +9612,11 @@ test('shape 27: a Codex live connection takes the mailbox\'s place only on its r
   const daemon = (await w.call('/api/messages/register', { agent: 'codex', session: w.session, surface: SURFACE_IDS.codexDaemon, turn: 'session', scope: 'session', unclaimed: true })).body
   const live = await w.card()
   assert.deepEqual([live.delivery?.id, live.line, live.canSend], [daemon.id, 'afterWait', true])
-  // While the session works, the receiver's route has no note: the card is the one the mailbox gives without the receiver.
+  // While the session works, the receiver's route has no note: the card is the one the mailbox gives without the
+  // receiver, which on the CLI sends at the step end (#319).
   shapeFile = stateFile('codex', 'working', w.session)
   const busy = await w.card()
-  assert.equal(busy.canSend, false)
+  assert.deepEqual([busy.delivery?.id, busy.line, busy.canSend], [w.target.id, 'stepEnd', true])
   assert.equal((await w.call('/api/messages/disconnect', { connection: daemon.id, secret: daemon.secret, turn: 'session' })).status, 200)
   assert.deepEqual(busy, await w.card())
 })
