@@ -291,7 +291,7 @@ export type View = {
   groups: RowGroup[]
   recent: DoneItem[]
   recentAsking?: TaskRow[]
-  finished?: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null }>
+  finished?: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null; sessionId?: string }>
   unreadable?: string[]
   health?: string[]
 }
@@ -949,7 +949,7 @@ export const buildView = (
   const due: Array<TaskRow & { days: number }> = []
   const active: Array<TaskRow & { rank: number; order: number }> = []
   const recent: Array<DoneItem & { at: number }> = []
-  const finished: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null }> = []
+  const finished: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null; sessionId?: string }> = []
   const idle: TaskRow[] = []
   const stopped: Array<{ row: TaskRow; updated: number }> = []
   const completed: Array<{ row: TaskRow; updated: number; recent: DoneItem & { at: number } | null }> = []
@@ -1210,6 +1210,7 @@ export const buildView = (
             at: seen,
             agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
             ...(isManual ? { isOwn: true as const } : {}),
+            ...(task.auto === null ? {} : { sessionId: task.auto.resume ?? task.auto.session }),
             dir: task.auto?.dir ?? null,
             questions: isInactive ? unresolved : [],
           })
