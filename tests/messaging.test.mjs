@@ -6182,7 +6182,7 @@ test('a process list that cannot be read keeps the 10-minute wait', () => codexF
     await pause(6 * codexPollMs)
     assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
     let at = null
-    await stepped.advance(700_000, { step: 10_000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    await stepped.advance(900_000, { step: 10_000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
     assert.equal(codexStarts(daemon), 1)
     assert.ok(at >= 605_000, `started at ${Math.round(at / 1000)} s by the receiver's clock`)
     // The failure is told once for the daemon connection, not on each tick.
@@ -6283,7 +6283,7 @@ test('a process list that could not be read keeps only its own message on the 10
     await stepped.settle()
     // The first claim cannot read the list: that message goes back and waits as it did before the list was read.
     let at = null
-    await stepped.advance(700_000, { step: 5000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    await stepped.advance(900_000, { step: 5000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
     assert.equal(codexStarts(daemon), 1)
     assert.ok(at >= 600_000, `the first message started at ${Math.round(at / 1000)} s by the receiver's clock`)
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
@@ -6390,6 +6390,32 @@ test('a start held up by a busy board checks for a Codex window again before it 
   } finally { await stepped.receiver.close(); await proxy.close() }
 }))
 
+test('a turn the person starts while the process list is read before turn/start gets no board message in it: the thread is read again after the list (#1652, #1370)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), beginFlag = join(dir, 'begin-turn'), endFlag = join(dir, 'end-turn')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, beginFlag, endFlag, unloadSecs: 'none' })
+  let isBegun = false
+  // The board answers the starting receipt after 600 ms, more than one tick, so the list is read once more before turn/start; the
+  // person's own turn begins while that read is out, and its notices have arrived by the time the read answers.
+  const proxy = await pollingProxy(board, 'pass', undefined, async () => { await pause(600) })
+  const stepped = codexStepped(board, daemon, { boardUrl: proxy.address, clients: async why => {
+    if (why === 'start' && !isBegun) { isBegun = true; writeFileSync(beginFlag, ''); await waitFor(async () => !existsSync(beginFlag)); await pause(300) }
+    return [codexClientRow()]
+  } })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => isBegun && !existsSync(beginFlag))
+    await pause(1500)
+    assert.equal(codexStarts(daemon), 0)
+    // Once the person's turn ends, the message is started once, and never into a running turn.
+    writeFileSync(endFlag, '')
+    await waitFor(async () => codexStarts(daemon) === 1)
+    assert.deepEqual(daemon.calls().filter(call => 'startedInRunningTurn' in call).map(call => call.startedInRunningTurn), [false])
+  } finally { await stepped.receiver.close(); await proxy.close() }
+}))
+
 test('with another Codex window open, a closed window\'s thread can still be started until it unloads', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person')
   writeFileSync(person, '')
@@ -6437,11 +6463,15 @@ test('the Windows and macOS process lists are read into rows with a start time, 
   assert.throws(() => parseWindowsClients('not a process row'), /CLIENTS_UNPARSABLE/)
   assert.deepEqual(terminalClients(parseWindowsClients(text), 'win32').clients, [`4242:${ms}`, `4500:${ms}`])
   // macOS: `ps -axo pid=,lstart=,command=` with the C locale and UTC; only the Codex programs are kept.
-  const ps = ['  501 Thu Nov 26 10:11:12 2026 /usr/local/bin/codex resume abc', '  777 Thu Nov 26 10:11:13 2026 /Users/x/My Tools/codex', '  778 Thu Nov 26 10:11:14 2026 node /usr/lib/node_modules/@openai/codex/bin/codex.js', '  779 Thu Nov 26 10:11:15 2026 /usr/local/bin/codex app-server proxy', ''].join('\n')
+  const ps = ['  501 Thu Nov 26 10:11:12 2026 /usr/local/bin/codex resume abc', '  777 Thu Nov 26 10:11:13 2026 /Users/x/My Tools/codex', '  778 Thu Nov 26 10:11:14 2026 node /usr/lib/node_modules/@openai/codex/bin/codex.js', '  779 Thu Nov 26 10:11:15 2026 /usr/local/bin/codex app-server proxy', '  780 Thu Nov 26 10:11:16 2026 /usr/bin/vim /tmp/codex', ''].join('\n')
   const rows = parsePsClients(ps)
-  assert.deepEqual(rows.map(one => [one.pid, one.name]), [[501, 'codex'], [777, 'codex'], [779, 'codex']])
+  assert.deepEqual(rows.map(one => [one.pid, one.name]), [[501, 'codex'], [777, 'codex'], [779, 'codex'], [780, 'codex']])
+  // Only a command whose first word is the codex program is read as one. A `/codex` further on (a folder with a space in the program's
+  // own path, or another program's argument) cannot be told apart from the other, so that row counts as one that cannot be read.
+  assert.deepEqual(rows.map(one => one.argv === null), [false, true, false, true])
   assert.equal(rows[0].started, Date.parse('Thu Nov 26 10:11:12 2026 UTC'))
-  assert.equal(terminalClients(rows, 'darwin').clients.length, 2)
+  assert.deepEqual(terminalClients(rows, 'darwin').clients, [`501:${rows[0].started}`])
+  assert.deepEqual(terminalClients(rows.filter(one => one.pid !== 501), 'darwin'), { clients: [], isUnsure: true })
   assert.throws(() => parsePsClients('garbled'), /CLIENTS_UNPARSABLE/)
 })
 
