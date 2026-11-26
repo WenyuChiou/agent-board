@@ -1139,6 +1139,7 @@ export const ZH_TW = {
   pgProjects: '專案',
   pgSideFold: '收起側欄',
   pgSideOpen: '展開側欄',
+  pgDetailRail: '細節',
   pgGithub: '在 GitHub 上看 Agent Board',
   pgPasteLater: (text: string, agent: string): string => `已複製「${text}」。等 ${agent} 開啟後，貼到它的對話。`,
   serveRetry: '再傳一次',

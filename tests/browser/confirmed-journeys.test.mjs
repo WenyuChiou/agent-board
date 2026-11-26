@@ -418,7 +418,7 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
       // The question shows on its Stopped row (the step it stopped at) and in the Older line on the Needs you sheet.
       const stoppedRow = await board.openTask(title)
-      await stoppedRow.locator('.r-meta').getByText(words).waitFor()
+      await board.task(title).locator('.r-meta').getByText(words).waitFor()
       // The press must reach the board and be taken: a lost or refused press fails here, not as a row that never leaves (#1468).
       const pressed = page.waitForResponse(answer => new URL(answer.url()).pathname === '/api/act')
       await stoppedRow.getByRole('button', { name: 'Archive', exact: true }).click()
@@ -464,11 +464,15 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
       }))
       assert.equal(await fold.evaluate(node => node.open), true)
       assert.equal(await clip.evaluate(node => node.open), true)
-      // The race below reads both folds from #board when the next board answer arrives: they are there before it is armed.
-      assert.deepEqual(await Promise.all([fold, clip].map(one => one.evaluate(node => document.getElementById('board').contains(node)))), [true, true])
+      // The race below reads both folds from the open detail container when the next board answer arrives: they are there before it is armed.
+      assert.deepEqual(await Promise.all([fold, clip].map(one => one.evaluate(node => (document.getElementById('detail-rail')?.contains(node) ?? false) || document.getElementById('board').contains(node)))), [true, true])
 
       await page.evaluate(() => {
         const origFetch = window.fetch
+        const detailRoot = () => {
+          const rail = document.getElementById('detail-rail')
+          return rail && !rail.hidden ? rail : document.getElementById('board')
+        }
         window.__race = { armed: true, done: false, toggledBeforeDraw: null, closedSync: null, afterDraw: null }
         window.fetch = async function (...args) {
           const res = await origFetch.apply(this, args)
@@ -480,12 +484,13 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
             if (window.__race.armed && JSON.stringify(data).includes('Synthetic redraw race task')) {
               window.__race.armed = false
               const root = document.getElementById('board')
-              const liveFold = [...root.querySelectorAll('details:not(.clip)')].find(node => node.querySelector('summary')?.textContent === '2 more steps')
-              const liveClip = [...root.querySelectorAll('.steps details.clip')].find(node => node.textContent.includes('Review the complete synthetic rollout plan'))
+              const container = detailRoot()
+              const liveFold = [...container.querySelectorAll('details:not(.clip)')].find(node => node.querySelector('summary')?.textContent === '2 more steps')
+              const liveClip = [...container.querySelectorAll('.steps details.clip')].find(node => node.textContent.includes('Review the complete synthetic rollout plan'))
               // A throw here would make the page drop this answer and draw the task from its next poll, 2 s later,
               // with the race never run (#1728): say what the page held instead, so the failure names its cause.
               if (liveFold === undefined || liveClip === undefined) {
-                window.__race = { ...window.__race, error: 'race found no ' + (liveFold === undefined ? 'fold' : 'clip'), summaries: [...root.querySelectorAll('summary')].map(node => node.textContent.slice(0, 40)) }
+                window.__race = { ...window.__race, error: 'race found no ' + (liveFold === undefined ? 'fold' : 'clip'), summaries: [...container.querySelectorAll('summary')].map(node => node.textContent.slice(0, 40)) }
                 return data
               }
               let toggled = false
@@ -498,8 +503,9 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
               const observer = new MutationObserver(() => {
                 if (!root.textContent.includes('Synthetic redraw race task')) return
                 observer.disconnect()
-                const nextFold = [...root.querySelectorAll('details:not(.clip)')].find(node => node.querySelector('summary')?.textContent === '2 more steps')
-                const nextClip = [...root.querySelectorAll('.steps details.clip')].find(node => node.textContent.includes('Review the complete synthetic rollout plan'))
+                const nextContainer = detailRoot()
+                const nextFold = [...nextContainer.querySelectorAll('details:not(.clip)')].find(node => node.querySelector('summary')?.textContent === '2 more steps')
+                const nextClip = [...nextContainer.querySelectorAll('.steps details.clip')].find(node => node.textContent.includes('Review the complete synthetic rollout plan'))
                 window.__race = {
                   armed: false,
                   done: true,
