@@ -152,7 +152,8 @@ const savedLanguage = (): SettingsLang | null => {
   } catch { return null }
 }
 const langFlag = flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang'))
-const wordsNow = () => STRINGS[boardLanguage(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))]
+const currentLang = () => boardLanguage(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))
+const wordsNow = () => STRINGS[currentLang()]
 let s = wordsNow()
 
 // Files changed since the board last read progress.md in full. A read refused because another
@@ -2358,7 +2359,7 @@ const serveChild = (): void => {
       },
       get s() { return s },
       port: requestedPort,
-      ping: { path, built: built(), idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: isCodexSendOn(), noCodexSend: args.includes('--no-codex-send'), messagesDirectory: messagesDirectory() },
+      ping: { path, built: built(), get lang() { return currentLang() }, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: isCodexSendOn(), noCodexSend: args.includes('--no-codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       // An open board request is answered when progress.md or the hooks' inbox changes (#359).
@@ -2527,7 +2528,7 @@ const runningPage = async (isStarting = false, isReplacing = false, replaced?: {
   const requestedStale = staleTimeoutMs()
   // Send to Codex (#318): a plain command keeps a page whether its receiver is on or off, so `/agent-board` never ends a page the
   // person turned it off for; `--codex-send` asks for a page with it on, `--no-codex-send` for one with it off.
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built() && (isStopping || (answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built() && (isStopping || ((!args.includes('--port') || parseServePort(flag('--port')) === running.port) && (answer.lang === undefined || answer.lang === currentLang()) && answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   if (await stays(running, serveFile(), isReplacing && replacementMove(running))) return { page: running, isKept: true }
   if (replaced !== undefined && answer !== null && answer !== 'silent' && answer.noCodexSend === true) replaced.isCodexSendOff = true
   return null
@@ -2650,6 +2651,13 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     }
     throw runtimeFolderFailure()
   }
+  if (args.includes('--port')) {
+    const requestedPort = parseServePort(flag('--port'))
+    if (requestedPort === null) {
+      if (failure !== undefined) failure.invalidPort = flag('--port') ?? ''
+      return null
+    }
+  }
   const old = readRunning(oldServeFile)
   if (old !== null && (await stays(old, oldServeFile, replacementMove(old)))) {
     await refreshServerPackage(old.url)
@@ -2665,13 +2673,6 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   if (found !== null) {
     await refreshServerPackage(found.page.url)
     return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
-  }
-  if (args.includes('--port')) {
-    const requestedPort = parseServePort(flag('--port'))
-    if (requestedPort === null) {
-      if (failure !== undefined) failure.invalidPort = flag('--port') ?? ''
-      return null
-    }
   }
   const rest = ['--lang', '--port', '--idle-minutes', '--stale-ms'].flatMap(name => {
     const value = flag(name)

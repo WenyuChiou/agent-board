@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
+import { createServer as createNetServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -67,7 +68,7 @@ const createBoardFixture = () => {
     HOME: home, USERPROFILE: home, APPDATA: join(home, 'AppData', 'Roaming'), LOCALAPPDATA: join(home, 'AppData', 'Local'),
     XDG_CONFIG_HOME: join(home, '.config'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_CACHE_HOME: join(home, '.cache'),
     TEMP: temp, TMP: temp, TMPDIR: temp,
-    CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: run,
+    LANG: 'en', CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: run,
     AGENT_BOARD_TEST_PID: String(process.pid),
   }
   const served = servedAt(run, boardPath)
@@ -85,6 +86,21 @@ const createBoardFixture = () => {
       done(out)
     })
   })
+  const serveFailing = (scriptFile, extra = []) => new Promise(done => {
+    execFile(process.execPath, [scriptFile, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out, err) => done({ status: error?.code ?? 1, out, err }))
+  })
+  const distinctPorts = async () => {
+    const s1 = createNetServer()
+    const s2 = createNetServer()
+    await new Promise((resolve, reject) => { s1.once('error', reject); s1.listen(0, '127.0.0.1', resolve) })
+    await new Promise((resolve, reject) => { s2.once('error', reject); s2.listen(0, '127.0.0.1', resolve) })
+    const ports = [s1.address().port, s2.address().port]
+    await Promise.all([
+      new Promise(resolve => s1.close(resolve)),
+      new Promise(resolve => s2.close(resolve)),
+    ])
+    return ports
+  }
   const urlOf = out => out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0] ?? null
   const pingOf = async url => (await requestJson(url, 'GET', '/api/ping')).json
   const boardPoll = (url, pageId) => requestJson(url, 'GET', '/api/board', { 'x-board-page': pageId, 'x-board-visible': '1' })
@@ -98,7 +114,7 @@ const createBoardFixture = () => {
     for (let tries = 0; isAlive(pid) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
     try { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) } catch {}
   }
-  return { dir, home, boardPath, served, writeCopy, serve, urlOf, pingOf, boardPoll, end }
+  return { dir, home, boardPath, served, writeCopy, serve, serveFailing, distinctPorts, urlOf, pingOf, boardPoll, end }
 }
 
 test('two copies of the same release with different mtimes, preludes, and line endings reuse the running page (#1831)', { timeout: 60_000 }, async () => {
@@ -187,6 +203,61 @@ test('same-release copies still replace the running page when launch options dif
     const ping3 = await board.pingOf(url3)
     assert.equal(ping3.allowResume, true)
     assert.equal(ping3.codexSend, false)
+  } finally {
+    await board.end(urls)
+  }
+})
+
+test('an explicit --port replaces a running same-release page on another port across copies (#1831)', { timeout: 60_000 }, async () => {
+  const board = createBoardFixture()
+  const urls = []
+  try {
+    const [port1, port2] = await board.distinctPorts()
+    const copyA = board.writeCopy('port-copy-a.mjs', { path: board.boardPath, lang: 'en' }, BOARD_SCRIPT, new Date('2026-11-26T04:00:00Z'))
+    const copyB = board.writeCopy('port-copy-b.mjs', { path: board.boardPath, lang: 'en', codexRoot: board.home }, BOARD_SCRIPT, new Date('2026-11-26T04:05:00Z'))
+
+    const url1 = board.urlOf(await board.serve(copyA, ['--quiet-board', '--port', String(port1)]))
+    assert.ok(url1)
+    assert.equal(Number(new URL(url1).port), port1)
+    urls.push(url1)
+
+    assert.equal(board.urlOf(await board.serve(copyB, ['--quiet-board', '--port', String(port1)])), url1, 'same explicit --port must reuse running page across copies')
+
+    const url2 = board.urlOf(await board.serve(copyB, ['--quiet-board', '--port', String(port2)]))
+    assert.ok(url2)
+    assert.notEqual(url2, url1)
+    assert.equal(Number(new URL(url2).port), port2, 'different explicit --port must replace running same-release page')
+    urls.push(url2)
+
+    const bad = await board.serveFailing(copyA, ['--quiet-board', '--port', 'not-a-port'])
+    assert.equal(bad.status, 1)
+    assert.equal((await board.pingOf(url2)).codexSend, true, 'invalid --port must fail without closing the running page')
+  } finally {
+    await board.end(urls)
+  }
+})
+
+test('a same-release copy with a changed baked language replaces the running page (#1831)', { timeout: 60_000 }, async () => {
+  const board = createBoardFixture()
+  const urls = []
+  try {
+    const copyEn = board.writeCopy('lang-en.mjs', { path: board.boardPath, lang: 'en' }, BOARD_SCRIPT, new Date('2026-11-26T05:00:00Z'))
+    const copyZhCn = board.writeCopy('lang-zh-cn.mjs', { path: board.boardPath, lang: 'zh-CN' }, BOARD_SCRIPT, new Date('2026-11-26T05:05:00Z'))
+    const copyZhCn2 = board.writeCopy('lang-zh-cn-2.mjs', { path: board.boardPath, lang: 'zh-CN', codexRoot: board.home }, BOARD_SCRIPT, new Date('2026-11-26T05:10:00Z'))
+
+    const url1 = board.urlOf(await board.serve(copyEn, ['--quiet-board']))
+    assert.ok(url1)
+    urls.push(url1)
+    assert.equal((await board.pingOf(url1)).lang, 'en')
+
+    const url2 = board.urlOf(await board.serve(copyZhCn, ['--quiet-board']))
+    assert.ok(url2)
+    assert.notEqual(url2, url1, 'changed baked language must replace running page')
+    urls.push(url2)
+    assert.equal((await board.pingOf(url2)).lang, 'zh-CN')
+    assert.equal((await board.boardPoll(url2, 'tab-lang')).json.lang, 'zh-CN')
+
+    assert.equal(board.urlOf(await board.serve(copyZhCn2, ['--quiet-board'])), url2, 'same effective language and different mtime/prelude must reuse running page')
   } finally {
     await board.end(urls)
   }

@@ -7005,7 +7005,9 @@ test('agent-board stop with a Send to Codex switch stops this file\'s page whate
 test('stop says the board page did not stop and exits 1 when the page refuses to close', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const requests = []
-  const built = String(statSync(board.script).mtimeMs)
+  const rawScript = readFileSync(board.script, 'utf8')
+  const cut = rawScript.indexOf('\n')
+  const built = createHash('sha256').update((rawScript.startsWith('globalThis.AGENT_BOARD = ') ? (cut >= 0 ? rawScript.slice(cut + 1) : '') : rawScript).replace(/\r\n/g, '\n')).digest('hex')
   const fake = createServer((req, res) => {
     requests.push([req.method, req.url, req.headers['x-board-token']])
     if (req.url === '/api/ping') {

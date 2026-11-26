@@ -1177,7 +1177,9 @@ test('a later launcher that reuses a server through the retry wait or the claim 
     const recordPath = join(recordDir, recordName)
     const messagesDir = recordPath.replace(/\.json$/, '-messages')
     mkdirSync(messagesDir, { mode: 0o700, recursive: true })
-    const built = String(statSync(boardPath(f)).mtimeMs)
+    const rawScript = readFileSync(boardPath(f), 'utf8')
+    const cut = rawScript.indexOf('\n')
+    const built = createHash('sha256').update((rawScript.startsWith('globalThis.AGENT_BOARD = ') ? (cut >= 0 ? rawScript.slice(cut + 1) : '') : rawScript).replace(/\r\n/g, '\n')).digest('hex')
     // The message store is held by this test process: the launcher's child cannot claim it
     // and fails with MESSAGE_STORE_IN_USE, so onePass takes the retry path. No lock file, so
     // the owner block is skipped and the two retry returns are the only way back.
