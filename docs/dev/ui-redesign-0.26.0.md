@@ -111,7 +111,7 @@ The plan (plan-0.26.0.md, section D) holds them:
 
 ## Redesign 2: the item and the words
 
-> **Status: in force as merged (owner, 2026-11-26, 「全照建議」).** Design proposal — this section changes no code or string table (implementation lands in separate code PRs; issue N15 builds its item controls, and L10 carries 送出, 收回 and 不確定).
+> **Status: in force as merged (owner, 2026-11-26, 「全照建議」).** Issue N15 builds its item controls; L10 carries 送出, 收回 and 不確定.
 
 Redesign 1 settled the page skeleton (208 px sidebar, one `<= 760 px` work column, `320 px` detail rail at `>= 1440 px` within `#1849`'s `<= 340 px` cap, search/filters, and flush sidebar footer). Redesign 2 keeps that layout skeleton from Redesign 1 while **newly introducing** the swallowtail `.flag`, `.pulse-bar`, `.sync-btn`, and `.surf-pill` (`>_ CLI` / `❐ App`) badges (not carried over from Redesign 1), specifying **Agent Board's visual identity, the compact interactive pulse and freshness pill bar (`#1023`), the item and its icon/button micro-controls, all board states, keyboard triage, phone sheet, and the 16-string cut list** across all three languages (`zh-TW`, `en`, `zh-CN`), directly addressing `#209` comments `7148340095` ("in the UI, order and layout first, then the card, then wording") and `7154088026`, plus `#1023`'s first line.
 
@@ -291,14 +291,14 @@ Redesign 3 aligns the 0.26.0 UI cues with the approved delivery rules in `docs/d
 2. **Native TUI-only question (`native=` / `docs/FORMAT.md:94`):**
    - Options render as **plain text** (never dashed pseudo-buttons) paired with one quiet **`在視窗回答`** tag (`native-pill`, `I.win` SVG + `在視窗回答`) so the person immediately sees what the host asks without mistaking mirrored options for clickable buttons.
 
-### 3.2 Unified `送出` + existing `收回` (B4), setup-step cue, and `[>]` past-30-min rule
+### 3.2 Unified `送出` + existing `收回` (B4), setup-step cue, and `[>]` step presentation
 
 - **Single send button (`送出`) everywhere (`plan-0.26.0.md` §2 & B4):**
   - Every composer uses one primary button **`送出`** with no AI name (never `排入 … 的下一回合`, `暫存`, or `↵`). When a message will land is carried by B4's status line (`已排入 · 現在` / `已排入 · 步驟結束` / `已排入 · 下一回合`).
-  - Rows under **`已停止`** (`#sec-stop`) and **`已完成`** (`#sec-done`) open cleanly in `inline`, `320 px` rail, and phone `.sheet` with a follow-up composer (`placeholder="接著交代下一步…"`) + **`送出`** (`data-act="followup"`) to start the next turn (`~3s` -> `進行中`).
+  - Rows under **`已停止`** (`#sec-stop`) and **`已完成`** (`#sec-done`) open cleanly in `inline`, `320 px` rail, and phone `.sheet` with a follow-up composer (`送出` via `data-act="followup"`) to start the next turn (`~3s` -> `進行中`).
   - A message still waiting on the queue offers one existing action: **`收回`** (`data-act="dismiss-wait"`, `docs/MESSAGING.md:743`), cancelling pre-claim wait and restoring the exact raw draft text back into the composer `<textarea>`.
 - **Where one setup step is missing:** beside `需貼上`, if a single setup step unlocks direct sending (e.g. switching on the sidecar or hook approval), the item offers that one setup step pill rather than multi-sentence instructions.
-- **`[>]` background-step row past 30 min (`docs/FORMAT.md:162`):** shows the `[>]` step's note (`I.stepWait` SVG + step text) and age; it stays under `進行中` past 30 minutes **only** while its block carries a live `agentpid` process record (a step mark alone never proves liveness).
+- **`[>]` running-step visual cue:** renders the active step's note (`I.stepWait` SVG + step text) and age quietly on line 2 (`進行中` / detail view) without setting new grouping or expiry rules on the design doc.
 
 ### 3.3 Multi-worktree muted tag, `不確定` state, and 0.27.0 scope boundaries
 

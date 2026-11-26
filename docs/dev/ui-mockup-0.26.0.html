@@ -548,7 +548,7 @@ const SEED = [
   {id:'w2',kind:'wait',ai:'claude',surf:'App',proj:'reservoir-paper',wt:'weekly-review',who:'Alex',title:'每週 review 的 5 項建議',unsure:true,unsureReason:'超過 2 小時沒有新活動，可能已離開視窗。',age:150},
   {id:'r1',kind:'run',ai:'codex',surf:'CLI',proj:'weather-model',wt:'fix/tz-loader',title:'修正測站座標的時區錯誤',steps:[['x','找出 37 個時區錯誤的測站'],['x','補齊測站時區對照表'],['~','重寫 loader 的時區轉換並補測試'],[' ','重跑回測'],[' ','更新季節報告圖表']],age:1},
   {id:'r2',kind:'run',ai:'claude',surf:'CLI',proj:'api-server',wt:'feat/token-store',title:'Migrate the auth service to the new token store',steps:[['x','Map every token read'],['x','Add the new store behind a flag'],['~','Move the session checks'],[' ','Remove the old store']],age:6},
-  {id:'r3',kind:'run',ai:'claude',surf:'App',proj:'demo-site',wt:'#1880',waitStep:'等候 CI 瀏覽器套件',agentPid:48210,title:'等待 CI 端對端測試跑完後合併分支',steps:[['x','更新手機抽屜對比度'],['~','等候 CI 瀏覽器套件完成'],[' ','合併至主分支']],age:4},
+  {id:'r3',kind:'run',ai:'claude',surf:'App',proj:'demo-site',wt:'#1880',waitStep:'等候 CI 瀏覽器套件',title:'等待 CI 端對端測試跑完後合併分支',steps:[['x','更新手機抽屜對比度'],['~','等候 CI 瀏覽器套件完成'],[' ','合併至主分支']],age:4},
   {id:'s1',kind:'stop',ai:'claude',surf:'App',proj:'api-server',wt:'orm-v7',title:'Upgrade the ORM to v7',steps:[['x','Bump the version'],[' ','Fix the migrations']],unsure:true,unsureReason:'最後活動已逾 3 小時，視窗可能已關閉。',age:190},
   {id:'s2',kind:'stop',ai:'codex',surf:'CLI',proj:'demo-site',wt:'fix/drawer',title:'Check mobile drawer contrast',steps:[['x','Audit dark tokens'],[' ','Retake screenshots']],age:320},
   {id:'d1',kind:'done',ai:'codex',surf:'CLI',proj:'weather-model',wt:'#1872',title:'清掉重複的測站資料',steps:[['x','找出 58 筆重複'],['x','刪除並重算統計']],age:1500},
@@ -596,7 +596,7 @@ function sharedProjs(){
 }
 const wtTag = (it, shared = sharedProjs()) => (it.wt && shared.has(it.proj)) ? `<span class="wt-tag" translate="no">${esc(it.wt)}</span>` : '';
 const unsureWordHTML = it => it.unsure ? '<span class="unsure-word">不確定</span>' : '';
-const waitStepHTML = it => it.waitStep ? `<span class="wait-step-tag" tabindex="0" data-tip="agentpid ${esc(it.agentPid || '—')} · ${esc(it.waitStep)}">${I.stepWait}<span>${esc(it.waitStep)}</span></span>` : '';
+const waitStepHTML = it => it.waitStep ? `<span class="wait-step-tag" tabindex="0" data-tip="${esc(it.waitStep)}">${I.stepWait}<span>${esc(it.waitStep)}</span></span>` : '';
 
 const prog = it => { const t = it.steps.length, d = it.steps.filter(s => s[0]==='x').length;
   return `<span class="prog"><span class="bar"><i style="width:${Math.round(d/t*100)}%"></i></span>${d}/${t}</span>`; };
@@ -626,7 +626,7 @@ function detailHTML(it, where){
   if (it.task && it.task !== it.title) h += `<p class="d-task">${esc(it.task)}</p>`;
   if (it.ctx) h += `<p class="d-ctx">${esc(it.ctx)}</p>`;
   if (it.unsure && it.unsureReason) h += `<p class="d-ctx">${esc(it.unsureReason)}</p>`;
-  if (it.waitStep) h += `<p class="d-ctx"><code>agentpid ${esc(it.agentPid || '—')}</code> · ${esc(it.waitStep)}</p>`;
+  if (it.waitStep) h += `<p class="d-ctx">${esc(it.waitStep)}</p>`;
   if (it.pasteTip || it.setupTip) h += `<div class="d-paste">${pasteTagHTML(it)}${setupPillHTML(it)}</div>`;
   if (it.nativeOnly) {
     h += `<ul class="native-list">${it.opts.map(o => `<li>${esc(o)}</li>`).join('')}</ul><div class="d-paste"><span class="native-pill">${I.win}<span>在視窗回答</span></span></div>`;
