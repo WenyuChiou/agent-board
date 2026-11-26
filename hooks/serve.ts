@@ -571,10 +571,15 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       // A question gone from its agent's report is kept until it is answered; one the person answered
       // here, and its session took, needs nothing more from the person.
       if (ask.key.startsWith('retained::') && ask.questionId !== undefined && isAnswerHanded(messaging?.messages ?? [], ask.questionId)) continue
-      const matchingRow = items.find(one => one.type === 'row' && (
-        ask.nativeSession !== undefined && ask.nativeSession !== '' && one.row.nativeSession === ask.nativeSession && one.row.agent === ask.agent
-        || one.row.project === ask.project && one.row.title === ask.task
-      ))
+      const matchingRow = ask.key.startsWith('retained::')
+        ? (ask.nativeSession !== undefined && ask.nativeSession !== ''
+            ? items.find(one => one.type === 'row' && one.row.agent === ask.agent && one.row.nativeSession === ask.nativeSession)
+            : undefined)
+        : items.find(one => one.type === 'row'
+            && one.row.agent === ask.agent
+            && (ask.nativeSession !== undefined && ask.nativeSession !== ''
+              ? one.row.nativeSession === ask.nativeSession
+              : (one.row.nativeSession ?? '') === '' && one.row.project === ask.project && one.row.title === ask.task))
       const rawSteps = ask.steps ?? (matchingRow?.type === 'row' ? matchingRow.row.steps : undefined)
       const extraSteps = rawSteps?.filter(step => !(step.status === 'waiting' && step.text === ask.text)) ?? []
       const askSteps = extraSteps.length > 0

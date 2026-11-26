@@ -5356,7 +5356,7 @@ export const LINES = [
 "      const { ask } = item;",
 "      if (ask.key.startsWith(\"retained::\") && ask.questionId !== undefined && isAnswerHanded(messaging?.messages ?? [], ask.questionId))",
 "        continue;",
-"      const matchingRow = items.find((one) => one.type === \"row\" && (ask.nativeSession !== undefined && ask.nativeSession !== \"\" && one.row.nativeSession === ask.nativeSession && one.row.agent === ask.agent || one.row.project === ask.project && one.row.title === ask.task));",
+"      const matchingRow = ask.key.startsWith(\"retained::\") ? ask.nativeSession !== undefined && ask.nativeSession !== \"\" ? items.find((one) => one.type === \"row\" && one.row.agent === ask.agent && one.row.nativeSession === ask.nativeSession) : undefined : items.find((one) => one.type === \"row\" && one.row.agent === ask.agent && (ask.nativeSession !== undefined && ask.nativeSession !== \"\" ? one.row.nativeSession === ask.nativeSession : (one.row.nativeSession ?? \"\") === \"\" && one.row.project === ask.project && one.row.title === ask.task));",
 "      const rawSteps = ask.steps ?? (matchingRow?.type === \"row\" ? matchingRow.row.steps : undefined);",
 "      const extraSteps = rawSteps?.filter((step) => !(step.status === \"waiting\" && step.text === ask.text)) ?? [];",
 "      const askSteps = extraSteps.length > 0 ? extraSteps.map((step) => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent, ...lined(step.note ? `${step.text} — ${step.note}` : step.text), ...step.line === null ? {} : { fileLine: step.line } })) : undefined;",

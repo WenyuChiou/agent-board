@@ -12042,6 +12042,60 @@ test('overflow choices and Write your own hide in write and copied modes while d
   assert.ok(visibleButton(EN.answeredHide))
 })
 
+test('retained question does not borrow steps from another agent or session with the same project and task', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const progress = [
+    '## shared-repo',
+    '<!-- auto session=s-live-codex agent=codex state=working updated=' + new Date(now).toISOString() + ' -->',
+    '### Deploy API',
+    '- [~] Codex wrong plan step',
+    '<!-- /auto session=s-live-codex -->',
+    '',
+    '## shared-repo',
+    '<!-- auto session=s-other agent=claude state=working updated=' + new Date(now).toISOString() + ' -->',
+    '### Deploy API',
+    '- [~] Other session wrong plan step',
+    '<!-- /auto session=s-other -->',
+  ].join('\n')
+  const view = runtime.buildView(runtime.parseProgress(progress), [], null, now, 0, {}, EN)
+  const makeRetained = (id, agent, nativeSession) => ({
+    key: `retained::${id}`,
+    questionId: id,
+    dir: null,
+    ageStage: 'fresh',
+    project: 'shared-repo',
+    task: 'Deploy API',
+    context: '',
+    text: `Retained ${id}?`,
+    note: '',
+    when: '2 min ago',
+    at: now - 120_000,
+    kind: 'confirm',
+    answers: ['Yes', 'No'],
+    command: '',
+    link: '',
+    where: 'other',
+    agent,
+    ...(nativeSession === undefined ? {} : { nativeSession }),
+    session: '',
+    sessionId: null,
+    resumeVia: null,
+    reopen: null,
+    hideKey: id,
+    canHide: true,
+    step: null,
+    target: null,
+  })
+  view.waiting.push(makeRetained('q1', '', 's-old'), makeRetained('q2', 'codex', undefined))
+  const model = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, { now, repoOf: () => null, versions: { board: '0.26.0', package: null } })
+  const ask1 = model.asks.find(one => one.questionId === 'q1')
+  const ask2 = model.asks.find(one => one.questionId === 'q2')
+  assert.ok(ask1 && ask2)
+  assert.equal(ask1.steps, undefined)
+  assert.equal(ask2.steps, undefined)
+})
+
 test('More opens and closes by keyboard and keeps its state across a refresh', async () => {
   const model = cardsModel()
   model.asks.push({ ...model.asks[0], key: 'ask2', text: 'Ship it, OK?' })
