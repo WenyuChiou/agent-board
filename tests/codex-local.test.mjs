@@ -1099,13 +1099,23 @@ test('a replayed hook event never claims a mailbox message', async () => mailbox
 // #319: Codex's Stop hook hands one queued message over at a step end, as `decision: block` with the delivery text in `reason`,
 // only when no hook has continued the turn yet (`stop_hook_active` false), and reads the ACK line of the reply at the next Stop.
 // The session's turn has started, then one board message is queued for its mailbox.
+// Codex in a terminal: the first record of its history names the codex-tui originator, as a real session's does. Only
+// such a Stop hands a message over.
+const terminalTranscript = f => {
+  const history = join(f.home, 'codex-history')
+  mkdirSync(history, { recursive: true })
+  const transcript = join(history, `rollout-2026-11-26T00-00-00-${session}.jsonl`)
+  writeFileSync(transcript, JSON.stringify({ type: 'session_meta', payload: { id: session, originator: 'codex-tui' } }) + '\n')
+  return transcript
+}
 const stopFixture = fn => mailboxFixture(async f => {
-  const started = f.call('codex', 'UserPromptSubmit')
+  const transcript = terminalTranscript(f)
+  const started = f.call('codex', 'UserPromptSubmit', { transcript_path: transcript })
   assert.equal(started.status, 0, started.stderr)
   f.seed()
-  await fn(f)
+  await fn({ ...f, transcript })
 })
-const stepEnd = (f, extra = {}, flags = [], env = {}) => f.call('codex', 'Stop', { stop_hook_active: false, ...extra }, flags, env)
+const stepEnd = (f, extra = {}, flags = [], env = {}) => f.call('codex', 'Stop', { stop_hook_active: false, ...(f.transcript === undefined ? {} : { transcript_path: f.transcript }), ...extra }, flags, env)
 const handedOver = result => { try { const out = JSON.parse(result.stdout); return out?.decision === 'block' && typeof out.reason === 'string' ? out.reason : null } catch { return null } }
 // A hook may find the store busy and defer, once (#902); the next step end then hands the message over.
 const stepEndOrDeferred = (f, extra, flags, env) => hookOrDeferred(() => stepEnd(f, extra, flags, env), result => handedOver(result) !== null)
@@ -1123,7 +1133,7 @@ const stopReply = (f, reply) => f.call('codex', 'Stop', { stop_hook_active: true
 
 test('a Codex Stop payload without stop_hook_active === false prints nothing and leaves the message queued', async () => stopFixture(async f => {
   for (const extra of [{}, { stop_hook_active: 'false' }, { stop_hook_active: 0 }, { stop_hook_active: null }]) {
-    const result = f.call('codex', 'Stop', extra)
+    const result = f.call('codex', 'Stop', { transcript_path: f.transcript, ...extra })
     assert.equal(result.status, 0, result.stderr)
     assert.equal(result.stdout, '', JSON.stringify(extra))
     assert.equal(stopMessage(f).status, 'queued', JSON.stringify(extra))
@@ -1222,7 +1232,7 @@ test('a Stop hook killed after persisting its claim leaves the message uncertain
     let stderr = ''
     child.stderr.on('data', chunk => { stderr += chunk })
     child.once('close', status => done({ status, stderr }))
-    child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'Stop', turn_id: 'mailbox-turn', stop_hook_active: false }))
+    child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'Stop', turn_id: 'mailbox-turn', stop_hook_active: false, transcript_path: f.transcript }))
   })
   await closedStop()
   if (stopMessage(f).status === 'queued') await closedStop()
@@ -1276,6 +1286,31 @@ test('an ACK that is not the reply\'s first line is not read', async () => stopF
   assert.equal(stopMessage(f).status, 'accepted')
 }))
 
+test('an ACK the board could not take is read again at the next Stop', async () => stopFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+  const { nonce } = stopMessage(f)
+  // The store is busy when the reply with the ACK line ends its step.
+  const claim = claimMessageStore(f.directory)
+  const pendingNonce = 'd'.repeat(32)
+  const pending = join(f.directory, `.message-pending-${process.pid}-${pendingNonce}.json`)
+  f.save(pending, JSON.stringify({ version: 1, pid: process.pid, nonce: pendingNonce }) + '\n')
+  try {
+    const busy = stopReply(f, `ACK ${nonce}`)
+    assert.equal(busy.status, 0, busy.stderr)
+    assert.equal(stopMessage(f).status, 'accepted')
+    assert.equal(stopClaimFiles(f).length, 1)
+  } finally {
+    claim.release()
+    unlinkSync(pending)
+  }
+  // The next Stop records the ACK it kept, though its own reply carries none.
+  const next = stopReply(f, 'Synthetic answer with no acknowledgement line.')
+  assert.equal(next.status, 0, next.stderr)
+  assert.deepEqual([stopMessage(f).status, stopMessage(f).reply], ['acknowledged', `ACK ${nonce}`])
+  assert.deepEqual(stopClaimFiles(f), [])
+}))
+
 test('a message that answers no question is handed over at a later turn\'s step end', async () => mailboxFixture(async f => {
   const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
   // The first turn starts with the mailbox open, and the message is queued while it runs.
@@ -1295,7 +1330,7 @@ test('a message that answers no question is handed over at a later turn\'s step 
     claim.release()
     unlinkSync(pending)
   }
-  const result = await stepEndOrDeferred(f, { turn_id: 'later-turn' })
+  const result = await stepEndOrDeferred({ ...f, transcript: terminalTranscript(f) }, { turn_id: 'later-turn' })
   assert.ok(handedOver(result)?.includes('Synthetic hook-mailbox-message'), result.stdout + result.stderr)
   assert.equal(stopMessage(f).status, 'accepted')
 }))
@@ -1340,6 +1375,21 @@ test('a Codex Stop outside the terminal takes no message stored for the CLI', as
   assert.ok(handedOver(await stepEndOrDeferred(f, { transcript_path: transcript }))?.includes('Synthetic mailbox payload'))
 }))
 
+test('a Codex Stop outside the terminal takes no message that names no surface either', async () => stopFixture(async f => {
+  // A peer's message names no surface, as the board's own does here.
+  await queueStop(f, 'hook-mailbox-peer', 'claude:synthetic-peer')
+  assert.deepEqual([stopMessage(f).surface, stopMessage(f, 'hook-mailbox-peer').surface], [undefined, undefined])
+  // The desktop app's mark, the Windows background service's, and a Stop with no transcript to tell.
+  for (const [where, payload, env] of [['app', f, { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'Codex Desktop' }], ['service', f, { CODEX_DAEMON_SHUTDOWN_SOCKET: '1' }], ['no transcript', { ...f, transcript: undefined }, {}]]) {
+    const result = stepEnd(payload, {}, [], env)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(handedOver(result), null, `${where}: ${result.stdout}`)
+    assert.deepEqual([stopMessage(f).status, stopMessage(f, 'hook-mailbox-peer').status], ['queued', 'queued'], where)
+  }
+  // The terminal's Stop hands one over.
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+}))
+
 test('a Codex Stop against an older board claims nothing', async () => stopFixture(async f => {
   const { createServer } = await import('node:http')
   const calls = []
@@ -1366,7 +1416,7 @@ test('a Codex Stop against an older board claims nothing', async () => stopFixtu
       child.stdout.on('data', chunk => { stdout += chunk })
       child.stderr.on('data', chunk => { stderr += chunk })
       child.once('close', status => done({ status, stdout, stderr }))
-      child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'Stop', turn_id: 'mailbox-turn', stop_hook_active: false }))
+      child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'Stop', turn_id: 'mailbox-turn', stop_hook_active: false, transcript_path: f.transcript }))
     })
     assert.equal(result.status, 0, result.stderr)
     assert.equal(handedOver(result), null, result.stdout)

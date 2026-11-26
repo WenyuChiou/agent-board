@@ -178,7 +178,7 @@ test('a DeepSeek hook claim nobody accepted is still handed out again after the 
 })
 
 // #319: a board answer is bound to the turn the session's hook last named. Codex's Stop hook hands a message over at a step
-// end; one ending a later turn than the answer's refuses it (owner answer 3 (a)), and a turn start does not.
+// end; one ending a later turn than the answer's refuses it (#319, question 3 (a)), and a turn start does not.
 test('a mailbox message whose bound turn changed is rejected or left unclaimed at step end', () => {
   const now = Date.now()
   const take = (state, at, hostTurn, isStepEnd, nonce = 'abcdef') => takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', at, 43_200_000, nonce, 'a1b2c3d4e5f6', { hostTurn, isStepEnd })
@@ -208,6 +208,41 @@ test('a message refused because the conversation moved on reads Not delivered', 
     assert.equal(typeof s.statusWhyMovedOn, 'string')
     assert.ok(![s.statusWhyRefused, s.statusWhyStopped, s.statusWhyAppOpen].includes(s.statusWhyMovedOn))
     assert.deepEqual(messageStatus(one, now, s), { state: 'notDelivered', line: s.statusNotDelivered(s.statusWhyMovedOn), tone: 'alert', updatedAt: now })
+  }
+})
+
+test('a take with a turn id that is not one, a stepEnd other than true or a step end with no claim name is refused', () => {
+  const now = Date.now()
+  const state = mailboxQueue(mailboxSeed(now), 'AB-319-TURN', 'board', now)
+  const turn = body => mailboxAction(state, 'mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI', ref: 'a1b2c3d4e5f6', ...body }, now + 1)
+  for (const body of [{ hostTurn: '' }, { hostTurn: 'turn\nforged' }, { hostTurn: 7 }, { hostTurn: 't'.repeat(201) }, { stepEnd: false }, { stepEnd: 'true' }, { stepEnd: true, ref: undefined }]) {
+    assert.throws(() => turn(body), /INVALID_TURN/, JSON.stringify(body))
+  }
+  // The same take, well formed, hands the message over and names the mailbox's turn.
+  const taken = turn({ hostTurn: 'turn-a', stepEnd: true })
+  assert.equal(taken.result.message?.id, 'AB-319-TURN')
+  assert.equal(taken.state.mailboxes[0].hostTurn, 'turn-a')
+})
+
+test('a receiver cannot report MOVED_ON, which only the board writes', () => {
+  const now = Date.now()
+  const taken = takeMailboxMessage(mailboxQueue(mailboxSeed(now), 'AB-319-RECEIPT', 'board', now), 'codex', 'mailbox-session', 'CLI', now, 43_200_000, 'abcdef', 'a1b2c3d4e5f6')
+  assert.equal(taken.message?.id, 'AB-319-RECEIPT')
+  for (const status of ['uncertain', 'rejected']) {
+    assert.throws(() => messageReceipt(taken.state, taken.state.mailboxes[0], { id: 'AB-319-RECEIPT', nonce: 'abcdef', status, error: 'MOVED_ON' }, now + 1), /INVALID_RECEIPT/, status)
+  }
+})
+
+test('a store whose bound turn or mailbox turn is not a turn id is refused', () => {
+  const now = Date.now()
+  const state = mailboxQueue(mailboxSeed(now), 'AB-319-STORE', 'board', now)
+  const read = patch => parseMessageStore(JSON.stringify({ version: 2, ...state, ...patch }), now)
+  // Well formed, both are kept.
+  const kept = read({ messages: [{ ...state.messages[0], boundTurn: 'turn-a' }], mailboxes: [{ ...state.mailboxes[0], hostTurn: 'turn-a' }] })
+  assert.deepEqual([kept.messages[0].boundTurn, kept.mailboxes[0].hostTurn], ['turn-a', 'turn-a'])
+  for (const bad of ['', 'turn\nforged', 7, 't'.repeat(201)]) {
+    assert.throws(() => read({ messages: [{ ...state.messages[0], boundTurn: bad }] }), /INVALID_MESSAGE_STORE/, `boundTurn ${JSON.stringify(bad)}`)
+    assert.throws(() => read({ mailboxes: [{ ...state.mailboxes[0], hostTurn: bad }] }), /INVALID_MESSAGE_STORE/, `hostTurn ${JSON.stringify(bad)}`)
   }
 })
 

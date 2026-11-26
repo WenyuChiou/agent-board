@@ -9000,7 +9000,7 @@ export const LINES = [
 "  const held = state.messages.filter((one) => one.to === to && [\"uncertain\", \"accepted\"].includes(one.status) && isHolding(one) && !isHookDelivered(one));",
 "  const canTake = (one) => one.status === \"queued\" && !isAcceptedOnce(one) && !isHeldTooLong(one, now) && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to);",
 "  const moved = held.length === 0 && stepEndTurn !== undefined ? state.messages.filter((one) => canTake(one) && one.answers !== undefined && one.boundTurn !== undefined && one.boundTurn !== stepEndTurn) : [];",
-"  const current = moved.length === 0 ? state : { ...state, messages: state.messages.map((one) => moved.includes(one) ? { ...one, status: \"rejected\", error: MOVED_ON, updated: now } : one) };",
+"  const current = moved.length === 0 ? state : { ...state, messages: state.messages.map((one) => moved.includes(one) ? settled({ ...one, status: \"rejected\", error: MOVED_ON, updated: now }) : one) };",
 "  const pick = held.length === 0 ? current.messages.find(canTake) : held.every(isRetaken) ? held.find(canReach) : undefined;",
 "  const messages = pick === undefined ? [] : [pick];",
 "  if (messages.length === 0)",

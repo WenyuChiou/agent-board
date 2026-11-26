@@ -421,7 +421,7 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
   if (state.messages.filter(isOpen).length >= OPEN_CAP || state.messages.length >= OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('MESSAGE_LIMIT')
-  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(answers === undefined || target.hostTurn === undefined ? {} : { boundTurn: target.hostTurn }),...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
+  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(answers === undefined || target.hostTurn === undefined ? {} : { boundTurn: target.hostTurn }), ...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
   return { state: { ...state, messages: [...state.messages, message] }, message }
 }
 // `stepEndTurn`: the turn a step-end take ends (Codex's Stop hook, #319).
@@ -445,7 +445,7 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   const moved = held.length === 0 && stepEndTurn !== undefined
     ? state.messages.filter(one => canTake(one) && one.answers !== undefined && one.boundTurn !== undefined && one.boundTurn !== stepEndTurn) : []
   const current = moved.length === 0 ? state
-    : { ...state, messages: state.messages.map(one => moved.includes(one) ? { ...one, status: 'rejected' as const, error: MOVED_ON, updated: now } : one) }
+    : { ...state, messages: state.messages.map(one => moved.includes(one) ? settled({ ...one, status: 'rejected' as const, error: MOVED_ON, updated: now }) : one) }
   const pick = held.length === 0 ? current.messages.find(canTake) : held.every(isRetaken) ? held.find(canReach) : undefined
   const messages = pick === undefined ? [] : [pick]
   if (messages.length === 0) return { state: current, messages }

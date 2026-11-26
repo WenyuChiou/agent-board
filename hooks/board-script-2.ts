@@ -4583,6 +4583,8 @@ export const LINES = [
 "        return false;",
 "      const transcript = raw.transcript_path;",
 "      const surface = codexSurface(typeof transcript === \"string\" && transcript !== \"\" ? readSessionMeta(transcript, session) : null, process.env[CODEX_CLIENT_VARIABLE], process.env[CODEX_DAEMON_VARIABLE]);",
+"      if (surface !== SURFACE_IDS.cli)",
+"        return false;",
 "      const turnId = raw.turn_id;",
 "      const message = await mailbox.turn(agent, session, surface, Date.now(), undefined, { ...isHostTurn(turnId) ? { hostTurn: turnId } : {}, isStepEnd: true });",
 "      if (mailbox.hasDeferred)",

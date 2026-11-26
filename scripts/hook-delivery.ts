@@ -213,6 +213,9 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
       if (!isStepEnd(agent, event, raw) || hookDeadline - Date.now() < STEP_END_MIN_MS || mailbox === undefined) return false
       const transcript = raw.transcript_path
       const surface = codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null, process.env[CODEX_CLIENT_VARIABLE], process.env[CODEX_DAEMON_VARIABLE])
+      // Only Codex in a terminal is shown to continue a turn this way; anywhere else (the desktop app, an editor, the
+      // background service, or no transcript to tell) takes nothing, even a message that names no surface.
+      if (surface !== SURFACE_IDS.cli) return false
       const turnId = raw.turn_id
       const message = await mailbox.turn(agent, session, surface, Date.now(), undefined, { ...(isHostTurn(turnId) ? { hostTurn: turnId } : {}), isStepEnd: true })
       if (mailbox.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
