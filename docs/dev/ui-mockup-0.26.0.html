@@ -666,11 +666,11 @@ function detailHTML(it, where){
       if (where === 'sheet') {
         h += `<div class="big"><button class="btn pri" data-act="allow-once" data-id="${eid}">${I.checkSm}<span>允許一次</span></button><button class="btn" data-act="deny" data-id="${eid}">${I.xSm}<span>拒絕</span></button></div>`;
       }
-      if ((where === 'rail' || where === 'sheet') && S.denyOpen === it.id) {
+      if (S.denyOpen === it.id) {
         h += denyFormHTML(it);
       }
     }
-  } else if (it.kind === 'ask' && !it.nativeOnly && !S.status[it.id]) {
+  } else if (!it.approval && it.kind === 'ask' && !it.nativeOnly && !S.status[it.id]) {
     if (where === 'sheet') h += `<div class="big">${it.opts.map(o => `<button class="btn" data-act="ans" data-id="${eid}" data-v="${esc(o)}">${it.pasteTip ? `${I.copySm}<span>${esc(o)}</span>` : esc(o)}</button>`).join('')}</div>`;
     h += `<div class="reply"><textarea id="rt-${ew}-${eid}" name="reply" data-id="${eid}" data-where="${ew}" rows="1" aria-label="回覆內容" placeholder="自己寫…" autocomplete="off">${esc(S.drafts[`${where}:${it.id}`] || '')}</textarea><button class="btn pri" data-act="send" data-id="${eid}" data-where="${ew}">${it.pasteTip ? `${I.copySm}<span>複製</span>` : '送出'}</button></div>`;
   } else if (it.kind === 'run' || it.kind === 'stop' || it.kind === 'done') {
@@ -890,9 +890,11 @@ function render(){
     const sid = esc(selIt.id);
     $('#app').classList.add('has-rail');
     let railActs = '';
-    if (selIt.approval && !S.status[selIt.id] && selIt.ttl > 0) {
-      railActs = `<div class="acts" style="margin:0 0 8px"><button class="btn pri" data-act="allow-once" data-id="${sid}">${I.checkSm}<span>允許一次</span></button><button class="btn" data-act="deny" data-id="${sid}">${I.xSm}<span>拒絕</span></button></div>`;
-    } else if (selIt.kind === 'ask' && !selIt.nativeOnly && !S.status[selIt.id]) {
+    if (selIt.approval && !S.status[selIt.id]) {
+      railActs = selIt.ttl > 0
+        ? `<div class="acts" style="margin:0 0 8px"><button class="btn pri" data-act="allow-once" data-id="${sid}">${I.checkSm}<span>允許一次</span></button><button class="btn" data-act="deny" data-id="${sid}">${I.xSm}<span>拒絕</span></button></div>`
+        : `<div class="acts" style="margin:0 0 8px"><span class="native-pill" tabindex="0" data-tip="倒數逾時，已轉回原視窗確認">↗ 已轉回原視窗</span></div>`;
+    } else if (!selIt.approval && selIt.kind === 'ask' && !selIt.nativeOnly && !S.status[selIt.id]) {
       railActs = selIt.pasteTip
         ? `<div class="acts" style="margin:0 0 6px">${(selIt.opts.length ? selIt.opts : [selIt.title]).map(o => `<button class="btn" data-act="copy-ans" data-id="${sid}" data-v="${esc(o)}">${I.copySm}<span>${selIt.opts.length ? `複製「${esc(o)}」` : '複製'}</span></button>`).join('')}</div>`
         : `<div class="acts" style="margin:0 0 6px">${selIt.opts.map(o => `<button class="btn" data-act="ans" data-id="${sid}" data-v="${esc(o)}">${esc(o)}</button>`).join('')}</div>`;
@@ -960,6 +962,8 @@ function nextFocusIdAfterRemoval(id){
 }
 async function answer(id, v){
   const it = D.find(x => x.id === id); if (!it || !v) return;
+  if (it.nativeOnly) return;
+  if (it.approval && it.ttl <= 0) { toast('已轉回原視窗'); return; }
   const hadFocus = document.activeElement && document.activeElement.closest && document.activeElement.closest('#content');
   if (it.pasteTip) {
     const ok = await copyText(v);
@@ -1037,9 +1041,13 @@ document.addEventListener('click', e => {
   switch (act) {
     case 'open': openItem(id); break;
     case 'ans': e.stopPropagation(); answer(id, v); break;
-    case 'allow-once': e.stopPropagation(); S.denyOpen = null; toast('已允許執行一次'); answer(id, '允許一次'); break;
+    case 'allow-once':
+      e.stopPropagation();
+      if (!it || !it.approval || it.ttl <= 0) { if (it && it.approval && it.ttl <= 0) toast('已轉回原視窗'); break; }
+      S.denyOpen = null; toast('已允許執行一次'); answer(id, '允許一次'); break;
     case 'deny': {
       e.stopPropagation();
+      if (!it || !it.approval || it.ttl <= 0) { if (it && it.approval && it.ttl <= 0) toast('已轉回原視窗'); break; }
       S.denyOpen = S.denyOpen === id ? null : id;
       render();
       if (S.denyOpen === id) {
@@ -1049,7 +1057,7 @@ document.addEventListener('click', e => {
     }
     case 'deny-confirm': {
       e.stopPropagation();
-      if (!it) break;
+      if (!it || !it.approval || it.ttl <= 0) { S.denyOpen = null; if (it && it.approval && it.ttl <= 0) toast('已轉回原視窗'); render(); break; }
       const why = (S.denyWhy[id] || '').trim();
       const prevKind = it.kind, prevAge = it.age;
       S.denyOpen = null; delete S.denyWhy[id];
@@ -1066,8 +1074,8 @@ document.addEventListener('click', e => {
       e.stopPropagation();
       if (!it) break;
       const t = document.getElementById(`rt-${el.dataset.where}-${id}`);
-      const txt = t ? t.value.trim() : (S.drafts[`${el.dataset.where}:${id}`] || '').trim();
-      if (!txt) { t && t.focus(); break; }
+      const txt = t ? t.value : (S.drafts[`${el.dataset.where}:${id}`] || '');
+      if (!txt.trim()) { t && t.focus(); break; }
       S.bgHold[id] = txt;
       ['inline','rail','sheet'].forEach(w => delete S.drafts[`${w}:${id}`]);
       render();
