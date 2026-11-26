@@ -177,6 +177,40 @@ test('a DeepSeek hook claim nobody accepted is still handed out again after the 
   assert.equal(takeMailboxMessage(inbox, 'codex', 'mailbox-session', 'CLI', now + 10 * MAILBOX_LEASE_MS, '555555', 'a1b2c3d4e5f6').message, null)
 })
 
+// #319: a board answer is bound to the turn the session's hook last named. Codex's Stop hook hands a message over at a step
+// end; one ending a later turn than the answer's refuses it (owner answer 3 (a)), and a turn start does not.
+test('a mailbox message whose bound turn changed is rejected or left unclaimed at step end', () => {
+  const now = Date.now()
+  const take = (state, at, hostTurn, isStepEnd, nonce = 'abcdef') => takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', at, 43_200_000, nonce, 'a1b2c3d4e5f6', { hostTurn, isStepEnd })
+  // Turn A starts: its hook names the turn and finds nothing.
+  const started = take(mailboxSeed(now), now, 'turn-a', false)
+  assert.equal(started.message, null)
+  const answer = queueMessage(started.state, { id: 'AB-319-ANSWER', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'AB-319-ANSWER', answers: 'question-319' }, 'board', started.state.mailboxes[0], now + 1).state
+  // Turn A's own step end hands it over.
+  assert.equal(take(answer, now + 2, 'turn-a', true).message?.id, 'AB-319-ANSWER')
+  // Turn B's step end refuses it as moved on and hands over the message behind it, which answers no question (from
+  // another sender: the board keeps one open message per sender).
+  const moved = take(mailboxQueue(answer, 'AB-319-BEHIND', 'claude:synthetic-peer', now + 1), now + 2, 'turn-b', true)
+  assert.equal(moved.message?.id, 'AB-319-BEHIND')
+  const refused = moved.state.messages.find(one => one.id === 'AB-319-ANSWER')
+  assert.deepEqual([refused.status, refused.error], ['rejected', 'MOVED_ON'])
+  // Refused for good: no later take hands it out, whatever turn it names.
+  for (const [hostTurn, isStepEnd] of [['turn-a', true], ['turn-b', false], ['turn-c', true]]) assert.equal(take(moved.state, now + 3, hostTurn, isStepEnd).message, null, `${hostTurn} ${isStepEnd}`)
+  // Turn B's start hands the answer over: only a step end refuses it.
+  assert.equal(take(answer, now + 2, 'turn-b', false).message?.id, 'AB-319-ANSWER')
+})
+
+test('a message refused because the conversation moved on reads Not delivered', async () => {
+  const { messageStatus } = await import('../hooks/message-status.ts')
+  const now = Date.now()
+  const one = { id: 'AB-319-MOVED', status: 'rejected', error: 'MOVED_ON', reply: '', updated: now, claimed: now, target: mailboxId('codex', 'mailbox-session'), answers: 'question-319' }
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    assert.equal(typeof s.statusWhyMovedOn, 'string')
+    assert.ok(![s.statusWhyRefused, s.statusWhyStopped, s.statusWhyAppOpen].includes(s.statusWhyMovedOn))
+    assert.deepEqual(messageStatus(one, now, s), { state: 'notDelivered', line: s.statusNotDelivered(s.statusWhyMovedOn), tone: 'alert', updatedAt: now })
+  }
+})
+
 const mailboxAt = (id, agent = 'codex') => ({ id, target: mailboxId(agent, 'mailbox-session'), turn: 'session', text: id })
 const mailboxBound = (state, id, surface, now, agent = 'codex') => queueMessage(state, mailboxAt(id, agent), 'board', state.mailboxes[0], now, 'local', undefined, undefined, surface).state
 const mailboxHook = (state, surface, at, nonce, agent = 'codex') => takeMailboxMessage(state, agent, 'mailbox-session', surface, at, 43_200_000, nonce, 'a1b2c3d4e5f6')
