@@ -7,7 +7,7 @@ import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { installCommand, installContext } from './setup-command.mjs'
-import { newestUse } from './setup-discovery.mjs'
+import { isNewer, newestUse } from './setup-discovery.mjs'
 import { blockClaimOf, blockHostOf, boardConfirmedReport, claimText, cleanAntigravityIdentity, codexClaimOf, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, resolveAntigravityIdentity, seenClaimOf, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { AntigravityIdentity, CodexReport } from '../hooks/codex'
 import { hermesHome } from '../hooks/hermes-home'
@@ -2211,8 +2211,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const isApproved = loaded.approved === true || args.includes('--hooks-approved') || trustNow === true
   const approval = agent !== 'codex' && agent !== 'hermes' ? {} : isApproved ? { approved: true } : loaded.approved === false || initial(manifestFile) === null && flag('--setup-version') !== undefined ? { approved: false } : {}
   // A new record keeps the newest use's version however it was set up (Settings, or this script's own setup), as setup
-  // writes it, so an update does not ask about a use the install has had from the start. An older record without one keeps none.
-  const setupVersion = flag('--setup-version') ?? (typeof loaded.version === 'string' ? loaded.version : initial(manifestFile) === null ? newestUse : undefined)
+  // writes it, so an update does not ask about a use the install has had from the start. An existing higher record
+  // version stays put (#1812), and an older record without one keeps none.
+  const suppliedVersion = flag('--setup-version')
+  const setupVersion = suppliedVersion !== undefined
+    ? (typeof loaded.version === 'string' && isNewer(loaded.version, suppliedVersion) ? loaded.version : suppliedVersion)
+    : (typeof loaded.version === 'string' ? loaded.version : initial(manifestFile) === null ? newestUse : undefined)
   // A kept /board file keeps its record entry, so it still goes as setup wrote it once the script is taken (#1698).
   const nextManifest = `${JSON.stringify({ files: Object.fromEntries([...Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]]), ...keptBoards.flatMap(file => manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])]), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}), ...(setupVersion === undefined ? {} : { version: setupVersion }), ...approval }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })

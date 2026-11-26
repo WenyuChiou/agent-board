@@ -3,11 +3,22 @@ import { createHash } from 'node:crypto'
 import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { request } from 'node:http'
 import { join, resolve } from 'node:path'
+import { registerHooks } from 'node:module'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, insideHome, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, snapshot, tempFolder } from './e2e/lib/host-journey.mjs'
 import { spawnIsolated } from './e2e/lib/spawn.mjs'
-import { newestUse } from '../scripts/setup-discovery.mjs'
+import { newestUse, newUses } from '../scripts/setup-discovery.mjs'
+import { EN } from '../hooks/strings-en.ts'
+
+const settingsLoader = registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (context.parentURL?.startsWith(new URL('../hooks/', import.meta.url).href) && /^\.\.?\//.test(specifier) && !/\.[a-z]+$/i.test(specifier)) return nextResolve(`${specifier}.ts`, context)
+    return nextResolve(specifier, context)
+  },
+})
+const { settingsPanel } = await import('../hooks/page-settings.ts')
+settingsLoader.deregister()
 
 // The upgrade journey of #466. It reads the 0.24.0 files from the release tag, so it stays in
 // the board group, whose CI job fetches the tags; the other host journeys are in tests/e2e/.
@@ -1029,15 +1040,16 @@ test('a changed host-loaded file asks once and names the file', async () => {
   assert.equal(updateSteps(output), 1, 'one step: the yes')
 })
 
-test('J11a: 0.25.0 to 0.25.1 asks one question that names the version check and the session list, in 3 steps', async t => {
+test('J11a: 0.25.0 to current release asks one question for the changed board script in 3 steps without unshipped uses', async t => {
   const old = taggedRelease(t, 'agent-board--v0.25.0', '0.25.0')
   if (!old) return
   const f = await oldCodexHome(old)
   const mock = mockCodex(f)
   const output = checked(await update(f, ['--codex-bin', mock.executable], { source: repoRoot, input: 'y\n' }), 'setup --update')
   assert.equal(questions(output), 1, output)
-  for (const words of ['Once a day, the board asks npm for the newest version number.', '"Check for new versions"', 'the list of your Codex sessions', '"Show Codex sessions"']) {
-    assert.ok(output.includes(words), `the question names ${words}\n${output}`)
+  assert.match(output, /Code your agents run changes: .*agent-board\.mjs/, output)
+  for (const unshipped of ['Once a day, the board asks npm for the newest version number.', '"Check for new versions"', 'the list of your Codex sessions', '"Show Codex sessions"']) {
+    assert.equal(output.includes(unshipped), false, `unshipped use must not appear: ${unshipped}\n${output}`)
   }
   assert.match(output, /Agent Board updated to /, output)
   assert.equal(updateSteps(output, true), 3, `three steps: learn of it, the command, the yes\n${output}`)
@@ -1046,16 +1058,88 @@ test('J11a: 0.25.0 to 0.25.1 asks one question that names the version check and 
 test('several ask conditions at once make one question', async () => {
   const f = fixture(['.codex', '.cursor'])
   const mock = mockCodex(f)
+  writeFileSync(mock.stateFile, JSON.stringify({ trusted: false }))
   await apply(f, ['codex', 'cursor'])
   const changed = olderHook(f, 'cursor', '.cursor/hooks.json')
   olderScript(f)
-  beforeUses(f)
+  editRecord(f, 'codex', record => { record.approved = false })
   const output = checked(await update(f, ['--codex-bin', mock.executable], { input: 'y\n' }), 'setup --update')
   assert.equal(questions(output), 1, output)
   assert.ok(output.includes(`Now: ${changed.older}`), output)
   assert.match(output, /Code your agents run changes: .*agent-board\.mjs/, output)
-  assert.match(output, /Check for new versions/, output)
+  assert.match(output, /- Approve the board's hooks in Codex\r?\n/, output)
+  assert.equal(output.includes('Check for new versions'), false, output)
   assert.equal(updateSteps(output), 1, 'one step: the yes')
+})
+
+const hasSettingsSwitch = (html, switchId) => {
+  if (typeof switchId !== 'string' || !switchId) return false
+  const idPattern = switchId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`<[^>]*\\bid=["']${idPattern}["'][^>]*\\brole=["']switch["']|<[^>]*\\brole=["']switch["'][^>]*\\bid=["']${idPattern}["']`).test(html)
+}
+const missingSwitches = (uses, html) => uses.filter(entry => !hasSettingsSwitch(html, entry.switchId)).map(entry => entry.id)
+
+test('every newUses entry has a matching switch on the Settings page', () => {
+  const html = settingsPanel(EN, 'en')
+  assert.deepEqual(missingSwitches(newUses, html), [], 'every active newUses entry must have a switch in Settings')
+  assert.deepEqual(missingSwitches([{ id: 'version-check', version: '0.25.1', use: 'useVersionCheck', off: 'useVersionCheckOff' }], html), ['version-check'])
+  assert.deepEqual(missingSwitches([{ id: 'notify', version: '0.25.0', use: 'useNotify', off: 'useNotifyOff', switchId: 'settings-notify' }], html), [])
+})
+
+test('updating a 0.25.0 or 0.25.1 home asks nothing about unshipped uses and keeps a 0.25.1 record version', async () => {
+  const f = fixture(['.codex', '.config/opencode'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex', 'opencode'])
+  beforeUses(f)
+  const from0250 = checked(await update(f, ['--codex-bin', mock.executable]), 'update from 0.25.0 record')
+  assert.equal(questions(from0250), 0, from0250)
+  for (const unshipped of ['Check for new versions', 'Show Codex sessions']) {
+    assert.equal(from0250.includes(unshipped), false, from0250)
+  }
+
+  for (const agent of ['codex', 'opencode']) editRecord(f, agent, record => { record.version = '0.25.1' })
+  const from0251 = checked(await update(f, ['--codex-bin', mock.executable]), 'update from 0.25.1 record')
+  assert.equal(from0251, 'Agent Board is up to date (99.0.0).\n')
+  assert.equal(questions(from0251), 0, from0251)
+  for (const agent of ['codex', 'opencode']) {
+    assert.equal(readRecord(f, agent).version, '0.25.1', `${agent}: keep 0.25.1 instead of downgrading to ${newestUse}`)
+  }
+})
+
+test('a 0.25.1 home is asked once when a later release ships a real new use and not asked again', async () => {
+  assert.deepEqual(newUses, [], 'current release has no unshipped uses in newUses')
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  editRecord(f, 'codex', record => { record.version = '0.25.1' })
+
+  const future = tempFolder()
+  cpSync(nextBuild(), future, { recursive: true })
+  const discoveryFile = join(future, 'scripts', 'setup-discovery.mjs')
+  writeFileSync(
+    discoveryFile,
+    readFileSync(discoveryFile, 'utf8').replace(
+      /export const newUses = \[\s*\]/,
+      "export const newUses = [{ id: 'version-check', version: '0.26.0', use: 'useVersionCheck', off: 'useVersionCheckOff', switchId: 'settings-version-check' }]",
+    ),
+  )
+  const setupFile = join(future, 'scripts', 'setup-agent.mjs')
+  writeFileSync(
+    setupFile,
+    readFileSync(setupFile, 'utf8').replace(
+      '"updateUse": "New: {use} Off switch: {off}",',
+      '"updateUse": "New: {use} Off switch: {off}",\n    "useVersionCheck": "Once a day, the board asks npm for the newest version number.",\n    "useVersionCheckOff": "\\"Check for new versions\\" in the board\'s Settings.",',
+    ),
+  )
+
+  const first = checked(await update(f, ['--codex-bin', mock.executable], { source: future, input: 'y\n' }), 'first upgrade to 0.26.0 use')
+  assert.equal(questions(first), 1, first)
+  assert.match(first, /Check for new versions/, first)
+  assert.equal(readRecord(f, 'codex').version, '0.26.0')
+
+  const second = checked(await update(f, ['--codex-bin', mock.executable], { source: future }), 'second upgrade after accepting 0.26.0 use')
+  assert.equal(questions(second), 0, second)
+  assert.equal(second, 'Agent Board is up to date (99.0.0).\n')
 })
 
 test('an update from a Node in another folder asks nothing', async () => {
