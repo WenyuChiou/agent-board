@@ -8307,9 +8307,13 @@ test('a press whose stored receipt a board read already drew says neither trying
     return open
   })
   const { page, press, modelOf } = await retryPage(post, connection)
+  const slotText = () => page.slot(page.cards().find(one => page.inputs(one).length))?.textContent ?? ''
   await press('Continue')
+  assert.equal(slotText(), EN.statusSending)
+  // The board's read brings the stored message: its receipt replaces Sending.
   await page.redraw(modelOf(stored()))
   assert.ok(page.text().includes(EN.statusQueued(EN.statusWhenNow)), page.text())
+  assert.ok(!page.text().includes(EN.statusSending), page.text())
   // 2 s: the page tries again under the same id, and writes nothing over the receipt it shows.
   assert.deepEqual(await page.runTimers('retrySend'), [2000])
   assert.equal(page.requests[1].body.id, page.requests[0].body.id)
