@@ -351,9 +351,10 @@ out of Needs you; the receipt still distinguishes delivery from a confirmed mode
 
 ### The status line
 
-The terminal board (`--watch`), `--print` and `--json` give the last message the board sent to a
-session one status line, read from its stored receipt alone (`hooks/message-status.ts`, #1843). Every
-agent gets the same words. The page still shows its own receipt words until it moves to these.
+The page, the terminal board (`--watch`), `--print` and `--json` give the last message the board sent to
+a session one status line, read from its stored receipt alone (`hooks/message-status.ts`, #1843). Every
+agent gets the same words, and the server words the page's line, so two pages show the same one. A kept
+question shows only the answer sent to it, never another message to its session.
 
 | Line | When |
 | --- | --- |
@@ -366,7 +367,8 @@ agent gets the same words. The page still shows its own receipt words until it m
 | Not delivered · why | `rejected` (refused, stopped, the app stayed open, taken back); a queued mailbox message whose session now reads another surface; one given up at the open limit before anything took it |
 
 The 20 seconds count from the receipt's last change, so the line reads the same with or without a live
-connection, and reading it changes nothing in the store. A route that waits on a step, a turn or the
+connection, and reading it changes nothing in the store. The one exception is a Codex app turn the receiver
+still holds: the page reads it as delivered while the receiver keeps its connection. A route that waits on a step, a turn or the
 app has no such clock. A message taken back after it was handed out shows no line.
 
 ### Message ids

@@ -54,9 +54,12 @@ test('messages: a Codex session with no poller takes a page message on its next 
     snapshot = (await server.get('/api/board')).json()
     assert.equal(snapshot.messaging.messages[0].status, 'accepted')
     await page.redraw(snapshot.model)
-    assert.ok(page.text().includes('Handed to the session at its turn start. No reply is confirmed.'))
-    assert.ok(!page.text().includes('Delivered'))
-    assert.ok(!page.text().includes('Waiting for a reply'))
+    // Taken at its turn start: Delivered, in the board's words, and nothing more than that.
+    const shown = []
+    JSON.stringify(snapshot.model, (key, value) => { if (key === 'shown' && value?.line) shown.push(value); return value })
+    assert.deepEqual(shown.map(one => one.state), ['delivered'], JSON.stringify(shown))
+    assert.ok(page.text().includes(shown[0].line), page.text())
+    assert.ok(!page.text().includes('Read · ') && !page.text().includes('Answered · '), page.text())
     const again = await hook('UserPromptSubmit')
     assert.equal(again.status, 0, again.stderr)
     assert.ok(!again.stdout.includes('Synthetic next-turn mailbox message'))
@@ -106,7 +109,7 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     await nativeDelivery(hub, sender, receiver)
     const card = (await hub.card(sender)).textContent
     await knownFailure('hold:sender-receipt', () => {
-      assert.ok(card.includes('Replied'), 'Sender card has no outgoing receipt: ' + card)
+      assert.ok(/Read(?: · |$)/m.test(card), 'Sender card has no outgoing receipt: ' + card)
     })
   }))
 
@@ -233,7 +236,7 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     await seenWithin(async () => {
       message = (await hub.snapshot()).messaging.messages.find(one => one.id === sent.id)
       return (await hub.card(receiver)).textContent
-    }, card => message?.status === 'uncertain' && message.error === 'ACK_TIMEOUT' && /Reply timed out/.test(card), Math.max(1, budget.measuredMs - budget.pagePollMs - (performance.now() - sent.started)))
+    }, card => message?.status === 'uncertain' && message.error === 'ACK_TIMEOUT' && card.includes(EN.statusUnsure(message.hasAccepted === true ? EN.statusWhyDelivered : EN.statusWhyTimedOut)), Math.max(1, budget.measuredMs - budget.pagePollMs - (performance.now() - sent.started)))
     const elapsed = performance.now() - sent.started + budget.pagePollMs
     assert.ok(elapsed <= budget.measuredMs, `${elapsed} ms including the page poll exceeds ${budget.measuredMs} ms`)
     assert.equal(receiver.received.length, 1)

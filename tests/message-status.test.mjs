@@ -17,13 +17,14 @@ const loader = registerHooks({
     return nextResolve(specifier, context)
   },
 })
-let status, delivery, store, hooks, board, boardJson, view, parse, strings, bundle
+let status, delivery, store, hooks, board, boardJson, view, parse, strings, bundle, serve
 try {
   // Before this change the module does not exist: every test here then fails on its own assertion or call.
   status = await import('../hooks/message-status.ts').catch(() => ({}))
-  ;[delivery, store, hooks, board, boardJson, view, parse, strings, bundle] = await Promise.all([
+  ;[delivery, store, hooks, board, boardJson, view, parse, strings, bundle, serve] = await Promise.all([
     import('../hooks/delivery-states.ts'), import('../hooks/queued-store.ts'), import('../hooks/hook-messages.ts'), import('../hooks/board.ts'), import('../hooks/board-json.ts'),
     import('../hooks/view.ts'), import('../hooks/parse.ts'), import('../hooks/strings.ts'), import('../hooks/board-script.ts'),
+    import('../hooks/serve.ts'),
   ])
 } finally { loader.deregister() }
 const { MESSAGE_STATES, NOW_ROUTE_MS, messageStatus } = status
@@ -248,8 +249,11 @@ const surfaces = (messaging, now = NOW, s = en) => {
     print: board.boardText(v, [], s, o),
     watch: board.boardLayout(v, [], board.emptyBoardState, s, o).screen,
     json: boardJson.boardDocument(v, [], [], s, '/synthetic-home', false, now, group(now), undefined, messaging),
+    page: serve.serveModel(v, [], s, new Set(), false, messaging, false, group(now)),
   }
 }
+// The status the page's model gives a row of an agent: the board words it, the page only draws it.
+const pageRowOf = (model, agent) => [...model.groups.flatMap(one => one.rows), ...model.idle, ...model.stopped].find(row => row.agent === agent)
 // The line drawn under a row: the text lines after its title, up to the next title.
 const linesUnder = (screen, title) => {
   const lines = screen.split('\n')
@@ -326,18 +330,19 @@ const ASKING = `## synthetic-api
 <!-- /auto session=c1000001 -->
 `
 const QUESTION = 'Q-synthetic-2'
-const askSurfaces = (messaging, now = NOW + MINUTE) => {
+const askSurfaces = (messaging, now = NOW + MINUTE, questionId = QUESTION) => {
   const v = viewAt(now, ASKING)
-  v.waiting[0].questionId = QUESTION
+  if (questionId !== null) v.waiting[0].questionId = questionId
   const o = { width: 120, isColor: false, messaging }
   return {
     print: board.boardText(v, [], en, o),
     watch: board.boardLayout(v, [], board.emptyBoardState, en, o).screen,
     json: boardJson.boardDocument(v, [], [], en, '/synthetic-home', false, now, group(now), undefined, messaging),
+    page: serve.serveModel(v, [], en, new Set(), false, messaging, false, group(now)),
   }
 }
 
-test("a question waiting on the person shows its answer's status on the terminal board, --print and --json", () => {
+test("a question waiting on the person shows its answer's status on the page, the terminal board, --print and --json", () => {
   const toSession = { from: 'board', to: `codex:${SESSION}` }
   const cases = [
     // The answer to it, refused.
@@ -355,14 +360,68 @@ ${read[surface]}`)
     const card = [...read.json.needs, ...read.json.queued][0]
     assert.equal(card?.message?.state, state, where)
     assert.equal(card?.message?.line, line, where)
+    assert.equal(read.page.asks[0]?.receipt?.shown?.state, state, `page, ${where}`)
+    assert.equal(read.page.asks[0]?.receipt?.shown?.line, line, `page, ${where}`)
   }
   // An answer to another question of the session is not this card's status.
   const other = askSurfaces(messagingOf('rejected', undefined, { ...toSession, answers: 'Q-synthetic-other' }))
   assert.ok(!/Not delivered/.test(other.print), other.print)
   assert.equal('message' in [...other.json.needs, ...other.json.queued][0], false)
+  assert.equal(other.page.asks[0]?.receipt, undefined)
+  // A card with no question id shows the last message to its session, whatever it answers, everywhere.
+  const unknown = askSurfaces(messagingOf('rejected', undefined, { ...toSession, answers: 'Q-synthetic-other' }), NOW + MINUTE, null)
+  assert.equal('questionId' in unknown.json.needs[0], false)
+  assert.deepEqual(unknown.json.needs[0].message, { state: 'notDelivered', line: 'Not delivered · refused', updatedAt: new Date(NOW).toISOString() })
+  assert.equal(unknown.page.asks[0]?.receipt?.shown?.line, 'Not delivered · refused')
+  for (const surface of ['print', 'watch']) assert.ok(linesUnder(unknown[surface], 'Choose the limit').includes('Not delivered · refused'), unknown[surface])
 })
 
-test('the terminal board, --print and --json say the same words for every delivery state', () => {
+// A kept question: its session has moved on, so a message to the session is no news of the person's answer.
+const keptSurfaces = (shelf, messaging, now = NOW + MINUTE) => {
+  const v = viewAt(now, ASKING)
+  v[shelf] = [{ ...v.waiting[0], questionId: QUESTION }]
+  v.waiting = []
+  const o = { width: 120, isColor: false, messaging, isQuestionsOpen: true }
+  const page = serve.serveModel(v, [], en, new Set(), false, messaging, false, group(now))
+  return {
+    print: board.boardText(v, [], en, o),
+    watch: board.boardLayout(v, [], { ...board.emptyBoardState, isOlderOpen: true }, en, o).screen,
+    page: page[shelf][0]?.receipt?.shown?.line,
+  }
+}
+
+test('a kept question shows only the answer sent to it, on the page, the terminal board and --print', () => {
+  const toSession = { from: 'board', to: `codex:${SESSION}` }
+  for (const shelf of ['reminder', 'older']) {
+    // A message to its session that answers no question: no line anywhere.
+    const other = keptSurfaces(shelf, messagingOf('accepted', undefined, toSession))
+    assert.equal(other.page, undefined, shelf)
+    for (const surface of ['print', 'watch']) assert.ok(!linesUnder(other[surface], 'Choose the limit').some(one => /^(Queued|Delivered|Read|Answered|Unsure|Not delivered)\b/.test(one)), `${surface}, ${shelf}\n${other[surface]}`)
+    // The answer sent to it: the same line everywhere.
+    const answer = keptSurfaces(shelf, messagingOf('rejected', undefined, { ...toSession, answers: QUESTION }))
+    assert.equal(answer.page, 'Not delivered · refused', shelf)
+    for (const surface of ['print', 'watch']) assert.ok(linesUnder(answer[surface], 'Choose the limit').includes('Not delivered · refused'), `${surface}, ${shelf}\n${answer[surface]}`)
+  }
+})
+
+test('a fresh claim on the page reads from its stored receipt only, live connection or not', () => {
+  const one = shown('claimed')
+  const connection = { id: one.target, agent: 'codex', session: 's1', turn: one.turn, surface: 'synthetic', expires: NOW + 10 * MINUTE }
+  for (const connections of [[], [connection]]) {
+    for (const [later, state, line] of [[16 * SECOND, 'queued', 'Queued · now'], [NOW_ROUTE_MS, 'unsure', 'Unsure · no answer · check its window']]) {
+      const where = `+${later} ms, ${connections.length} connection`
+      const { receipt } = serve.rowReceipt('codex', 's1', [one], NOW + later, en, undefined, undefined, connections)
+      assert.deepEqual(receipt?.shown, { state, line, tone: state === 'queued' ? 'wait' : 'alert' }, where)
+      assert.equal(receipt?.shown?.line, statusOf(one, NOW + later)?.line, where)
+    }
+  }
+  // A Codex app turn the receiver still holds is the one reading only the page makes: delivered while it holds it.
+  const app = at(one, { isAfterAppQuit: true })
+  assert.equal(serve.rowReceipt('codex', 's1', [app], NOW + MINUTE, en, undefined, undefined, [connection]).receipt?.shown?.state, 'delivered')
+  assert.equal(serve.rowReceipt('codex', 's1', [app], NOW + MINUTE, en, undefined, undefined, []).receipt?.shown?.state, 'unsure')
+})
+
+test('the page, the terminal board, --print and --json say the same words for every delivery state', () => {
   const wrong = []
   for (const name of DELIVERY_STATES) {
     for (const shape of shapeNames(name)) {
@@ -371,12 +430,15 @@ test('the terminal board, --print and --json say the same words for every delive
       const agent = agentOfSample(name, shape)
       const want = statusOf(messaging.messages[0], NOW, en, BLOCK_AT)
       const json = read.json.working.find(row => row.agent === agent)?.message
+      const page = pageRowOf(read.page, agent)?.receipt?.shown
       const where = `${name}.${shape}`
       if (want === null) {
         if (json !== undefined) wrong.push(`${where}: --json has ${json.line}`)
+        if (page !== undefined) wrong.push(`${where}: the page has ${page.line}`)
         continue
       }
       if (json?.line !== want.line || json?.state !== want.state) wrong.push(`${where}: --json ${json?.state} "${json?.line}", not ${want.state} "${want.line}"`)
+      if (page?.line !== want.line || page?.state !== want.state || page?.tone !== want.tone) wrong.push(`${where}: the page ${page?.state} "${page?.line}" ${page?.tone}, not ${want.state} "${want.line}" ${want.tone}`)
       for (const surface of ['print', 'watch']) if (!linesUnder(read[surface], TITLES[agent]).includes(want.line)) wrong.push(`${where}: ${surface} has no "${want.line}"`)
     }
   }

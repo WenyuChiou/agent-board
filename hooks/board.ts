@@ -353,7 +353,8 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push(`${title} (${items.length})${isOpen ? '' : ' · --all'}`)
     if (isOpen) for (const item of items) {
       lines.push(`  ${cut(`${questionHead(item.project, item.task)} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
-      const message = messageLine(view, item, s, o)
+      // A kept question shows only the answer sent to it, as the page's card does: its session has moved on.
+      const message = messageLine(view, { ...item, nativeSession: undefined }, s, o)
       if (message !== null) lines.push(message)
     }
   }
@@ -1057,7 +1058,7 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       lines.push(`${mark} ${titled(2, `${s.chip(s.ask[ask.kind])}${ask.text}`, [name, ask.when === s.questionAgeUnknown ? '' : ask.when].filter(part => part !== '').join(' · '), isHere)}`)
       if (result?.key === item.key) resultLines('    ')
       lines.push(`    ${c('project', cut(ask.project + (ask.task ? ` › ${ask.task}` : ''), o.width - 6))}`)
-      const message = messageLine(view, ask, s, o)
+      const message = messageLine(view, item.key.startsWith('older:') ? { ...ask, nativeSession: undefined } : ask, s, o)
       if (message !== null) lines.push(message)
       if (ask.task && ask.context && (titleCounts.get(ask.task) ?? 0) > 1) lines.push(`    ${c('quiet', cut(ask.context, o.width - 6))}`)
       // A Codex card with no process to check, quiet past two minutes (#1092): `a` archives it.

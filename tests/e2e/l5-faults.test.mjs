@@ -236,7 +236,7 @@ test('L5 hub killed mid-delivery: the restarted --serve recovers the stale lock,
     assert.equal(restored.error, 'DISCONNECTED')
     assert.ok(!('nonce' in restored), 'The board shows the nonce')
     const pageText = await second.page()
-    assert.ok(pageText.includes(EN.messagesAcceptedDisconnected), `The page does not show the disconnected accepted label: ${pageText}`)
+    assert.ok(pageText.includes(EN.statusUnsure(EN.statusWhyDelivered)), `The page does not show the disconnected accepted line: ${pageText}`)
 
     // The receiver registers again as the same session. The message was bound to its old connection
     // and is not handed out again, however often it asks.
