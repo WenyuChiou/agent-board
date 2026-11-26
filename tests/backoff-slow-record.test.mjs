@@ -243,8 +243,8 @@ test('launcher stops waiting after claim backoff when a 0-byte address record st
     }, started + 5000, 120, 20)
     const elapsed = performance.now() - started
     assert.equal(found, null)
-    assert.ok(calls >= 2, `expected bounded polling on 0-byte file, got ${calls} calls`)
-    assert.ok(elapsed < 1000, `expected bounded return, took ${elapsed} ms`)
+    assert.equal(calls, 0)
+    assert.ok(elapsed >= 90 && elapsed < 1000, `expected bounded publish wait near 120 ms, took ${elapsed} ms`)
   })
 })
 
