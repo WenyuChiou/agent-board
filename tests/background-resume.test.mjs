@@ -377,9 +377,11 @@ test('an idle Codex card says its message starts within about 10 minutes, not ri
   }
   // The start waits on the receiver reading a person's Codex on the thread, so the line names that, and that the message stays
   // queued until then, in each language (codex_392, codex_393).
-  assert.ok(EN.serveLineSoon('Codex').startsWith('Codex is waiting. It starts on this once the board has seen your Codex open on this thread for about 10 minutes, or longer if your Codex config keeps threads loaded longer. Until then it stays queued here.'))
+  assert.ok(EN.serveLineSoon('Codex').startsWith('Codex is waiting. It goes in within a few seconds while a Codex window is open; up to about 10 minutes otherwise. Until then it stays queued here.'))
   assert.ok(ZH_TW.serveLineSoon('Codex').includes('在那之前，這則訊息會留在看板排隊。'))
+  assert.ok(ZH_TW.serveLineSoon('Codex').includes('幾秒內'))
   assert.ok(ZH_TW.serveLineSoon('Codex').includes('約 10 分鐘'))
+  assert.ok(ZH_CN.serveLineSoon('Codex').includes('几秒内'))
   assert.ok(ZH_CN.serveLineSoon('Codex').includes('约 10 分钟'))
   assert.ok(ZH_CN.serveLineSoon('Codex').includes('在那之前，这条消息会留在看板排队。'))
 })
