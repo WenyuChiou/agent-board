@@ -469,11 +469,11 @@ export const isStopped = (auto: ProgressAuto | null, now: number, updated = auto
   isStale(auto, now, updated, staleMs) || (auto !== null && (auto.state === 'working' || auto.state === 'waiting') && gone.has(blockKey(auto)))
 
 // How long a Codex card with no process record waits, with no new event, before it
-// says the window may be closed (#1092, M7). Windows and the shared server give the
-// board no process to check; there SessionEnd arrived 61.4 s and 61.5 s after a close
-// (docs/validation/2026-11-18-c1-codex-terminal-process.md), so two minutes is past
-// the time a closed window normally takes to end its card by itself.
-export const CODEX_MAY_BE_CLOSED_MS = 120_000
+// says the window may be closed (#1092, #1813, M7). Windows and the shared server give
+// the board no process to check, so 2 minutes flagged open idle windows (#1813); wait
+// 30 minutes (matching WORKING_MS) before showing the line, while sessions with a
+// process record still rely on the process check immediately (#1092).
+export const CODEX_MAY_BE_CLOSED_MS = 30 * 60_000
 
 // A waiting Codex block with a question that names no process and has been quiet
 // past CODEX_MAY_BE_CLOSED_MS (#1092). Its card stays in Needs you and only adds the

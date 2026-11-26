@@ -10,11 +10,12 @@ registerHooks({ resolve(specifier, context, next) {
   }
 } })
 
-const { DELIVERY_EVENTS, DELIVERY_STATES, DELIVERY_TABLE, SAMPLE_NOW, SUSPECT_CELLS, applyEvent, isDoubleSend, observe, observeHolds, rowOf, sampleBinding, sampleOf, shapesOf, stateOf } = await import('../hooks/delivery-states.ts')
+const { DELIVERY_EVENTS, DELIVERY_STATES, DELIVERY_TABLE, SAMPLE_NOW, SUSPECT_CELLS, applyEvent, observe, observeHolds, rowOf, sampleBinding, sampleOf, shapesOf, stateOf } = await import('../hooks/delivery-states.ts')
 const { FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, MCP_SURFACE, OPEN_LIMIT_MS, claimMessages, disconnectMessages, dismissMessage, isMailboxSurfaceLost, isMailboxTarget, isOpen, messageReceipt, pruneMessages, queueMessage, rebindMessages, shownMessage } = await import('../hooks/messaging.ts')
 const { releaseMailboxMessage } = await import('../hooks/hook-messages.ts')
+const { restartMessages } = await import('../hooks/messaging.ts')
 const { mailboxAction } = await import('../scripts/board-messaging.ts')
-const { servePage } = await import('../hooks/serve.ts')
+const { rowReceipt, servePage } = await import('../hooks/serve.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
 const { EN } = await import('../hooks/strings-en.ts')
 const { ZH_TW } = await import('../hooks/i18n.ts')
@@ -49,7 +50,7 @@ test('every cell of the delivery table matches what hooks/messaging.ts does toda
   for (const [state, event] of SUSPECT_CELLS) assert.ok(DELIVERY_STATES.includes(state) && DELIVERY_EVENTS.includes(event), `${state} x ${event}`)
 })
 
-// The page's own card selector (receiptLine and claudeReceipt in hooks/serve.ts), run on the receipt the board sends.
+// The page's own card line (receiptLine and claudeReceipt in hooks/serve.ts), run on the receipt the board sends.
 const page = servePage(STRINGS.en, 'synthetic')
 const pageFunction = name => {
   const start = page.indexOf(`\n  function ${name}(`)
@@ -57,43 +58,70 @@ const pageFunction = name => {
   return page.slice(start, page.indexOf('\n  }\n', start) + 4)
 }
 const selector = page.match(/\n {2}var ENDED_UNCERTAIN_ERRORS = .*;\n/)[0]
-  + ['isEndedUncertainReceipt', 'releaseFinishedAttempt', 'receiptFailed', 'claudeReceipt', 'receiptLine'].map(pageFunction).join('\n')
-const node = (tag, cls, text) => ({ tag, cls, text, children: [], setAttribute() {} })
+  + ['isEndedUncertainReceipt', 'releaseFinishedAttempt', 'receiptFailed', 'shownLine', 'claudeReceipt', 'receiptLine'].map(pageFunction).join('\n')
+const node = (tag, cls, text) => {
+  const one = { tag, cls, text, children: [], attributes: {} }
+  one.setAttribute = (name, value) => { one.attributes[name] = value }
+  return one
+}
 const pageScope = {
   el: node, add: (parent, ...kids) => { parent.children.push(...kids.filter(Boolean)); return parent }, w: key => key, button: () => node('button'),
   dismissButton: () => node('button'), copy() {}, clearEnqueueResult() {}, isClaudeAgent: agent => agent === 'claude', agentName: agent => agent, sentLast: {}, messageAttempts: {},
 }
 runInNewContext(selector, pageScope)
-// The key of the card's line: the first part of the receipt element's text, which `w` leaves as the key.
-const lineOf = one => one == null ? null : (one.cls ?? '').split(' ').includes('receipt') ? one.text.split(' · ')[0] : one.children.map(lineOf).find(Boolean) ?? null
-// A message's receipt as rowReceipt in hooks/serve.ts sends it, on the default route.
-const cardOf = (name, shape, agent) => {
+// The card's receipt element, and its line: the element's text.
+const receiptElement = one => one == null ? null : (one.cls ?? '').split(' ').includes('receipt') ? one : one.children.map(receiptElement).find(Boolean) ?? null
+const lineOf = one => receiptElement(one)?.text ?? null
+// A message's receipt as the board sends it (rowReceipt in hooks/serve.ts), on the default route, when its last event happened.
+const receiptOf = (name, shape, s = EN) => {
   const { message, state } = sampleOf(name, shape)
-  const receipt = {
-    id: message.id, status: message.status, reply: shownMessage(message).reply, error: message.error, text: message.text,
-    ...(message.hasAccepted === true ? { hasAccepted: true } : {}), ...(isMailboxSurfaceLost(message, state.mailboxes) ? { isSurfaceLost: true } : {}),
-    isMailbox: isMailboxTarget(message.target), when: '',
-  }
-  return lineOf(pageScope.receiptLine(receipt, 'k', agent, true, undefined))
+  const one = { ...shownMessage(message), ...(isMailboxSurfaceLost(message, state.mailboxes) ? { isSurfaceLost: true } : {}) }
+  return rowReceipt(message.to.split(':')[0], 's1', [one], SAMPLE_NOW, s).receipt
 }
+const cardOf = (name, shape, agent, s = EN) => lineOf(pageScope.receiptLine(receiptOf(name, shape, s), 'k', agent, true))
 
 test('every card line in the delivery table is the one the page picks (#1543)', () => {
   const wrong = []
-  for (const name of DELIVERY_STATES) {
-    for (const shape of shapeNames(name)) {
-      const row = rowOf(name, shape)
-      for (const [key, agent] of [['card', 'codex'], ['claudeCard', 'claude']]) {
-        const shown = cardOf(name, shape, agent)
-        if (shown !== row[key]) wrong.push(`${label(name, shape)} ${key}: table ${row[key]}, page ${shown}`)
-        if (row[key] === null) continue
-        for (const [lang, table] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) if (table[row[key]] === undefined) wrong.push(`${label(name, shape)}: ${row[key]} is missing from ${lang}`)
+  for (const [lang, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
+    for (const name of DELIVERY_STATES) {
+      for (const shape of shapeNames(name)) {
+        const row = rowOf(name, shape)
+        const shown = receiptOf(name, shape, s)?.shown
+        if ((shown?.state ?? null) !== row.status) wrong.push(`${lang} ${label(name, shape)}: table ${row.status}, board ${shown?.state ?? null}`)
+        // The same words on a Claude card and any other, in the page's language.
+        for (const agent of ['codex', 'claude']) {
+          const drawn = cardOf(name, shape, agent, s)
+          if (drawn !== (shown?.line ?? null)) wrong.push(`${lang} ${label(name, shape)} ${agent}: the page draws ${drawn}, not ${shown?.line ?? null}`)
+        }
+        // A line in this language, not English, outside English.
+        if (s !== EN && shown && shown.line === receiptOf(name, shape, EN)?.shown?.line) wrong.push(`${lang} ${label(name, shape)}: the line is the English one`)
       }
     }
   }
   assert.deepEqual(wrong, [], wrong.join('\n'))
 })
 
-test('isDoubleSend names exactly the uncertain receipts that send a message accepted before again (#1553)', () => {
+test('the page colours the line by its tone and reads only a line that needs the person out at once', () => {
+  const wrong = []
+  const tones = new Set()
+  for (const name of DELIVERY_STATES) {
+    for (const shape of shapeNames(name)) {
+      const shown = receiptOf(name, shape)?.shown
+      if (shown === undefined) continue
+      tones.add(shown.tone)
+      for (const agent of ['codex', 'claude']) {
+        const one = receiptElement(pageScope.receiptLine(receiptOf(name, shape), 'k', agent, true))
+        const where = `${label(name, shape)} ${agent}`
+        if (one?.cls !== `receipt t-${shown.tone}`) wrong.push(`${where}: class ${one?.cls}, tone ${shown.tone}`)
+        if (one?.attributes.role !== (shown.tone === 'alert' ? 'alert' : 'status')) wrong.push(`${where}: role ${one?.attributes.role}, tone ${shown.tone}`)
+      }
+    }
+  }
+  assert.deepEqual(wrong, [], wrong.join('\n'))
+  assert.deepEqual([...tones].sort(), ['alert', 'done', 'wait'])
+})
+
+test('no uncertain receipt sends again a message its host accepted before, in any state of the table (#1553, #1407)', () => {
   const wrong = []
   for (const name of DELIVERY_STATES) {
     for (const shape of shapeNames(name)) {
@@ -115,27 +143,124 @@ test('isDoubleSend names exactly the uncertain receipts that send a message acce
         isSentAgain = [[after, at], [after, one.claimed + MAILBOX_LEASE_MS], [back(false), at + 1000], [back(true), at + 1000]]
           .some(([store, now]) => claimMessages(store, own, now, 'd4e5f6', binding.scope === 'mailbox' ? 'ba9876543210' : undefined).messages.some(item => item.id === message.id))
       }
-      const expected = (message.status === 'accepted' || message.hasAccepted === true) && isSentAgain
-      if (isDoubleSend(message, 'unsure') !== expected) wrong.push(`${label(name, shape)}: isDoubleSend ${isDoubleSend(message, 'unsure')}, accepted before and sent again ${expected}`)
-      for (const event of DELIVERY_EVENTS) if (event !== 'unsure' && isDoubleSend(message, event)) wrong.push(`${label(name, shape)}: isDoubleSend names ${event}`)
+      if ((message.status === 'accepted' || message.hasAccepted === true) && isSentAgain) wrong.push(`${label(name, shape)}: accepted before and sent again`)
     }
   }
   assert.deepEqual(wrong, [], wrong.join('\n'))
 })
 
+test('nothing a hook was handed before a board start goes out after it, whatever receipts its session sends since, in any state of the table (#1407)', () => {
+  const wrong = []
+  let checked = 0
+  for (const name of DELIVERY_STATES) {
+    for (const shape of shapeNames(name)) {
+      const { message, binding, state } = sampleOf(name, shape)
+      // Handed to a hook: a mailbox message with an ACK code. OpenCode's keep their own rules (#724, #1366).
+      if (!isMailboxTarget(message.target) || message.nonce === '' || message.to.startsWith('opencode:') || !isOpen(message)) continue
+      for (const errors of [[undefined], ['TIMEOUT', undefined], ['TURN_ABORTED', undefined]]) {
+        const start = message.updated + 1000
+        let after = restartMessages(state, start)
+        for (const [index, error] of errors.entries()) {
+          try {
+            after = messageReceipt(after, binding, { id: message.id, nonce: message.nonce, status: 'uncertain', ...(error === undefined ? {} : { error }) }, start + 1000 * (index + 1))
+          } catch (failure) {
+            assert.ok(isBoardError(failure), `${label(name, shape)}: ${failure.stack}`)
+          }
+        }
+        // Sent again: its own binding takes it, at once or after its lease, or its hook hands back its old claim first.
+        const own = { ...binding, surface: message.surface ?? binding.surface }
+        const late = start + 10 * MAILBOX_LEASE_MS
+        const back = releaseMailboxMessage(after, binding.agent, binding.session, message.ref ?? '', late)
+        const isSentAgain = [[after, start + 5000], [after, late], [back, late + 1000]]
+          .some(([store, now]) => claimMessages(store, own, now, 'd4e5f6', 'ba9876543210').messages.some(item => item.id === message.id))
+        if (isSentAgain) wrong.push(`${label(name, shape)}: sent again after a start, then ${errors.map(error => error ?? 'no error').join(', ')}`)
+        checked++
+      }
+    }
+  }
+  assert.ok(checked > 30, `only ${checked} checked`)
+  assert.deepEqual(wrong, [], wrong.join('\n'))
+})
+
+test('nothing a hook was handed goes out again after its lease, whatever receipts its session sends since, in any state of the table', () => {
+  const wrong = []
+  let checked = 0
+  for (const name of DELIVERY_STATES) {
+    for (const shape of shapeNames(name)) {
+      const { message, binding, state } = sampleOf(name, shape)
+      // A claim a hook holds: a mailbox message with an ACK code, not queued. OpenCode's keep their own rules (#724, #1366),
+      // and DeepSeek's keep the lease rule for now (#1843 answer 3, #1870).
+      if (!isMailboxTarget(message.target) || message.nonce === '' || message.status === 'queued' || /^(opencode|deepseek):/.test(message.to) || !isOpen(message)) continue
+      for (const errors of [[undefined], ['TIMEOUT', undefined], ['TURN_ABORTED', undefined]]) {
+        // Any write after the lease prunes the store first.
+        const lapsed = Math.max(message.claimed, message.updated) + MAILBOX_LEASE_MS
+        let after = pruneMessages(state, lapsed)
+        for (const [index, error] of errors.entries()) {
+          try {
+            after = messageReceipt(after, binding, { id: message.id, nonce: message.nonce, status: 'uncertain', ...(error === undefined ? {} : { error }) }, lapsed + 1000 * (index + 1))
+          } catch (failure) {
+            assert.ok(isBoardError(failure), `${label(name, shape)}: ${failure.stack}`)
+          }
+        }
+        // Sent again: its own binding takes it, before or after a prune, or its hook hands back its old claim first.
+        const own = { ...binding, surface: message.surface ?? binding.surface }
+        const late = lapsed + 10 * MAILBOX_LEASE_MS
+        const back = releaseMailboxMessage(after, binding.agent, binding.session, message.ref ?? '', late)
+        const isSentAgain = [[after, lapsed + 5000], [after, late], [pruneMessages(after, late), late], [back, late + 1000]]
+          .some(([store, now]) => claimMessages(store, own, now, 'd4e5f6', 'ba9876543210').messages.some(item => item.id === message.id))
+        if (isSentAgain) wrong.push(`${label(name, shape)}: sent again after its lease, then ${errors.map(error => error ?? 'no error').join(', ')}`)
+        checked++
+      }
+    }
+  }
+  assert.ok(checked > 20, `only ${checked} checked`)
+  assert.deepEqual(wrong, [], wrong.join('\n'))
+})
+
+test('the page keeps the attempt id of a message that reads HOLDER_LOST', () => {
+  // A hook's claim whose lease passed, as the store holds it once a write pruned it.
+  const { message, binding, state } = sampleOf('leased')
+  const pruned = pruneMessages(state, message.claimed + MAILBOX_LEASE_MS)
+  const lost = pruned.messages.find(one => one.id === message.id)
+  assert.deepEqual([lost.status, lost.error, lost.text], ['uncertain', 'HOLDER_LOST', message.text])
+  // The card reads Unsure, and the page keeps the id its press made, so a press again sends that id and not a new message.
+  assert.equal(cardOf('holderLost', undefined, 'codex'), EN.statusUnsure(EN.statusWhyHolderLost))
+  pageScope.messageAttempts.k = { id: lost.id, text: lost.text }
+  pageScope.releaseFinishedAttempt({ id: lost.id, status: lost.status, error: lost.error, isMailbox: true }, false)
+  assert.equal(pageScope.messageAttempts.k?.id, lost.id)
+  delete pageScope.messageAttempts.k
+  const again = queueMessage(pruned, { id: lost.id, target: lost.target, turn: lost.turn, text: lost.text }, 'board', binding, message.claimed + MAILBOX_LEASE_MS + 1)
+  assert.equal(again.message, lost)
+  assert.equal(again.state, pruned)
+})
+
 test('combined flag shapes predict both card and transitions when independent flags interact (#1560)', () => {
   assert.ok('acceptedBefore+onHook' in shapesOf('turnEnded'))
   const hookAfterAccept = rowOf('turnEnded', 'acceptedBefore+onHook')
-  assert.equal(hookAfterAccept.card, 'messagesAcceptedUnconfirmed')
+  assert.equal(hookAfterAccept.status, 'unsure')
   assert.equal(hookAfterAccept.on.accept, 'handed')
   assert.equal(hookAfterAccept.on.unsure, 'leased')
   assert.equal(observe('turnEnded', 'accept', 'acceptedBefore+onHook'), 'handed')
 
   assert.equal(rowOf('leased', 'otherSurface+lastRepeat').on.claimLate, 'leased')
-  assert.equal(rowOf('inDoubt', 'acceptedBefore+otherError').card, 'messagesAcceptedUnconfirmed')
-  assert.equal(rowOf('acceptedLost', 'awaitsAck+otherError').card, 'messagesHandedNow')
+  assert.equal(rowOf('inDoubt', 'acceptedBefore+otherError').status, 'unsure')
+  assert.equal(rowOf('acceptedLost', 'awaitsAck+otherError').status, 'unsure')
+  // Refused after something took it: Unsure, whether it was stopped or refused.
+  assert.equal(rowOf('rejected', 'acceptedBefore+stopped').status, 'unsure')
   assert.equal(rowOf('turnEnded', 'acceptedBefore+onWake').on.openLimit, 'wakeExpired')
   assert.equal('acceptedBefore+onWake' in shapesOf('expired'), false)
+})
+
+test('the delivery table held shape for the Codex desktop app keeps claim queued and rejects at the limits (#1775)', () => {
+  assert.ok('appHeld' in shapesOf('queued'), 'queued defines the appHeld shape')
+  assert.ok(DELIVERY_TABLE.queued.shapes && 'appHeld' in DELIVERY_TABLE.queued.shapes, 'DELIVERY_TABLE.queued.shapes defines appHeld')
+  const row = rowOf('queued', 'appHeld')
+  assert.equal(row.on.claim, 'queued')
+  assert.equal(row.on.openLimit, 'rejected')
+  assert.equal(row.on.dayLimit, 'rejected')
+  assert.equal(observe('queued', 'claim', 'appHeld'), 'queued')
+  assert.equal(observe('queued', 'openLimit', 'appHeld'), 'rejected')
+  assert.equal(observe('queued', 'dayLimit', 'appHeld'), 'rejected')
 })
 
 // A small seeded generator, so every run plays the same orders.
@@ -146,7 +271,7 @@ const generator = seed => () => {
   return ((t ^ (t >>> 14)) >>> 0) / 4294967296
 }
 
-const EVERY_KIND = ['send', 'send', 'claim', 'claim', 'claim', 'pull', 'wake', 'receipt', 'receipt', 'hook', 'hook', 'dismiss', 'disconnect', 'leave', 'endMailbox', 'tick', 'tick', 'tick']
+const EVERY_KIND = ['send', 'send', 'claim', 'claim', 'claim', 'pull', 'wake', 'receipt', 'receipt', 'hook', 'hook', 'dismiss', 'disconnect', 'leave', 'endMailbox', 'restart', 'tick', 'tick', 'tick']
 
 test('short random event orders never lose a message, never send one twice, never start one in a running turn, and never open a finished one (#1543)', () => {
   const reached = new Set()
@@ -158,13 +283,15 @@ test('short random event orders never lose a message, never send one twice, neve
     const hex = size => Array.from({ length: size }, () => Math.floor(random() * 16).toString(16)).join('')
     const codexBox = sampleBinding('codex', 'mailbox')
     const opencodeBox = sampleBinding('opencode', 'mailbox')
+    const deepseekBox = sampleBinding('deepseek', 'mailbox')
     let live = sampleBinding('codex', 'live')
-    let state = { messages: [], mailboxes: [codexBox, opencodeBox] }
+    let state = { messages: [], mailboxes: [codexBox, opencodeBox, deepseekBox] }
     let now = SAMPLE_NOW
-    // Each order sends and takes through some of the receivers: all three, or one alone, so a hook's claim can lapse to its last repeat.
-    const using = pick([['live', 'codexBox', 'opencodeBox'], ['live', 'codexBox'], ['codexBox'], ['opencodeBox']])
-    const receiver = () => ({ live, codexBox, opencodeBox })[pick(using)]
-    // Some orders only send, claim and wait, so a hook's claim can lapse to its last repeat.
+    // Each order sends and takes through some of the receivers: all of them, or one alone, so a DeepSeek claim can lapse to its
+    // last repeat and another hook's claim can read HOLDER_LOST.
+    const using = pick([['live', 'codexBox', 'opencodeBox', 'deepseekBox'], ['live', 'codexBox'], ['codexBox'], ['opencodeBox'], ['deepseekBox']])
+    const receiver = () => ({ live, codexBox, opencodeBox, deepseekBox })[pick(using)]
+    // Some orders only send, claim and wait, so a DeepSeek claim can lapse to its last repeat.
     const kinds = pick([EVERY_KIND, EVERY_KIND, EVERY_KIND, ['send', 'claim', 'claim', 'tick']])
     const seen = new Map()
     for (let step = 0; step < 40; step++) {
@@ -178,10 +305,10 @@ test('short random event orders never lose a message, never send one twice, neve
           const binding = receiver()
           const id = `m${run}x${step}`
           state = queueMessage(state, { id, target: binding.id, turn: binding.turn, text: `words ${step}` }, 'board', binding, now).state
-          seen.set(id, { handed: 0, nonce: '', isAccepted: false, redelivered: 0 })
+          seen.set(id, { handed: 0, nonce: '', isAccepted: false, redelivered: 0, handedBeforeStart: false })
         } else if (kind === 'claim' || kind === 'pull') {
           // A claim by a receiver, named as a hook names it; or the agent's own MCP pull, an unnamed claim on its mailbox.
-          const binding = kind === 'pull' ? { ...pick([codexBox, opencodeBox]), surface: MCP_SURFACE } : receiver()
+          const binding = kind === 'pull' ? { ...pick([codexBox, opencodeBox, deepseekBox]), surface: MCP_SURFACE } : receiver()
           const result = claimMessages(state, binding, now, hex(6), kind === 'claim' && binding.scope === 'mailbox' ? hex(12) : undefined)
           state = result.state
           sent = result.messages
@@ -198,20 +325,17 @@ test('short random event orders never lose a message, never send one twice, neve
             where += ` ${event} ${one.id}`
             const status = { accept: 'accepted', ack: 'acknowledged', reject: 'rejected', fail: 'uncertain', timeout: 'uncertain', unsure: 'uncertain' }[event]
             const error = { fail: 'TURN_ABORTED', timeout: 'TIMEOUT' }[event]
-            const binding = one.to.startsWith('opencode:') ? opencodeBox : live
-            // The one receipt that sends a message twice today (#1553) is left out.
-            if (!isDoubleSend(one, event)) {
-              state = event === 'dismiss' ? dismissMessage(state, one.id, now) : messageReceipt(state, binding, {
-                id: one.id, nonce: one.nonce, status, ...(event === 'ack' ? { reply: `ACK ${one.nonce}` } : {}), ...(error === undefined ? {} : { error }),
-              }, now)
-            }
+            const binding = one.to.startsWith('opencode:') ? opencodeBox : one.to.startsWith('deepseek:') ? deepseekBox : live
+            state = event === 'dismiss' ? dismissMessage(state, one.id, now) : messageReceipt(state, binding, {
+              id: one.id, nonce: one.nonce, status, ...(event === 'ack' ? { reply: `ACK ${one.nonce}` } : {}), ...(error === undefined ? {} : { error }),
+            }, now)
           }
         } else if (kind === 'hook') {
           // A hook's own call on a mailbox message, through the board's handler: OpenCode's plugin marks the wake it starts, a
           // hook hands its claim back (OpenCode's plugin says when it never sent it), or a caller that can ACK takes it.
           const one = pick(state.messages.filter(message => isMailboxTarget(message.target) && message.nonce !== ''))
           if (one !== undefined) {
-            const agent = one.to.startsWith('opencode:') ? 'opencode' : 'codex'
+            const agent = one.to.startsWith('opencode:') ? 'opencode' : one.to.startsWith('deepseek:') ? 'deepseek' : 'codex'
             const action = pick(agent === 'opencode' ? ['mailbox-attempt', 'mailbox-release', 'mailbox-accept'] : ['mailbox-release', 'mailbox-accept'])
             body = action === 'mailbox-accept' ? { agent, session: 's1', id: one.id, nonce: one.nonce, awaitsAck: true }
               : { agent, session: 's1', ref: one.ref ?? hex(12), ...(action === 'mailbox-release' && agent === 'opencode' && random() < 0.5 ? { unsent: true } : {}) }
@@ -224,7 +348,11 @@ test('short random event orders never lose a message, never send one twice, neve
           live = { ...live, id: `c${run}x${step}`, turn: `t${run}x${step}` }
           if (kind === 'leave') state = rebindMessages(state, live, id => id === live.id)
         } else if (kind === 'endMailbox') {
-          state = disconnectMessages(state, pick([codexBox, opencodeBox]).id, now)
+          state = disconnectMessages(state, pick([codexBox, opencodeBox, deepseekBox]).id, now)
+        } else if (kind === 'restart') {
+          // The board starts again and loads the store (#1407).
+          state = restartMessages(state, now)
+          for (const record of seen.values()) if (record.handed > 0) record.handedBeforeStart = true
         } else {
           // Mostly short steps and lease ends, so a hook's claim can lapse up to its last repeat.
           now += pick([1000, MAILBOX_LEASE_MS, MAILBOX_LEASE_MS, MAILBOX_LEASE_MS, OPEN_LIMIT_MS + 1000, FINISHED_KEEP_MS + 1000])
@@ -256,12 +384,16 @@ test('short random event orders never lose a message, never send one twice, neve
         // Never sent twice: a message goes out again only while nobody took it, with its first ACK code. Taken again after its
         // lease passed, a started wake never goes, and a hook's claim says it is a repeat, up to the last; handed back by its
         // hook, it goes as it was.
+        // Nothing handed out before a board start goes out after it, but OpenCode's, which keep their own rules (#1407).
+        if (!one.to.startsWith('opencode:')) assert.ok(!record.handedBeforeStart, `${where}: ${one.id} was handed out before a board start and again after it`)
         if (record.handed > 0) {
-          assert.ok(!record.isAccepted, `${where}: ${one.id} was handed out again after it was accepted`)
+          assert.ok(!record.isAccepted,`${where}: ${one.id} was handed out again after it was accepted`)
           assert.equal(one.nonce, record.nonce, `${where}: ${one.id} went out again under a new ACK code`)
           if (earlier.status === 'queued') assert.equal(one.redelivered ?? 0, record.redelivered, `${where}: ${one.id} came back with ${one.redelivered} repeats`)
           else {
             assert.equal(earlier.attempted, undefined, `${where}: ${one.id}, a started wake, went out again`)
+            // Only DeepSeek's and OpenCode's claims are taken again; any other hook's reads HOLDER_LOST after its lease (#1843).
+            assert.ok(/^(opencode|deepseek):/.test(one.to), `${where}: ${one.id}, a hook's claim, went out again after its lease`)
             if (!one.to.startsWith('opencode:')) assert.ok(one.redelivered === record.redelivered + 1 && one.redelivered <= MAILBOX_REDELIVERIES, `${where}: ${one.id} went out again ${one.redelivered} times`)
           }
         }

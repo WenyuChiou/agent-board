@@ -1,7 +1,9 @@
-import { clipped, plain, redact } from './board'
+import { boardItems, clipped, plain, redact } from './board'
 import type { PendingTurn } from './board'
 import { stampOf, withoutStamp } from './done-stamp'
 import type { Lang, Strings } from './i18n'
+import { latestMessage, messageStatus } from './message-status'
+import type { StatusState } from './message-status'
 import { localDay, parseJournal } from './journal'
 import { isTaskComplete, parseProgress } from './parse'
 import { serveModel } from './serve'
@@ -24,6 +26,10 @@ export type FinishedTask = {
   steps: FinishedStep[]
 }
 
+// The status of the last message the board sent there (#1843 B4), in the words the page and the terminal use. Absent
+// with no such message, or one taken back after it was handed out.
+type BoardMessage = { state: StatusState; line: string; updatedAt: string | null }
+
 type BoardNeed = {
   kind: 'question' | 'stuck' | 'task'
   agent: string
@@ -36,6 +42,7 @@ type BoardNeed = {
   age: string
   // A Codex card with no process record, quiet past two minutes (#1092): the window may be closed. Never a proof.
   mayBeClosed: boolean
+  message?: BoardMessage
 }
 
 type BoardRow = {
@@ -50,6 +57,7 @@ type BoardRow = {
   // The row's one derived state (#1317), when buildView set one; its age is `age`.
   state?: string
   isUnsure: boolean
+  message?: BoardMessage
 }
 
 export type BoardDocument = {
@@ -292,12 +300,20 @@ export const boardDocument = (
   const source = (ref: Ref): Source => sources.get(ref.sourceKey ?? ref.key) ?? sources.get(ref.key.replace(/^stuck:/, '')) ?? {}
   const age = (ref: Ref): string => clean(source(ref).when || s.pgUnknownAge)
   const original = new Map([...view.due, ...view.groups.flatMap(one => one.rows), ...view.idle, ...view.stopped].map(row => [`row:${row.key}`, row]))
+  // A question card's session, keyed as the page keys its cards (`ask:<key>@<hideKey>`, and the older ones' own keys).
+  const asked = new Map(boardItems(view, pending, true, true).flatMap(item => item.type === 'ask' ? [[item.key, item.ask] as const] : []))
+  const messageOf = (agent: string, session: string | undefined, reportedAt: number | undefined, answers?: string): { message?: BoardMessage } => {
+    const one = latestMessage(messaging?.messages ?? [], agent, session, answers)
+    const status = one === undefined ? null : messageStatus(one, now, s, reportedAt)
+    return status === null ? {} : { message: { state: status.state, line: clean(status.line), updatedAt: iso(status.updatedAt) } }
+  }
   const row = (ref: Ref): BoardRow => {
     const one = source(ref)
     const steps = one.steps ?? []
     const current = steps.find(step => step.isCurrent) ?? steps.find(step => step.status !== 'done' && step.status !== 'cancelled')
     // The derived state, from the served row or the view's own row (#1317).
-    const derived = one.rowState ?? original.get(ref.sourceKey ?? ref.key)?.rowState
+    const mine = original.get(ref.sourceKey ?? ref.key)
+    const derived = one.rowState ?? mine?.rowState
 
     return {
       agent: clean(ref.agent),
@@ -313,6 +329,7 @@ export const boardDocument = (
       // A row the derivation calls 'unsure' is unsure by its age, not only by
       // an unknown one: quiet past 30 min with no live process (#1317).
       isUnsure: !one.when || one.when === s.pgUnknownAge || original.get(ref.sourceKey ?? ref.key)?.hasFutureTime === true || derived === 'unsure',
+      ...(mine === undefined ? {} : messageOf(mine.agent, mine.nativeSession, mine.at)),
     }
   }
   const needsRefs: Ref[] = group === undefined ? grouped.asks.map(ask => page.needs.cards.find(ref => ref.key === ask.key) ?? {
@@ -325,6 +342,7 @@ export const boardDocument = (
     const one = source(ref)
     const isStuck = ref.kind === 'stuck'
     const note = isStuck ? one.stuck?.reason : one.note || one.context
+    const item = asked.get(ref.sourceKey ?? ref.key) ?? asked.get(one.key ?? '')
 
     return {
       kind: clean(ref.kind),
@@ -337,6 +355,9 @@ export const boardDocument = (
       askedAt: iso(one.at ?? ref.at),
       age: age(ref),
       mayBeClosed: !isStuck && one.mayBeClosed === true,
+      // A question's card shows what the page's does: the answer sent to it, or the last message to its session that
+      // answers no question; a kept question with no session, the answer sent to it.
+      ...(isStuck ? {} : messageOf(item?.agent ?? one.agent ?? ref.agent, item?.nativeSession, item?.at ?? one.at, one.questionId ?? item?.questionId)),
     }
   }
   const needs = needsRefs.filter(ref => !handled.has(ref.key)).map(asNeed)
@@ -344,9 +365,9 @@ export const boardDocument = (
   const byTime = (left: Ref, right: Ref): number => right.at - left.at
   const workingKeys = new Set(page.working.map(ref => ref.key))
   const working = page.working.map(row)
-  const waiting = [...page.all.open, ...page.own.open].filter(ref => !workingKeys.has(ref.key)).sort(byTime).map(row)
-  const stopped = [...page.all.stopped, ...page.own.stopped].sort(byTime).map(row)
-  const doneRecently = [...page.all.done, ...page.own.done].sort(byTime).map(ref => ({
+  const waiting = page.all.open.filter(ref => !workingKeys.has(ref.key)).sort(byTime).map(row)
+  const stopped = page.all.stopped.slice().sort(byTime).map(row)
+  const doneRecently = page.all.done.slice().sort(byTime).map(ref => ({
     project: named(ref.repo || source(ref).project || ref.project),
     title: clean(source(ref).title || ''),
     agent: clean(ref.agent),

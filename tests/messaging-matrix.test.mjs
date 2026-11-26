@@ -314,7 +314,7 @@ test("a surface note whose file is missing shows no live note on that surface's 
 
 test('shape 23 matrix: each displayed surface names its registered id and only its own recorded routes', async () => {
   const records = (await readReceiverRecords(root)).filter(one => one.routes)
-  const { SURFACE_IDS, routeRecord } = await import('../hooks/messaging.ts')
+  const { SURFACE_IDS, routeRecord, routeLine } = await import('../hooks/messaging.ts')
   assert.ok(SURFACE_IDS, 'the shared surface ids are exported')
   const ids = new Set(Object.values(SURFACE_IDS))
   let checked = 0
@@ -328,7 +328,8 @@ test('shape 23 matrix: each displayed surface names its registered id and only i
         const row = renderMatrix([record], file, root).split('\n').find(line => line.startsWith(`| ${record.host} | ${surface.name} |`))
         assert.ok(row, `${record.source}: missing matrix row for ${surface.name}`)
         const cell = row.slice(2, -2).split(' | ')[7 + index]
-        assert.ok(cell.startsWith(`${route.line} · `), `${record.source}: wrong ${state} line on ${surface.name}`)
+        // A surface may have its own line on a route (#319): the row shows the line the card on that surface reads.
+        assert.ok(cell.startsWith(`${routeLine(route, surface.id)} · `), `${record.source}: wrong ${state} line on ${surface.name}`)
         // A route's own note, or a surface's own note on it, shows on that surface's row only, and an unrecorded route shows none.
         for (const note of new Set(Object.values(record.routes).flatMap(one => [one.record, ...Object.values(one.surfaceRecords ?? {})]).filter(Boolean))) {
           assert.equal(cell.includes(note), note === routeRecord(route, surface.id) && route.surfaces.includes(surface.id), `${record.source}: wrong ${state} note on ${surface.name}`)
@@ -345,4 +346,33 @@ test('the messaging matrix has no Gemini CLI row (#1327)', async () => {
   assert.ok(!records.some(one => one.agent === 'gemini' || one.host === 'Gemini CLI'))
   assert.ok(!receiverRows(records).some(row => row.host === 'Gemini CLI'))
   assert.ok(!/^\| Gemini CLI \|/m.test(read(join(root, 'docs/MESSAGING.md'))))
+})
+
+test('a send-to-<agent>-live validation note verifies that agent, Codex daemon idle prints afterWait, and Claude Code CLI prints 2026-11-16 Verified (#1814)', async () => {
+  await fixture(async directory => {
+    for (const file of ['2026-11-03-send-to-synthetic-live.md', '2026-11-03-send-to-codex-live.md', '2026-11-03-send-to-synthetic-hostile-live.md', '2026-11-03-send-to-synthetic.md']) {
+      writeFileSync(join(directory, 'docs/validation', file), '# Synthetic fixture\n')
+    }
+    const base = {
+      host: 'Synthetic Host', agent: 'synthetic', tier: 1, primitive: '[P1]', isImplemented: true,
+      surfaces: [
+        { name: 'CLI', evidence: 'docs/validation/2026-11-03-send-to-synthetic-live.md' },
+        { name: 'Other agent', evidence: 'docs/validation/2026-11-03-send-to-codex-live.md' },
+        { name: 'Longer agent', evidence: 'docs/validation/2026-11-03-send-to-synthetic-hostile-live.md' },
+        { name: 'Not live', evidence: 'docs/validation/2026-11-03-send-to-synthetic.md' },
+      ],
+    }
+    assert.deepEqual(receiverRows([{ ...base, source: 'scripts/synthetic.mjs' }], directory).map(row => row.status), ['Verified', 'Implemented', 'Implemented', 'Implemented'])
+    // Omitting `agent` falls back to host slug matching only.
+    const noAgent = { ...base, agent: undefined, source: 'scripts/synthetic-no-agent.mjs' }
+    assert.deepEqual(receiverRows([noAgent], directory).map(row => row.status), ['Implemented', 'Implemented', 'Implemented', 'Implemented'])
+  })
+  const records = await readReceiverRecords(root)
+  const doc = read(join(root, 'docs/MESSAGING.md'))
+  assert.ok(doc.includes('`afterWait` (after a wait of about 10 minutes)'), 'docs/MESSAGING.md intro documents afterWait')
+  for (const file of ['docs/MESSAGING.md', 'docs/MESSAGING.zh-TW.md', 'docs/MESSAGING.zh-CN.md']) {
+    assert.ok(renderMatrix(records, file, root).includes('`afterWait`'), `${file} intro includes afterWait`)
+  }
+  assert.ok(doc.includes('| Codex | Daemon | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | [scripts/codex-receiver.mjs](../scripts/codex-receiver.mjs) | afterWait · [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | stepEnd · no live note | none · no live note |'))
+  assert.ok(doc.includes('| Claude Code | CLI | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | stepEnd · [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | none · no live note |'))
 })

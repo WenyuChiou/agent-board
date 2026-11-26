@@ -544,7 +544,8 @@ test('the launcher finds an older installed script and starts setup --update wit
   const result = f.run(pkg, ['--data-dir', root, '--print'], terminalLauncher(f), 'y\n')
   success(result)
   assert.equal(result.stdout.split('[y/N]').length - 1, 1, result.stdout)
-  for (const words of ['"Check for new versions"', 'the list of your Codex sessions']) assert.ok(result.stdout.includes(words), result.stdout)
+  assert.match(result.stdout, /Code your agents run changes: .*agent-board\.mjs/, result.stdout)
+  for (const unshipped of ['"Check for new versions"', 'the list of your Codex sessions']) assert.equal(result.stdout.includes(unshipped), false, result.stdout)
   assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), "the update wrote this package's board script")
   assert.equal(typeof JSON.parse(readFileSync(record, 'utf8')).version, 'string', 'the record names the version')
   assert.ok(result.stdout.split('Agent Board updated to')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the update\n${result.stdout}`)
@@ -553,17 +554,74 @@ test('the launcher finds an older installed script and starts setup --update wit
   assert.deepEqual(existsSync(join(f.home, '.agent-board')) ? filesUnder(join(f.home, '.agent-board')) : [], [], 'the update stayed in the install root')
 }))
 
-// #1314: declining is not an error for the board: the script stays as it was and the board opens on it.
+// #1314, #1802: declining is not an error for the board: the script stays as it was, setup already printed how to
+// update with --update, so the duplicate preview/--apply notice is not printed in the same run, and the board still opens.
 test('a person who declines the launcher\'s update keeps the older script and the board still opens', () => fixture(f => {
   const { pkg, root, script, record, text } = olderInstall(f)
-  const result = f.run(pkg, ['--data-dir', root, '--print'], terminalLauncher(f), 'n\n')
-  success(result)
-  assert.equal(result.stdout.split('[y/N]').length - 1, 1, result.stdout)
-  assert.equal(readFileSync(script, 'utf8'), text, 'the older script is left as it was')
-  assert.equal(JSON.parse(readFileSync(record, 'utf8')).version, undefined, 'the record is left as it was')
-  assert.ok(result.stdout.includes('Nothing changed. To update, run this in a terminal and answer y:'), result.stdout)
-  assert.ok(result.stderr.includes('To update it, preview'), `a no leaves the notice too\n${result.stderr}`)
-  assert.ok(result.stdout.split('Nothing changed.')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the answer\n${result.stdout}`)
+  for (const input of ['n\n', '']) {
+    const result = f.run(pkg, ['--data-dir', root, '--print'], terminalLauncher(f), input)
+    success(result)
+    assert.equal(result.stdout.split('[y/N]').length - 1, 1, result.stdout)
+    assert.equal(readFileSync(script, 'utf8'), text, 'the older script is left as it was')
+    assert.equal(JSON.parse(readFileSync(record, 'utf8')).version, undefined, 'the record is left as it was')
+    const updateLines = `${result.stdout}\n${result.stderr}`.split(/\r?\n/).filter(line => /\bTo update\b/.test(line))
+    assert.equal(updateLines.length, 1, `declining prints exactly one update line\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    assert.match(updateLines[0], /^Nothing changed\. To update, run this in a terminal and answer y: .* --update/)
+    assert.equal(updateLines[0].includes('--from-launcher'), false, updateLines[0])
+    assert.equal(result.stderr.includes('To update it, preview'), false, `a declined update skips the duplicate preview notice\n${result.stderr}`)
+    assert.equal(result.stderr, '', `unexpected stderr on declined update\n${result.stderr}`)
+    assert.ok(result.stdout.split('Nothing changed.')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the answer\n${result.stdout}`)
+  }
+}))
+
+// #1802: the launcher tells setup `--update` via `--from-launcher` (never via env), and setup strips that flag
+// before starting its helper, the Codex bootstrap board, or any other child.
+test('the launcher passes --from-launcher to setup --update only, without leaking it to setup\'s children or the board', () => fixture(f => {
+  const { pkg, root, script } = olderInstall(f)
+  const terminal = terminalLauncher(f)
+  const logFile = join(f.box, 'child-spy.jsonl')
+  const spy = join(f.box, 'child-spy.cjs')
+  save(logFile, '')
+  save(spy, `require('node:fs').appendFileSync(${JSON.stringify(logFile)}, JSON.stringify({ script: process.argv[1] || '', argv: process.argv.slice(2), launcherEnv: Object.keys(process.env).filter(k => /LAUNCHER/i.test(k)) }) + '\\n')\n`)
+  const spyEnv = { ...terminal, NODE_OPTIONS: `${terminal.NODE_OPTIONS} --require ${JSON.stringify(spy)}` }
+  const takeSpy = () => {
+    const events = readFileSync(logFile, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    writeFileSync(logFile, '')
+    return events
+  }
+  const assertIsolated = (events, label) => {
+    for (const entry of events.filter(one => !/[\\/]setup-agent\.mjs$/.test(one.script))) {
+      assert.equal(entry.argv.includes('--from-launcher'), false, `${label}: --from-launcher leaked to ${entry.script}: ${JSON.stringify(entry.argv)}`)
+      assert.deepEqual(entry.launcherEnv, [], `${label}: launcher env leaked to ${entry.script}: ${JSON.stringify(entry.launcherEnv)}`)
+    }
+  }
+  const declined = f.run(pkg, ['--data-dir', root, '--print'], spyEnv, 'n\n')
+  success(declined)
+  assert.equal(`${declined.stdout}\n${declined.stderr}`.split(/\r?\n/).filter(line => /\bTo update\b/.test(line)).length, 1, `${declined.stdout}\n${declined.stderr}`)
+  assert.equal(declined.stderr, '', declined.stderr)
+  const declineEvents = takeSpy()
+  const setupDecline = declineEvents.filter(one => /[\\/]setup-agent\.mjs$/.test(one.script))
+  assert.equal(setupDecline.length, 1, JSON.stringify(declineEvents))
+  assert.ok(setupDecline[0].argv.includes('--update') && setupDecline[0].argv.includes('--from-launcher'), JSON.stringify(setupDecline[0]))
+  assert.deepEqual(setupDecline[0].launcherEnv, [])
+  assert.ok(declineEvents.some(one => /[\\/]setup-codex\.mjs$/.test(one.script)), 'preview helper ran')
+  assert.ok(declineEvents.some(one => one.argv.includes('--codex-setup')), 'bootstrap board ran for preview')
+  assert.equal(declineEvents.filter(one => resolve(one.script) === resolve(script)).length, 1, 'installed board opened')
+  assertIsolated(declineEvents, 'declined')
+
+  // Even with the old env variable set externally, direct `setup --update` without `--from-launcher` still exits 1 on decline.
+  const direct = f.run(pkg, ['setup', '--update', '--agent', 'opencode', '--data-dir', root], { AGENT_BOARD_SETUP_TTY: '1', AGENT_BOARD_TEST_PID: String(process.pid), AGENT_BOARD_LAUNCHER_UPDATE: '1' }, 'n\n')
+  assert.ifError(direct.error)
+  assert.equal(direct.status, 1, direct.stderr)
+  takeSpy()
+
+  const accepted = f.run(pkg, ['--data-dir', root, '--print'], spyEnv, 'y\n')
+  success(accepted)
+  const acceptEvents = takeSpy()
+  assert.ok(acceptEvents.some(one => /[\\/]setup-codex\.mjs$/.test(one.script) && one.argv.includes('--apply')), 'apply helper ran')
+  assert.ok(acceptEvents.some(one => one.argv.includes('--codex-setup') && one.argv.includes('--apply')), 'bootstrap board ran for apply')
+  assert.equal(acceptEvents.filter(one => resolve(one.script) === resolve(script)).length, 1, 'updated board opened')
+  assertIsolated(acceptEvents, 'accepted')
 }))
 
 // #1314: Ctrl-C at setup's question stops the launcher too, so no board opens behind it. On Windows a process that stops
@@ -632,6 +690,7 @@ test('the launcher\'s update runs for the view options that take no value', () =
     success(declined)
     assert.equal(declined.stdout.split('[y/N]').length - 1, 1, `${list.join(' ')} did not ask once\n${declined.stdout}\n${declined.stderr}`)
     assert.equal(readFileSync(script, 'utf8'), text, `${list.join(' ')}: declined, the older script is left as it was`)
+    assert.equal(declined.stderr.includes('To update it, preview'), false, `${list.join(' ')}: ${declined.stderr}`)
     assert.ok(declined.stdout.split('Nothing changed.')[1]?.split('\n').slice(1).join('\n').trim(), `${list.join(' ')}: the board opened after the answer\n${declined.stdout}`)
   }
   const result = f.run(pkg, ['--data-dir', root, '--print', '--lan', '--no-open'], terminal, 'y\n')
@@ -643,17 +702,51 @@ test('the launcher\'s update runs for the view options that take no value', () =
   assert.ok(result.stdout.split('Agent Board updated to')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the update\n${result.stdout}`)
 }))
 
-// #1783: a view option that takes a value (#1789), any option that is not a view, `--` and any other word keep the
-// notice: the board acts on them, or reads a value the launcher does not check. A plain view afterwards still updates.
-test('an option that takes a value, or any word that is not a view, keeps the notice and starts no setup', () => fixture(f => {
+// #1789: a view option that takes a valid value asks once in a terminal; declined, the script stays without the
+// duplicate notice and the board opens; accepted, the update runs and the board opens.
+test('the launcher\'s update runs for every view option that takes a value', () => fixture(f => {
+  const { pkg, root, script, record, text } = olderInstall(f)
+  const terminal = terminalLauncher(f)
+  for (const list of [
+    ['--print', '--idle-minutes', '0.02'],
+    ['--print', '--lang', 'auto'],
+    ['--print', '--lang', 'fr'],
+    ['--print', '--theme', 'dark', '--quiet-board'],
+  ]) {
+    const declined = f.run(pkg, ['--data-dir', root, ...list], terminal, 'n\n')
+    success(declined)
+    assert.equal(declined.stdout.split('[y/N]').length - 1, 1, `${list.join(' ')} did not ask once\n${declined.stdout}\n${declined.stderr}`)
+    assert.equal(readFileSync(script, 'utf8'), text, `${list.join(' ')}: declined, the older script is left as it was`)
+    assert.equal(declined.stderr.includes('To update it, preview'), false, `${list.join(' ')}: ${declined.stderr}`)
+    assert.ok(declined.stdout.split('Nothing changed.')[1]?.split('\n').slice(1).join('\n').trim(), `${list.join(' ')}: the board opened after the answer\n${declined.stdout}`)
+  }
+  const accepted = f.run(pkg, ['--data-dir', root, '--print', '--lan', '10.0.0.5', '--port', '8080', '--idle-minutes', '30', '--lang', 'en'], terminal, 'y\n')
+  success(accepted)
+  assert.equal(accepted.stdout.split('[y/N]').length - 1, 1, `${accepted.stdout}\n${accepted.stderr}`)
+  assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), "the update wrote this package's board script")
+  assert.equal(typeof JSON.parse(readFileSync(record, 'utf8')).version, 'string', 'the record names the version')
+  assert.equal(accepted.stderr.includes('To update it, preview'), false, accepted.stderr)
+  assert.ok(accepted.stdout.split('Agent Board updated to')[1]?.split('\n').slice(1).join('\n').trim(), `the board opened after the update\n${accepted.stdout}`)
+}))
+
+// #1783, #1789: a view option with an invalid or missing value, any option that is not a view, `--` and any other
+// word keep the notice and start no setup. A plain view afterwards still updates.
+test('an invalid view value, or any word that is not a view, keeps the notice and starts no setup', () => fixture(f => {
   const { pkg, root, script, text } = olderInstall(f)
   const terminal = terminalLauncher(f)
   const lists = [
-    ['--print', '--idle-minutes', '0.02'], ['--print', '--lang', 'auto'], ['--print', '--theme', 'dark'], ['--print', '--port', '0'],
-    ['--print', '--lan', '10.0.0.5'], ['--port', '--print'], ['--print', '--days', '3'], ['--print', '--'],
+    ['--html', '--port', '0'], ['--print', '--port', '70000'], ['--print', '--port', '08080'], ['--print', '--port'], ['--port', '--print'],
+    ['--print', '--idle-minutes', '600000'], ['--print', '--idle-minutes', '-1'], ['--print', '--idle-minutes', 'soon'], ['--print', '--idle-minutes'],
+    ['--print', '--lang'], ['--print', '--lang', '-x'], ['--print', '--theme'], ['--print', '--theme', '--quiet-board'],
+    ['--print', '--days', '3'], ['--print', '--'],
   ].map(list => ['--data-dir', root, ...list])
-  // The folder selector between a value option and its value.
-  lists.push(['--port', '--data-dir', root, '8080', '--print'])
+  // The folder selector between a value option (or --lan with an address) and its value must not be stripped before checking.
+  lists.push(
+    ['--port', '--data-dir', root, '8080', '--print'],
+    ['--lang', '--data-dir', root, 'en', '--print'],
+    ['--theme', '--data-dir', root, 'dark', '--print'],
+    ['--lan', '--data-dir', root, '10.0.0.5', '--print'],
+  )
   for (const list of lists) {
     const shown = list.map(word => word === root ? '<root>' : word).join(' ')
     const result = f.run(pkg, list, terminal, 'y\n')
@@ -668,8 +761,8 @@ test('an option that takes a value, or any word that is not a view, keeps the no
   assert.equal(bodyHash(readFileSync(script, 'utf8')), bodyHash(`\n${bundle(pkg)}`), "the plain view wrote this package's board script")
 }))
 
-// #1783: the launcher's list of options that open the board is kept against the board's own option grammar, so an
-// option added to the board is classified here before it can start, or fail to start, the update.
+// #1783, #1789: the launcher's lists of options that open the board are kept against the board's own option grammar,
+// so an option added to the board is classified here before it can start, or fail to start, the update.
 test('every board option is classified as a view or not, and the view list is pinned', () => {
   const cli = readFileSync(join(repo, 'scripts/board-cli.ts'), 'utf8')
   const set = name => {
@@ -678,14 +771,20 @@ test('every board option is classified as a view or not, and the view list is pi
     return [...body.matchAll(/'(-[^']+)'/g)].map(one => one[1])
   }
   const board = new Set([...set('BOOL_FLAGS'), ...set('VALUE_FLAGS'), '--days', '--lan'])
-  const table = readFileSync(join(repo, 'bin/agent-board.mjs'), 'utf8').match(/const boardViews = new Set\(\[([^\]]*)\]\)/)?.[1]
-  assert.ok(table, 'boardViews in bin/agent-board.mjs')
-  const views = [...table.matchAll(/'(-[^']+)'/g)].map(one => one[1])
+  const launcher = readFileSync(join(repo, 'bin/agent-board.mjs'), 'utf8')
+  const readLauncherSet = name => {
+    const body = launcher.match(new RegExp(`const ${name} = new Set\\(\\[([^\\]]*)\\]\\)`))?.[1]
+    assert.ok(body, `${name} in bin/agent-board.mjs`)
+    return [...body.matchAll(/'(-[^']+)'/g)].map(one => one[1])
+  }
+  const views = readLauncherSet('boardViews')
+  const valueViews = readLauncherSet('boardValueViews')
   assert.deepEqual(views.sort(), ['--all', '--html', '--lan', '--no-color', '--no-open', '--plain', '--print', '--quiet-board', '--serve', '--watch'])
-  // Not views: the options that take a value (#1789), data reads, scripted keys, page server behaviour, actions, reports, management and internal flags, the
+  assert.deepEqual(valueViews.sort(), ['--idle-minutes', '--lang', '--port', '--theme'])
+  assert.deepEqual(views.filter(option => valueViews.includes(option)), [], 'flag views and value views do not overlap')
+  // Not views: data reads, scripted keys, page server behaviour, actions, reports, management and internal flags, the
   // folders setup and the launcher choose, and `--progress-file`, which picks the board.
   const notViews = [
-    '--port', '--idle-minutes', '--lang', '--theme',
     '--json', '--days', '--project', '--keys', '--stale-ms', '--allow-resume', '--codex-send', '--no-codex-send', '--cwd', '--home',
     '--chat', '--status', '--tidy', '--mcp', '--report', '--stop', '--help', '-h', '--version', '-v', '--stopped', '--unsent',
     '--agent-status', '--apply', '--awaits-ack', '--check-conflicts', '--remove', '--update', '--antigravity-sidecar', '--hooks-approved',
@@ -696,8 +795,10 @@ test('every board option is classified as a view or not, and the view list is pi
     '--opencode-dir', '--progress-file', '--ready-file', '--recovery-owner-created', '--recovery-owner-pid', '--recovery-owner-token',
     '--recovery-previous-token', '--ref', '--removing', '--session', '--setup-version', '--state', '--summary-b64', '--surface',
   ]
-  assert.deepEqual([...board].filter(option => !views.includes(option) && !notViews.includes(option)), [], 'every board option is a view or named as not one')
-  assert.deepEqual(views.filter(option => !board.has(option)), [], 'every view is a board option')
+  const allViews = new Set([...views, ...valueViews])
+  assert.deepEqual(notViews.filter(option => allViews.has(option)), [], 'views and notViews do not overlap')
+  assert.deepEqual([...board].filter(option => !allViews.has(option) && !notViews.includes(option)), [], 'every board option is a view or named as not one')
+  assert.deepEqual([...allViews].filter(option => !board.has(option)), [], 'every view is a board option')
   assert.deepEqual(notViews.filter(option => !board.has(option)), [], 'every name in the not-a-view list is a board option')
 })
 

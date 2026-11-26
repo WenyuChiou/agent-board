@@ -7,11 +7,9 @@ export const retiredAgents = ['gemini']
 export const setupAgents = ['codex', 'cursor', 'opencode', 'grok', 'muse', 'hermes', 'openclaw', 'antigravity', 'deepseek']
 
 // What a release starts doing that reaches the network or reads files it did not read before, with the version that added
-// it and its off switch (#1314). An update from an install record older than an entry asks about it, once.
-export const newUses = [
-  { id: 'version-check', version: '0.25.1', use: 'useVersionCheck', off: 'useVersionCheckOff' },
-  { id: 'codex-sessions', version: '0.25.1', use: 'useCodexSessions', off: 'useCodexSessionsOff' },
-]
+// it, its off switch (#1314), and its Settings panel switch id (#1812). Only shipped uses with a real Settings switch
+// belong here; an update from an install record older than an entry asks about it once.
+export const newUses = []
 const versionParts = value => String(value).split(/[.+-]/).slice(0, 3).map(part => Number.parseInt(part, 10) || 0)
 export const isNewer = (one, other) => {
   const [a, b] = [versionParts(one), versionParts(other)]

@@ -31,6 +31,7 @@ import { moveLockAside, readQueuedMessaging } from './board-messaging'
 import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, holderDeps, ownerRecordOf, pageState as storePageState, patiently, settleStoreHolder, untilDeadline, type OwnerRead, type PageProbe, type PageState as StorePageState, type StartPass } from './message-store-claim'
+import { waitForPublishedRecord } from './backoff-publish'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -1998,24 +1999,36 @@ const updateRoutes = async (): Promise<boolean> => {
   return isChanged
 }
 
+// The id of an answer whose press got no reply, by its line, session and question, with its words: the same answer pressed
+// again goes under that id, and the board answers it with the message it stored instead of a second one (#1843, B3.1).
+const answerAttempts = new Map<string, { id: string; text: string }>()
 // An answer key's answer, sent by the running page as its own button sends it: the page checks
 // the line, the question and the session again, and answers with what came of it.
 const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 'alert' }> => {
   const running = await runningAddress()
-  if (running === null) return { note: s.messagesFailed, tone: 'alert' }
+  // No page to send through, or no answer from it after its one try: the board cannot be reached (owner, #1843 B4 answer 3).
+  if (running === null) return { note: s.statusUnreachable, tone: 'alert' }
   const { route } = action
+  const slot = JSON.stringify([action.key, route.session, route.asked])
+  const kept = answerAttempts.get(slot)
+  const id = kept !== undefined && kept.text === action.text ? kept.id : `AB-${randomUUID()}`
   const body = route.mode === 'connected' && route.delivery !== undefined
-    ? { key: action.key, type: 'message', id: `AB-${randomUUID()}`, text: action.text, connection: route.delivery.id, turn: route.delivery.turn, session: route.session, asked: route.asked, fp: route.fp }
+    ? { key: action.key, type: 'message', id, text: action.text, connection: route.delivery.id, turn: route.delivery.turn, session: route.session, asked: route.asked, fp: route.fp }
     : { key: action.key, type: 'send', text: action.text, session: route.session, asked: route.asked, fp: route.fp }
+  answerAttempts.set(slot, { id, text: action.text })
   try {
     // A closed session is started to take it, and answers only once it is done.
     const res = await fetch(`http://127.0.0.1:${running.port}/api/act`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(route.mode === 'send' ? 300_000 : 5000) })
     const data = (await res.json().catch(() => null)) as { note?: unknown } | null
+    // A body cut off on its way is no answer: the board may have stored the message, so the same key keeps its id (#1843).
+    if (data === null && res.ok) return { note: s.messagesFailed, tone: 'alert' }
+    // The board answered: whatever it said, the next press is a new answer.
+    answerAttempts.delete(slot)
     const note = typeof data?.note === 'string' && data.note !== '' ? data.note : res.ok ? s.messagesQueued : s.messagesFailed
     // What was sent leads the note, so a key pressed by mistake shows at once.
     return res.ok ? { note: s.boardAnswered(action.text, note), tone: 'done' } : { note, tone: 'alert' }
   } catch {
-    return { note: s.messagesFailed, tone: 'alert' }
+    return { note: s.statusUnreachable, tone: 'alert' }
   }
 }
 
@@ -2893,7 +2906,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     } else if (storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
       // Collision in claims or another start is in flight: back off with randomized jitter, then retry or wait for its page
       await new Promise(done => setTimeout(done, Math.floor(Math.random() * 150) + 50))
-      const afterWait = await runningPage(true, false, replaced)
+      const afterWait = await waitForPublishedRecord(file, () => runningPage(true, false, replaced), deadline)
       // The server it reuses may predate this launcher: tell it the package before returning its URL.
       if (afterWait !== null) { await refreshServerPackage(afterWait.page.url); return { result: { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs } } }
       return again()

@@ -850,11 +850,12 @@ test('B6 an ack on a marked message that was not accepted yet acknowledges it', 
   assert.deepEqual([acked.messages[0].status, acked.messages[0].reply], ['acknowledged', `ACK ${nonce} done`])
 })
 
-test('B8 the claims of the other hook receivers behave as before: handed out again with a repeat count and line, expired at 30 minutes, an unknown release is still ok', async () => {
+test("B8 a DeepSeek hook's claims behave as before: handed out again with a repeat count and line, expired at 30 minutes, and another hook's unknown release is still ok", async () => {
   const b = await mailbox()
-  let state = b.seed('codex', 's1')
-  state = b.take(state, 'codex', 's1', refOf(1), T0).state
-  const again = b.take(b.prune(state, T0 + 31 * SEC), 'codex', 's1', refOf(2), T0 + 31 * SEC)
+  // DeepSeek's claims keep the lease rule for now (#1843 answer 3, #1870); every other hook's claim reads HOLDER_LOST after it.
+  let state = b.seed('deepseek', 's1')
+  state = b.take(state, 'deepseek', 's1', refOf(1), T0).state
+  const again = b.take(b.prune(state, T0 + 31 * SEC), 'deepseek', 's1', refOf(2), T0 + 31 * SEC)
   assert.equal(again.message.redelivered, 1)
   assert.ok(b.messaging.deliveryText(again.message, b.STRINGS.en).includes(b.STRINGS.en.messagesDeliveryRepeat))
   const expired = b.prune(again.state, T0 + 31 * SEC + 31 * MIN)
@@ -1167,13 +1168,18 @@ test('R17 an end that fails once is tried again at the next tick and reported on
   assert.equal((existsSync(log) ? readFileSync(log, 'utf8') : '').split('MAILBOX_FAILED').length - 1, 1)
 }, { watch: false }))
 
-test('the card says sent, not confirmed in all three languages, and the page asks for it', async () => {
+test('the card says sent, not confirmed in all three languages, and the board words it so', async () => {
   const { STRINGS } = await importTs('../hooks/strings.ts')
-  const texts = Object.values(STRINGS).map(one => one.messagesSentUnconfirmed)
+  const texts = Object.values(STRINGS).map(one => one.statusUnsure(one.statusWhyUnconfirmed))
   for (const text of texts) assert.ok(typeof text === 'string' && text.length > 8)
   assert.equal(new Set(texts).size, 3)
-  const page = readFileSync(new URL('../hooks/serve.ts', import.meta.url), 'utf8')
-  assert.ok(page.includes("'messagesSentUnconfirmed'") && page.includes("receipt.error === 'UNCONFIRMED'"))
+  // The board words every card's status line (hooks/message-status.ts) and sends it with the receipt; the page draws it.
+  const { rowReceipt } = await importTs('../hooks/serve.ts')
+  for (const s of Object.values(STRINGS)) {
+    const sent = { id: 'AB-OC-1', to: 'opencode:ses_synthetic', target: 'synthetic-connection', turn: 'session', from: 'board', text: 'Blue', origin: 'local', status: 'uncertain', reply: '', error: 'UNCONFIRMED', hops: 0, updated: 1, claimed: 1 }
+    const { receipt } = rowReceipt('opencode', 'ses_synthetic', [sent], 2, s)
+    assert.deepEqual([receipt?.shown?.state, receipt?.shown?.line], ['unsure', s.statusUnsure(s.statusWhyUnconfirmed)])
+  }
 })
 
 test('the agent_board_ack tool takes no summary as well as one', () => fixture(async f => {

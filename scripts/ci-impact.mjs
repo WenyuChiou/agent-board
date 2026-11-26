@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, appendFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, appendFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -185,6 +185,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // Grew with #1680's eleven removal re-read tests: up to 49.0 s on Windows Node 24 (run 44650276536), over the 42 s
   // line of the 60 s default. By the rule of #1715: 49 x 1.3 / 0.7, rounded up to five seconds.
   'tests/setup-sidecar.test.mjs': 95_000, // slowest 49.0 s
+  // Grew with #1881's test of the 20 s clock (#1843), which waits the real 20 s: 56.6 s on Windows Node 24 (run
+  // 45763999753), over the 42 s line of the 60 s default. By the rule of #1715: 56.6 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/serve-watch.test.mjs': 110_000, // slowest 56.6 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
@@ -558,7 +561,33 @@ export const testRuns = (files, { isSerial = false, isWindows = false, part = ''
   return share.length ? [testArgs(share, { isSerial, isWindows })] : []
 }
 
-export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform) => {
+const cleanupStaleTimings = (target, writeError, remove, stat) => {
+  let cleanupProblem = null
+  let entry
+  try {
+    entry = stat(target)
+  } catch (statError) {
+    if (statError?.code !== 'ENOENT' && statError?.code !== 'ENOTDIR') {
+      cleanupProblem = 'could not inspect timings path: ' + statError.message
+    }
+  }
+  if (entry !== undefined) {
+    if (!entry.isFile()) {
+      cleanupProblem = 'timings path is not a regular file'
+    } else {
+      try {
+        remove(target)
+      } catch (removeError) {
+        if (removeError?.code !== 'ENOENT') {
+          cleanupProblem = 'could not remove stale timings file: ' + removeError.message
+        }
+      }
+    }
+  }
+  return cleanupProblem === null ? null : 'could not record test timings (' + writeError.message + '); ' + cleanupProblem
+}
+
+export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform, write = writeFileSync, remove = unlinkSync, stat = lstatSync) => {
   if (!Array.isArray(files) || !files.length || files.some(path => !/^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/.test(path) || !existsSync(path))) throw new Error('selected tests are empty, invalid or missing')
   // A self-parted file reads its part from CI_TEST_PART, so the child gets the part this run was given,
   // not whatever part the environment holds.
@@ -583,14 +612,23 @@ export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn
     if (result.status !== 0) failures.push(result.status ?? result.signal)
   }
   const totalMs = Date.now() - started
+  let timingsFailure = null
   if (process.env.CI_TEST_TIMINGS || process.env.CI === 'true') {
+    const target = timingsPath()
     try {
-      writeFileSync(timingsPath(), JSON.stringify({ version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }, null, 2) + '\n')
+      write(target, JSON.stringify({ version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }, null, 2) + '\n')
     } catch (error) {
       console.error('agent-board: could not record test timings: ' + error.message)
+      // Remove any stale regular timings file via lstat so check cannot pass on earlier data and symlinks/dirs stay intact (#1720).
+      timingsFailure = cleanupStaleTimings(target, error, remove, stat)
     }
   }
-  if (failures.length) throw new Error('selected tests failed: ' + failures.join(', '))
+  if (failures.length || timingsFailure !== null) {
+    const parts = []
+    if (failures.length) parts.push('selected tests failed: ' + failures.join(', '))
+    if (timingsFailure !== null) parts.push(timingsFailure)
+    throw new Error(parts.join('; '))
+  }
 }
 
 const main = async () => {
@@ -601,6 +639,11 @@ const main = async () => {
       timings = readBoardTimings()
     } catch (error) {
       if (error.code === 'ENOENT') {
+        if (process.env.CI === 'true') {
+          console.log('time budget: no test timings recorded on CI; cannot check board time budgets (the run step could not write them)')
+          process.exitCode = 1
+          return
+        }
         console.log('no test timings recorded; nothing to check')
         return
       }

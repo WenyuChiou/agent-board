@@ -24,7 +24,8 @@ const { runCodexLocal } = await import('../scripts/codex-local.ts')
 void [antigravityHooks, hookCommandArgs, planEvents, statusEvents, openclawLocalPlugin, deepseekPatch, HOOK_TIMEOUTS]
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url))
-const BASE_TAG = 'agent-board--v0.25.0'
+const BASE_VERSION = '0.25.1'
+const BASE_TAG = `agent-board--v${BASE_VERSION}`
 const tempDirs = []
 after(() => {
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
@@ -38,7 +39,7 @@ const extractBaseRelease = t => {
     t.skip(`${BASE_TAG} is missing locally; run git fetch --tags to compare hook declarations`)
     return null
   }
-  const folder = mkdtempSync(join(tmpdir(), 'hook-decl-v0250-'))
+  const folder = mkdtempSync(join(tmpdir(), 'hook-decl-v0251-'))
   tempDirs.push(folder)
   const archive = spawnSync('git', ['-C', repoRoot, 'archive', '--format=tar', BASE_TAG, 'scripts', 'hooks', 'bin', 'package.json'], { maxBuffer: 64 * 1024 * 1024, windowsHide: true })
   assert.ifError(archive.error)
@@ -46,6 +47,7 @@ const extractBaseRelease = t => {
   const untar = spawnSync('tar', ['-x', '-f', '-'], { cwd: folder, input: archive.stdout, encoding: 'utf8', windowsHide: true })
   assert.ifError(untar.error)
   assert.equal(untar.status, 0, untar.stderr || `tar extract ${BASE_TAG} failed`)
+  assert.equal(JSON.parse(readFileSync(join(folder, 'package.json'), 'utf8')).version, BASE_VERSION, `${BASE_TAG} must match baseline ${BASE_VERSION}`)
   return folder
 }
 
@@ -174,11 +176,11 @@ export const compareHookDeclarations = (label, expectedDecl, actualDecl) => {
 
 const assertDeclarationsEqual = (label, expectedDecl, actualDecl) => {
   const diffs = compareHookDeclarations(label, expectedDecl, actualDecl)
-  assert.deepStrictEqual(diffs, [], `${label} changed vs 0.25.0:\n${diffs.join('\n')}`)
-  assert.deepStrictEqual(actualDecl, expectedDecl, `${label} full declaration mismatch vs 0.25.0`)
+  assert.deepStrictEqual(diffs, [], `${label} changed vs ${BASE_VERSION}:\n${diffs.join('\n')}`)
+  assert.deepStrictEqual(actualDecl, expectedDecl, `${label} full declaration mismatch vs ${BASE_VERSION}`)
 }
 
-test('#1658: 0.25.1 plugin hooks.json matches 0.25.0 across events, matchers, timeouts and groups', t => {
+test('#1825: 0.25.2 plugin hooks.json matches 0.25.1 across events, matchers, timeouts and groups', t => {
   const baseDir = extractBaseRelease(t)
   if (!baseDir) return
   const expected = extractHookDeclarations('grouped', readFileSync(join(baseDir, 'hooks', 'hooks.json'), 'utf8'))
@@ -207,7 +209,7 @@ const foreignSeedForConnect = target => {
   return ''
 }
 
-test('#1658: 0.25.1 /progress connect generated hook declarations match 0.25.0 across OS, path and Node contexts (empty, foreign additions and removals)', async t => {
+test('#1825: 0.25.2 /progress connect generated hook declarations match 0.25.1 across OS, path and Node contexts (empty, foreign additions and removals)', async t => {
   const baseDir = extractBaseRelease(t)
   if (!baseDir) return
   const baseConnect = await import(pathToFileURL(join(baseDir, 'hooks', 'connect-pure.ts')).href)
@@ -311,8 +313,8 @@ test('#1658: 0.25.1 /progress connect generated hook declarations match 0.25.0 a
         assert.equal(typeof headRemoved, 'string', `${ctx.name}/${b.agent}: removal from shared config must keep foreign hooks`)
         assertDeclarationsEqual(`${ctx.name}/${b.agent}(${b.file}) foreign remove`, extractHookDeclarations(shape, baseRemoved), extractHookDeclarations(shape, headRemoved))
       } else if (b.generated && typeof baseEmpty === 'string' && typeof headEmpty === 'string') {
-        assert.equal(b.edit(baseEmpty, true), baseConnect.DELETE, `${ctx.name}/${b.agent}: 0.25.0 generated file remove`)
-        assert.equal(h.edit(headEmpty, true), DELETE, `${ctx.name}/${b.agent}: 0.25.1 generated file remove`)
+        assert.equal(b.edit(baseEmpty, true), baseConnect.DELETE, `${ctx.name}/${b.agent}: 0.25.1 generated file remove`)
+        assert.equal(h.edit(headEmpty, true), DELETE, `${ctx.name}/${b.agent}: 0.25.2 generated file remove`)
       }
     }
   }
@@ -353,12 +355,12 @@ const seedForeignLocalConfig = (agent, spec) => {
   }
 }
 
-test('#1658: 0.25.1 standalone setup generated hook declarations match 0.25.0 across all agents, additions and removals', async t => {
+test('#1825: 0.25.2 standalone setup generated hook declarations match 0.25.1 across all agents, additions and removals', async t => {
   const baseDir = extractBaseRelease(t)
   if (!baseDir) return
   const baseCodexLocal = await import(pathToFileURL(join(baseDir, 'scripts', 'codex-local.ts')).href)
 
-  // Use one fixed synthetic root path across both 0.25.0 and 0.25.1 runs so base64 bootstraps
+  // Use one fixed synthetic root path across both 0.25.1 and 0.25.2 runs so base64 bootstraps
   // containing encoded paths and process.execPath match byte-for-byte.
   const fixtureRoot = mkdtempSync(join(tmpdir(), 'hook-decl-local-'))
   tempDirs.push(fixtureRoot)

@@ -9,10 +9,11 @@ export const messagingReceiver = {
   host: 'Codex',
   agent: 'codex',
   kind: 'live',
-  // The live run woke an idle Codex CLI session on the shared daemon; a message during a running turn is not recorded (#1409).
+  // The live run woke an idle Codex CLI session on the shared daemon after its ~10-minute watch (#1578, #1814);
+  // a message during a running turn is not recorded (#1409).
   surfaces: [{ name: 'Daemon', id: 'Codex daemon', evidence: 'docs/validation/2026-11-13-codex-cli-wake-live.md' }],
   routes: {
-    idle: { line: 'now', record: 'docs/validation/2026-11-13-codex-cli-wake-live.md', surfaces: ['Codex daemon'] },
+    idle: { line: 'afterWait', record: 'docs/validation/2026-11-13-codex-cli-wake-live.md', surfaces: ['Codex daemon'] },
     working: { line: 'stepEnd', record: null, surfaces: [] },
     ended: { line: 'none', record: null, surfaces: [] },
   },
