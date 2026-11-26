@@ -290,12 +290,17 @@ export const ZH_TW = {
 
   // A message's status line (#1843 B4): the same words on the page, the terminal board, --print and --json
   statusSending: '傳送中',
+  // A send that had no answer in 2 s is tried again under the same id; after 30 s the board is out of reach (#1843, B4).
+  statusRetrying: '傳送中 · 尚未確認，重試中',
   statusQueued: (when: string): string => `已排入 · ${when}`,
   statusDelivered: (when: string): string => `已送達 · ${when}`,
   statusRead: (reply: string): string => reply === '' ? '已讀' : `已讀 · ${reply}`,
   statusAnswered: '已回覆 · 在看板上',
   statusUnsure: (why: string): string => `不確定 · ${why} · 看它的視窗`,
   statusNotDelivered: (why: string): string => `未送達 · ${why}`,
+  statusUnreachable: '連不上看板 · 文字已保留',
+  // A second answer to a question whose first answer is still open, with the first one's status line.
+  statusAnswerOpen: (line: string): string => `已有另一個回答先送出 · ${line}`,
   statusWhenNow: '馬上',
   statusWhenStepEnd: '這一步結束時',
   statusWhenNextTurn: '下一輪開始時',

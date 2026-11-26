@@ -4075,7 +4075,8 @@ test('an existing card sends only to its exact live receiver and preserves mark 
   const shown = (await board.call('/api/board')).body.model
   assert.equal(shown.asks[0].receipt.reply, 'on it')
   assert.ok(!JSON.stringify(shown).includes(claimed.nonce))
-  assert.equal((await board.call('/api/act', request)).body.note, 'Replied')
+  // The press made again answers with the message's status line: Read, with the agent's words (#1843, B4).
+  assert.equal((await board.call('/api/act', request)).body.note, EN.statusRead('on it'))
   await board.call('/api/messages/disconnect', { ...credentials, turn: 'turn1' })
   const disconnected = (await board.call('/api/board')).body.model.asks[0]
   assert.ok(!['send', 'connected'].includes(disconnected.send)); assert.equal(disconnected.delivery, undefined)
@@ -8272,7 +8273,12 @@ test('a try that gets no answer and no close is sent again after 2 s, and its la
 test('a press reads Sending until the board answers, and says it is trying again after 2 s with no answer', async () => {
   const connection = claudeLive()
   const held = []
-  const { post, stored } = await storingPost(connection, (request, answer) => new Promise(done => { held.push(() => done(answer)) }))
+  const { post, stored } = await storingPost(connection, (request, answer) => {
+    // Each try stays open until the test answers it.
+    const open = new Promise(done => { held.push(() => done(answer)) })
+    open.isHeld = true
+    return open
+  })
   const { page, press } = await retryPage(post, connection)
   const slotText = () => page.slot(page.cards().find(one => page.inputs(one).length))?.textContent ?? ''
   await press('Continue')
@@ -8317,11 +8323,13 @@ test('after cannot reach the board, the stored receipt replaces the line and the
   await press('Continue')
   for (let i = 0; i < 15; i++) await page.runTimers('retrySend')
   assert.ok(slotText().startsWith(EN.statusUnreachable), slotText())
-  // The same words pressed again go under the first press's id.
+  // The same words pressed again go under the first press's id, so the board can answer with the message it has.
   await press('Continue')
   assert.equal(page.requests.length, 16)
   assert.equal(page.requests[15].body.id, page.requests[0].body.id)
-  // The board's next read brings the message it stored: its own line replaces what the press left on the card.
+  for (let i = 0; i < 15; i++) await page.runTimers('retrySend')
+  assert.ok(slotText().startsWith(EN.statusUnreachable), slotText())
+  // The board answers again, and its read brings the message it stored: its own line replaces what the press left.
   await page.redraw(modelOf(stored()))
   assert.ok(!slotText().includes(EN.statusUnreachable) && !slotText().includes(EN.statusSending), slotText())
   assert.ok(page.text().includes(EN.statusQueued(EN.statusWhenNow)), page.text())
@@ -9093,7 +9101,8 @@ test('a board reply to a Codex desktop app conversation is answered with the wai
   const sent = await board.call('/api/act', { key: ask.key, type: 'message', id: 'AB-APP-QUIT', text: 'Teal', session: codex, asked: ask.text, fp: ask.fp, connection: app.id, turn: 'session' })
   assert.equal(sent.status, 200)
   assert.equal(sent.body.receipt.status, 'queued')
-  assert.equal(sent.body.note, EN.serveReopenWaitingCodexApp)
+  // The press's note is the status line: queued until the app quits (#1843, B4).
+  assert.equal(sent.body.note, EN.statusQueued(`${EN.statusWhenReopen} · ${EN.justNow}`))
   // The card's receipt after a redraw keeps the same wait.
   const after = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
   assert.equal(after.receipt.status, 'queued'); assert.equal(after.receipt.isAfterAppQuit, true)
@@ -9647,11 +9656,14 @@ test('next-turn route explains in plain words in EN, ZH_TW, and ZH_CN, and in-fl
     await new Promise(done => setImmediate(done))
     assert.equal(queueBtn.disabled, true)
     assert.ok(queueBtn.textContent.startsWith(s.serveQueueNextTurn('Codex')))
-    assert.ok(page.text().includes(s.serveQueuingNextTurn('Codex')), page.text())
+    // In flight it reads Sending, the word every route uses (#1843, B4), and claims no reply.
+    assert.ok(page.text().includes(s.statusSending), page.text())
     assert.ok(!page.text().includes(s.serveSending('Codex')), page.text())
-    release({ ok: true, json: async () => ({ ok: true, note: s.serveQueuedNextTurn('Codex'), receipt: { id: 'next-turn-1', status: 'queued', line: 'nextTurn', isMailbox: true } }) })
+    // The board answers with the message's status line.
+    const answered = s.statusQueued(`${s.statusWhenNextTurn} · ${s.justNow}`)
+    release({ ok: true, json: async () => ({ ok: true, note: answered, receipt: { id: 'next-turn-1', status: 'queued', line: 'nextTurn', isMailbox: true } }) })
     await page.flush()
-    assert.ok(page.text().includes(s.serveQueuedNextTurn('Codex')), page.text())
+    assert.ok(page.text().includes(answered), page.text())
     const queued = queueMessage(seed, { id: 'next-turn-1', target: mailbox.id, turn: 'session', text: 'Answer for next turn' }, 'board', mailbox, now, 'local', undefined, 'nextTurn').state
     // The stored receipt, in the board's words (hooks/message-status.ts): queued for its next turn, never a reply.
     await page.redraw(makeModel(queued.messages))

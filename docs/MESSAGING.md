@@ -358,7 +358,9 @@ question shows only the answer sent to it, never another message to its session.
 
 | Line | When |
 | --- | --- |
-| Sending | The page's own line while a send has no answer yet; never read from a store |
+| Sending | The page's own line while a send has no answer yet, on every route; never read from a store |
+| Sending · not confirmed, trying again | The page's line once a send had no answer in 2 seconds and goes again under the same id |
+| Cannot reach the board · your words are kept | The page after 30 seconds with no answer, and the terminal board after its one try; the typed words stay, and the message's own line replaces this one if the board stored it |
 | Queued · when | Stored and not handed out, with when it goes in: now, when its step ends, at its next turn (a mailbox with no route says this too), when its wait ends, when its chat next opens, or once the app quits. A route other than now adds the message's age. A claim handed out less than 20 seconds ago also reads Queued · now |
 | Delivered · age | `accepted`, with no error since |
 | Read · reply | `acknowledged`, with the reply the session gave (a version 1 store's `ACK <id>` is left out) |
@@ -369,7 +371,11 @@ question shows only the answer sent to it, never another message to its session.
 The 20 seconds count from the receipt's last change, so the line reads the same with or without a live
 connection, and reading it changes nothing in the store. The one exception is a Codex app turn the receiver
 still holds: the page reads it as delivered while the receiver keeps its connection. A route that waits on a step, a turn or the
-app has no such clock. A message taken back after it was handed out shows no line.
+app has no such clock. A message taken back after it was handed out shows no line. When a message on that clock turns
+Unsure with no event of its own, the server wakes every page waiting on the board, so each shows the line as it turns.
+
+The board's answer to a press is the message's status line. A second answer to a question whose first answer is still
+open is refused with "Another answer went first" and the first answer's line.
 
 ### Message ids
 

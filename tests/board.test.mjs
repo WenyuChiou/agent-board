@@ -15790,7 +15790,8 @@ test('busy or connected card shows one honest message status after Send instead 
       post: async request => {
         if (request.path === '/api/act' && request.body.type === 'message') {
           lastMsgId = request.body.id
-          return { ok: true, json: async () => ({ ok: true, note: s.messagesQueued }) }
+          // The board answers a press with the message's own status line.
+          return { ok: true, json: async () => ({ ok: true, note: s.statusQueued(s.statusWhenNow) }) }
         }
         if (request.path === '/api/messages/dismiss') {
           currentClaude = { ...base, asks: [claudeAsk] }
@@ -15807,7 +15808,7 @@ test('busy or connected card shows one honest message status after Send instead 
     await claudeDom.settle()
 
     const afterSendWords = shownWords(findCard(claudeDom, claudeAsk.key))
-    assert.equal(countMatches(afterSendWords, s.messagesQueued), 1, `right after Send: single queued status (${afterSendWords})`)
+    assert.equal(countMatches(afterSendWords, s.statusQueued(s.statusWhenNow)), 1, `right after Send: single queued status (${afterSendWords})`)
     assert.equal(afterSendWords.includes(s.claudeSendNow), false, 'pre-send line hides after Send')
     assert.equal(afterSendWords.includes(s.pgSentTo(claudeName, replyText)), false, 'never pgSentTo on connected card')
 
@@ -15819,7 +15820,7 @@ test('busy or connected card shows one honest message status after Send instead 
     const queuedWords = shownWords(findCard(claudeDom, claudeAsk.key))
     assert.equal(countMatches(queuedWords, s.statusQueued(s.statusWhenStepEnd)), 1, `queued receipt: one status line (${queuedWords})`)
     // The press's own Queued note is gone once the board's line is drawn: no second Queued beside it.
-    assert.equal(countMatches(queuedWords.split(s.statusQueued(s.statusWhenStepEnd)).join(''), s.messagesQueued), 0, `queued receipt: no second Queued beside it (${queuedWords})`)
+    assert.equal(countMatches(queuedWords, s.statusQueued(s.statusWhenNow)), 0, `queued receipt: no second Queued beside it (${queuedWords})`)
     assert.equal(queuedWords.includes(s.pgSentTo(claudeName, replyText)), false, 'no pgSentTo above queued receipt')
     assert.equal(queuedWords.includes(s.claudeSendNow), false, 'no stale claudeSendNow')
     assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
@@ -15874,15 +15875,17 @@ test('busy or connected card shows one honest message status after Send instead 
       currentModel: () => currentCodex,
       post: async request => {
         lastMsgId = request.body.id
-        return { ok: true, json: async () => ({ ok: true, note: s.messagesQueued }) }
+        return { ok: true, json: async () => ({ ok: true, note: s.statusQueued(`${s.statusWhenStepEnd} · ${s.justNow}`) }) }
       },
     })
     selectAnswer(findCard(codexDom, codexAsk.key), 'Ship it').click()
     await codexDom.settle()
     const codexAfterSend = shownWords(findCard(codexDom, codexAsk.key))
-    assert.equal(countMatches(codexAfterSend, s.serveLineStepEnd(codexName)), 1, `busy codex after Send (${codexAfterSend})`)
+    // One status after Send, the board's note; the route's own hint is not drawn beside it.
+    assert.equal(countMatches(codexAfterSend, s.statusQueued(`${s.statusWhenStepEnd} · ${s.justNow}`)), 1, `busy codex after Send (${codexAfterSend})`)
+    assert.equal(codexAfterSend.includes(s.serveLineStepEnd(codexName)), false, `no route hint beside the note (${codexAfterSend})`)
     assert.equal(codexAfterSend.includes(s.pgSentTo(codexName, 'Ship it')), false, 'never pgSentTo on busy stepEnd codex card')
-    assert.equal(codexAfterSend.includes(s.messagesQueued), false, 'no redundant Queued line beside serveLineStepEnd')
+    assert.equal(codexAfterSend.split(s.statusQueued(`${s.statusWhenStepEnd} · ${s.justNow}`)).join('').includes(s.messagesQueued), false, 'no redundant Queued line beside the note')
 
     currentCodex = {
       ...base,

@@ -252,12 +252,15 @@ export const ZH_CN: Strings = {
 
   // A message's status line (#1843 B4): the same words on the page, the terminal board, --print and --json
   statusSending: '发送中',
+  statusRetrying: '发送中 · 尚未确认，重试中',
   statusQueued: (when: string): string => `已排入 · ${when}`,
   statusDelivered: (when: string): string => `已送达 · ${when}`,
   statusRead: (reply: string): string => reply === '' ? '已读' : `已读 · ${reply}`,
   statusAnswered: '已回复 · 在看板上',
   statusUnsure: (why: string): string => `不确定 · ${why} · 看它的窗口`,
   statusNotDelivered: (why: string): string => `未送达 · ${why}`,
+  statusUnreachable: '连不上看板 · 文字已保留',
+  statusAnswerOpen: (line: string): string => `已有另一个回答先发出 · ${line}`,
   statusWhenNow: '马上',
   statusWhenStepEnd: '这一步结束时',
   statusWhenNextTurn: '下一轮开始时',

@@ -458,7 +458,8 @@ test('serve: the update command leaves a retired agent out, even with its record
 test('serve: a waiting page is answered when a message passes its 20 s, with no store change, and two waiting pages get the same line (#1843)', async () => {
   const thread = '11111111-2222-4333-8444-555555555555'
   const route = { line: 'now', record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.cli] }
-  const routes = [{ agent: 'codex', kind: 'live', routes: { idle: route, working: route, ended: { line: 'none', record: null, surfaces: [] } } }]
+  // A synthetic recorded route that goes in now, for a Codex receiver joined by turn or by session.
+  const routes = ['live', 'turn'].map(kind => ({ agent: 'codex', kind, routes: { idle: route, working: route, ended: { line: 'none', record: null, surfaces: [] } } }))
   const text = `## Synthetic watch\n<!-- auto session=abcd1234 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Clock fixture\n- [?] Blue or green?\n<!-- /auto session=abcd1234 -->\n`
   const board = await startBoard({ holdMs: 60_000, text, routes })
   try {
@@ -469,7 +470,10 @@ test('serve: a waiting page is answered when a message passes its 20 s, with no 
     assert.equal(pressed.status, 200, pressed.text)
     const pressedAt = performance.now()
     const store = join(board.root, 'messages', 'messages.json')
-    const stored = JSON.parse(readFileSync(store, 'utf8')).messages
+    // What the clock reads: the receipt and when it last changed. (The idle receiver's lease ends meanwhile, and the store
+    // notes that it left; that is its own event, not the clock's.)
+    const receiptOf = () => JSON.parse(readFileSync(store, 'utf8')).messages.map(({ id, status, updated, claimed, error, reply }) => ({ id, status, updated, claimed, error, reply }))
+    const stored = receiptOf()
     const unsure = EN.statusUnsure(EN.statusWhyNoAnswer)
     // Each page holds the board it has and asks again whenever it is answered, until its card reads Unsure.
     const watch = async page => {
@@ -492,7 +496,7 @@ test('serve: a waiting page is answered when a message passes its 20 s, with no 
     assert.ok(after >= 19_000 && after <= 25_000, `the page was answered ${Math.round(after)} ms after the press`)
     assert.equal(second.etag, first.etag)
     // Reading the clock is no write: the store holds what the press stored, and a later read still says Unsure.
-    assert.deepEqual(JSON.parse(readFileSync(store, 'utf8')).messages, stored)
+    assert.deepEqual(receiptOf(), stored)
     assert.ok((await board.ask()).text.includes(unsure))
   } finally { await board.close() }
 })
