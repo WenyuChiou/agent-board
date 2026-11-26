@@ -97,7 +97,7 @@ test('grouping puts every task and question under its agent with open, needs, st
   const empty: ServeModel = { counts: { waiting: 0, active: 0, due: 0, today: 0 }, hidden: [], asks: [], reminder: [], older: [], idle: [], stopped: [], groups: [], turns: [], recent: [] }
   const nothing = groupBoard(empty, NOW, none, EN)
   expect(nothing.agents).toEqual([])
-  expect(nothing.needs).toEqual({ n: 0, questions: 0, stuck: 0, cards: [], older: [] })
+  expect(nothing.needs).toEqual({ n: 0, questions: 0, stuck: 0, cards: [], older: [], olderLabel: '', waitingOthers: [], waitingOthersLabel: '' })
   expect(nothing.all.isHidden).toBe(true)
   expect(nothing.all.counts).toEqual({ open: 0, needs: 0, stopped: 0, done: 0, older: 0 })
   expect('own' in nothing).toBe(false)
@@ -345,10 +345,10 @@ test('two folders asking the same words under one agent show two Needs you cards
     const result = groupBoard(board({ asks, groups: grouped(open) }), NOW, none, EN)
     expect(result.needs.n).toBe(2)
     expect(result.needs.questions).toBe(2)
-    expect(result.needs.cards.map(card => card.key)).toEqual(['ask:two', 'ask:one'])
+    expect(result.needs.cards.map(card => card.key)).toEqual(['ask:one', 'ask:two'])
     const codex = result.agents.find(group => group.agent === 'codex')
     expect(codex?.counts).toEqual({ open: 2, needs: 2, stopped: 0, done: 0, older: 0 })
-    expect(codex?.cards.map(card => card.key)).toEqual(['ask:two', 'ask:one'])
+    expect(codex?.cards.map(card => card.key)).toEqual(['ask:one', 'ask:two'])
     expect(codex?.open).toEqual([])
     expect(result.all.counts.open).toBe(2)
     expect(result.all.counts.needs).toBe(2)
@@ -363,7 +363,7 @@ test('two questions in one task and folder that differ only in their note show t
   ]
   const result = groupBoard(board({ asks, groups: grouped([]) }), NOW, none, EN)
   expect(result.needs.questions).toBe(2)
-  expect(result.needs.cards.map(card => card.key)).toEqual(['ask:production', 'ask:staging'])
+  expect(result.needs.cards.map(card => card.key)).toEqual(['ask:staging', 'ask:production'])
 })
 
 test('grouping lists each unanswered question once in Needs you and leaves a carded task out of Open', () => {
@@ -399,10 +399,10 @@ test('grouping lists each unanswered question once in Needs you and leaves a car
   expect(result.needs.questions).toBe(6)
   expect(result.needs.stuck).toBe(1)
   expect(result.needs.n).toBe(7)
-  // Newest first; the last two have the same time, so they keep the input order.
-  expect(result.needs.cards.map(card => card.key)).toEqual([again.key, 'stuck:row:demo::Build the synthetic image', inbox.key, metric.key, alike.key, first.key, second.key])
-  expect(result.needs.cards.map(card => card.type)).toEqual(['question', 'stuck', 'question', 'question', 'question', 'question', 'question'])
-  expect(result.needs.older.map(one => [one.text, one.stage])).toEqual([['Old question one?', 'older'], ['Old question two?', 'older']])
+  // Longest wait first within each tier; the two at 20 min keep input order.
+  expect(result.needs.cards.map(card => card.key)).toEqual([first.key, second.key, alike.key, metric.key, inbox.key, again.key, 'stuck:row:demo::Build the synthetic image'])
+  expect(result.needs.cards.map(card => card.type)).toEqual(['question', 'question', 'question', 'question', 'question', 'question', 'stuck'])
+  expect(result.needs.older.map(one => [one.text, one.stage])).toEqual([['Old question two?', 'older'], ['Old question one?', 'older']])
 
   // A task with a card is counted as open but is not listed under Open; a stuck task is carded too.
   const claude = result.agents.find(group => group.agent === 'claude')
@@ -465,7 +465,7 @@ test('grouping names one project per repository and lists only projects with som
   expect(result.all.open.filter(task => task.repo === 'app').map(task => task.title)).toEqual(['Add cache', 'Try a fork'])
   expect(result.needs.cards.map(card => card.repo)).toEqual(['app'])
   expect(result.all.stopped.map(task => [task.project, task.repo])).toEqual([['archive-only', 'archive-only'], ['site', 'site']])
-  expect(result.needs.older.map(one => one.repo)).toEqual(['quiet', 'stale-one'])
+  expect(result.needs.older.map(one => one.repo)).toEqual(['stale-one', 'quiet'])
   // The caller's lookup runs once for each of the eight folders, however many rows share one.
   expect(calls).toHaveLength(8)
   expect(new Set(calls).size).toBe(8)
@@ -496,7 +496,7 @@ test('grouping keeps a helper run\'s question under its starter\'s agent', () =>
 
   const cursor = result.agents.find(group => group.agent === 'cursor')
   const codex = result.agents.find(group => group.agent === 'codex')
-  expect(cursor?.cards.map(card => (card.type === 'question' ? card.text : ''))).toEqual(['Should the helper rename the synthetic file?', 'Use the synthetic fixture?'])
+  expect(cursor?.cards.map(card => (card.type === 'question' ? card.text : ''))).toEqual(['Use the synthetic fixture?', 'Should the helper rename the synthetic file?'])
   expect(cursor?.counts.needs).toBe(2)
   expect(cursor?.cards.every(card => card.agent === 'cursor')).toBe(true)
   expect(codex?.cards.map(card => (card.type === 'question' ? card.text : ''))).toEqual(['Which synthetic folder?'])
@@ -734,8 +734,8 @@ test('two asking sessions with the same title and question keep separate cards (
   expect(result.needs.n).toBe(2)
   expect(result.needs.questions).toBe(2)
   expect(result.needs.cards.map(card => card.key)).toEqual([
-    'ask:antigravity::Shared asking title#2::1',
     'ask:antigravity::Shared asking title::1',
+    'ask:antigravity::Shared asking title#2::1',
   ])
   expect(result.needs.older).toEqual([])
   const ag = result.agents.find(group => group.agent === 'antigravity')
@@ -788,8 +788,8 @@ test("an AI's question comes before a hand-kept step", () => {
 
   expect(result.needs.cards.map(card => card.key)).toEqual([
     aiOld.key,
-    'stuck:row:demo::Blocked synthetic task',
     aiNew.key,
+    'stuck:row:demo::Blocked synthetic task',
     ownOlder.key,
     ownNew.key,
   ])
@@ -838,7 +838,7 @@ test('the oldest waiting question comes first', () => {
 test('waiting approvals come before AI questions and own steps; window approvals are excluded', () => {
   const ownOld = ask('codex', 'Home', 'Own step', 'Check synthetic notes', { isOwn: true, at: ago(30 * MIN) })
   const aiOld = ask('claude', 'demo', 'AI ask', 'Ship synthetic release, OK?', { at: ago(15 * MIN) })
-  const askApproval = ask('gemini', 'demo', 'Ask approval', 'Allow synthetic command?', { isApproval: true, at: ago(3 * MIN) } as Partial<GroupingAsk>)
+  const askApproval = ask('gemini', 'demo', 'Ask approval', 'Allow synthetic command?', { isApproval: true, at: ago(3 * MIN) })
   const stuckRow = row('codex', 'demo', 'Stuck AI task', { at: ago(20 * MIN), stuck: { reason: 'Needs input' } })
   const model = board({
     asks: [ownOld, aiOld, askApproval],
@@ -848,7 +848,7 @@ test('waiting approvals come before AI questions and own steps; window approvals
       { id: 'apr-new', agent: 'codex', state: 'asking', tool: 'Edit', command: 'file.ts', project: 'demo', task: 'Edit file', at: ago(MIN) },
       { id: 'apr-old', agent: 'claude', state: 'shown', tool: 'Bash', command: 'npm test', project: 'demo', task: 'Run tests', at: ago(4 * MIN) },
     ],
-  } as Partial<GroupingInput>)
+  })
   const result = groupBoard(model, NOW, none, EN)
 
   expect(result.needs.n).toBe(6)
@@ -858,11 +858,11 @@ test('waiting approvals come before AI questions and own steps; window approvals
     'approval:apr-old',
     askApproval.key,
     'approval:apr-new',
-    'stuck:row:demo::Stuck AI task',
     aiOld.key,
+    'stuck:row:demo::Stuck AI task',
     ownOld.key,
   ])
-  expect(result.needs.cards.slice(0, 3).map(card => [card.type, (card as { isApproval?: boolean }).isApproval])).toEqual([
+  expect(result.needs.cards.slice(0, 3).map(card => [card.type, card.type === 'question' ? card.isApproval : undefined])).toEqual([
     ['question', true],
     ['question', true],
     ['question', true],
@@ -907,8 +907,8 @@ test('steps waiting on others fold out of Needs you into waitingOthers with loca
 })
 
 test('questions first seen over three days ago fold into older with localized labels', () => {
-  const exactlyThreeDays = ask('claude', 'demo', 'Boundary task', 'Still within 3 days?', { firstObserved: ago(3 * DAY), at: ago(3 * MIN) } as Partial<GroupingAsk>)
-  const overThreeDays = ask('codex', 'demo', 'Overdue task', 'Seen over 3 days ago?', { firstObserved: ago(3 * DAY + 1), at: ago(5 * MIN) } as Partial<GroupingAsk>)
+  const exactlyThreeDays = ask('claude', 'demo', 'Boundary task', 'Still within 3 days?', { firstObserved: ago(3 * DAY), at: ago(3 * MIN) })
+  const overThreeDays = ask('codex', 'demo', 'Overdue task', 'Seen over 3 days ago?', { firstObserved: ago(3 * DAY + 1), at: ago(5 * MIN) })
   const rem = retained('codex', 'demo', 'Rem task', 'Reminder question?', { at: ago(4 * DAY) })
   const old = retained('gemini', 'demo', 'Old task', 'Oldest retained question?', { at: ago(6 * DAY) })
   const model = board({
@@ -935,10 +935,10 @@ test('questions first seen over three days ago fold into older with localized la
 })
 
 test('item timestamp and age prefer updated over at and clamp future timestamps to now', () => {
-  const byMs = ask('codex', 'demo', 'By updated ms', 'Question one?', { at: ago(20 * MIN), updated: ago(4 * MIN) } as Partial<GroupingAsk>)
-  const byIso = ask('codex', 'demo', 'By updated iso', 'Question two?', { at: ago(20 * MIN), updated: new Date(ago(7 * MIN)).toISOString() } as Partial<GroupingAsk>)
-  const invalidIso = ask('codex', 'demo', 'Invalid updated', 'Question three?', { at: ago(12 * MIN), updated: 'not-a-timestamp' } as Partial<GroupingAsk>)
-  const future = ask('codex', 'demo', 'Future updated', 'Question four?', { at: ago(10 * MIN), updated: NOW + 5 * MIN } as Partial<GroupingAsk>)
+  const byMs = ask('codex', 'demo', 'By updated ms', 'Question one?', { at: ago(20 * MIN), updated: ago(4 * MIN) })
+  const byIso = ask('codex', 'demo', 'By updated iso', 'Question two?', { at: ago(20 * MIN), updated: new Date(ago(7 * MIN)).toISOString() })
+  const invalidIso = ask('codex', 'demo', 'Invalid updated', 'Question three?', { at: ago(12 * MIN), updated: 'not-a-timestamp' })
+  const future = ask('codex', 'demo', 'Future updated', 'Question four?', { at: ago(10 * MIN), updated: NOW + 5 * MIN })
   const undated = ask('codex', 'demo', 'Undated', 'Question five?')
   const result = groupBoard(board({ asks: [byMs, byIso, invalidIso, future, undated] }), NOW, none, EN)
 
