@@ -898,19 +898,57 @@ test('Redesign 2 uses icon-only AI identity, distinct CLI/App .surf-pill badges,
   const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
   const hasClass = (node, name) => String(node.className ?? '').split(' ').includes(name)
 
-  // #side-agents renders full CLI/App .surf-pill badges while keeping vendor names in aria-label/title.
+  // #side-agents renders full CLI/App .surf-pill badges while keeping vendor names and surface labels in aria-label/title.
   const sideCodex = dom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
   const sideAntig = dom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'antigravity')
-  assert.ok(sideCodex.getAttribute('aria-label').includes('Codex'))
-  assert.ok(sideAntig.getAttribute('aria-label').includes('Antigravity'))
+  assert.ok(sideCodex.getAttribute('aria-label').includes('Codex · CLI'))
+  assert.ok(sideAntig.getAttribute('aria-label').includes('Antigravity · App'))
   assert.ok(walk(sideCodex).some(n => hasClass(n, 'surf-cli') && !hasClass(n, 'surf-icon') && n.textContent.includes('CLI')))
   assert.ok(walk(sideAntig).some(n => hasClass(n, 'surf-app') && !hasClass(n, 'surf-icon') && n.textContent.includes('App')))
 
-  // #chips renders compact icon-only .surf-icon pills.
+  // #chips renders compact icon-only .surf-icon pills and exposes surface labels in aria-label.
   const chipCodex = dom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
   const chipAntig = dom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'antigravity')
+  assert.ok(chipCodex.getAttribute('aria-label').includes('Codex · CLI'))
+  assert.ok(chipAntig.getAttribute('aria-label').includes('Antigravity · App'))
   assert.ok(walk(chipCodex).some(n => hasClass(n, 'surf-cli') && hasClass(n, 'surf-icon') && n.textContent.trim() === ''))
   assert.ok(walk(chipAntig).some(n => hasClass(n, 'surf-app') && hasClass(n, 'surf-icon') && n.textContent.trim() === ''))
+
+  // Multi-surface agent (both CLI and App sessions at once) renders both badges and includes both surfaces in aria-label.
+  const multiMd = [
+    '## cli-repo',
+    `<!-- auto session=cc200001 agent=codex state=waiting updated=${updated} -->`,
+    '### Codex CLI task',
+    '- [?] Ship CLI build?',
+    '<!-- /auto session=cc200001 -->',
+    '',
+    '## app-repo',
+    `<!-- auto session=cc200002 agent=codex state=working updated=${updated} -->`,
+    '### Codex App task',
+    '- [~] Running Desktop task',
+    '<!-- /auto session=cc200002 -->',
+    '',
+  ].join('\n')
+  for (const [locale, words] of [['en', STRINGS.en], ['zh-TW', STRINGS['zh-TW']], ['zh-CN', STRINGS['zh-CN']]]) {
+    const multiView = buildView(parseProgress(multiMd), ['cli-repo', 'app-repo'], null, now, 0, {}, words, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+    const multiModel = serveModel(multiView, [], words, new Set(), false, {
+      connections: [
+        { id: 'c-cli', agent: 'codex', session: 'cc200001', surface: 'Codex CLI', scope: 'session', turn: 't1', contested: false, expires: now + 60_000 },
+        { id: 'c-app', agent: 'codex', session: 'cc200002', surface: 'Codex desktop app', scope: 'session', turn: 't2', contested: false, expires: now + 60_000 },
+      ],
+      messages: [],
+    }, false, group)
+    const multiDom = await pageDom(servePage(words, 'n'), multiModel)
+    const multiSide = multiDom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+    const multiChip = multiDom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+    const expectSurf = `${words.pgInterfaceCli} · ${words.pgInterfaceApp}`
+    assert.ok(multiSide.getAttribute('aria-label').includes(expectSurf), `${locale} side aria-label: ${multiSide.getAttribute('aria-label')}`)
+    assert.ok(multiChip.getAttribute('aria-label').includes(expectSurf), `${locale} chip aria-label: ${multiChip.getAttribute('aria-label')}`)
+    assert.ok(walk(multiSide).some(n => hasClass(n, 'surf-cli') && !hasClass(n, 'surf-icon')))
+    assert.ok(walk(multiSide).some(n => hasClass(n, 'surf-app') && !hasClass(n, 'surf-icon')))
+    assert.ok(walk(multiChip).some(n => hasClass(n, 'surf-cli') && hasClass(n, 'surf-icon')))
+    assert.ok(walk(multiChip).some(n => hasClass(n, 'surf-app') && hasClass(n, 'surf-icon')))
+  }
 
   // .c-meta and .r-meta render .surf-pill and zero visible vendor names.
   const cardMeta = walk(dom.node('needs')).find(n => hasClass(n, 'c-meta'))

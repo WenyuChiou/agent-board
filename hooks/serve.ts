@@ -3116,9 +3116,11 @@ const PAGE_SCRIPT = String.raw`
       else parts.push(w('pgTipOpen', entry.open));
     }
     if (entry.unreadable) parts.push(w('pgTipCantRead'));
+    var surf = (entry.surfaces || []).filter(function (v) { return v === 'cli' || v === 'app'; }).map(function (v) { return w(v === 'app' ? 'pgInterfaceApp' : 'pgInterfaceCli'); }).join(' · ');
     var state = stateWord(entry);
-    if (entry.working > 0 && !parts.length) return entry.name + ' · ' + state;
-    return entry.name + (state ? ' · ' + state : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
+    var head = entry.name + (surf ? ' · ' + surf : '') + (state ? ' · ' + state : '');
+    if (entry.working > 0 && !parts.length) return head;
+    return head + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
   }
   // One button per agent, twice: in the icon row (phones) and in the sidebar (the rail and wider). Same label, count, dot and filter.
   function newChip(entry, isSide) {
