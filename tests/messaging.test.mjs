@@ -6120,7 +6120,7 @@ test('a delay the daemon will not give does not send a terminal thread to the 10
   await codexAtOnce(board, dir, { daemonConfig: { configFaults } })
 }))
 
-test('terminal gone, thread still listed: does not start', () => codexFixture(async (board, dir) => {
+test('terminal gone, thread still listed: not started at the next tick, and started only once the 10-minute wait is over (#1652)', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person')
   writeFileSync(person, '')
   const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
@@ -6138,15 +6138,61 @@ test('terminal gone, thread still listed: does not start', () => codexFixture(as
     await stepped.advance(66_000, { step: 10_000 })
     await watch(6 * codexPollMs)
     assert.ok(seen.has('queued'), JSON.stringify([...seen]))
-    // Past 10 minutes and 5 s as well: the old wait does not start it either.
-    await stepped.advance(606_000, { step: 10_000 })
-    await watch(6 * codexPollMs)
     assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon), [...seen].every(status => status === 'queued' || status === 'uncertain')], [false, 0, true])
-    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'queued')
     // The receiver did look for a window, so this is its answer and not a thread it never decided on.
     assert.ok(asked.length > 0 && asked.every(why => why === 'decide'), JSON.stringify(asked))
+    // A thread nobody holds is unloaded long before 10 minutes. One still listed then is held by a client the list does not show as a
+    // window (another client of the daemon, or a window whose command line reads as one of Codex's other commands): it gets the
+    // message once the 10-minute wait is over, with no check, as every message did before #1652, never a wait with no end.
+    let at = null
+    await stepped.advance(900_000, { step: 10_000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    assert.equal(codexStarts(daemon), 1)
+    assert.ok(at >= 605_000, `started at ${Math.round(at / 1000)} s by the receiver's clock`)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    assert.ok(asked.every(why => why === 'decide'), JSON.stringify(asked))
   } finally { await stepped.receiver.close() }
 }))
+
+test('a thread the daemon closes while the process list is read before the join is not joined, which would load it again (#1652)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), closeFlag = join(dir, 'close')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, closeFlag, unloadSecs: 'none' })
+  let joins = 0, readAt = null
+  const clients = async why => {
+    if (why === 'join' && ++joins === 1) {
+      // The daemon unloads the thread (its thread/closed) while the read before the join is under way: a read may take seconds.
+      writeFileSync(closeFlag, '')
+      await waitFor(async () => !existsSync(closeFlag))
+      await pause(300)
+      readAt = Date.now()
+    }
+    return [codexClientRow()]
+  }
+  const stepped = codexStepped(board, daemon, { clients, tickMs: 300 })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => readAt !== null)
+    // The window is still there, but the thread is not: nothing is joined or started on it right after the read.
+    await pause(1000)
+    assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon)], [false, 0])
+  } finally { await stepped.receiver.close() }
+}))
+
+test('on Linux a Codex window whose prompt starts with one of Codex\'s command words is still a window: its exact arguments are read (#1652)', async () => {
+  const { linuxCommandLine, terminalClients } = await import('../scripts/codex-receiver.mjs')
+  const at = 1_700_000_000_000
+  const row = (pid, cmdline) => ({ pid, started: at, name: 'codex', argv: linuxCommandLine(cmdline) })
+  // /proc/<pid>/cmdline splits the arguments by NUL: `codex "review this change"` is one prompt, `codex exec the plan` a one-shot run.
+  assert.deepEqual(terminalClients([
+    row(11, '/usr/bin/codex\0review this change\0'),
+    row(12, '/usr/bin/codex\0exec\0the synthetic plan\0'),
+    row(13, '/usr/bin/codex\0resume\0synthetic-thread\0'),
+    row(14, '/usr/bin/codex\0say "exec" twice\0'),
+  ], 'linux'), { clients: [`11:${at}`, `13:${at}`, `14:${at}`], isUnsure: false })
+  assert.equal(linuxCommandLine(''), null)
+})
 
 // The window the decision found must be the one there when the receiver joins: the list read right before the join is compared with
 // the decision's by process id and start time. firstJoin says what the first such read finds. The claim then goes back to the queue and
