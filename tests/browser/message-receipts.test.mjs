@@ -185,6 +185,7 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
       const failCard = board.question(qFail)
 
       // Next-turn route card hint uses plain words.
+      await waitCard.locator('button.q-toggle').click()
       await waitCard.getByText('Codex reads this when you next type in its window.', { exact: true }).waitFor()
       await waitCard.getByRole('button', { name: 'Write your own', exact: true }).click()
       await waitCard.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Queue this answer.')
@@ -230,6 +231,7 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
       await waitReceipt.filter({ hasText: 'Queued for next turn · Codex reads this when you next type in its window.' }).waitFor()
 
       // Card 2 settles in handed-over (delivered) state.
+      await doneCard.locator('button.q-toggle').click()
       await doneCard.getByRole('button', { name: 'Write your own', exact: true }).click()
       await doneCard.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Hand over this answer.')
       await doneCard.getByRole('button', { name: "Queue for Codex's next turn", exact: true }).click()
@@ -241,6 +243,7 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
       await doneReceipt.filter({ hasText: 'Handed to the session at its turn start. No reply is confirmed.' }).waitFor()
 
       // Card 3 settles in failed/rejected state.
+      await failCard.locator('button.q-toggle').click()
       await failCard.getByRole('button', { name: 'Write your own', exact: true }).click()
       await failCard.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Trigger failure.')
       await failCard.getByRole('button', { name: 'Send to Codex', exact: true }).click()

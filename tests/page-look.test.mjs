@@ -114,7 +114,7 @@ const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input|select)(?=$|[:[\s]
 
 test('the page uses only colour, size, radius, spacing and motion tokens from page-look', () => {
   const expected = {
-    text: { 'text-xs': 'max(13px,.8125rem)', 'text-sm': 'max(14px,.875rem)', 'text-md': 'max(16px,1rem)', 'text-lg': 'max(20px,1.25rem)' },
+    text: { 'text-xs': 'max(13px,.8125rem)', 'text-sm': 'max(14px,.875rem)', 'text-md': 'max(16px,1rem)', 'text-lg': 'max(18px,1.125rem)' },
     radius: { 'radius-s': '6px', 'radius-m': '10px', 'radius-round': '999px' },
     dur: { 'dur-fast': '120ms', 'dur-base': '200ms', 'dur-layout': '260ms', 'dur-glow': '1.6s', 'dur-dots': '1.2s', 'dur-theme': '.28s' },
     ease: { 'ease-out': 'cubic-bezier(.2,0,0,1)', 'ease-in': 'cubic-bezier(.4,0,1,1)' },
@@ -516,5 +516,119 @@ test('a board over every size limit shows no storage notice on the first screen'
     const writeFailBoardText = `${writeFailDom.node('board').readText}\n${writeFailDom.node('board').textContent}`
     assert.ok(writeFailBoardText.includes(s.journalFailed), `${lang}: write failure still speaks on the first screen`)
     assert.ok(!writeFailBoardText.includes(s.boardLarge), `${lang}: boardLarge stays hidden alongside a write failure`)
+  }
+})
+
+test("a waiting question's folded item is two lines at 1280 px", async () => {
+  const s = STRINGS.en
+  const html = servePage(s, 'n')
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const md = [
+    '## weather-model',
+    `<!-- auto session=aa11bb22 agent=codex state=waiting updated=${new Date(now - 7 * 60000).toISOString()} -->`,
+    '### Compare rainfall model error rates across stations',
+    '> Context: Need the Q4 report pick before Friday review.',
+    '- [x] Load station series',
+    '- [?] Choose model for `bun run compare-models`?',
+    '<!-- options=["ECMWF","Local model","Hybrid","Skip"] -->',
+    '<!-- /auto session=aa11bb22 -->',
+    '',
+  ].join('\n')
+  const view = buildView(parseProgress(md), ['weather-model'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const model = serveModel(view, [], s, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const dom = await pageDom(html, model)
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const isInert = node => {
+    for (let cur = node; cur; cur = cur.parentNode) if (cur.inert || cur.hidden) return true
+    return false
+  }
+  const card = walk(dom.node('needs')).find(node => node.tag === 'article' && node.getAttribute('data-ref-key'))
+  assert.ok(card, 'question card renders in Needs you')
+  const descendants = walk(card)
+  const mark = descendants.find(node => String(node.className ?? '').split(' ').includes('ag'))
+  assert.equal(mark?.getAttribute('title'), 'Codex', 'AI mark tooltip carries the AI name')
+  assert.equal(mark?.getAttribute('role'), 'img', 'AI mark exposes role="img" to screen readers')
+  assert.equal(mark?.getAttribute('aria-label'), 'Codex', 'AI mark exposes AI name to screen readers')
+  assert.equal(mark?.getAttribute('aria-hidden'), null, 'AI mark is not hidden from screen readers')
+  assert.equal(descendants.some(node => String(node.className ?? '').split(' ').includes('who')), false, 'folded item carries no inline AI name word')
+  const toggle = descendants.find(node => node.tag === 'button' && String(node.className ?? '').split(' ').includes('q-toggle'))
+  assert.ok(toggle, 'line 1 question uses a collapsible toggle button')
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false', 'waiting question item starts folded')
+  const qNode = descendants.find(node => String(node.className ?? '').split(' ').includes('q'))
+  assert.ok(qNode?.textContent.includes('Choose model for'), qNode?.textContent)
+  const line2 = descendants.find(node => String(node.className ?? '').split(' ').includes('c-line2'))
+  assert.ok(line2, 'folded item has line 2 container (.c-line2)')
+  assert.ok(line2.textContent.includes('weather-model') && line2.textContent.includes('7'), 'line 2 shows project and age')
+  const visibleButtons = descendants.filter(node => node.tag === 'button' && node !== toggle && !isInert(node))
+  assert.ok(visibleButtons.length <= 3, `folded item shows at most 3 controls, got ${visibleButtons.length}`)
+  const foldedText = card.visibleText
+  for (const hiddenSnippet of [
+    'Compare rainfall model error rates across stations',
+    'Need the Q4 report pick before Friday review.',
+    'Load station series',
+    'Hybrid',
+    'Skip',
+    '$ bun run compare-models',
+    s.pgWriteOwn,
+    s.answeredHide,
+  ]) {
+    assert.ok(!foldedText.includes(hiddenSnippet), `folded item hides "${hiddenSnippet}"`)
+  }
+  toggle.click()
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true', 'clicking item opens it')
+  const openText = card.visibleText
+  for (const detailSnippet of [
+    'Compare rainfall model error rates across stations',
+    'Need the Q4 report pick before Friday review.',
+    'Load station series',
+    'Hybrid',
+    'Skip',
+    '$ bun run compare-models',
+    s.pgWriteOwn,
+    s.answeredHide,
+  ]) {
+    assert.ok(openText.includes(detailSnippet), `opened item shows "${detailSnippet}"`)
+  }
+})
+
+test('no text inside an item is over 14 px', () => {
+  const html = servePage(STRINGS.en, 'n')
+  const rules = styleRules(html)
+  const pxFloor = value => Number(/^max\((\d+)px/.exec(String(value ?? ''))?.[1] ?? NaN)
+  const tokenPx = Object.fromEntries(
+    ['text-xs', 'text-sm', 'text-md', 'text-lg'].map(name => [name, pxFloor(light[name])]),
+  )
+  const resolveFontPx = value => {
+    const match = /var\(--(text-(?:xs|sm|md|lg))\)/.exec(String(value ?? ''))
+    return match ? tokenPx[match[1]] : null
+  }
+  const isItemSelector = selector => selector.split(',').some(part => {
+    const sel = part.trim()
+    return /(?:^|[\s.>])(?:card|q|c-meta|c-line2|answers|answer-send|row|r-title|r-meta|r-right|row-open|hid|note|context)\b/.test(sel) ||
+      /^(?:code|textarea)(?:$|:|\s)/.test(sel)
+  })
+  const checkedItemSizes = []
+  for (const rule of rules.filter(one => !isTokenRule(one) && isItemSelector(one.selector))) {
+    for (const decl of rule.declarations) {
+      if (decl.property !== 'font-size' && decl.property !== 'font') continue
+      const px = resolveFontPx(decl.value)
+      if (px !== null) {
+        checkedItemSizes.push({ selector: rule.selector, property: decl.property, value: decl.value, px })
+        assert.ok(px <= 14, `${rule.selector} { ${decl.property}: ${decl.value} } resolves to ${px}px > 14px`)
+      }
+    }
+  }
+  assert.ok(checkedItemSizes.length > 0, 'item font sizes must be checked')
+  const qRule = rules.find(rule => rule.selector === '.q')
+  assert.equal(resolveFontPx(qRule?.declarations.find(d => d.property === 'font-size')?.value), 14, '.q question title is 14 px')
+  assert.equal(qRule?.declarations.find(d => d.property === 'font-weight')?.value, '600', '.q question title weight is 600')
+  assert.notEqual(qRule?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap', '.q without .q-toggle (Older cards) wraps instead of truncating')
+  const toggleQRule = rules.find(rule => rule.selector === '.q-toggle .q')
+  assert.equal(toggleQRule?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap', '.q-toggle .q folded question stays one line')
+  const line2Rule = rules.find(rule => rule.selector === '.c-line2')
+  assert.equal(resolveFontPx(line2Rule?.declarations.find(d => d.property === 'font-size')?.value), 13, '.c-line2 second line is 13 px')
+  for (const viewSel of ['.sec-head h2', '.flag']) {
+    const rule = rules.find(one => one.selector === viewSel)
+    assert.equal(resolveFontPx(rule?.declarations.find(d => d.property === 'font-size')?.value), 18, `${viewSel} view title is 18 px`)
   }
 })

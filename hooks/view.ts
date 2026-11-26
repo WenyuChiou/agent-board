@@ -101,6 +101,7 @@ export type WaitingItem = {
   text: string
   note: string
   when: string
+  steps?: readonly ViewStep[]
   // What kind of answer it wants, and what the pane can offer for it (see ask.ts).
   kind: AskKind
   options: string[]
@@ -1142,6 +1143,7 @@ export const buildView = (
         return value
       }
 
+      const taskSteps = task.steps.some(step => step.status === 'waiting') ? rowSteps(task, s, isRepliedTask) : undefined
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting') return
         if (isFrozen && savedAt(index) !== undefined) return
@@ -1155,6 +1157,7 @@ export const buildView = (
           when,
           ...(lastActive === undefined ? {} : { at: lastActive }),
           dir: task.auto?.dir ?? null,
+          ...(taskSteps !== undefined && taskSteps.length > 0 ? { steps: taskSteps } : {}),
           ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: optionsGiven(validOptions(step.options)) }),
           ...(step.native === undefined ? {} : { native: step.native }),
           where: isManual ? 'manual' : 'other',
