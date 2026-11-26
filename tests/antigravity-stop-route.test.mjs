@@ -300,13 +300,12 @@ test('StopWait exits empty object immediately on unknown path without claiming',
 }))
 
 test('StopWait exits empty object when terminationReason is not NO_TOOL_CALL', () => fixture('antigravity-cli', async f => {
+  f.seed('msg-term', 'agy TUI', 'Ignored on non-NO_TOOL_CALL')
   for (const reason of ['USER_CANCELED', 'ERROR', 'MAX_INVOCATIONS']) {
-    const id = `msg-term-${reason}`
-    f.seed(id, 'agy TUI', `Ignored on ${reason}`)
     const res = f.call('StopWait', { terminationReason: reason })
     assert.equal(res.status, 0, res.stderr)
     assert.deepEqual(JSON.parse(res.stdout.trim()), {})
-    assert.equal(f.one(id).status, 'queued', reason)
+    assert.equal(f.one('msg-term').status, 'queued', reason)
   }
 }))
 

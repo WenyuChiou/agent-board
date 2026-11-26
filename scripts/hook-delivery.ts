@@ -1,4 +1,5 @@
-import { existsSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { request } from 'node:http'
 import { join, posix } from 'node:path'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging.ts'
 import { isSessionEnd, isTurnStart, turnStartEnvelope } from '../hooks/hook-messages.ts'
@@ -221,17 +222,7 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
           hasWritten = true
         } catch {}
         if (hasWritten && message !== null && agent === 'antigravity' && /^[0-9a-f]{6}$/.test(message.nonce)) {
-          // Written before the acceptance, so a hook stopped after the model saw the message still leaves its code for the Stop hook.
-          // The message is accepted even when neither folder takes the claim (the model has it; handing it over again would send
-          // it twice), so that failure is reported: that message's ACK cannot be recorded.
-          let isSaved = false
-          try {
-            const files = ackClaimsFiles(root, messages, owner)
-            const size = antigravityTranscriptSize(raw.transcriptPath)
-            const claim = size === null ? { id: message.id, nonce: message.nonce } : { id: message.id, nonce: message.nonce, from: size }
-            isSaved = saveAckClaims(files, [...readAckClaims(files, readLocal).filter(one => one.id !== message.id), claim].slice(-ACK_CLAIMS_KEEP), atomic, checkDeadline)
-          } catch {}
-          if (!isSaved) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
+          saveAntigravityAckClaim(root, messages, owner, raw.transcriptPath, message.id, message.nonce, readLocal, atomic, checkDeadline, s)
         }
         if (hasWritten && message !== null) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
         if (hasWritten && pushResult.keys.length > 0) {
@@ -247,6 +238,145 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
         return true
       }
     }
+  }
+  return false
+}
+
+// Written before acceptance so a hook killed after the model saw the message still leaves its ACK code for Stop (#1416).
+const saveAntigravityAckClaim = (
+  root: string,
+  messages: string,
+  owner: string,
+  transcriptPath: unknown,
+  id: string,
+  nonce: string,
+  readLocal: (file: string) => string | null,
+  atomic: TurnDelivery['atomic'],
+  checkDeadline: () => void,
+  s: Strings,
+): void => {
+  let isSaved = false
+  try {
+    const files = ackClaimsFiles(root, messages, owner)
+    const size = antigravityTranscriptSize(transcriptPath)
+    const claim = size === null ? { id, nonce } : { id, nonce, from: size }
+    isSaved = saveAckClaims(files, [...readAckClaims(files, readLocal).filter(one => one.id !== id), claim].slice(-ACK_CLAIMS_KEEP), atomic, checkDeadline)
+  } catch {}
+  if (!isSaved) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
+}
+
+const STOP_WAIT_VISIBLE_MS = 30_000
+const STOP_WAIT_CAP_MS = 28_000
+const STOP_WAIT_POLL_MS = 400
+const STOP_WAIT_EXECUTION_CAP = 8
+
+// Loopback-only ping check for an open visible board page (#1841); never reads any Antigravity port, token, or sign-in.
+const boardPageAgo = async (messages: string, timeoutMs: number): Promise<number | null> => {
+  let owner: { pid?: unknown; url?: unknown }
+  try {
+    const lockRaw = readFileSync(join(messages, 'server.lock'), 'utf8')
+    if (!/^[1-9][0-9]*$/.test(lockRaw)) return null
+    const pid = Number(lockRaw)
+    try { process.kill(pid, 0) } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EPERM') return null
+    }
+    const ownerRaw = readFileSync(join(messages, 'server.owner'), 'utf8')
+    if (!ownerRaw) return null
+    owner = JSON.parse(ownerRaw) as { pid?: unknown; url?: unknown }
+    if (!owner || typeof owner !== 'object' || owner.pid !== pid || typeof owner.url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url)) return null
+  } catch { return null }
+  const url = new URL(owner.url as string)
+  const token = url.searchParams.get('t')
+  if (!token) return null
+  return await new Promise<number | null>(resolve => {
+    let settled = false
+    const finish = (value: number | null): void => { if (!settled) { settled = true; clearTimeout(timer); resolve(value) } }
+    const req = request(new URL('/api/ping', url), { method: 'GET', headers: { 'x-board-token': token } }, res => {
+      let text = ''
+      res.setEncoding('utf8')
+      res.on('data', chunk => { text += chunk; if (text.length > 65_536) { req.destroy(); finish(null) } })
+      res.on('end', () => {
+        if (res.statusCode !== 200) return finish(null)
+        try {
+          const parsed = JSON.parse(text) as { pageAgo?: unknown }
+          finish(typeof parsed.pageAgo === 'number' && Number.isFinite(parsed.pageAgo) ? parsed.pageAgo : null)
+        } catch { finish(null) }
+      })
+      res.on('error', () => finish(null))
+    })
+    const timer = setTimeout(() => { req.destroy(); finish(null) }, Math.max(50, timeoutMs))
+    req.on('error', () => finish(null))
+    req.end()
+  })
+}
+
+const hasWaitingQuestion = (progress: string, session: string, readLocal: (file: string) => string | null, hash: (text: string) => string): boolean => {
+  try {
+    const text = readLocal(progress)
+    if (text === null) return false
+    const shortId = hash(`antigravity:${session}`).slice(0, 8)
+    return parseProgress(text).some(project => project.tasks.some(task =>
+      task.auto?.agent === 'antigravity' && (task.auto.session === shortId || task.auto.resume === session)
+      && task.auto.state === 'waiting' && task.steps.some(step => step.status === 'waiting')))
+  } catch { return false }
+}
+
+// Route H (#1841): second sequential agy Stop handler (`StopWait`, 30 s budget).
+// Claims an already-queued board message or waits while a waiting `[?]` block and a visible board page are active,
+// returning `{"decision":"continue","reason":...}` without holding any mailbox claim during the wait.
+export const deliverAntigravityStopWait = async (
+  delivery: Omit<TurnDelivery, 'mode' | 'agent' | 'event' | 'report' | 'folder' | 'base' | 'hereNames'>,
+): Promise<boolean> => {
+  const { session, raw, progress, home, root, hookDeadline, s, hash, readLocal, atomic, checkDeadline } = delivery
+  if (antigravitySurface(raw.transcriptPath, raw.artifactDirectoryPath) !== SURFACE_IDS.antigravityTui) return false
+  const termination = raw.terminationReason
+  if (termination !== undefined && termination !== '' && termination !== 'NO_TOOL_CALL') return false
+  if (typeof raw.error === 'string' && raw.error !== '') return false
+  if (raw.fullyIdle === false) return false
+  if (typeof raw.executionNum === 'number' && raw.executionNum >= STOP_WAIT_EXECUTION_CAP) return false
+  if (hookDeadline - Date.now() < 300) return false
+
+  const messages = defaultMessagesDirectory(progress, home, process.env, process.platform)
+  const owner = hash(`antigravity:${session}`)
+
+  const handOver = async (message: NonNullable<Awaited<ReturnType<ReturnType<typeof hookMailbox>['turn']>>>, mailbox: ReturnType<typeof hookMailbox>): Promise<boolean> => {
+    const payload = `${JSON.stringify({ decision: 'continue', reason: deliveryText(message, s) })}\n`
+    await new Promise<void>((done, fail) => process.stdout.write(payload, error => error ? fail(error) : done()))
+    if (/^[0-9a-f]{6}$/.test(message.nonce)) saveAntigravityAckClaim(root, messages, owner, raw.transcriptPath, message.id, message.nonce, readLocal, atomic, checkDeadline, s)
+    try { await mailbox.accept('antigravity', session, message.id, message.nonce, Date.now()) } catch {}
+    return true
+  }
+
+  let immediateBox: ReturnType<typeof hookMailbox> | undefined
+  let immediate = null
+  try {
+    immediateBox = hookMailbox(messages, Math.min(1500, hookDeadline - Date.now()))
+    immediate = await immediateBox.turn('antigravity', session, SURFACE_IDS.antigravityTui, Date.now()) ?? null
+  } catch {}
+  if (immediate !== null && immediateBox !== undefined) return await handOver(immediate, immediateBox)
+  if (immediateBox?.hasNoFolder) return false
+
+  if (!hasWaitingQuestion(progress, session, readLocal, hash)) return false
+  const initialAgo = await boardPageAgo(messages, Math.min(250, Math.max(50, hookDeadline - Date.now())))
+  if (initialAgo === null || initialAgo > STOP_WAIT_VISIBLE_MS) return false
+
+  const waitEnd = Math.min(Date.now() + STOP_WAIT_CAP_MS, hookDeadline - 1000)
+  for (let iter = 1; Date.now() < waitEnd; iter++) {
+    const sleepMs = Math.min(STOP_WAIT_POLL_MS, waitEnd - Date.now())
+    if (sleepMs <= 0) break
+    await new Promise(done => setTimeout(done, sleepMs))
+    const left = hookDeadline - Date.now()
+    if (left < 300) break
+    if (iter % 5 === 0) {
+      if (!hasWaitingQuestion(progress, session, readLocal, hash)) break
+      const ago = await boardPageAgo(messages, Math.min(250, left))
+      if (ago === null || ago > STOP_WAIT_VISIBLE_MS) break
+    }
+    try {
+      const pollBox = hookMailbox(messages, Math.min(1500, left))
+      const polled = await pollBox.turn('antigravity', session, SURFACE_IDS.antigravityTui, Date.now()) ?? null
+      if (polled !== null) return await handOver(polled, pollBox)
+    } catch {}
   }
   return false
 }
