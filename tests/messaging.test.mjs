@@ -6256,6 +6256,40 @@ test('only a Codex program that is not the app-server counts as a window, by its
   assert.equal(hasSameClient([`10:${at}`], []), false)
 })
 
+test('the Codex desktop app\'s exec-server and an MCP server are not counted as a terminal window', async () => {
+  const { terminalClients } = await import('../scripts/codex-receiver.mjs')
+  const at = 1_700_000_000_000
+  // The desktop app starts its own Codex programs: the app-server and an exec-server, both with flags before the command.
+  const app = [
+    { pid: 30, started: at, name: 'codex.exe', argv: '"C:\\Apps\\Codex\\codex.exe" -c features.code_mode_host=true app-server --analytics-default-enabled' },
+    { pid: 31, started: at, name: 'codex.exe', argv: '"C:\\Apps\\Codex\\codex.exe" -c features.prefer_mxc=true -c "forced_login_method=\\"chatgpt\\"" exec-server --listen stdio' },
+    { pid: 32, started: at, name: 'codex.exe', argv: 'codex.exe mcp-server' },
+  ]
+  assert.deepEqual(terminalClients(app, 'win32'), { clients: [], isUnsure: false })
+  // A terminal window beside them is still found.
+  assert.deepEqual(terminalClients([...app, { pid: 33, started: at, name: 'codex.exe', argv: 'codex' }], 'win32'), { clients: [`33:${at}`], isUnsure: false })
+  assert.deepEqual(terminalClients([{ pid: 40, started: at, name: 'codex', argv: '/usr/bin/codex exec-server' }], 'linux'), { clients: [], isUnsure: false })
+})
+
+test('a process list that could not be read once does not keep the thread on the 10-minute wait', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  let calls = 0
+  const stepped = codexStepped(board, daemon, { clients: async () => { calls += 1; if (calls === 1) throw new Error('SYNTHETIC_PROCESS_LIST_FAILURE'); return [codexClientRow()] }, onError: () => {} })
+  try {
+    assert.equal(await codexSend(board, await codexConnection(board)), 200)
+    await stepped.settle()
+    // The first claim cannot read the list and goes back; a later claim reads it again, finds the window and starts the turn
+    // long before the 10-minute wait would end.
+    let at = null
+    await stepped.advance(300_000, { step: 5000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    assert.equal(codexStarts(daemon), 1)
+    assert.ok(calls >= 2, `the list was read ${calls} times`)
+    assert.ok(at !== null && at < 300_000, `started at ${at === null ? 'never' : Math.round(at / 1000) + ' s'} by the receiver's clock`)
+  } finally { await stepped.receiver.close() }
+}))
+
 test('an ephemeral Codex thread is never read as a person\'s', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person')
   writeFileSync(person, '')
