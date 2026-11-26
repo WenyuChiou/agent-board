@@ -10,6 +10,8 @@ import { dockScript } from './board-dock'
 import type { SettingsLang } from './board-settings'
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
+import { messageStatus } from './message-status'
+import type { StatusState, StatusTone } from './message-status'
 import { agentLabel } from './strings'
 import type { Tone } from './palette'
 import { cellCode } from './progress-bar'
@@ -36,7 +38,8 @@ export type SendMode = 'send' | 'connected' | 'mailbox' | 'open' | 'claude' | 'n
 type Delivery = { id: string; turn: string; agent: string; isAfterAppQuit?: true }
 type ShownMessage = Omit<Message, 'nonce' | 'hash'> & { isSurfaceLost?: boolean; isAfterAppQuit?: boolean }
 // isAfterAppQuit: a message to a Codex desktop app conversation, which runs only once the app has let go of it (#557).
-type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean; isSurfaceLost?: true; isAfterAppQuit?: true }
+// shown: the card's one status line, from hooks/message-status.ts (#1843); none for a message taken back after it was handed out.
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean; isSurfaceLost?: true; isAfterAppQuit?: true; shown?: { state: StatusState; line: string; tone: StatusTone } }
 type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly ShownMessage[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
@@ -48,21 +51,14 @@ const reachable = (agent: string, session: string | undefined, target: AgentTarg
   const found = liveTarget(agent, session, targets)
   return found?.scope === 'mailbox' && target?.isClosed === true ? undefined : found
 }
-// A claim just handed to a live receiver still shows as queued during the brief handoff window while the receiver can accept or fail;
-// once that window elapses (for example a lost /api/messages/poll response while the receiver keeps renewing its connection), show uncertain (#1335).
-export const CLAIM_HANDOFF_MS = 15_000
-const isClaimInFlight = (one: ShownMessage, connections: readonly Connection[], now: number): boolean =>
-  one.status === 'uncertain' && one.error === '' && one.hasAccepted !== true && one.reply === ''
-  && one.claimed > 0 && one.updated === one.claimed && !isMailboxTarget(one.target)
-  && now >= one.claimed && now - one.claimed < CLAIM_HANDOFF_MS
-  && connections.some(c => c.id === one.target && c.turn === one.turn && !c.contested && c.expires > now)
 // A Codex desktop app turn the receiver said `starting` for runs in the background for as long as the model takes, and the
 // receiver keeps its connection until the receipt is in: while it does, the turn is running, not unconfirmed (#557).
 const isAppTurnRunning = (one: ShownMessage, connections: readonly Connection[], now: number): boolean =>
   one.isAfterAppQuit === true && one.status === 'uncertain' && one.error === '' && one.hasAccepted !== true && one.reply === ''
   && one.claimed > 0 && one.awaitsStart !== true
   && connections.some(c => c.id === one.target && c.turn === one.turn && !c.contested && c.expires > now)
-const rowReceipt =(agent: string, session: string | undefined, messages: readonly ShownMessage[], now: number, s: Strings, answers?: string, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true, connections: readonly Connection[] = []): { receipt?: Receipt } => {
+// reportedAt: when the card's session last reported, so an answer handed over before it reads Answered.
+export const rowReceipt = (agent: string, session: string | undefined, messages: readonly ShownMessage[], now: number, s: Strings, answers?: string, isSurfaceLost: (one: ShownMessage) => boolean = one => one.isSurfaceLost === true, connections: readonly Connection[] = [], reportedAt?: number): { receipt?: Receipt } => {
   // A kept question (no live session here) is found by the one message the board sent to answer it; a message
   // with no such link is no receipt for it. Only the board sets that link, so the question id alone names the
   // message. On a live question's card, an answer to another question is no receipt for this one (#725), while
@@ -72,8 +68,11 @@ const rowReceipt =(agent: string, session: string | undefined, messages: readonl
     ? answers === undefined ? undefined : messages.filter(message => message.answers === answers).at(-1)
     : messages.filter(message => message.to === to && (answers === undefined || message.answers === undefined || message.answers === answers)).at(-1)
   if (one === undefined) return {}
-  const status = isClaimInFlight(one, connections, now) ? 'queued' : isAppTurnRunning(one, connections, now) ? 'accepted' : one.status
-  return { receipt: { id: one.id, status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), ...(one.isAfterAppQuit === true ? { isAfterAppQuit: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s) } }
+  // A claim reads from its stored receipt alone, live connection or not (owner, #1843 answer 2); a Codex app turn the
+  // receiver still holds is the one reading only the page makes.
+  const status = isAppTurnRunning(one, connections, now) ? 'accepted' : one.status
+  const shown = messageStatus({ ...one, status, isSurfaceLost: isSurfaceLost(one) }, now, s, reportedAt)
+  return { receipt: { id: one.id, status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), ...(one.isAfterAppQuit === true ? { isAfterAppQuit: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s), ...(shown === null ? {} : { shown: { state: shown.state, line: shown.line, tone: shown.tone } }) } }
 }
 // The person's answer to this question reached its session: the session took it, or replied.
 const isAnswerHanded = (messages: readonly Pick<ShownMessage, 'answers' | 'status' | 'hasAccepted'>[], questionId: string): boolean =>
@@ -541,7 +540,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
-  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId, isMessageSurfaceLost, messaging?.connections))
+  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId, isMessageSurfaceLost, messaging?.connections, item.at))
   const asks: ServeAsk[] = []
   // Per ask card: whether an answer to this very question is held (the page's `isSending` is per session).
   const held = new Map<string, boolean>()
@@ -610,7 +609,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent, ...(connection.surface === SURFACE_IDS.codexApp ? { isAfterAppQuit: true as const } : {}) } }),
         // A question the board knows gets the receipt of the answer sent to it, not of an earlier message
         // to the same session.
-        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId, isMessageSurfaceLost, messaging?.connections)),
+        ...(isLan ? {} : rowReceipt(ask.agent, ask.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, ask.questionId, isMessageSurfaceLost, messaging?.connections, ask.at)),
         key: item.key,
         ...(ask.questionId === undefined ? {} : { questionId: ask.questionId }),
         project: ask.project,
@@ -692,7 +691,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
           ...(row.rowState === undefined ? {} : { rowState: row.rowState }),
         }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent, ...(connection.surface === SURFACE_IDS.codexApp ? { isAfterAppQuit: true as const } : {}) } }),
-        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, undefined, isMessageSurfaceLost, messaging?.connections)),
+        ...(isLan ? {} : rowReceipt(row.agent, row.nativeSession, messaging?.messages ?? [], group?.now ?? 0, s, undefined, isMessageSurfaceLost, messaging?.connections, row.at)),
         key: item.key,
         project: row.project,
         title: row.title,
@@ -1022,8 +1021,8 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
-  'claudeSendWorking', 'claudeDelivered', 'claudeReplied', 'claudeGotIt', 'claudeUnconfirmed', 'claudeStopped', 'messageTakeBack', 'messageDismiss',
-  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenWaitingCodexApp', 'serveReopenDone', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'messagesHandedNextTurn', 'messagesHandedNow', 'pressFailed', 'messagesQueued', 'messagesUncertain', 'messagesAccepted', 'messagesAcceptedUnconfirmed', 'messagesSentUnconfirmed', 'messagesAcceptedDisconnected', 'messagesAcknowledged', 'messagesRejected', 'messagesSurfaceLost', 'messagesFailed', 'messagesTimeout',
+  'claudeSendWorking', 'messageTakeBack', 'messageDismiss',
+  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenWaitingCodexApp', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'pressFailed', 'messagesQueued', 'messagesFailed',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
   'archiveNow', 'cleanUp', 'boardLarge', 'stoppedCount',
@@ -2064,23 +2063,25 @@ const PAGE_SCRIPT = String.raw`
       || isEndedUncertainReceipt(receipt);
     if (isDone) Object.keys(messageAttempts).forEach(function (slot) { if (messageAttempts[slot].id === receipt.id) delete messageAttempts[slot]; });
   }
-  // The card's line for a message to a Claude session, by what its receipt says (#316).
+  // The card's one status line, as the server read it from the stored receipt (hooks/message-status.ts, #1843): the same
+  // words for every agent. A message taken back after it was handed out has none.
+  function shownLine(receipt) {
+    var shown = receipt.shown;
+    if (!shown) return null;
+    var line = el('p', 'receipt' + (shown.tone === 'alert' ? ' t-alert' : shown.tone === 'wait' ? ' t-wait' : ' t-done'), shown.line);
+    line.setAttribute('role', shown.tone === 'alert' ? 'alert' : 'status');
+    return line;
+  }
+  // The buttons under a message to a Claude session, by what its receipt says (#316).
   function claudeReceipt(receipt, key, canSend) {
     var error = receipt.error || '';
     var isStopped = receipt.status === 'rejected';
     var isReplied = receipt.status === 'acknowledged';
     // Whatever went nowhere can be sent again, under an id of its own.
     releaseFinishedAttempt(receipt, true);
-    if (error === 'DISMISSED') return null;
+    var line = shownLine(receipt);
+    if (!line) return null;
     var isUnconfirmed = receipt.status === 'uncertain' || receipt.status === 'accepted' && error === 'DISCONNECTED';
-    var isFail = isStopped || receipt.status === 'uncertain' && receipt.hasAccepted !== true;
-    var toneClass = isFail ? ' t-alert' : receipt.status === 'queued' ? ' t-wait' : ' t-done';
-    var line = el('p', 'receipt' + toneClass, isStopped ? (error === 'STOPPED' ? w('claudeStopped') : w('messagesRejected'))
-      : isReplied ? (receipt.reply ? w('claudeReplied', receipt.reply) : w('claudeGotIt'))
-      : isUnconfirmed ? w('claudeUnconfirmed')
-      : receipt.status === 'queued' ? w('claudeSendWorking')
-      : w('claudeDelivered') + (receipt.when ? ' · ' + receipt.when : ''));
-    line.setAttribute('role', isFail ? 'alert' : 'status');
     var last = key && sentLast[key];
     // The hub lets go of a finished message's words; this page may still hold them.
     var words = receipt.text || (last ? last.text : '');
@@ -2092,51 +2093,18 @@ const PAGE_SCRIPT = String.raw`
       : add(el('div', 'acts'), dismissButton(w(receipt.status === 'queued' ? 'messageTakeBack' : 'messageDismiss'), receipt, key));
     return acts ? add(el('div', 'receipt-box'), line, acts) : line;
   }
-  // line: the card route. A message handed over on a route that goes in now or at a step's end is not said to wait for a turn.
-  function receiptLine(receipt, key, agent, canSend, line) {
+  function receiptLine(receipt, key, agent, canSend) {
     if (!receipt) return null;
     clearEnqueueResult(key, receipt);
     if (isClaudeAgent(agent)) return claudeReceipt(receipt, key, canSend);
-    // A session that takes its message the moment it is idle is not handed one at a turn it starts later (#725).
-    line = receipt.line;
-    var labels = { queued: 'messagesQueued', uncertain: 'messagesUncertain', accepted: !receipt.isMailbox ? 'messagesAccepted' : !line || line === 'now' || line === 'afterWait' || line === 'stepEnd' ? 'messagesHandedNow' : 'messagesHandedNextTurn', acknowledged: 'messagesAcknowledged', rejected: 'messagesRejected' };
     // A mailbox message that was handed over gets no ACK, so its id is done with here: the next send is a new message.
     releaseFinishedAttempt(receipt, false);
-    // The server already took a nonce ACK off; a receipt kept from a version 1 store was
-    // acknowledged with the message id instead.
-    var reply = receipt.reply || '';
-    var ack = 'ACK ' + receipt.id;
-    if (reply.indexOf(ack) === 0 && (reply.length === ack.length || /\s/.test(reply.charAt(ack.length)))) reply = reply.slice(ack.length).trim();
+    var lineEl = shownLine(receipt);
+    if (!lineEl) return null;
     var isSurfaceLost = receipt.isSurfaceLost === true;
     var isFailed = receiptFailed(receipt);
-    var isFailTone = isFailed || receipt.status === 'uncertain' && receipt.hasAccepted !== true;
-    var toneClass = isFailTone ? ' t-alert' : receipt.status === 'queued' ? ' t-wait' : ' t-done';
-    var isAcceptedUnconfirmed = receipt.status === 'uncertain' && receipt.hasAccepted === true;
     // A wake the board saw start and nothing confirmed after 30 minutes (OpenCode): it is not sent again, and its words stay to copy.
     var isSentUnconfirmed = receipt.status === 'uncertain' && receipt.error === 'UNCONFIRMED';
-    var labelText = isSurfaceLost
-      ? w('messagesSurfaceLost')
-      : isSentUnconfirmed ? w('messagesSentUnconfirmed')
-      : isFailed && receipt.status === 'uncertain'
-      ? w('messagesTimeout')
-      : isAcceptedUnconfirmed ? w('messagesAcceptedUnconfirmed')
-      : receipt.status === 'accepted' && line === 'reopen'
-        ? w('serveReopenRunning', agentName(agent))
-        : receipt.status === 'acknowledged' && line === 'reopen'
-          ? w('serveReopenDone', agentName(agent))
-          : receipt.status === 'accepted' && !receipt.isMailbox && receipt.error === 'DISCONNECTED'
-            ? w('messagesAcceptedDisconnected')
-            : receipt.status === 'queued' && line === 'stepEnd'
-              ? w('serveLineStepEnd', agentName(agent))
-              : receipt.status === 'queued' && line === 'nextTurn'
-                ? w('serveQueuedNextTurn', agentName(agent))
-                : receipt.status === 'queued' && line === 'chatOpen'
-                  ? w('serveQueuedNextOpen', agentName(agent))
-                  : receipt.status === 'queued' && line === 'reopen'
-                    ? reopenQueued(agent, receipt.isAfterAppQuit === true)
-                    : w(labels[receipt.status]);
-    var lineEl = el('p', 'receipt' + toneClass, labelText + (reply ? ' · ' + reply : ''));
-    lineEl.setAttribute('role', isFailTone ? 'alert' : 'status');
     var last = key && sentLast[key];
     var words = receipt.text || (last ? last.text : '');
     if (isSurfaceLost) {
@@ -2726,7 +2694,7 @@ const PAGE_SCRIPT = String.raw`
     }
     add(body, parts.after);
     if (ask.receipt && (ask.receipt.error === 'DISMISSED' || ask.receipt.isSurfaceLost === true || !isClaudeAgent(ask.agent) && (ask.receipt.status === 'rejected' || isEndedUncertainReceipt(ask.receipt))) && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
-    var receiptEl = ask.receipt ? receiptLine(ask.receipt, key, ask.agent, !!ask.delivery, ask.line) : null;
+    var receiptEl = ask.receipt ? receiptLine(ask.receipt, key, ask.agent, !!ask.delivery) : null;
     if (receiptEl) {
       parts.hasReceipt = true;
       parts.receiptActs = receiptEl.querySelector('.acts');
@@ -2859,7 +2827,7 @@ const PAGE_SCRIPT = String.raw`
       if (row.canArchive || row.archiveNote) add(acts, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', row.fp); }));
       if (row.canConfirm && section !== 'done') add(acts, button(w('confirmDone'), function () { act(key, 'done', '', '', '', '', row.fp); }));
       if (acts.firstChild) add(inner, acts);
-      if (row.receipt) add(inner, receiptLine(row.receipt, key, row.agent, !!row.delivery, row.line));
+      if (row.receipt) add(inner, receiptLine(row.receipt, key, row.agent, !!row.delivery));
       if (row.info) add(inner, el('p', 'context', row.info));
     } else {
       (row.questions || []).forEach(function (question) { add(inner, el('p', 'context', clean(question))); });
