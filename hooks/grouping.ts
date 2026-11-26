@@ -257,10 +257,10 @@ const sortCards = (list: readonly Card[]): Card[] =>
     .map(one => one.item)
 
 const olderLabelOf = (n: number, s: Strings): string =>
-  n > 0 ? (s.lang === 'en' ? `Earlier ${n}` : `更早 ${n}`) : ''
+  n > 0 ? s.groupOlderCount(n) : ''
 
 const waitingOthersLabelOf = (n: number, s: Strings): string =>
-  n > 0 ? (s.lang === 'en' ? `Waiting on others ${n}` : `${s.ask.wait} ${n}`) : ''
+  n > 0 ? s.groupWaitOthersCount(n) : ''
 
 type Holder = { agent: string; isOwn: boolean; isRun: boolean; parent: string | undefined }
 
@@ -445,10 +445,12 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
     if (isOlder) list(item, older)
     else if (isWait) list(item, waitingOthers)
     else list(item, pending)
-    const id = identity(ask.agent, ask.isOwn === true, ask.project, ask.task, ask.dir)
-    const held = carded.get(id)
-    if (held === undefined) carded.set(id, [ask])
-    else held.push(ask)
+    if (isOlder || !isWait) {
+      const id = identity(ask.agent, ask.isOwn === true, ask.project, ask.task, ask.dir)
+      const held = carded.get(id)
+      if (held === undefined) carded.set(id, [ask])
+      else held.push(ask)
+    }
   }
   for (const turn of model.turns) {
     if (!turn.isQuestion) continue
@@ -507,7 +509,7 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
   }
   // The producer gives a task that waits on the person a question and no row. It is one open task
   // however many questions it has, and its card stands for it. A helper run's question is not a task.
-  const waiting = new Map<string, { ask: GroupingAsk; at: number }>()
+  const waiting = new Map<string, { ask: GroupingAsk; at: number; hasCard: boolean }>()
   for (const ask of model.asks) {
     const id = identity(ask.agent, ask.isOwn === true, ask.project, ask.task, ask.dir)
     if (ask.isRun === true || (rowIds.get(id)?.some(row => sameTaskSession(ask, row)) ?? false)) continue
@@ -515,12 +517,16 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
     const waitId = token === '' ? id : `${id}@${token}`
     const held = waiting.get(waitId)
     const askAt = timeOf(ask.at, ask.updated)
-    if (held === undefined) waiting.set(waitId, { ask, at: askAt })
-    else held.at = Math.max(held.at, askAt)
+    const asksCard = isOverThreeDays(ask.firstObserved) || ask.kind !== 'wait'
+    if (held === undefined) waiting.set(waitId, { ask, at: askAt, hasCard: asksCard })
+    else {
+      held.at = Math.max(held.at, askAt)
+      if (asksCard) held.hasCard = true
+    }
   }
-  for (const [waitId, { ask, at }] of waiting) {
+  for (const [waitId, { ask, at, hasCard }] of waiting) {
     const tagged = tag({ agent: ask.agent, isOwn: ask.isOwn === true }, ask.project, ask.dir, at)
-    tasks.push({ ...tagged, key: `waiting:${waitId}`, title: ask.task, shelf: 'open', isIdle: false, hasCard: true, source: ask })
+    tasks.push({ ...tagged, key: `waiting:${waitId}`, title: ask.task, shelf: 'open', isIdle: false, hasCard, source: ask })
   }
   // A finished task whose agent the model did not say is under no agent: it counts in All only.
   const repeats = new Map<string, number>()
@@ -633,6 +639,7 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
       if (task.shelf !== 'open' || task.hasCard || task.isOwn) return false
       const source = task.source
       if (typeof source === 'object' && source !== null) {
+        if ('kind' in source && source.kind === 'wait') return false
         if ('auto' in source && source.auto === 'waiting') return false
         if ('status' in source && source.status === s.answeredWaiting) return false
       }

@@ -459,3 +459,16 @@ ${block('c0123457', 'cursor', 'waiting', 'Open question', '- [?] What should the
   assert.deepEqual(cliDoc.needs[0]?.options, [])
   assert.deepEqual(cliDoc.needs[1]?.options, ['Postgres', 'SQLite'])
 })
+
+test('a task whose only question waits on someone else stays in waiting rather than disappearing from boardDocument (#269)', () => {
+  const source = `## synthetic-api
+${block('d0123456', 'codex', 'waiting', 'Await review', '- [?] Waiting for reviewer reply', NOW - 5 * MINUTE)}
+`
+  const view = viewOf(source)
+  const document = documentOf(view)
+  assert.equal(document.counts.needs, 0)
+  assert.deepEqual(document.needs, [])
+  assert.equal(document.counts.working, 0)
+  assert.equal(document.counts.waiting, 1)
+  assert.equal(document.waiting[0]?.title, 'Await review')
+})

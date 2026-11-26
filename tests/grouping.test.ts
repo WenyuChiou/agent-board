@@ -890,10 +890,18 @@ test('steps waiting on others fold out of Needs you into waitingOthers with loca
   expect(tw.needs.cards.map(card => card.key)).toEqual([active.key])
   expect(tw.needs.waitingOthers.map(item => item.key)).toEqual([waitOwn.key, waitOld.key, waitNew.key])
   expect(tw.needs.waitingOthersLabel).toBe('等別人 3')
+  expect(tw.working).toEqual([])
+  expect(titles(tw.all.open)).toEqual(['Wait new', 'Wait old', 'Wait own'])
   const codexTw = tw.agents.find(group => group.agent === 'codex')
   expect(codexTw?.counts.needs).toBe(1)
   expect(codexTw?.waitingOthers.map(item => item.key)).toEqual([waitOld.key, waitNew.key])
   expect(codexTw?.waitingOthersLabel).toBe('等別人 2')
+  expect(titles(codexTw?.open ?? [])).toEqual(['Wait new', 'Wait old'])
+
+  const withRow = groupBoard(board({ asks: [waitNew], groups: grouped([row('codex', 'demo', 'Wait new', { at: ago(5 * MIN), auto: 'waiting' })]) }), NOW, none, EN)
+  expect(withRow.needs.n).toBe(0)
+  expect(withRow.working).toEqual([])
+  expect(titles(withRow.all.open)).toEqual(['Wait new'])
 
   const cn = groupBoard(model, NOW, none, ZH_CN)
   expect(cn.needs.waitingOthersLabel).toBe('等别人 3')

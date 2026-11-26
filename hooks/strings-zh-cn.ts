@@ -648,6 +648,8 @@ export const ZH_CN: Strings = {
   sectionWaiting: '等你处理',
   sectionQuestionReminders: '较早的未答问题',
   sectionOlderQuestions: '更早、尚未回答的问题',
+  groupOlderCount: (n: number): string => `更早 ${n}`,
+  groupWaitOthersCount: (n: number): string => `等别人 ${n}`,
   stoppedAsking: (n: number): string => `${n} 个未回答，在已停止的对话`,
   showAllQuestions: (n: number): string => `显示全部（${n}）`,
   questionAgingHint: '仍未回答；展开可查看。查看不会重设时间，也不代表批准或完成。',
