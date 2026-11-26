@@ -131,9 +131,13 @@ export const parsePsClients = text => {
     const head = /^\s*(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/.exec(line)
     if (head === null) throw new Error('CLIENTS_UNPARSABLE')
     const command = head[3]
-    if (!/^(?:.*?\/)?codex(?=\s|$)/.test(command)) continue
+    // ps joins a program's words with spaces, unquoted. A command whose first word is the codex program is one. A `/codex` further
+    // on may be a program in a folder with a space, or another program's argument: that row is kept with no command line, so it
+    // reads as one that cannot be read (the 10-minute route), never as a window.
+    const isProgram = /^(?:\S*\/)?codex(?=\s|$)/.test(command)
+    if (!isProgram && !/\/codex(?=\s|$)/.test(command)) continue
     const started = Date.parse(`${head[2]} UTC`)
-    rows.push({ pid: Number(head[1]), started: Number.isFinite(started) && started > 0 ? started : null, name: 'codex', argv: command })
+    rows.push({ pid: Number(head[1]), started: Number.isFinite(started) && started > 0 ? started : null, name: 'codex', argv: isProgram ? command : null })
   }
   return rows
 }
@@ -1051,8 +1055,15 @@ export const startCodexReceiver = ({
               // holds the claim as a busy read does (#1370). A busy store saved nothing, so the receiver stays in the thread and asks
               // again after the next event: leaving and joining again would start the daemon's delay, and with it a whole wait. A
               // claim that is done, or too short of time for that wait, leaves as a busy one does, so the wait above gives it back.
-              let status
+              let status, isWindowGone = false
               for (;;) {
+                // A starting receipt that took more than a tick may have outlived the window: the list is read once more, before the
+                // thread's last fresh read, so turn/start still follows that read with nothing asked between them (#1370). A turn the
+                // person starts while the list is read shows in that read.
+                if (said === 'said' && ids !== null && startingSince !== 0 && Date.now() - startingSince > tickMs) {
+                  startingSince = 0
+                  if (!await isWindowThere(ids, 'start')) { isWindowGone = true; break }
+                }
                 status = undefined
                 try { status = await readStatus() } catch (error) {
                   // A read that got no answer started nothing either: it is asked again. A refused or odd answer is a refusal.
@@ -1068,14 +1079,8 @@ export const startCodexReceiver = ({
                   await nextEvent()
                 }
               }
-              let isWindowGone = false
-              if (said === 'said' && status === 'idle' && isIdle() && !isDone()) {
-                // A starting receipt that took more than a tick may have outlived the window: read the list once more.
-                if (ids === null || startingSince === 0 || Date.now() - startingSince <= tickMs || await isWindowThere(ids, 'start')) break
-                isWindowGone = true
-                ids = null
-                holdNone(thread)
-              }
+              if (!isWindowGone && said === 'said' && status === 'idle' && isIdle() && !isDone()) break
+              if (isWindowGone) { ids = null; holdNone(thread) }
               // Busy: the receiver leaves again, so the thread is not kept loaded for a person who has gone.
               release()
               await leave(thread)
