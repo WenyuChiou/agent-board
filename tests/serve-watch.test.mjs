@@ -463,7 +463,7 @@ test('serve: a waiting page is answered when a message passes its 20 s, with no 
   const text = `## Synthetic watch\n<!-- auto session=abcd1234 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Clock fixture\n- [?] Blue or green?\n<!-- /auto session=abcd1234 -->\n`
   const board = await startBoard({ holdMs: 60_000, text, routes })
   try {
-    await clearOfMinute(35_000)
+    // No wait for the minute: a minute turning only answers a page early with a board that is not yet Unsure, and it asks again.
     assert.equal((await board.post('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli, unclaimed: true })).status, 200)
     const ask = JSON.parse((await board.ask()).text).model.asks.find(one => one.session === thread)
     const pressed = await board.post('/api/act', { key: ask.key, type: 'message', id: 'AB-CLOCK-1', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn })
@@ -494,7 +494,8 @@ test('serve: a waiting page is answered when a message passes its 20 s, with no 
     assert.ok(second !== undefined, 'the second waiting page was not answered when the message passed its 20 s')
     const after = first.at - pressedAt
     assert.ok(after >= 19_000 && after <= 25_000, `the page was answered ${Math.round(after)} ms after the press`)
-    assert.equal(second.etag, first.etag)
+    // One wake answers both: the second page gets the Unsure line at the same time, not at a later check.
+    assert.ok(Math.abs(second.at - first.at) < 2_000, `the second page was answered ${Math.round(second.at - first.at)} ms after the first`)
     // Reading the clock is no write: the store holds what the press stored, and a later read still says Unsure.
     assert.deepEqual(receiptOf(), stored)
     assert.ok((await board.ask()).text.includes(unsure))
