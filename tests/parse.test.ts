@@ -287,3 +287,13 @@ test('an options line with a comment opening or over-long entry is refused whole
   expect(parseProgress(blockWithBadOptions.split('\n').filter(line => !line.startsWith('<!-- options=')).join('\n'))[0]?.tasks[0]?.steps.map(step => step.options)).toEqual([undefined, undefined])
   expect(parseProgress(blockWithBadOptions.replace(/^<!-- options=.*$/m, NO_OPTIONS))[0]?.tasks[0]?.steps[0]?.options).toEqual([])
 })
+
+test('a hand-kept task heading may end with a session trailer that names its writer, and the title stays plain', () => {
+  const file = '## Home\n### Water the synthetic plants <!-- session=ab12cd34 -->\n- [ ] Fill the can\n### No trailer\n- [ ] Next\n### Bad <!-- session=a b -->\n- [ ] Other\n'
+  const tasks = parseProgress(file).flatMap(project => project.tasks)
+  expect(tasks.map(task => [task.title, task.writer, task.steps.length])).toEqual([
+    ['Water the synthetic plants', 'ab12cd34', 1],
+    ['No trailer', undefined, 1],
+    ['Bad', undefined, 1],
+  ])
+})
