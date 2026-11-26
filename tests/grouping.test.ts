@@ -958,3 +958,38 @@ test('item timestamp and age prefer updated over at and clamp future timestamps 
     [undated.key, 0, null],
   ])
 })
+
+test('uncategorized tasks and questions with empty project and dir do not add an unnamed project entry', () => {
+  const uncategorizedAsk = ask('codex', '', 'Unnamed ask task', 'Continue without project?', { dir: '', at: ago(3 * MIN) })
+  const uncategorizedTurn = turn('codex', '', 'Inbox question without project?', true, { dir: null, at: ago(2 * MIN) })
+  const uncategorizedOlder = retained('claude', '', 'Old task', 'Old question without project?', { dir: '', at: ago(5 * DAY) })
+  const uncategorizedRow = row('codex', '', 'Unnamed open task', { dir: '', at: ago(4 * MIN) })
+  const categorizedRow = row('codex', 'demo', 'Categorized task', { at: ago(MIN) })
+
+  const onlyUncategorized = groupBoard(
+    board({
+      asks: [uncategorizedAsk],
+      turns: [uncategorizedTurn],
+      older: [uncategorizedOlder],
+      groups: [{ project: '', rows: [uncategorizedRow] }],
+    }),
+    NOW,
+    none,
+    EN,
+  )
+  expect(onlyUncategorized.projects).toEqual([])
+
+  const mixed = groupBoard(
+    board({
+      asks: [uncategorizedAsk],
+      turns: [uncategorizedTurn],
+      older: [uncategorizedOlder],
+      groups: [{ project: '', rows: [uncategorizedRow] }, ...grouped([categorizedRow])],
+    }),
+    NOW,
+    none,
+    EN,
+  )
+  expect(mixed.projects).toEqual([{ name: 'demo', open: 1 }])
+  expect(mixed.projects.some(project => project.name === '')).toBe(false)
+})

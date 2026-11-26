@@ -330,7 +330,7 @@ export type ServeTurn = { key: string; project: string; agent: string; text: str
 
 export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[]; olderScript?: { update: 'setup' | 'plugin'; command?: string; lanCommand?: string } }
 type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; surface?: string; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
-type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
+type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string; waitsOnOthers?: true }
 type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[]; olderLabel: string; waitingOthers: PageRef[]; waitingOthersLabel: string }
 type PageView = {
   now: number
@@ -828,6 +828,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     repo: one.repo,
     at: one.at,
     ...('shelf' in one && one.source.key !== one.key ? { sourceKey: one.source.key } : {}),
+    ...('waitsOnOthers' in one && one.waitsOnOthers ? { waitsOnOthers: true as const } : {}),
   })
   const bucket = (one: Bucket): PageBucket => ({ counts: one.counts, cards: one.cards.map(ref), open: one.open.map(ref), stopped: one.stopped.map(ref), done: one.done.map(ref), older: one.older.map(ref), olderLabel: one.olderLabel, waitingOthers: one.waitingOthers.map(ref), waitingOthersLabel: one.waitingOthersLabel })
   model.view = {
@@ -3761,9 +3762,20 @@ const PAGE_SCRIPT = String.raw`
     add(sheet, list, pg.nodes.needsEmpty);
     var foot = el('div', 'sheet-foot');
     var soloWaitKeys = Object.create(null);
+    var waitOpenRows = [];
     ((view.all && view.all.open) || []).forEach(function (ref) {
       if (ref.key.indexOf('waiting:') === 0 && ref.sourceKey) soloWaitKeys[ref.sourceKey] = true;
+      else if (ref.waitsOnOthers) waitOpenRows.push(ref);
     });
+    var matchesWaitRow = function (askRef, rowRef) {
+      if ((askRef.agent || '') !== (rowRef.agent || '')) return false;
+      var askSrc = source(askRef);
+      var rowSrc = source(rowRef);
+      if (askSrc.project !== rowSrc.project || askSrc.task !== rowSrc.title) return false;
+      var askSess = askSrc.session || askSrc.sessionId || '';
+      var rowSess = rowSrc.session || rowSrc.sessionId || '';
+      return !askSess || !rowSess || askSess === rowSess;
+    };
     if ((view.needs.waitingOthers || []).length) {
       var waitingList = el('ul', 'cards');
       settle('waitingOthers', view.needs.waitingOthers).forEach(function (ref) {
@@ -3775,7 +3787,16 @@ const PAGE_SCRIPT = String.raw`
         add(waitingList, li);
         pg.cardNodes[ref.key] = li;
         var one = entry(li, block, ref, 'waitingOthers');
-        one.soloWait = soloWaitKeys[ref.key] === true;
+        if (soloWaitKeys[ref.key] === true) one.soloWait = true;
+        else {
+          for (var wi = 0; wi < waitOpenRows.length; wi += 1) {
+            if (matchesWaitRow(ref, waitOpenRows[wi])) {
+              one.soloWait = true;
+              waitOpenRows.splice(wi, 1);
+              break;
+            }
+          }
+        }
       });
       var waitMore = el('div', pg.hasWaitingOthers ? 'open' : '');
       var waitFold = el('div', 'fold');
@@ -3857,12 +3878,8 @@ const PAGE_SCRIPT = String.raw`
     return sec;
   }
   function othersSection(view, workingKeys) {
-    var waitingSourceKeys = Object.create(null);
-    (view.needs.waitingOthers || []).forEach(function (ref) {
-      waitingSourceKeys[ref.sourceKey || ref.key] = true;
-    });
     var refs = settle('others', view.all.open.filter(function (ref) {
-      return !workingKeys[ref.key] && !(ref.key.indexOf('waiting:') === 0 && ref.sourceKey && waitingSourceKeys[ref.sourceKey]);
+      return !workingKeys[ref.key] && !ref.waitsOnOthers;
     }).sort(byTime));
     var order = [];
     var by = {};

@@ -107,6 +107,8 @@ export type GroupedTask = Tagged & {
   isIdle: boolean
   // A question card or a stuck card stands for it, so the Open list leaves it out.
   hasCard: boolean
+  // A wait-on-others step folded out of Needs you stands for it on the page, so Other work leaves it out.
+  waitsOnOthers?: true
   source: GroupingRow | GroupingDone | GroupingAsk
 }
 
@@ -430,6 +432,7 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
     else pending.push(item)
   }
   const carded = new Map<string, GroupingAsk[]>()
+  const waitCarded = new Map<string, GroupingAsk[]>()
   for (const ask of model.asks) {
     const isOlder = isOverThreeDays(ask.firstObserved)
     const isWait = ask.kind === 'wait'
@@ -449,6 +452,11 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
       const id = identity(ask.agent, ask.isOwn === true, ask.project, ask.task, ask.dir)
       const held = carded.get(id)
       if (held === undefined) carded.set(id, [ask])
+      else held.push(ask)
+    } else {
+      const id = identity(ask.agent, ask.isOwn === true, ask.project, ask.task, ask.dir)
+      const held = waitCarded.get(id)
+      if (held === undefined) waitCarded.set(id, [ask])
       else held.push(ask)
     }
   }
@@ -505,7 +513,8 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
     if (row.stuck !== undefined) stuck.push({ ...tagged, type: 'stuck', key: `stuck:${row.key}`, task: row.title, reason: row.stuck.reason, source: row })
     const id = identity(row.agent, row.isOwn === true, row.project, row.title, row.dir)
     const hasCard = row.stuck !== undefined || (carded.get(id)?.some(ask => sameTaskSession(ask, row)) ?? false)
-    tasks.push({ ...tagged, key: row.key, title: row.title, shelf, isIdle, hasCard, source: row })
+    const waitsOnOthers = !hasCard && (waitCarded.get(id)?.some(ask => sameTaskSession(ask, row)) ?? false)
+    tasks.push({ ...tagged, key: row.key, title: row.title, shelf, isIdle, hasCard, ...(waitsOnOthers ? { waitsOnOthers: true as const } : {}), source: row })
   }
   // The producer gives a task that waits on the person a question and no row. It is one open task
   // however many questions it has, and its card stands for it. A helper run's question is not a task.
@@ -526,7 +535,8 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
   }
   for (const [waitId, { ask, at, hasCard }] of waiting) {
     const tagged = tag({ agent: ask.agent, isOwn: ask.isOwn === true }, ask.project, ask.dir, at)
-    tasks.push({ ...tagged, key: `waiting:${waitId}`, title: ask.task, shelf: 'open', isIdle: false, hasCard, source: ask })
+    const waitsOnOthers = !hasCard
+    tasks.push({ ...tagged, key: `waiting:${waitId}`, title: ask.task, shelf: 'open', isIdle: false, hasCard, ...(waitsOnOthers ? { waitsOnOthers: true as const } : {}), source: ask })
   }
   // A finished task whose agent the model did not say is under no agent: it counts in All only.
   const repeats = new Map<string, number>()
@@ -614,7 +624,7 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
 
     return held
   }
-  for (const task of sortedTasks) if (task.shelf === 'open') touch(task).open += 1
+  for (const task of sortedTasks) if (task.shelf === 'open' && task.repo !== '') touch(task).open += 1
   for (const one of [...cards, ...sortedWaitingOthers, ...sortedOlder]) if (one.repo !== '') touch(one)
 
   return {
@@ -636,7 +646,7 @@ export const groupBoard =(model: GroupingInput, now: number, repoOf: RepoOf, s: 
     // the only other steps are closed, such as a question the hook marked answered (#1067).
     // A waiting session whose question was hidden stays waiting on the agent, out of Working now (#1206).
     working: sortedTasks.filter(task => {
-      if (task.shelf !== 'open' || task.hasCard || task.isOwn) return false
+      if (task.shelf !== 'open' || task.hasCard || task.waitsOnOthers || task.isOwn) return false
       const source = task.source
       if (typeof source === 'object' && source !== null) {
         if ('kind' in source && source.kind === 'wait') return false

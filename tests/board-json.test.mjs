@@ -445,6 +445,8 @@ ${block('c0123457', 'cursor', 'waiting', 'Open question', '- [?] What should the
   const view = viewOf(source)
   const document = documentOf(view)
   assert.equal(document.needs[0]?.kind, 'question')
+  // c0123457 (NOW - 2 * MINUTE, options: []) waited longer than c0123456 (NOW - MINUTE, options: ['Postgres', 'SQLite']),
+  // so longest-wait-first ordering puts [] first.
   assert.deepEqual(document.needs[0]?.options, [])
   assert.deepEqual(document.needs[1]?.options, ['Postgres', 'SQLite'])
 
@@ -456,6 +458,7 @@ ${block('c0123457', 'cursor', 'waiting', 'Open question', '- [?] What should the
   const ran = jsonRun(['--json'], { files: { 'progress.md': cliSource } })
   assert.equal(ran.status, 0, ran.stderr)
   const cliDoc = JSON.parse(ran.stdout)
+  // Longest-wait-first ordering puts c0123457 (cliNow - 2 * MINUTE, options: []) before c0123456 (cliNow - MINUTE).
   assert.deepEqual(cliDoc.needs[0]?.options, [])
   assert.deepEqual(cliDoc.needs[1]?.options, ['Postgres', 'SQLite'])
 })
