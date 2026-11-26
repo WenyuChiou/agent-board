@@ -685,6 +685,8 @@ export const ZH_TW = {
   sectionWaiting: '等你處理',
   sectionQuestionReminders: '較早的未答問題',
   sectionOlderQuestions: '更早、尚未回答的問題',
+  groupOlderCount: (n: number): string => `更早 ${n}`,
+  groupWaitOthersCount: (n: number): string => `等別人 ${n}`,
   stoppedAsking: (n: number): string => `${n} 個未回答，在已停止的對話`,
   showAllQuestions: (n: number): string => `顯示全部（${n}）`,
   questionAgingHint: '仍未回答；展開可查看。查看不會重設時間，也不代表核准或完成。',
