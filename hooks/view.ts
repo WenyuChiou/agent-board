@@ -999,6 +999,19 @@ export const buildView = (
       twins.set(twin, (twins.get(twin) ?? 0) + 1)
     }
   }
+  // The AI that wrote a hand-kept task: its `<!-- session=<id> -->` trailer, matched to the block with
+  // that session (or its full resume id). A trailer that matches no block names no one, and so does a
+  // task with none: both stay '' and show only in Needs you and the full list (#1866). A Claude block
+  // gives 'claude', not '', because '' on a hand-kept task means no writer.
+  const writerAgents = new Map<string, string>()
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto === null) continue
+      for (const id of [task.auto.session, task.auto.resume]) if (id !== null && id !== '' && !writerAgents.has(id)) writerAgents.set(id, task.auto.agent)
+    }
+  }
+  const agentOf = (task: ProgressTask): string =>
+    task.auto === null ? (task.writer === undefined ? '' : writerAgents.get(task.writer) ?? '') : task.auto.agent === 'claude' ? '' : task.auto.agent
 
   for (const project of folded.projects) {
     const name = project.name || s.uncategorized
@@ -1161,7 +1174,7 @@ export const buildView = (
           ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: optionsGiven(validOptions(step.options)) }),
           ...(step.native === undefined ? {} : { native: step.native }),
           where: isManual ? 'manual' : 'other',
-          agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+          agent: agentOf(task),
           // Another agent's block id is a hash of its session; its own id is what its session
           // list shows.
           session: task.auto === null ? '' : task.auto.agent !== 'claude' && task.auto.resume !== null ? sessionName(task.auto.resume) : task.auto.session,
@@ -1208,7 +1221,7 @@ export const buildView = (
             title,
             when: clock.isFuture ? when : relativeTime(seen, now, s),
             at: seen,
-            agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+            agent: agentOf(task),
             ...(isManual ? { isOwn: true as const } : {}),
             ...(task.auto === null ? {} : { sessionId: task.auto.resume ?? task.auto.session }),
             dir: task.auto?.dir ?? null,
@@ -1299,7 +1312,7 @@ export const buildView = (
             : null,
         due: null,
         pr: autoPr(task.auto, s),
-        agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+        agent: agentOf(task),
         ...(task.auto?.state === 'ended' ? { isRecordedEnded: true as const } : {}),
         // The process check proved the session's process gone (#1092, #1595): it is closed, as one whose block says ended.
         ...(livenessOf(task.auto, gone) === 'dead' ? { isProcessGone: true as const } : {}),

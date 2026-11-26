@@ -297,3 +297,10 @@ test('a hand-kept task heading may end with a session trailer that names its wri
     ['Bad', undefined, 1],
   ])
 })
+
+test('a file with session trailers reads as the same file without them, apart from the writer a newer board names', () => {
+  const plain = '## Home\n### Water the synthetic plants\n> Context: synthetic\n- [ ] Fill the can\n- [x] Find the can\n### Other\n- [?] Ask\n'
+  const trailed = plain.replace('plants', 'plants <!-- session=ab12cd34 -->').replace('### Other', '### Other <!-- session=zz99zz99 -->')
+  const withoutWriter = parseProgress(trailed).map(project => ({ ...project, tasks: project.tasks.map(({ writer: _writer, ...task }) => task) }))
+  expect(withoutWriter).toEqual(parseProgress(plain))
+})
