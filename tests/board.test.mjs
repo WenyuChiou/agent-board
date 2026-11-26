@@ -13579,6 +13579,56 @@ test('stale saved agent filter clears cleanly and LAN models preserve interface 
   assert.ok(shownWords(dom.node('needs')).includes('Approve desktop edit?'))
 })
 
+test('completed Codex desktop task keeps App classification in Done shelf', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const session = '019a0000-0000-7000-8000-000000001848'
+  const session2 = '019a0000-0000-7000-8000-000000001849'
+  const progress = [
+    '## desktop-done-repo',
+    `<!-- auto session=s1848app1 resume=${session} agent=codex state=done updated=${new Date(now).toISOString()} -->`,
+    '### Desktop refactor finished',
+    '- [x] Ship UI update',
+    `<!-- /auto session=s1848app1 -->`,
+    '',
+    '## desktop-stopped-repo',
+    `<!-- auto session=s1848app2 resume=${session2} agent=codex state=ended updated=${new Date(now - 60_000).toISOString()} -->`,
+    '### Earlier ended desktop task',
+    '- [~] Wait for check',
+    `<!-- /auto session=s1848app2 -->`,
+  ].join('\n')
+  const parsed = runtime.parseProgress(progress)
+  const view = runtime.buildView(parsed, [], null, now, 0, {}, EN)
+  assert.equal(runtime.sessionState(view, 'codex', session2), 'ended')
+  const messaging = {
+    connections: [
+      { id: 'd1848', agent: 'codex', session, turn: 't1', scope: 'live', surface: 'Codex desktop app', updated: now },
+      { id: 'd1849', agent: 'codex', session: session2, turn: 't2', scope: 'live', surface: 'Codex desktop app', updated: now },
+    ],
+    mailboxes: [
+      { id: 'm1848', agent: 'codex', session, turn: 't0', scope: 'mailbox', surface: 'Codex desktop app', updated: now },
+    ],
+    messages: [],
+  }
+  const opts = { now, repoOf: () => null, versions: { board: '1.2.3', package: null } }
+  const model = runtime.serveModel(view, [], EN, new Set(), false, messaging, false, opts)
+  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, messaging, false, opts)
+  for (const m of [model, lanModel]) {
+    assert.equal(m.finished.length, 1)
+    assert.equal(m.finished[0].surface, 'Codex desktop app')
+    assert.equal('sessionId' in m.finished[0], false)
+    assert.equal(m.recent[0].surface, 'Codex desktop app')
+  }
+  assert.equal('dir' in lanModel.finished[0], false)
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const ifaceOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  assert.equal(ifaceOpt(EN.pgInterfaceApp).childNodes[1].textContent, '2')
+  assert.equal(ifaceOpt(EN.pgInterfaceCli).childNodes[1].textContent, '0')
+  ifaceOpt(EN.pgInterfaceApp).click()
+  assert.equal(dom.node('count-done').textContent, '1')
+  assert.ok(sectionWords(dom, 'done').includes('Desktop refactor finished'))
+})
+
 test('a project in the sidebar counts its questions, working tasks and other work, and leaves its stopped and finished tasks out', async () => {
   const { board, model, html } = await projectBoard()
   try {

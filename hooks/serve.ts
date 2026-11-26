@@ -325,12 +325,12 @@ export type ServeRow = {
 // A question marked answered, listed so it can be shown again.
 export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string; questionId?: string }
 // key names the line in the action route; canHide is false for a retained source that is only for review.
-export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string; project: string; agent: string; isOwn?: true; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null; receipt?: Receipt }
+export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string; project: string; agent: string; isOwn?: true; surface?: string; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null; receipt?: Receipt }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
 export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[]; olderScript?: { update: 'setup' | 'plugin'; command?: string; lanCommand?: string } }
-type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
+type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; surface?: string; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
 type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
 type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
 type PageView = {
@@ -539,12 +539,22 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const stateOfSession = (agent: string, session: string): RowState | undefined => sessionState(view, agent, session)
   // A live connection hides its session's mailbox only on a route its record shows for the session's state now (#318).
   const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes, live => isRecordedRoute(live, stateOfSession, routes))
+  const surfaceOf = (agent: string, session: string | undefined, target: AgentTarget | null): string | undefined =>
+    reachable(agent, session, target, targets)?.surface
+    ?? liveTarget(agent, session, messaging?.connections ?? [])?.surface
+    ?? (target?.isClosed === true ? undefined : liveTarget(agent, session, messaging?.mailboxes ?? [])?.surface)
   const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], stateOfSession, routes, group?.now ?? 0)
   const isMessageSurfaceLost = (one: ShownMessage): boolean => isMailboxSurfaceLost(one, messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
-  const retained = (item: WaitingItem): ServeRetained => retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId, isMessageSurfaceLost, messaging?.connections))
+  const retained = (item: WaitingItem): ServeRetained => {
+    const keptSurface = item.where === 'manual' ? undefined : surfaceOf(item.agent, item.nativeSession, item.target)
+    return {
+      ...retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId, isMessageSurfaceLost, messaging?.connections)),
+      ...(keptSurface === undefined ? {} : { surface: keptSurface }),
+    }
+  }
   const asks: ServeAsk[] = []
   // Per ask card: whether an answer to this very question is held (the page's `isSending` is per session).
   const held = new Map<string, boolean>()
@@ -608,7 +618,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const openInSession = heldBy === undefined ? 0 : openBy.get(heldBy) ?? 0
       held.set(item.key, sending.has(cardSendKey(item.key)) || holdsAnswer(messaging?.messages ?? [], heldBy, ask.questionId, openInSession))
       if (answerFailed(messaging?.messages ?? [], heldBy, ask.questionId, openInSession, isMessageSurfaceLost)) failed.add(item.key)
-      const liveSurface = found?.surface ?? (isManual || !isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)?.surface)
+      const liveSurface = found?.surface ?? (isManual ? undefined : surfaceOf(ask.agent, ask.nativeSession, ask.target))
       asks.push({
         ...(group === undefined ? {} : { ...(ask.at === undefined ? {} : { at: ask.at }), dir: ask.dir ?? null, when: ask.when }),
         ...(connection === undefined ? {} : { delivery: { id: connection.id, turn: connection.turn, agent: connection.agent, ...(connection.surface === SURFACE_IDS.codexApp ? { isAfterAppQuit: true as const } : {}) } }),
@@ -684,7 +694,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       if (answerFailed(messaging?.messages ?? [], heldBy, undefined, rowTurn, isMessageSurfaceLost)) failed.add(item.key)
       const rows = idleKeys.has(row.key) ? idle : stoppedKeys.has(row.key) ? stopped : (groups.get(row.project) ?? [])
       if (!idleKeys.has(row.key) && !stoppedKeys.has(row.key)) groups.set(row.project, rows)
-      const rowSurface = found?.surface ?? (row.auto === null || !isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)?.surface)
+      const rowSurface = found?.surface ?? (row.auto === null ? undefined : surfaceOf(row.agent, row.nativeSession, row.target))
       rows.push({
         ...(group === undefined ? {} : {
           ...(row.at === undefined ? {} : { at: row.at }),
@@ -794,11 +804,20 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const extra = (item: WaitingItem): ServeRetained => ({ ...retained(item), ...(item.at === undefined ? {} : { at: item.at }), dir: item.dir ?? null })
   model.reminder = (view.reminder ?? []).map(extra)
   model.older = (view.older ?? []).map(extra)
-  model.finished = (view.finished ?? []).map(item => ({ ...item, key: `row:${item.key}`, questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')), ...askingFp(item.key) }))
+  model.finished = (view.finished ?? []).map(({ sessionId, ...item }) => {
+    const doneSurface = item.isOwn ? undefined : surfaceOf(item.agent, sessionId, null)
+    return {
+      ...item,
+      key: `row:${item.key}`,
+      ...(doneSurface === undefined ? {} : { surface: doneSurface }),
+      questions: item.questions?.map(question => [question.text, question.note].filter(Boolean).join(' — ')),
+      ...askingFp(item.key),
+    }
+  })
   const finishedByKey = new Map((model.finished ?? []).map(one => [one.key, one]))
   model.recent = view.recent.map((item, index) => {
     const finished = finishedByKey.get(`row:${item.key}`)
-    return { ...model.recent[index]!, key: `row:${item.key}`, ...(finished === undefined ? {} : { agent: finished.agent, ...(finished.isOwn ? { isOwn: true as const } : {}), dir: finished.dir, at: finished.at }), ...askingFp(item.key) }
+    return { ...model.recent[index]!, key: `row:${item.key}`, ...(finished === undefined ? {} : { agent: finished.agent, ...(finished.isOwn ? { isOwn: true as const } : {}), ...(finished.surface === undefined ? {} : { surface: finished.surface }), dir: finished.dir, at: finished.at }), ...askingFp(item.key) }
   })
   model.agents = [...new Set(group.unreadable)].map(agent => ({ agent, unreadable: true }))
   const grouped = groupBoard(model, group.now, group.repoOf, s)
