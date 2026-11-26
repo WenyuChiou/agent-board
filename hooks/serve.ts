@@ -1022,7 +1022,7 @@ const PAGE_WORDS = [
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent', 'settingsApprovals', 'approvalSwitchFailed',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen',
+  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen', 'sideClose', 'pgDetailRail',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -1052,12 +1052,12 @@ const CLIP_CSS = `.clip{flex:1 1 0;min-width:0}.clip>summary,.clip[open]>summary
 const PAGE_CSS = `
 html{scrollbar-gutter:stable}
 body{overflow-wrap:anywhere}
-.col{width:100%;max-width:808px;margin:0 auto;padding-left:max(var(--s5),env(safe-area-inset-left,0px));padding-right:max(var(--s5),env(safe-area-inset-right,0px))}
+.col{width:100%;max-width:760px;margin:0 auto;padding-left:max(var(--s5),env(safe-area-inset-left,0px));padding-right:max(var(--s5),env(safe-area-inset-right,0px))}
 .head .topbar{flex-wrap:nowrap;min-height:56px;padding-block:0;gap:var(--s3)}
 .brand h1{white-space:nowrap}.brand h1 .ab-logo{display:block}
 #offline{position:sticky;top:0;color:var(--alert);overflow-wrap:anywhere;padding:var(--s2) 0;border-bottom:1px solid var(--line)}
 #offline:empty{display:none}
-#offline:not(:empty){top:var(--head-h,56px);z-index:5;padding:var(--s3) max(var(--s4),calc((100vw - 808px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--ground))}
+#offline:not(:empty){top:var(--head-h,56px);z-index:5;padding:var(--s3) max(var(--s4),calc((100vw - 760px)/2));border-color:color-mix(in srgb,var(--alert) 35%,var(--line));background:color-mix(in srgb,var(--alert) 9%,var(--ground))}
 /* The away line: one line at the top of the content column, above the can't-read line. Each part stays whole when the line wraps, and the " · " separator ends a line, never starts one. It folds away on its own row track when the × is pressed. */
 #away-line[hidden]{display:none}
 #away-line .away-seg{white-space:nowrap}
@@ -1233,6 +1233,19 @@ ${CLIP_CSS}
 .shell{display:block}
 .side{display:none}
 .stage{min-width:0}
+.detail-rail{display:none}
+.d-head{display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s3) var(--s3) var(--s4);border-bottom:1px solid var(--line);font-size:var(--text-xs);color:var(--muted)}
+.d-head .ag{flex:none}
+.d-meta{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.d-close{flex:none;width:32px;height:32px;display:inline-grid;place-items:center;padding:0;border:0;border-radius:var(--radius-m);background:transparent;color:var(--muted);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+.d-close:hover{background:var(--hover);color:var(--ink)}
+.d-close:active{background:var(--press)}
+.d-close>svg.i{width:16px;height:16px}
+.d-body{padding:var(--s4);display:grid;gap:var(--s3);min-width:0}
+.d-title{margin:0;font-size:var(--text-md);line-height:1.4;font-weight:600;overflow-wrap:anywhere}
+.d-body .row-open{opacity:1;background:transparent;padding:0;border-radius:0}
+.row.selected .row-btn,.card.selected{background:var(--current)}
+.card-detail-btn{display:none}
 .s-brand{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 var(--s2)}
 .s-brand .b-logo{flex:1 1 auto;display:flex;align-items:center;min-width:0}.s-brand .b-logo svg,.s-brand .b-icon svg{display:block}
 .s-brand .b-icon{display:none}
@@ -1302,8 +1315,6 @@ ${ICON_CSS}
   .head,.agents-in{display:none}
   .agents{position:static;border-bottom:0}
   #offline:not(:empty){top:0;padding:var(--s3) var(--s5)}
-  /* the can't-read line and the work share one width, so their edges line up */
-  .col{max-width:1040px}
   /* the rail: the views and the agents as 44px icons with their badges; names in the tooltip; the project link, the theme and Close the board in the footer */
   .shell[data-rail="1"] .side{padding:var(--s3) 10px;align-items:center}
   .shell[data-rail="1"] :is(.s-label,.s-projects,.s-foot,.s-brand .b-logo){display:none}
@@ -1332,27 +1343,14 @@ ${ICON_CSS}
   /* The button is an icon alone where the heading would crowd its label out. */
   .drawer-btn .drawer-label{display:none}
 }
-@media (min-width:1280px){
-  .shell:is([data-view="all"],[data-view="needs"]) .col{max-width:1440px}
-  /* Overview in two columns: Needs you on the left, the rest stacked on the right; the last row takes the slack */
-  .shell[data-view="all"] #board{display:grid;grid-template-columns:minmax(460px,5fr) minmax(0,6fr);column-gap:var(--s6);row-gap:0;grid-template-rows:repeat(12,auto) 1fr;align-items:start}
-  .shell[data-view="all"] #board>*{grid-column:2;margin-bottom:var(--s6)}
-  .shell[data-view="all"] #board>#needs{grid-column:1;grid-row:1 / -1;margin-bottom:0}
-  .shell[data-view="all"] #board>.fresh{grid-column:1 / -1}
-  /* Needs you on its own: the questions sit side by side, each its own sheet */
-  .shell[data-view="needs"] .sheet{background:none;border:0}
-  .shell[data-view="needs"] .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:var(--s4);align-items:start}
-  .shell[data-view="needs"] .cards>li{background:var(--surface);border:1px solid var(--line-strong);border-radius:var(--radius-m)}
-  .shell[data-view="needs"] .cards>li:first-child{border-top-left-radius:0}
-  .shell[data-view="needs"] .cards>li+li .card{border-top:0}
-}
-@media (min-width:1760px){
-  .shell[data-view="all"] .col{max-width:1840px}
-  .shell[data-view="all"] #board{grid-template-columns:repeat(3,minmax(0,1fr))}
-  .shell[data-view="all"] #board>*{grid-column:3}
-  .shell[data-view="all"] #board>#needs{grid-column:1}
-  .shell[data-view="all"] #board>[data-sec="working"]{grid-column:2;grid-row:1 / -1;margin-bottom:0}
-  .shell[data-view="all"] #board>.fresh{grid-column:1 / -1}
+@media (min-width:1440px){
+  .shell[data-detail="1"]{grid-template-columns:232px minmax(0,1fr) 340px}
+  .shell[data-rail="1"][data-detail="1"]{grid-template-columns:64px minmax(0,1fr) 340px}
+  .shell[data-detail="1"] .detail-rail{display:flex;flex-direction:column;position:sticky;top:0;height:100dvh;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;border-left:1px solid var(--line);background:var(--ground);width:340px;max-width:340px}
+  .card[data-rail-item="1"]{cursor:pointer}
+  .card-detail-btn{display:inline-flex;align-items:center;margin-left:auto;padding:0 var(--s2);min-height:24px;border:0;border-radius:var(--radius-s);background:transparent;color:var(--muted);font-size:var(--text-xs);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+  .card-detail-btn:hover{background:var(--hover);color:var(--ink)}
+  .card-detail-btn:active{background:var(--press)}
 }
 @media (max-width:640px){
   .col{padding-left:max(var(--s3),env(safe-area-inset-left,0px));padding-right:max(var(--s3),env(safe-area-inset-right,0px))}
@@ -1374,7 +1372,7 @@ ${ICON_CSS}
   .answers button.answer-send{flex:0 0 48px;width:48px;min-width:48px;justify-content:center}
   .answers button.answer-send[data-copy="1"]{flex:0 0 auto;width:auto;min-width:48px;padding:0 14px}
   .pfoot #close,.pfoot #settings-toggle{height:48px;min-width:48px;min-height:48px}
-  .s-toggle{width:44px;height:44px}
+  .s-toggle,.d-close{width:44px;height:44px}
   #away-line .away-x{width:44px;height:44px}
   textarea{min-height:96px}
 }
@@ -1433,6 +1431,8 @@ ${settingsCss}
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
+<aside class="detail-rail" id="detail-rail" aria-label="${esc(s.pgDetailRail)}" hidden></aside>
+<template id="detail-close-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></template>
 </div>
 ${settingsPanel(s, language, isLan, isLangOverridden)}
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
@@ -1778,6 +1778,8 @@ const PAGE_SCRIPT = String.raw`
     movedMain.textContent = '';
     add(movedMain, el('p', '', w('serveMoved')));
     document.getElementById('side').hidden = true;
+    var detailRail = document.getElementById('detail-rail');
+    if (detailRail) detailRail.hidden = true;
   }
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
@@ -1992,7 +1994,10 @@ const PAGE_SCRIPT = String.raw`
   // A draft that was sent is gone from the box on the page now, whatever redraw happened since it was pressed.
   function clearDraft(draftKey) {
     pg.drafts[draftKey] = '';
-    board.querySelectorAll('textarea[data-key]').forEach(function (box) { if (box.getAttribute('data-key') === draftKey) box.value = ''; });
+    var detailRailEl = document.getElementById('detail-rail');
+    [board, detailRailEl].forEach(function (rootEl) {
+      if (rootEl) rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) { if (box.getAttribute('data-key') === draftKey) box.value = ''; });
+    });
   }
   function brand(agent) {
     if (!agent) return '';
@@ -2185,6 +2190,104 @@ const PAGE_SCRIPT = String.raw`
   var cardState = {};
   var cardParts = {};
   var cardChoices = Object.create(null);
+  var selectedKey = '';
+  var railItems = Object.create(null);
+  function isWideDetail() { return typeof window.innerWidth === 'number' && window.innerWidth >= 1440; }
+  var wasWideDetail = isWideDetail();
+  var railDraftFocus = null;
+  function syncRailDraftFocus() {
+    var rail = document.getElementById('detail-rail');
+    var active = document.activeElement;
+    if (rail && active && active.getAttribute && active.getAttribute('data-key')) {
+      for (var node = active; node; node = node.parentNode) {
+        if (node === rail) {
+          railDraftFocus = { key: active.getAttribute('data-key'), start: active.selectionStart, end: active.selectionEnd };
+          return;
+        }
+      }
+    }
+  }
+  if (typeof document.addEventListener === 'function') {
+    document.addEventListener('focusin', function (event) {
+      var rail = document.getElementById('detail-rail');
+      var target = event && event.target;
+      var inRail = false;
+      if (rail && target) for (var node = target; node; node = node.parentNode) if (node === rail) { inRail = true; break; }
+      if (!inRail) { railDraftFocus = null; return; }
+      syncRailDraftFocus();
+    });
+    ['input', 'keyup', 'mouseup', 'select', 'selectionchange'].forEach(function (name) {
+      document.addEventListener(name, syncRailDraftFocus);
+    });
+    document.addEventListener('pointerdown', function (event) {
+      var rail = document.getElementById('detail-rail');
+      var target = event && event.target;
+      if (rail && target) for (var node = target; node; node = node.parentNode) if (node === rail) return;
+      railDraftFocus = null;
+    }, true);
+  }
+  function closeDetailRail(restoreFocus) {
+    var prevKey = selectedKey;
+    var rail = document.getElementById('detail-rail');
+    var active = document.activeElement;
+    var wasInRail = false;
+    if (rail && active) {
+      for (var node = active; node; node = node.parentNode) if (node === rail) { wasInRail = true; break; }
+    }
+    selectedKey = '';
+    if (pg.model) draw(pg.model);
+    else renderDetailRail();
+    var restored = prevKey && railItems[prevKey];
+    if (restoreFocus && wasInRail && restored && restored.trigger && typeof restored.trigger.focus === 'function') {
+      restored.trigger.focus({ preventScroll: true });
+    }
+  }
+  function selectDetailRail(key, focusRail) {
+    if (selectedKey === key) {
+      closeDetailRail(false);
+      var restored = railItems[key];
+      if (focusRail && restored && restored.trigger && typeof restored.trigger.focus === 'function') {
+        restored.trigger.focus({ preventScroll: true });
+      }
+      return;
+    }
+    selectedKey = key;
+    if (pg.model) draw(pg.model);
+    else renderDetailRail();
+    if (focusRail) {
+      var closeBtn = document.getElementById('detail-close');
+      if (closeBtn && typeof closeBtn.focus === 'function') closeBtn.focus({ preventScroll: true });
+    }
+  }
+  function renderDetailRail() {
+    var shell = document.getElementById('shell');
+    var rail = document.getElementById('detail-rail');
+    if (!shell || !rail) return;
+    document.querySelectorAll('.row.selected, .card.selected').forEach(function (node) { toggleClass(node, 'selected', false); });
+    var entry = selectedKey && railItems[selectedKey];
+    if (!isWideDetail() || !entry) {
+      rail.textContent = '';
+      rail.hidden = true;
+      shell.setAttribute('data-detail', '');
+      return;
+    }
+    rail.textContent = '';
+    var closeBtn = button('', function () { closeDetailRail(true); }, 'd-close', true, true);
+    closeBtn.id = 'detail-close';
+    closeBtn.setAttribute('aria-label', w('sideClose'));
+    closeBtn.title = w('sideClose');
+    var tpl = document.getElementById('detail-close-icon');
+    if (tpl && tpl.content) closeBtn.appendChild(tpl.content.cloneNode(true));
+    var head = add(el('div', 'd-head'), markOf(entry.ref), el('span', 'd-meta', entry.meta || ''), closeBtn);
+    var body = el('div', 'd-body');
+    add(body, el('h2', 'd-title', entry.title));
+    if (entry.renderBody) add(body, entry.renderBody());
+    add(rail, head, body);
+    rail.hidden = false;
+    shell.setAttribute('data-detail', '1');
+    if (entry.node) toggleClass(entry.node, 'selected', true);
+    if (entry.trigger) entry.trigger.setAttribute('aria-expanded', 'true');
+  }
   // The first screen describes work, so diagnostic identifiers and logs stay out of its labels.
   function clean(value) {
     var text = String(value || '').trim();
@@ -2378,6 +2481,16 @@ const PAGE_SCRIPT = String.raw`
     var text = clean(isStuck ? ask.title : ask.text);
     var question = el('p', 'q', text);
     question.setAttribute('title', text);
+    var detailBtn = null;
+    if (!isOlder) {
+      card.setAttribute('data-rail-item', '1');
+      detailBtn = navButton(w('pgDetailRail'), function () {
+        selectDetailRail(ref.key, true);
+      });
+      detailBtn.className = 'card-detail-btn';
+      detailBtn.setAttribute('aria-expanded', String(isWideDetail() && selectedKey === ref.key));
+      detailBtn.setAttribute('aria-label', w('pgDetailRail') + ': ' + text);
+    }
     if (isOwnCard) {
       add(body, question);
       var smallMark = agent ? agentMark(agent) : null;
@@ -2386,9 +2499,9 @@ const PAGE_SCRIPT = String.raw`
         smallMark.setAttribute('title', agentName(agent));
       }
       var age = ageOf(ref);
-      add(body, add(el('div', 'c-meta'), smallMark, project ? el('span', '', project) : null, age ? el('span', '', age) : null));
+      add(body, add(el('div', 'c-meta'), smallMark, project ? el('span', '', project) : null, age ? el('span', '', age) : null, detailBtn));
     } else {
-      add(body, add(el('div', 'c-meta'), el('span', 'who', agentName(agent)), project ? el('span', '', project) : null, el('span', '', ageOf(ref))));
+      add(body, add(el('div', 'c-meta'), el('span', 'who', agentName(agent)), project ? el('span', '', project) : null, el('span', '', ageOf(ref)), detailBtn));
       add(body, question);
     }
     if (isStuck) add(body, el('p', 'note', clean(ask.stuck && ask.stuck.reason)));
@@ -2543,6 +2656,36 @@ const PAGE_SCRIPT = String.raw`
     paintMode(key);
     resultSlot(body, key, ask.fp || ask.text, ask.task || ask.title || ref.repo);
     add(card, body);
+    if (!isOlder) {
+      railItems[ref.key] = {
+        kind: 'card',
+        ref: ref,
+        node: card,
+        trigger: detailBtn,
+        title: text,
+        meta: [agent ? agentName(agent) : '', project, ageOf(ref)].filter(Boolean).join(' · '),
+        renderBody: function () {
+          var wrap = el('div', 'row-open');
+          if (ask.task && clean(String(ask.task)) !== text) add(wrap, el('p', 'context', clean(String(ask.task))));
+          if (isStuck && ask.stuck && ask.stuck.reason) add(wrap, el('p', 'note', clean(ask.stuck.reason)));
+          else if (ask.note) add(wrap, el('p', 'note', clean(ask.note)));
+          if (ask.context) add(wrap, el('p', 'context', clean(ask.context)));
+          if (Array.isArray(ask.steps) && ask.steps.length) add(wrap, stepList(ask.steps, { key: key, steps: ask.steps, isOwn: ask.isOwn, nextFileLine: ask.nextFileLine, next: ask.next, tickFp: ask.tickFp }));
+          if (!isStuck && ask.command) add(wrap, el('code', '', '$ ' + ask.command));
+          if (ask.lineText) add(wrap, el('p', 'note', ask.lineText));
+          else if (ask.info) add(wrap, el('p', 'note', ask.info));
+          return wrap;
+        },
+      };
+      card.addEventListener('click', function (event) {
+        if (!isWideDetail()) return;
+        var target = event && event.target;
+        if (target && target.closest && target.closest('button, a, input, textarea, select, summary, label, details')) return;
+        var sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
+        if (sel && String(sel)) return;
+        selectDetailRail(ref.key, false);
+      });
+    }
     return card;
   }
   function pressAnswer(ask, key, answer, node) {
@@ -2600,7 +2743,8 @@ const PAGE_SCRIPT = String.raw`
     var isTask = Array.isArray(row.steps);
     var steps = row.steps || [];
     var inner = el('div', 'row-open');
-    var isOpen = opened[ref.key] === true;
+    var isRailSelected = isWideDetail() && selectedKey === ref.key;
+    var isOpen = !isRailSelected && opened[ref.key] === true;
     var acts = el('div', 'acts');
     if (isTask) {
       if (row.context) add(inner, clipped(clean(row.contextLine || row.context), row.context, 'context', 'context:' + key));
@@ -2666,8 +2810,12 @@ const PAGE_SCRIPT = String.raw`
     li.setAttribute('data-k', ref.key);
     var fold = el('div', 'fold');
     fold.inert = !isOpen;
-    add(fold, add(el('div', 'fold-in'), inner));
+    if (!isRailSelected) add(fold, add(el('div', 'fold-in'), inner));
     var head = isExpandable ? navButton('', function () {
+      if (isWideDetail()) {
+        selectDetailRail(ref.key, true);
+        return;
+      }
       var now = !hasClass(li, 'open');
       toggleClass(li, 'open', now);
       head.setAttribute('aria-expanded', String(now));
@@ -2675,11 +2823,20 @@ const PAGE_SCRIPT = String.raw`
       opened[ref.key] = now;
     }) : el('div');
     head.className = 'row-btn';
-    if (isExpandable) head.setAttribute('aria-expanded', String(isOpen));
+    if (isExpandable) head.setAttribute('aria-expanded', String(isOpen || isRailSelected));
     add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', 'r-right' + (dueOf(ref) && source(ref).dueTone === 'alert' ? ' t-alert' : ''), dueOf(ref) || ageOf(ref)), el('span', 'r-chev'));
     var block = el('div', 'fx');
     add(block, add(el('div', 'fx-in'), head, isExpandable ? fold : null));
     add(li, block);
+    railItems[ref.key] = {
+      kind: 'row',
+      ref: ref,
+      node: li,
+      trigger: head,
+      title: title,
+      meta: [agentName(row.agent), project, dueOf(ref) || ageOf(ref)].filter(Boolean).join(' · '),
+      renderBody: isExpandable ? function () { return inner; } : null,
+    };
     return { li: li, block: block };
   }
   function setText(node, text) { if (node && node.textContent !== String(text)) node.textContent = String(text); }
@@ -3213,6 +3370,14 @@ const PAGE_SCRIPT = String.raw`
     if (drawerBtn) drawerBtn.setAttribute('aria-expanded', String(drawerOpen));
     var side = document.getElementById('side');
     if (side) side.inert = !hasSide && !drawerOpen;
+    var wideNow = isWideDetail();
+    if (wideNow !== wasWideDetail) {
+      wasWideDetail = wideNow;
+      if (selectedKey) {
+        if (!wideNow && railItems[selectedKey] && railItems[selectedKey].kind === 'row') opened[selectedKey] = true;
+        if (pg.model) draw(pg.model);
+      }
+    }
     var foot = document.getElementById('pfoot');
     // The footer lives at the foot of the sidebar when it is shown full, or in the drawer when that is open; otherwise under the work.
     var inSide = (hasSide && !isRail) || (!hasSide && drawerOpen);
@@ -3620,10 +3785,18 @@ const PAGE_SCRIPT = String.raw`
     if (!model.view) return;
     syncDetails();
     var view = model.view;
-    board.querySelectorAll('textarea[data-key]').forEach(function (box) { pg.drafts[box.getAttribute('data-key')] = box.value; });
+    var detailRailEl = document.getElementById('detail-rail');
+    [board, detailRailEl].forEach(function (rootEl) {
+      if (rootEl) rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) { pg.drafts[box.getAttribute('data-key')] = box.value; });
+    });
     var active = document.activeElement;
     var focused = active && active.getAttribute && active.getAttribute('data-key');
     var caret = focused ? [active.selectionStart, active.selectionEnd] : null;
+    if (!focused && railDraftFocus && selectedKey && !isWideDetail()) {
+      focused = railDraftFocus.key;
+      caret = [railDraftFocus.start, railDraftFocus.end];
+      railDraftFocus = null;
+    }
     pg.model = model;
     latest = model;
     view.agents.forEach(function (agent) { if (pg.ids.indexOf(agent.agent) === -1) pg.ids.push(agent.agent); });
@@ -3657,6 +3830,7 @@ const PAGE_SCRIPT = String.raw`
     pg.mores = [];
     pg.nodes = { counts: {} };
     pg.cardNodes = {};
+    railItems = Object.create(null);
     cardParts = {};
     var closeSlot = resultSlots.close;
     var tidySlot = resultSlots.tidy;
@@ -3767,13 +3941,18 @@ const PAGE_SCRIPT = String.raw`
     // A result with no slot in this update was drawn apart from its card, if at all. It
     // stays for this update, and is dropped when a slot for its card is drawn again.
     Object.keys(results).forEach(function (key) { if (!resultSlots[key]) results[key].orphaned = true; });
-    board.querySelectorAll('textarea[data-key]').forEach(function (box) {
-      var key = box.getAttribute('data-key');
-      if (Object.prototype.hasOwnProperty.call(pg.drafts, key)) box.value = pg.drafts[key];
-      if (key === focused) {
-        box.focus({ preventScroll: true });
-        if (caret) box.setSelectionRange(caret[0], caret[1]);
-      }
+    if (selectedKey && !railItems[selectedKey]) selectedKey = '';
+    renderDetailRail();
+    [board, detailRailEl].forEach(function (rootEl) {
+      if (!rootEl) return;
+      rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) {
+        var key = box.getAttribute('data-key');
+        if (Object.prototype.hasOwnProperty.call(pg.drafts, key)) box.value = pg.drafts[key];
+        if (key === focused) {
+          box.focus({ preventScroll: true });
+          if (caret) box.setSelectionRange(caret[0], caret[1]);
+        }
+      });
     });
     paintLight();
     hasDrawn = true;
@@ -3950,6 +4129,10 @@ const PAGE_SCRIPT = String.raw`
       return;
     }
     if (event.key !== 'Escape') return;
+    if (selectedKey && isWideDetail()) {
+      closeDetailRail(true);
+      return;
+    }
     // Only the panel the focus is in (or its More button) closes; with no focus anywhere, every open one does.
     // A reply being typed elsewhere is left alone.
     var active = document.activeElement;
