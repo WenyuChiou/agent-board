@@ -1064,6 +1064,7 @@ export const ZH_CN: Strings = {
   pgProjects: '项目',
   pgSideFold: '收起侧栏',
   pgSideOpen: '展开侧栏',
+  pgDetailRail: '详情',
   pgGithub: '在 GitHub 上查看 Agent Board',
   pgPasteLater: (text: string, agent: string): string => `已复制“${text}”。等 ${agent} 打开后，贴到它的对话。`,
   serveRetry: '再发一次',
