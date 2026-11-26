@@ -53,8 +53,10 @@ const UNLOAD_MS = UNLOAD_LEAST_MS + UNLOAD_MARGIN_MS
 // Codex program that is not the app-server and is not the npm launcher; one is known by its process id and start time, and the
 // same window is the same id with a start time within the drift hooks/session-liveness.ts allows.
 const AGENT_START_DRIFT_MS = 3000
-const CLIENTS_LIMIT_MS = 2500
-const CLIENTS_ASK_LIMIT_MS = 3500
+// The live run of 2026-11-26 timed the Windows list (PowerShell, CIM) at 1.6 to 5.7 s on a busy computer: a slow read is still an
+// answer, and one cut short sends the message to the 10-minute route.
+const CLIENTS_LIMIT_MS = 10_000
+const CLIENTS_ASK_LIMIT_MS = 11_000
 // A thread with no window found is kept off the short wait for this many ticks, so a waiting message costs one read in that time.
 const HOLD_TICKS = 10
 // A Codex program running as a server, not as a person's window: the command anywhere after the flags.
