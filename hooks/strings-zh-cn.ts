@@ -279,6 +279,7 @@ export const ZH_CN: Strings = {
   statusWhyRefused: '被拒绝',
   statusWhyStopped: '被停止',
   statusWhyAppOpen: '程序一直开着',
+  statusWhyMovedOn: '对话已往下进行',
   statusWhyTakenBack: '你收回了',
   statusWhySurfaceLost: '它不再读这个界面',
   statusWhyHeldTooLong: '放太久了',

@@ -5,7 +5,7 @@ import { sha256 } from './sha256.ts'
 // a later bridge can add its own value without a new store version.
 export type Origin = 'local'
 // A connected session is a live lease from a host adapter, never a name in progress.md.
-export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin; folderDigest?: string; mcpOwner?: string; mcpLeaseUntil?: number }
+export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin; folderDigest?: string; mcpOwner?: string; mcpLeaseUntil?: number; hostTurn?: string }
 export type Message = {
   id: string
   target: string
@@ -36,6 +36,9 @@ export type Message = {
   attempted?: number
   // The id of the question this message answers, set only by the board: a kept question finds its own receipt by it.
   answers?: string
+  // For an answer to a mailbox, the turn its session's hook last named when the board queued it (#319): a step end of a
+  // later turn refuses it as moved on (MOVED_ON) instead of handing it over.
+  boundTurn?: string
   // The route line the board showed when it sent this message (set only by the board), so a receipt is worded
   // for the route the message took, not for whatever the card shows after its mailbox has expired.
   line?: RouteLine
@@ -178,6 +181,9 @@ export const BOARD_RESTARTED = 'BOARD_RESTARTED'
 // after its output reached the host, and the board cannot tell which, so the claim loses its name and is never handed out
 // again (#1843). It holds its session as BOARD_RESTARTED does, until a dismiss or the open limit. Only the board writes it.
 export const HOLDER_LOST = 'HOLDER_LOST'
+// The error the board writes on an answer that a step end of a later turn than its own refused (#319): the conversation
+// moved on from the question it answers. Only the board writes it.
+export const MOVED_ON = 'MOVED_ON'
 const isLeaseKept = (one: Pick<Message, 'to'>): boolean => one.to.startsWith('deepseek:')
 // A named claim whose lease is over and that no rule hands out again: not OpenCode's (#724), not DeepSeek's, not one its host
 // accepted (#1407). An error a receipt wrote does not change it: a later receipt with no error would clear that error.
@@ -351,6 +357,8 @@ export const messageText = (value: unknown, max = 8000): string => {
   return value
 }
 export const isAnswersId = (value: unknown): value is string => typeof value === 'string' && value.length >= 1 && value.length <= 200 && !/[\r\n\0]/.test(value)
+// A turn id a hook names (Codex's `turn_id`), kept as it came.
+export const isHostTurn = isAnswersId
 // The board's open answer to a question, for one answer per question (#1843, B3.2): the last one that still holds its session.
 // One a hook put into a turn holds nothing, but its answer is still on its way until the session reports after it; a session
 // that never reports holds it until the open limit or a dismiss. `reportedAt` is the session's last report, -1 for none.
@@ -413,10 +421,11 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
   if (state.messages.filter(isOpen).length >= OPEN_CAP || state.messages.length >= OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('MESSAGE_LIMIT')
-  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
+  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(answers === undefined || target.hostTurn === undefined ? {} : { boundTurn: target.hostTurn }), ...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
   return { state: { ...state, messages: [...state.messages, message] }, message }
 }
-export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string, marksStart = false): { state: MessageState; messages: Message[] } => {
+// `stepEndTurn`: the turn a step-end take ends (Codex's Stop hook, #319).
+export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string, marksStart = false, stepEndTurn?: string): { state: MessageState; messages: Message[] } => {
   if (target.contested || target.expires <= now) return { state, messages: [] }
   const to = address(target.agent, target.session)
   // A message the board checked a route for goes only to a claimant on that same surface; on any other it stays queued.
@@ -430,16 +439,23 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   // that reads "sent, not confirmed" or a confirmed turn-ended uncertain delivery no longer holds the session (`isHolding`).
   const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isHolding(one) && !isHookDelivered(one))
   const canTake = (one: Message): boolean => one.status === 'queued' && !isAcceptedOnce(one) && !isHeldTooLong(one, now) && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
-  const pick = held.length === 0 ? state.messages.find(canTake) : held.every(isRetaken) ? held.find(canReach) : undefined
+  // At a step end, an answer queued during an earlier turn than the one ending is refused, not handed over: the conversation
+  // moved on from its question (#319, question 3). A turn start still hands it over, and a message that answers nothing
+  // is never refused for its turn.
+  const moved = held.length === 0 && stepEndTurn !== undefined
+    ? state.messages.filter(one => canTake(one) && one.answers !== undefined && one.boundTurn !== undefined && one.boundTurn !== stepEndTurn) : []
+  const current = moved.length === 0 ? state
+    : { ...state, messages: state.messages.map(one => moved.includes(one) ? settled({ ...one, status: 'rejected' as const, error: MOVED_ON, updated: now }) : one) }
+  const pick = held.length === 0 ? current.messages.find(canTake) : held.every(isRetaken) ? held.find(canReach) : undefined
   const messages = pick === undefined ? [] : [pick]
-  if (messages.length === 0) return { state, messages }
+  if (messages.length === 0) return { state: current, messages }
   // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.
   const claimed = messages.map(({ ref: previous, ...one }) => ({
     ...one, target: target.id, turn: target.turn, status: 'uncertain' as const, claimed: now, nonce: one.nonce || nonce, updated: now,
     ...(one.status === 'uncertain' && !isAtMostOnce({ to: one.to, ref: previous }) ? { redelivered: (one.redelivered ?? 0) + 1 } : {}), ...(ref === undefined ? {} : { ref }),
     ...(marksStart ? { awaitsStart: true as const } : {}),
   }))
-  return { state: { ...state, messages: state.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }
+  return { state: { ...current, messages: current.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }
 }
 export const messageReceipt = (state: MessageState, target: Connection, input: Record<string, unknown>, now: number): MessageState => {
   if (target.contested) throw new Error('CONTESTED')
@@ -478,8 +494,8 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   const error = input.error === undefined ? '' : messageId(input.error)
   // These are the board's own states: EXPIRED and DISMISSED it writes at the limit or for the person, "sent, not
   // confirmed" only for an OpenCode wake it started, BOARD_RESTARTED at its start and HOLDER_LOST at a lease's end; a
-  // receiver cannot claim them (#1366 review, #1843).
-  if (error === 'EXPIRED' || error === 'DISMISSED' || error === UNCONFIRMED || error === BOARD_RESTARTED || error === HOLDER_LOST) throw new Error('INVALID_RECEIPT')
+  // receiver cannot claim them (#1366 review, #1843), nor MOVED_ON, which a step-end take writes (#319).
+  if (error === 'EXPIRED' || error === 'DISMISSED' || error === UNCONFIRMED || error === BOARD_RESTARTED || error === HOLDER_LOST || error === MOVED_ON) throw new Error('INVALID_RECEIPT')
   if (status === 'acknowledged' && (typeof reply !== 'string' || reply.length > ACK_MAX || /[\r\n]/.test(reply) || reply !== `ACK ${one.nonce}` && !reply.startsWith(`ACK ${one.nonce} `))) throw new Error('ACK_REQUIRED')
   if (typeof reply !== 'string' || reply && messageText(reply) !== reply) throw new Error('INVALID_TEXT')
   if (one.status === 'acknowledged' || one.status === 'rejected') {
