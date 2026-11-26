@@ -114,12 +114,14 @@ const fixture = async (folder, fn) => {
       let pageAgo = initialPageAgo
       let store = { messages: [] }
       const mailboxTurnCalls = []
+      let pingCount = 0
       const now = Date.now()
       const enrolled = tsMod.enrollMailbox(store, 'antigravity', session, 'agy TUI', now, 43_200_000)
       store = enrolled
       const server = createServer((req, res) => {
         if (req.url === '/api/ping' && req.method === 'GET') {
           if (req.headers['x-board-token'] !== token) { res.writeHead(403); return res.end('{}') }
+          pingCount += 1
           res.writeHead(200, { 'content-type': 'application/json' })
           return res.end(JSON.stringify({ pageAgo }))
         }
@@ -160,6 +162,7 @@ const fixture = async (folder, fn) => {
         setPageAgo: next => { pageAgo = next },
         storeState: () => store,
         mailboxTurnCalls,
+        get pingCount() { return pingCount },
       }
     }
 
@@ -225,11 +228,12 @@ test('StopWait waits on active page without holding claim until board reply arri
 
 test('StopWait fast-exits empty object when progress has no waiting step for session', () => fixture('antigravity-cli', async f => {
   f.say('Done without question.')
-  await f.startStandInServer(100)
+  const srv = await f.startStandInServer(100)
   const t0 = Date.now()
-  const res = f.call('StopWait', {}, { deadlineMs: 5000 })
+  const res = await f.spawnAsync('StopWait', {}, { deadlineMs: 5000 })
   assert.equal(res.status, 0, res.stderr)
   assert.deepEqual(JSON.parse(res.stdout.trim()), {})
+  assert.equal(srv.pingCount, 0)
   assert.ok(Date.now() - t0 < 2000, 'must fast-exit without waiting loop')
 }))
 
@@ -246,22 +250,24 @@ test('StopWait fast-exits empty object when no board server is running', () => f
 test('StopWait fast-exits empty object when ping returns null pageAgo', () => fixture('antigravity-cli', async f => {
   f.say('Blue or green?')
   f.writeWaitingBlock()
-  await f.startStandInServer(null)
+  const srv = await f.startStandInServer(null)
   const t0 = Date.now()
-  const res = f.call('StopWait', {}, { deadlineMs: 5000 })
+  const res = await f.spawnAsync('StopWait', {}, { deadlineMs: 5000 })
   assert.equal(res.status, 0, res.stderr)
   assert.deepEqual(JSON.parse(res.stdout.trim()), {})
+  assert.ok(srv.pingCount >= 1, 'expected /api/ping query to run')
   assert.ok(Date.now() - t0 < 2000, 'must fast-exit when no visible page loaded')
 }))
 
 test('StopWait fast-exits empty object when ping returns stale pageAgo over 30000', () => fixture('antigravity-cli', async f => {
   f.say('Blue or green?')
   f.writeWaitingBlock()
-  await f.startStandInServer(35000)
+  const srv = await f.startStandInServer(35000)
   const t0 = Date.now()
-  const res = f.call('StopWait', {}, { deadlineMs: 5000 })
+  const res = await f.spawnAsync('StopWait', {}, { deadlineMs: 5000 })
   assert.equal(res.status, 0, res.stderr)
   assert.deepEqual(JSON.parse(res.stdout.trim()), {})
+  assert.ok(srv.pingCount >= 1, 'expected /api/ping query to run')
   assert.ok(Date.now() - t0 < 2000, 'must fast-exit when page hidden > 30 s')
 }))
 
@@ -269,9 +275,13 @@ test('StopWait exits empty object without claim when wait deadline expires with 
   f.say('Blue or green?')
   f.writeWaitingBlock()
   const srv = await f.startStandInServer(100)
-  const res = f.call('StopWait', {}, { deadlineMs: 1800, timeout: 10000 })
+  const t0 = Date.now()
+  const res = await f.spawnAsync('StopWait', {}, { deadlineMs: 2200 })
+  const elapsed = Date.now() - t0
   assert.equal(res.status, 0, res.stderr)
   assert.deepEqual(JSON.parse(res.stdout.trim()), {})
+  assert.ok(srv.pingCount >= 1, 'expected /api/ping query to run before entering wait loop')
+  assert.ok(elapsed >= 800, `expected wait loop to wait until near deadline, got ${elapsed}ms`)
   assert.equal(srv.storeState().messages.length, 0)
 }))
 
@@ -399,6 +409,33 @@ test('StopWait worker error fails open with empty object exit 0 and skips pendin
     ], { cwd: home, encoding: 'utf8', windowsHide: true, timeout: 10000, input: JSON.stringify({ conversationId: session, hook_event_name: 'Stop' }) })
     assert.equal(res.status, 0, res.stderr)
     assert.deepEqual(JSON.parse(res.stdout.trim()), {})
+    const pendingDir = join(root, 'pending')
+    const queued = existsSync(pendingDir) ? readdirSync(pendingDir).filter(name => name.endsWith('.json')) : []
+    assert.deepEqual(queued, [])
+  } finally {
+    try { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) } catch {}
+  }
+})
+
+test('StopWait worker preserves complete continue stdout when child exits non-zero after writing it', () => {
+  const home = mkdtempSync(join(tmpdir(), 'agy-stop-worker-crash-'))
+  try {
+    const root = join(home, '.agent-board')
+    const progress = join(root, 'progress.md')
+    const fakeScript = join(root, 'fake-board.mjs')
+    const worker = join(root, 'agent-board-hook.mjs')
+    mkdirSync(root, { recursive: true })
+    writeFileSync(progress, '')
+    writeFileSync(fakeScript, `globalThis.AGENT_BOARD = {"hookVersion":${tsMod.HOOK_VERSION},"x":1}\nprocess.stdout.write(JSON.stringify({ decision: 'continue', reason: 'Accepted board reply' }) + '\\n')\nprocess.exit(1)\n`)
+    writeFileSync(worker, tsMod.hookWorker(home, fakeScript, 'const isBoardRequest = () => false; const isDeliveryRequest = () => false;'))
+    const res = spawnSync(process.execPath, [
+      worker, '--hook-version', String(tsMod.HOOK_VERSION), '--hook-event', 'StopWait', '--hook-deadline', String(Date.now() + 5000),
+      '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'StopWait', '--progress-file', progress,
+    ], { cwd: home, encoding: 'utf8', windowsHide: true, timeout: 10000, input: JSON.stringify({ conversationId: session, hook_event_name: 'Stop' }) })
+    assert.equal(res.status, 0, res.stderr)
+    const out = JSON.parse(res.stdout.trim())
+    assert.equal(out.decision, 'continue')
+    assert.equal(out.reason, 'Accepted board reply')
     const pendingDir = join(root, 'pending')
     const queued = existsSync(pendingDir) ? readdirSync(pendingDir).filter(name => name.endsWith('.json')) : []
     assert.deepEqual(queued, [])

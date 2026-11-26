@@ -292,6 +292,11 @@ const run = async () => {
     input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, env: childEnv,
     timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 1048576,
   })
+  const hasContinue = text => {
+    try { const parsed = JSON.parse(text); return Boolean(parsed && parsed.decision === 'continue' && typeof parsed.reason === 'string') }
+    catch { return false }
+  }
+  if (isWait && hasContinue(result.stdout ?? '')) { process.stdout.write(result.stdout); return true }
   // A plan that failed in the board script exits 0 there; its code is only logged here.
   if (isPlan && !result.error && result.status === 0) {
     const code = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
