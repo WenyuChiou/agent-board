@@ -8801,10 +8801,9 @@ const timer = setInterval(() => {
     board,
     ran,
     started: () => until(() => ran().length > 0),
-    // A new copy of the script, as after an update: another build time, so --serve means to replace the page.
+    // A new copy of the script, as after an update: different release bytes, so --serve means to replace the page.
     update: () => {
-      const { atime, mtimeMs } = statSync(script)
-      utimesSync(script, atime, new Date(mtimeMs + 5000))
+      writeFileSync(script, `${readFileSync(script, 'utf8')}\n// synthetic-newer-release\n`)
     },
     serve: () => new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', '--allow-resume'], { env, encoding: 'utf8', timeout: 30_000 }, (error, out) => (error ? fail(error) : done(out)))),
     // Lets the reply go, waits until the page has none in flight, and closes it if it is still there.
