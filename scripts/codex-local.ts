@@ -37,7 +37,7 @@ import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
-import { antigravitySurface, deliverTurnEvent } from './hook-delivery'
+import { antigravitySurface, deliverAntigravityStopWait, deliverTurnEvent } from './hook-delivery'
 import { checkStoreFile, hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
@@ -1108,7 +1108,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const status = flag('--state') ?? payload.state
       if (mode === '--agent-status' && !['working', 'waiting', 'ended'].includes(String(status))) throw new Error('INVALID_STATE')
       const event = agent === 'antigravity' && mode === '--agent-status' ? flag('--event') : undefined
-      if (event !== undefined && statusEvents.antigravity?.[event] !== status) throw new Error('INVALID_EVENT_STATE')
+      if (event !== undefined && (event === 'StopWait' ? 'waiting' : statusEvents.antigravity?.[event]) !== status) throw new Error('INVALID_EVENT_STATE')
       // Classify before Cursor's adapter drops prompt text; retain lifecycle
       // ordering without treating a board lookup as an answer to the question.
       const isPromptLike = isPromptEvent(raw) || raw.prompt_submitted === true
@@ -1554,6 +1554,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         mkdirSync(dirname(offsetFile), { recursive: true })
         atomic(offsetFile, `${JSON.stringify({ version: 1, file: resolve(path as string), offset: read.end })}\n`, checkDeadline)
       } catch {}
+    }
+    if (mode === '--agent-status' && agent === 'antigravity' && current?.event === 'StopWait') {
+      const delivered = await deliverAntigravityStopWait({
+        session: current.session, raw, progress, home, root, hookDeadline, s, hash, readLocal, atomic, checkDeadline,
+      })
+      if (!delivered) output({})
+      return true
     }
     if (mode === '--agent-status' && agent === 'antigravity' && planInput === undefined && current !== undefined) await bringMarkedReport(current.session)
     let delay = 50

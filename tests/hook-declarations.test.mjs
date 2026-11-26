@@ -15,7 +15,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 
 const { agentHooks, DELETE, writeConfig } = await import('../hooks/connect-pure.ts')
-const { antigravityHooks, hookCommandArgs, localAgents, planEvents, statusEvents } = await import('../hooks/local-agents.ts')
+const { antigravityHooks, directHookArgs, encodedCommandText, hookCommandArgs, localAgents, planEvents, statusEvents } = await import('../hooks/local-agents.ts')
 const { openclawLocalPlugin, deepseekPatch } = await import('../hooks/portable-agents.ts')
 const { HOOK_TIMEOUTS } = await import('../hooks/hook-safety.ts')
 const { EN } = await import('../hooks/strings-en.ts')
@@ -174,6 +174,37 @@ export const compareHookDeclarations = (label, expectedDecl, actualDecl) => {
   return diffs
 }
 
+// #1841 adds a second sequential `StopWait` (timeout: 30) entry inside Antigravity's `Stop` array
+// while leaving `SessionStart`, `PreInvocation`, `PostInvocation`, and `Stop[0]` (`timeout: 3`) identical to 0.25.1.
+const assertAntigravityDeclWithStopWait = (label, expectedDecl, actualDecl) => {
+  const key = Object.keys(expectedDecl).find(k => k === 'agent-board' || k === 'agent-board-local')
+  assert.ok(key, `${label}: missing owned antigravity group in baseline`)
+  const expGroup = expectedDecl[key]
+  const actGroup = actualDecl[key]
+  assert.ok(actGroup && Array.isArray(actGroup.Stop), `${label}: Stop must be an array`)
+  assert.equal(actGroup.Stop.length, 2, `${label}: Stop must have 2 sequential entries (Stop + StopWait)`)
+  assert.deepStrictEqual(actGroup.Stop[0], expGroup.Stop[0], `${label}.Stop[0] must match 0.25.1`)
+  assert.equal(actGroup.Stop[1].type, 'command')
+  assert.equal(actGroup.Stop[1].timeout, 30)
+  const cmd0 = actGroup.Stop[0].command
+  const cmd1 = actGroup.Stop[1].command
+  const stop0Args = directHookArgs(cmd0)
+  const stop1Args = directHookArgs(cmd1)
+  if (stop0Args !== null && stop1Args !== null) {
+    assert.deepStrictEqual(stop1Args, stop0Args.map(arg => arg === 'Stop' ? 'StopWait' : arg), `${label}.Stop[1] args must mirror Stop[0] with StopWait`)
+  } else {
+    const m0 = /-EncodedCommand\s+([A-Za-z0-9+/=]+)/.exec(cmd0)
+    const m1 = /-EncodedCommand\s+([A-Za-z0-9+/=]+)/.exec(cmd1)
+    if (m0 && m1) {
+      assert.equal(encodedCommandText(m1[1]), encodedCommandText(m0[1]).replaceAll('Stop', 'StopWait'), `${label}.Stop[1] encoded command must mirror Stop[0] with StopWait`)
+    } else {
+      assert.equal(cmd1, cmd0.replaceAll('Stop', 'StopWait'), `${label}.Stop[1] command must mirror Stop[0] with StopWait`)
+    }
+  }
+  const normalizedGroup = { ...actGroup, Stop: [actGroup.Stop[0]] }
+  assertDeclarationsEqual(label, expectedDecl, { ...actualDecl, [key]: normalizedGroup })
+}
+
 const assertDeclarationsEqual = (label, expectedDecl, actualDecl) => {
   const diffs = compareHookDeclarations(label, expectedDecl, actualDecl)
   assert.deepStrictEqual(diffs, [], `${label} changed vs ${BASE_VERSION}:\n${diffs.join('\n')}`)
@@ -298,7 +329,8 @@ test('#1825: 0.25.2 /progress connect generated hook declarations match 0.25.1 a
       // 1) Addition into empty config
       const baseEmpty = b.edit('', false)
       const headEmpty = h.edit('', false)
-      assertDeclarationsEqual(`${ctx.name}/${b.agent}(${b.file}) empty add`, extractHookDeclarations(shape, baseEmpty), extractHookDeclarations(shape, headEmpty))
+      const checkDecl = b.agent === 'antigravity' ? assertAntigravityDeclWithStopWait : assertDeclarationsEqual
+      checkDecl(`${ctx.name}/${b.agent}(${b.file}) empty add`, extractHookDeclarations(shape, baseEmpty), extractHookDeclarations(shape, headEmpty))
 
       // 2) Addition alongside foreign hooks & removal preserving foreign hooks (shared config targets)
       const seed = b.generated ? '' : foreignSeedForConnect(b)
@@ -306,7 +338,7 @@ test('#1825: 0.25.2 /progress connect generated hook declarations match 0.25.1 a
         const baseWithForeign = b.edit(seed, false)
         const headWithForeign = h.edit(seed, false)
         assert.equal(typeof headWithForeign, 'string', `${ctx.name}/${b.agent}: shared config merge must not collide`)
-        assertDeclarationsEqual(`${ctx.name}/${b.agent}(${b.file}) foreign add`, extractHookDeclarations(shape, baseWithForeign), extractHookDeclarations(shape, headWithForeign))
+        checkDecl(`${ctx.name}/${b.agent}(${b.file}) foreign add`, extractHookDeclarations(shape, baseWithForeign), extractHookDeclarations(shape, headWithForeign))
 
         const baseRemoved = b.edit(baseWithForeign, true)
         const headRemoved = h.edit(headWithForeign, true)
@@ -423,9 +455,10 @@ test('#1825: 0.25.2 standalone setup generated hook declarations match 0.25.1 ac
   const headForeign = await runSuite(runCodexLocal, true)
 
   for (const agent of localAgents) {
-    assertDeclarationsEqual(`local/${agent} empty install`, baseEmpty.installed[agent], headEmpty.installed[agent])
+    const checkDecl = agent === 'antigravity' ? assertAntigravityDeclWithStopWait : assertDeclarationsEqual
+    checkDecl(`local/${agent} empty install`, baseEmpty.installed[agent], headEmpty.installed[agent])
     assertDeclarationsEqual(`local/${agent} empty remove`, baseEmpty.removed[agent], headEmpty.removed[agent])
-    assertDeclarationsEqual(`local/${agent} foreign install`, baseForeign.installed[agent], headForeign.installed[agent])
+    checkDecl(`local/${agent} foreign install`, baseForeign.installed[agent], headForeign.installed[agent])
     assertDeclarationsEqual(`local/${agent} foreign remove`, baseForeign.removed[agent], headForeign.removed[agent])
   }
 })

@@ -1737,11 +1737,17 @@ test('antigravity connect: the legacy connector writes the Antigravity report ho
   const states = { SessionStart: 'waiting', PreInvocation: 'working', PostInvocation: 'working', Stop: 'waiting' }
   assert.deepEqual(Object.keys(hooks['agent-board']), Object.keys(states))
   for (const [event, entries] of Object.entries(hooks['agent-board'])) {
-    assert.equal(entries.length, 1)
+    assert.equal(entries.length, event === 'Stop' ? 2 : 1)
     assert.equal(entries[0].type, 'command')
     assert.equal(entries[0].timeout, 3)
     const command = generatedHookCommand(entries[0].command).text
     for (const part of [worker, f.progress, '--agent-status', 'antigravity', states[event], '--hook-event', event]) assert.ok(command.includes(part), `${event} lacks ${part}: ${command}`)
+    if (event === 'Stop') {
+      assert.equal(entries[1].type, 'command')
+      assert.equal(entries[1].timeout, 30)
+      const waitCommand = generatedHookCommand(entries[1].command).text
+      for (const part of [worker, f.progress, '--agent-status', 'antigravity', 'waiting', '--hook-event', 'StopWait']) assert.ok(waitCommand.includes(part), `StopWait lacks ${part}: ${waitCommand}`)
+    }
   }
   assert.ok(existsSync(join(f.home, '.gemini', 'config', 'skills', 'agent-board', 'SKILL.md')))
   assert.ok(existsSync(worker))
