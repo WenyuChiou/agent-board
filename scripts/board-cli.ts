@@ -2005,7 +2005,8 @@ const answerAttempts = new Map<string, { id: string; text: string }>()
 // the line, the question and the session again, and answers with what came of it.
 const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 'alert' }> => {
   const running = await runningAddress()
-  if (running === null) return { note: s.messagesFailed, tone: 'alert' }
+  // No page to send through, or no answer from it after its one try: the board cannot be reached (owner, #1843 B4 answer 3).
+  if (running === null) return { note: s.statusUnreachable, tone: 'alert' }
   const { route } = action
   const slot = JSON.stringify([action.key, route.session, route.asked])
   const kept = answerAttempts.get(slot)
@@ -2026,7 +2027,7 @@ const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 
     // What was sent leads the note, so a key pressed by mistake shows at once.
     return res.ok ? { note: s.boardAnswered(action.text, note), tone: 'done' } : { note, tone: 'alert' }
   } catch {
-    return { note: s.messagesFailed, tone: 'alert' }
+    return { note: s.statusUnreachable, tone: 'alert' }
   }
 }
 

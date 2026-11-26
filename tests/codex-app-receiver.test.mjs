@@ -169,7 +169,8 @@ test('a Codex app card says a sent reply waits here until the app is fully quit,
     press.inputs(press.cards()[0])[0].value = 'Teal'
     press.cards().flatMap(card => press.buttons(card)).find(one => one.textContent.startsWith(s.serveSend('Codex'))).click()
     await new Promise(done => setImmediate(done))
-    assert.ok(press.text().includes(s.serveReopenWaitingCodexApp), press.text())
+    // In flight it reads Sending, as every route does (#1843, B4); never that the turn already runs.
+    assert.ok(press.text().includes(s.statusSending), press.text())
     assert.ok(!press.text().includes(s.serveReopenRunning('Codex')), press.text())
     release({ ok: true, json: async () => ({ ok: true, receipt: { id: 'AB-APP-2', status: 'queued', line: 'reopen', isMailbox: false } }) })
     await press.flush()

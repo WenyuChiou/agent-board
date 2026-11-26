@@ -1049,7 +1049,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendWorking', 'messageTakeBack', 'messageDismiss',
-  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenWaitingCodexApp', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'pressFailed', 'messagesQueued', 'messagesFailed',
+  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenWaitingCodexApp', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'pressFailed', 'messagesQueued', 'messagesFailed', 'statusSending', 'statusRetrying', 'statusUnreachable',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
   'archiveNow', 'cleanUp', 'boardLarge', 'stoppedCount',
@@ -1660,6 +1660,8 @@ const PAGE_SCRIPT = String.raw`
   var ACT_WAIT_MS = 10000;
   // The last message sent from each card or row, so a failed one can go again or be copied.
   var sentLast = {};
+  // The board's answer to a card's last press, its status line and tone, until the board's next read brings the receipt (#1843, B4).
+  var pressNotes = {};
   var agentPresence = {};
   var resultSlots = {};
   var lostResults = [];
@@ -1980,6 +1982,11 @@ const PAGE_SCRIPT = String.raw`
     var slot = resultSlots[key];
     if (slot) { slot.node.textContent = ''; slot.node.className = 'press-result'; }
   }
+  // The board drew this message's stored receipt on the card: a line the press would write over it says less.
+  function isReceiptShown(key, id) {
+    var one = key && pg.sources[key];
+    return !!(one && one.receipt && one.receipt.id === id);
+  }
   function clearEnqueueResult(key, receipt) {
     var result = key && results[key];
     if (!result || !receipt || result.messageId !== receipt.id) return;
@@ -1991,9 +1998,9 @@ const PAGE_SCRIPT = String.raw`
   }
   // A send that gets no answer within 2 s is sent again under the same id, while the earlier tries may still answer: the
   // first answer wins, and the board answers an id it knows with the message it stored, so a lost or late answer never
-  // makes a second message. After 15 tries and 30 s with no answer the send failed. It stops when the page has moved,
-  // or when the person pressed other words (#1843, B3.1).
-  function sendTries(attempt, body) {
+  // makes a second message. After 15 tries and 30 s with no answer the board cannot be reached. It stops when the page
+  // has moved, or when the person pressed other words (#1843, B3.1). The first try again calls onRetry (B4).
+  function sendTries(attempt, body, onRetry) {
     return new Promise(function (resolve, reject) {
       var tries = 0, isSettled = false, wait = 0;
       function settle(isAnswer, data) {
@@ -2007,6 +2014,7 @@ const PAGE_SCRIPT = String.raw`
         if (isSettled) return;
         if (attempt.isStopped || isClosed) { settle(true, null); return; }
         if (tries >= SEND_TRIES) { settle(false); return; }
+        if (tries === 1 && onRetry) onRetry();
         tries++;
         call('/api/act', body, undefined, false, true).then(function (data) {
           // A body cut off on its way is no answer the page can trust; a refusal with one is an answer.
@@ -2029,22 +2037,18 @@ const PAGE_SCRIPT = String.raw`
       attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
     }
     var who = agentName(delivery.agent);
-    var waitingText = line === 'nextTurn'
-      ? w('serveQueuingNextTurn', who)
-      : line === 'chatOpen'
-        ? w('serveQueuingNextOpen', who)
-        : line === 'reopen'
-          ? reopenQueued(delivery.agent, delivery.isAfterAppQuit === true)
-          : line === 'stepEnd' && isClaudeAgent(delivery.agent)
-            ? w('claudeSendWorking')
-            : line === 'stepEnd'
-              ? w('serveLineStepEnd', who)
-              : w('serveSending', who);
+    // Until the board answers, the card reads Sending, the same word for every route and agent (#1843, B4). The line it
+    // leaves names this message, so the message's stored receipt replaces it on the next read of the board.
     busyOn(go);
-    say(waitingText, 'wait', key);
+    say(w('statusSending'), 'wait', key);
+    if (results[key]) results[key].messageId = attempt.id;
     var body = { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp };
     // A press made again while its send still tries joins that send: one send per message on this page (#1843, B3.1).
-    if (!attempt.sending) attempt.sending = sendTries(attempt, body);
+    if (!attempt.sending) attempt.sending = sendTries(attempt, body, function () {
+      if (attempt.isStopped || isReceiptShown(key, attempt.id)) return;
+      say(w('statusRetrying'), 'wait', key);
+      if (results[key]) results[key].messageId = attempt.id;
+    });
     return attempt.sending.then(function (data) {
       if (attempt.isStopped || !data) { busyOff(go, false); return false; }
       var receiptStatus = data.receipt && data.receipt.status;
@@ -2064,13 +2068,25 @@ const PAGE_SCRIPT = String.raw`
               : w('messagesQueued');
       var noteText = data.note && !(data.ok && line === 'nextTurn' && data.note === w('messagesQueued')) ? data.note : fallback;
       say(noteText, tone, key, undefined, !data.ok);
+      if (data.ok) pressNotes[key] = { text: noteText, tone: tone };
       if (data.ok && results[key]) {
         results[key].messageId = attempt.id;
         clearEnqueueResult(key, pg.sources[key] && pg.sources[key].receipt);
       }
       busyOff(go, data.ok || isUnreachable);
       return data.ok;
-    }, function () { say(w('messagesFailed'), 'alert', key, undefined, true); busyOff(go, false); unreachable(); return false; }).then(function (ok) { refresh(); return ok; });
+    }, function () {
+      // No answer in 30 s, but a read of the board drew this message's receipt: the board has it and answers, so the
+      // press went in and the page stays online.
+      if (isReceiptShown(key, attempt.id)) { busyOff(go, false); return true; }
+      // No answer in 30 s: the board cannot be reached, the words stay in the box, and the board may still have stored
+      // the message, so its receipt replaces this line once the board answers again (owner, #1843 B4).
+      say(w('statusUnreachable'), 'alert', key, undefined, true);
+      if (results[key]) results[key].messageId = attempt.id;
+      busyOff(go, false);
+      unreachable();
+      return false;
+    }).then(function (ok) { refresh(); return ok; });
   }
   // A draft that was sent is gone from the box on the page now, whatever redraw happened since it was pressed.
   function clearDraft(draftKey) {
@@ -2497,10 +2513,12 @@ const PAGE_SCRIPT = String.raw`
     }
     if (!isAfter || hasReceiptAfter) return;
     var isQueuedState = state.mode === 'queued';
-    if (parts.afterRow) parts.afterRow.className = isQueuedState ? 'state receipt t-wait' : 'state';
+    // A sent card says what the board answered, in the status line's words; its own words only with no answer kept.
+    var pressNote = isQueuedState ? pressNotes[key] : undefined;
+    if (parts.afterRow) parts.afterRow.className = isQueuedState ? 'state receipt t-' + (pressNote && pressNote.tone === 'done' ? 'done' : pressNote && pressNote.tone === 'alert' ? 'alert' : 'wait') : 'state';
     if (parts.afterMk) parts.afterMk.hidden = isQueuedState;
     parts.msg.className = isQueuedState ? 'msg' : 'msg ok';
-    parts.msg.textContent = isQueuedState
+    parts.msg.textContent = pressNote ? pressNote.text : isQueuedState
       ? (parts.line === 'stepEnd'
           ? (isClaudeAgent(parts.agent) ? w('claudeSendWorking') : w('serveLineStepEnd', agentName(parts.agent)))
           : parts.line === 'nextTurn'
@@ -2517,6 +2535,7 @@ const PAGE_SCRIPT = String.raw`
   function setMode(key, mode, text) {
     var previous = cardState[key];
     cardState[key] = { mode: mode, text: text === undefined ? previous ? previous.text : '' : text };
+    if (mode !== 'queued') delete pressNotes[key];
     if ((mode === 'sent' || mode === 'queued') && results[key] && results[key].messageId) clearResultSlot(key);
     paintMode(key);
     if (mode === 'write') {

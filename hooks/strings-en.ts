@@ -252,12 +252,15 @@ export const EN: Strings = {
 
   // A message's status line (#1843 B4): the same words on the page, the terminal board, --print and --json
   statusSending: 'Sending',
+  statusRetrying: 'Sending · not confirmed, trying again',
   statusQueued: (when: string): string => `Queued · ${when}`,
   statusDelivered: (when: string): string => `Delivered · ${when}`,
   statusRead: (reply: string): string => reply === '' ? 'Read' : `Read · ${reply}`,
   statusAnswered: 'Answered · on the board',
   statusUnsure: (why: string): string => `Unsure · ${why} · check its window`,
   statusNotDelivered: (why: string): string => `Not delivered · ${why}`,
+  statusUnreachable: 'Cannot reach the board · your words are kept',
+  statusAnswerOpen: (line: string): string => `Another answer went first · ${line}`,
   statusWhenNow: 'now',
   statusWhenStepEnd: 'when its step ends',
   statusWhenNextTurn: 'at its next turn',

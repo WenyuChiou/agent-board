@@ -213,7 +213,8 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
       const inFlight = waitCard.locator('.press-result.wait')
       await inFlight.waitFor()
       const inFlightText = await inFlight.innerText()
-      assert.ok(inFlightText.includes("Queuing for Codex's next turn…"), inFlightText)
+      // In flight every route reads Sending, the one word set the board reads from receipts (#1843, B4).
+      assert.ok(inFlightText.includes('Sending'), inFlightText)
       assert.ok(!inFlightText.includes('waiting for its reply'), inFlightText)
       assert.equal(await queueBtn.isDisabled(), true)
       assert.ok((await queueBtn.innerText()).startsWith("Queue for Codex's next turn"))
