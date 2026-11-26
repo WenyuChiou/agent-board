@@ -6153,6 +6153,32 @@ test('terminal gone, thread still listed: not started at the next tick, and star
   } finally { await stepped.receiver.close() }
 }))
 
+test('a window closed after its thread sat idle for over 10 minutes: the 10-minute wait counts from when no window was found, not from the idle start (#1652)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  // The person's Codex window was open while the thread sat idle, and closed just before the message: the daemon still lists the
+  // thread for its unload delay, so the process list is the only sign that nobody is there.
+  const stepped = codexStepped(board, daemon, { clients: async () => [] })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    await stepped.advance(660_000, { step: 10_000 })
+    const sentAt = stepped.now()
+    assert.equal(await codexSend(board, connection), 200)
+    // Not started while the thread could still be one whose window just closed: the idle stretch before the message counts for
+    // nothing once no window is found.
+    await stepped.advance(sentAt + 120_000, { step: 10_000, done: () => codexStarts(daemon) > 0 })
+    assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon)], [false, 0])
+    // Still listed a full wait after no window was found, it is held by a client the list does not show: the message goes then,
+    // never a wait with no end, though the thread's hold ends and the list is read again meanwhile.
+    let at = null
+    await stepped.advance(sentAt + 900_000, { step: 10_000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    assert.equal(codexStarts(daemon), 1)
+    assert.ok(at - sentAt >= 600_000, `started ${Math.round((at - sentAt) / 1000)} s after the message by the receiver's clock`)
+  } finally { await stepped.receiver.close() }
+}))
+
 test('a thread the daemon closes while the process list is read before the join is not joined, which would load it again (#1652)', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person')
   writeFileSync(person, '')
