@@ -57,6 +57,8 @@ const CLIENTS_LIMIT_MS = 2500
 const CLIENTS_ASK_LIMIT_MS = 3500
 // A thread with no window found is kept off the short wait for this many ticks, so a waiting message costs one read in that time.
 const HOLD_TICKS = 10
+// A Codex program running as a server, not as a person's window: the command anywhere after the flags.
+const SERVER_COMMAND = /(?:^|[\s"])(?:app|exec|mcp)-server(?=\s|"|$)/
 // Whether a listing asked at `listedAt` is one wait after a stretch that began at `since`: the longer of `unloadMs` and the
 // folder's unload delay (`delay`) with its margin (#1578).
 export const isWaitOver = ({ since, listedAt, delay, unloadMs = UNLOAD_MS, unloadMarginMs = UNLOAD_MARGIN_MS }) =>
@@ -88,7 +90,8 @@ export const terminalClients = (rows, platform = process.platform) => {
     if (!isCodex(String(row?.name ?? ''))) continue
     const isKnown = typeof row.argv === 'string' && row.argv !== '' && Number.isSafeInteger(row.started) && row.started > 0 && Number.isSafeInteger(row.pid) && row.pid > 0
     if (!isKnown) { isUnsure = true; continue }
-    if (row.argv.includes('app-server')) continue
+    // The app-server, and the servers the Codex desktop app starts (exec-server) or a host starts (mcp-server), are no window.
+    if (SERVER_COMMAND.test(row.argv)) continue
     clients.push(`${row.pid}:${row.started}`)
   }
   return { clients, isUnsure: isUnsure && clients.length === 0 }
@@ -393,8 +396,9 @@ export const startCodexReceiver = ({
   const quiet = new Map()
   let hasConfigFailed = false, hasClientsFailed = false
   // A thread kept off the short wait (#1652). none: a claim found no Codex window, so for HOLD_TICKS ticks nothing is claimed for
-  // it; unreadable: the process list could not be read, so the thread waits as long as it did before the process check, and
-  // delivers as before once that wait is over. A readable list that finds a window ends it.
+  // it; unreadable: the process list could not be read, so that one message waits as it did before the process check and goes
+  // with no check once that wait is over. The hold ends when it goes, and the next message reads the list again, so one failed
+  // read is not kept for the thread. A readable list that finds a window ends it too.
   const holds = new Map()
   const holdOf = thread => {
     const hold = holds.get(thread)
@@ -992,17 +996,16 @@ export const startCodexReceiver = ({
           let said = null, startingSince = 0, ids = null
           try {
             // A message was claimed, so now the process list is read: is a Codex terminal window open? None: the claim goes back and
-            // the thread is held off the short wait. Unreadable: it goes back too, and the thread waits as it did before this check,
-            // then delivers with no check. A thread already on that wait delivers as before (#1652).
-            if (holdOf(thread)?.kind !== 'unreadable') {
+            // the thread is held off the short wait. Unreadable: it goes back too, and the message waits as it did before this check,
+            // then goes with no check. A thread already on that wait reads no list (#1652).
+            const decide = async () => {
               const found = await readClients('decide')
-              if (found.kind === 'clients') { ids = found.ids; holds.delete(thread) }
-              else {
-                if (found.kind === 'none') holdNone(thread)
-                else holds.set(thread, { kind: 'unreadable', until: null })
-                if (await giveBack() !== 'held') return undefined
-              }
+              if (found.kind === 'clients') { ids = found.ids; holds.delete(thread); return true }
+              if (found.kind === 'none') holdNone(thread)
+              else holds.set(thread, { kind: 'unreadable', until: null })
+              return false
             }
+            if (holdOf(thread)?.kind !== 'unreadable' && !await decide() && await giveBack() !== 'held') return undefined
             for (;;) {
               for (;;) {
                 if (isDone()) return undefined
@@ -1010,11 +1013,14 @@ export const startCodexReceiver = ({
                 // thread for all it knows, and stays out of it until it can tell a person from its own subscription.
                 if (sub.mayBeSubscribed) await leave(thread)
                 else if (!sub.isInUse && await isReady(thread) && !isDone()) {
-                  // The window the decision found must be the one there now, right before the join: the same process id and start
-                  // time. A reused id is not that window. Nothing was joined or asked of Codex, so the claim goes back.
-                  if (ids === null || await isWindowThere(ids, 'join')) break
-                  ids = null
-                  holdNone(thread)
+                  // On the wait for a list that could not be read, the message goes with no check, as before the check.
+                  if (ids === null && holdOf(thread)?.kind === 'unreadable') break
+                  // The short route needs a window found for this claim. The window the decision found must be the one there now,
+                  // right before the join: the same process id and start time; a reused id is not that window. A claim with none
+                  // found (it kept its claim when it gave back, and its hold ended while it waited) reads the list again here.
+                  // Nothing was joined or asked of Codex, so a claim with no window goes back.
+                  if (ids === null ? await decide() : await isWindowThere(ids, 'join')) break
+                  if (ids !== null) { ids = null; holdNone(thread) }
                   if (await giveBack() !== 'held') return undefined
                 }
                 if (!isDone() && isShort() && await giveBack() !== 'held') return undefined
@@ -1091,6 +1097,8 @@ export const startCodexReceiver = ({
             // answer) may have been delivered. The claim nonce is the message id Codex records.
             let result, begunBefore = new Set()
             pending = state.pending
+            // The message goes now, so a hold for a list that could not be read ends with it: the next message reads the list again.
+            if (holds.get(thread)?.kind === 'unreadable') holds.delete(thread)
             // A request that cannot leave (the connection is already gone) starts nothing, as one the daemon refuses.
             const canLeave = daemon !== null && daemon.isOpen()
             try { result = await ask('turn/start', { threadId: thread, input: input(prompt), clientUserMessageId: message.nonce }, 10_000, () => { begunBefore = new Set(pending.begun) }) } catch (error) {
