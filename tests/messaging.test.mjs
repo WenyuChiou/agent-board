@@ -5389,7 +5389,9 @@ const codexStepped = (board, daemon, options = {}) => {
   let clock = 0
   const reads = () => daemon.calls().filter(one => one.method === 'thread/read').length
   const receiver = codexReceiver(board, daemon, { unloadMs: undefined, unloadMarginMs: undefined, now: () => clock, watchTickMs: 10_000, ...options })
-  const advance = async (limit, { done = () => false, step = 5000 } = {}) => {
+  // gapMs: real time left between two steps. The board hands out claims on real time, a poll apart, so a clock that steps faster
+  // can pass a whole wait between two claims and never hold still while one is read.
+  const advance = async (limit, { done = () => false, step = 5000, gapMs = 0 } = {}) => {
     while (clock < limit) {
       if (done()) return
       const seen = reads(), until = Date.now() + 20_000
@@ -5398,6 +5400,8 @@ const codexStepped = (board, daemon, options = {}) => {
         assert.ok(Date.now() < until, `no thread/read for 20 s at ${clock / 1000} s by the receiver's clock`)
         await pause(20)
       }
+      if (gapMs > 0) await pause(gapMs)
+      if (done()) return
       clock = Math.min(limit, clock + step)
     }
   }
@@ -6173,7 +6177,10 @@ test('a window closed after its thread sat idle for over 10 minutes: the 10-minu
     // Still listed a full wait after no window was found, it is held by a client the list does not show: the message goes then,
     // never a wait with no end, though the thread's hold ends and the list is read again meanwhile.
     let at = null
-    await stepped.advance(sentAt + 900_000, { step: 10_000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    const started = () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null }
+    await stepped.advance(sentAt + 600_000, { step: 10_000, done: started })
+    // Past the 10-minute wait the clock moves a step for every two polls of the board, so a claim lands at each step.
+    await stepped.advance(sentAt + 1_200_000, { step: 10_000, gapMs: 2 * codexPollMs, done: started })
     assert.equal(codexStarts(daemon), 1)
     assert.ok(at - sentAt >= 600_000, `started ${Math.round((at - sentAt) / 1000)} s after the message by the receiver's clock`)
   } finally { await stepped.receiver.close() }
@@ -6192,7 +6199,10 @@ test('no Codex window, thread still listed: the message goes once the 10-minute 
     const sentAt = stepped.now()
     assert.equal(await codexSend(board, connection), 200)
     let at = null
-    await stepped.advance(sentAt + 900_000, { step: 10_000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    const started = () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null }
+    await stepped.advance(sentAt + 600_000, { step: 10_000, done: started })
+    // Past the 10-minute wait the clock moves a step for every two polls of the board, so a claim lands at each step.
+    await stepped.advance(sentAt + 1_200_000, { step: 10_000, gapMs: 2 * codexPollMs, done: started })
     assert.equal(codexStarts(daemon), 1)
     assert.ok(at - sentAt >= 600_000, `started ${Math.round((at - sentAt) / 1000)} s after the message by the receiver's clock`)
   } finally { await stepped.receiver.close() }
