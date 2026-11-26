@@ -27,7 +27,8 @@ const promptParts = prompt => {
 // A reply that names how many messages this receiver has had, so its card's receipt line
 // differs from the one an earlier message left on the same card (the page strips "ACK <nonce>").
 const ackReply = (message, actor) => `ACK ${message.nonce} reply ${actor.received.length}`
-const receiptText = (receipt, s = 'Replied') => receipt.reply ? `${s} · ${receipt.reply}` : s
+// The board words the line (hooks/message-status.ts): Read, and the reply as one line after it.
+const receiptText = (receipt, s = EN) => s.statusRead(receipt.reply.replace(/s+/g, ' ').trim())
 
 // The owned transport shapes come from tests/messaging.test.mjs:584 and :735.
 // Only these adapters represent native receivers; generic client registration

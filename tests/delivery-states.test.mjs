@@ -73,24 +73,28 @@ runInNewContext(selector, pageScope)
 const receiptElement = one => one == null ? null : (one.cls ?? '').split(' ').includes('receipt') ? one : one.children.map(receiptElement).find(Boolean) ?? null
 const lineOf = one => receiptElement(one)?.text ?? null
 // A message's receipt as the board sends it (rowReceipt in hooks/serve.ts), on the default route, when its last event happened.
-const receiptOf = (name, shape) => {
+const receiptOf = (name, shape, s = EN) => {
   const { message, state } = sampleOf(name, shape)
   const one = { ...shownMessage(message), ...(isMailboxSurfaceLost(message, state.mailboxes) ? { isSurfaceLost: true } : {}) }
-  return rowReceipt(message.to.split(':')[0], 's1', [one], SAMPLE_NOW, EN).receipt
+  return rowReceipt(message.to.split(':')[0], 's1', [one], SAMPLE_NOW, s).receipt
 }
-const cardOf = (name, shape, agent) => lineOf(pageScope.receiptLine(receiptOf(name, shape), 'k', agent, true))
+const cardOf = (name, shape, agent, s = EN) => lineOf(pageScope.receiptLine(receiptOf(name, shape, s), 'k', agent, true))
 
 test('every card line in the delivery table is the one the page picks (#1543)', () => {
   const wrong = []
-  for (const name of DELIVERY_STATES) {
-    for (const shape of shapeNames(name)) {
-      const row = rowOf(name, shape)
-      const shown = receiptOf(name, shape)?.shown
-      if ((shown?.state ?? null) !== row.status) wrong.push(`${label(name, shape)}: table ${row.status}, board ${shown?.state ?? null}`)
-      // The same words on a Claude card and any other.
-      for (const agent of ['codex', 'claude']) {
-        const drawn = cardOf(name, shape, agent)
-        if (drawn !== (shown?.line ?? null)) wrong.push(`${label(name, shape)} ${agent}: the page draws ${drawn}, not ${shown?.line ?? null}`)
+  for (const [lang, s] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
+    for (const name of DELIVERY_STATES) {
+      for (const shape of shapeNames(name)) {
+        const row = rowOf(name, shape)
+        const shown = receiptOf(name, shape, s)?.shown
+        if ((shown?.state ?? null) !== row.status) wrong.push(`${lang} ${label(name, shape)}: table ${row.status}, board ${shown?.state ?? null}`)
+        // The same words on a Claude card and any other, in the page's language.
+        for (const agent of ['codex', 'claude']) {
+          const drawn = cardOf(name, shape, agent, s)
+          if (drawn !== (shown?.line ?? null)) wrong.push(`${lang} ${label(name, shape)} ${agent}: the page draws ${drawn}, not ${shown?.line ?? null}`)
+        }
+        // A line in this language, not English, outside English.
+        if (s !== EN && shown && shown.line === receiptOf(name, shape, EN)?.shown?.line) wrong.push(`${lang} ${label(name, shape)}: the line is the English one`)
       }
     }
   }

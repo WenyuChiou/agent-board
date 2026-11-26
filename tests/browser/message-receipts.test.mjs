@@ -75,7 +75,10 @@ test('an earlier receipt preserves a new send error on the same card', { concurr
     // The context appears in both its one-line and full copies; either visible copy proves the redraw.
     await card.getByText('Updated synthetic receipt context.', { exact: true }).first().waitFor()
     assert.equal(await card.getByRole('alert').innerText(), 'Type something first.')
-    assert.equal(await card.getByText('Read · Synthetic reply.', { exact: true }).count(), 1)
+    // The session reported again after the answer went in, so the board reads it Answered (owner, #1843 answer 5): the
+    // card keeps one status line for the earlier answer beside the new error.
+    assert.equal(await card.getByText('Answered · on the board', { exact: true }).count(), 1)
+    assert.equal(await card.getByText('Read · Synthetic reply.', { exact: true }).count(), 0)
     assert.equal(deliveries.length, 1)
   })
 })
@@ -226,9 +229,9 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
       await routeDone
       await page.unroute('**/api/act', actRoute)
 
-      // Card 1 settles in queued (waiting) state.
+      // Card 1 settles in queued (waiting) state, in the board's words (hooks/message-status.ts).
       const waitReceipt = waitCard.locator('p.receipt.t-wait')
-      await waitReceipt.filter({ hasText: 'Queued for next turn · Codex reads this when you next type in its window.' }).waitFor()
+      await waitReceipt.filter({ hasText: /^Queued · at its next turn · / }).waitFor()
 
       // Card 2 settles in handed-over (delivered) state.
       await doneCard.locator('button.q-toggle').click()

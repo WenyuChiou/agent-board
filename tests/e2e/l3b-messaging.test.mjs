@@ -55,8 +55,10 @@ test('messages: a Codex session with no poller takes a page message on its next 
     assert.equal(snapshot.messaging.messages[0].status, 'accepted')
     await page.redraw(snapshot.model)
     // Taken at its turn start: Delivered, in the board's words, and nothing more than that.
-    assert.equal(snapshot.model.asks[0]?.receipt?.shown?.state, 'delivered')
-    assert.ok(page.text().includes(snapshot.model.asks[0].receipt.shown.line), page.text())
+    const shown = []
+    JSON.stringify(snapshot.model, (key, value) => { if (key === 'shown' && value?.line) shown.push(value); return value })
+    assert.deepEqual(shown.map(one => one.state), ['delivered'], JSON.stringify(shown))
+    assert.ok(page.text().includes(shown[0].line), page.text())
     assert.ok(!page.text().includes('Read · ') && !page.text().includes('Answered · '), page.text())
     const again = await hook('UserPromptSubmit')
     assert.equal(again.status, 0, again.stderr)
@@ -234,7 +236,7 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     await seenWithin(async () => {
       message = (await hub.snapshot()).messaging.messages.find(one => one.id === sent.id)
       return (await hub.card(receiver)).textContent
-    }, card => message?.status === 'uncertain' && message.error === 'ACK_TIMEOUT' && /Reply timed out/.test(card), Math.max(1, budget.measuredMs - budget.pagePollMs - (performance.now() - sent.started)))
+    }, card => message?.status === 'uncertain' && message.error === 'ACK_TIMEOUT' && card.includes(EN.statusUnsure(message.hasAccepted === true ? EN.statusWhyDelivered : EN.statusWhyTimedOut)), Math.max(1, budget.measuredMs - budget.pagePollMs - (performance.now() - sent.started)))
     const elapsed = performance.now() - sent.started + budget.pagePollMs
     assert.ok(elapsed <= budget.measuredMs, `${elapsed} ms including the page poll exceeds ${budget.measuredMs} ms`)
     assert.equal(receiver.received.length, 1)
