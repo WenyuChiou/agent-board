@@ -119,6 +119,8 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     assert.match(railBox.railText, /Stream rows to temporary file/)
     assert.equal(railBox.rowInlineOpen, false, 'selected item should open in the rail, not inline')
     assert.equal(await row.locator('.row-open').isVisible(), false)
+    assert.equal(await page.locator('#detail-rail .d-head .surf-pill.surf-cli').count(), 1, 'detail rail head renders CLI .surf-pill')
+    assert.equal((await page.locator('#detail-rail .d-head .d-meta').innerText()).includes('Codex'), false, 'detail rail meta omits visible AI vendor name')
 
     // Esc closes the rail without manually focusing #detail-close and restores focus to the row trigger.
     await page.keyboard.press('Escape')
@@ -146,6 +148,8 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     })
     assert.ok(cardRail.width > 0 && cardRail.width <= 340, `expected rail width <= 340px, got ${cardRail.width}px`)
     assert.match(cardRail.text, /Retry upload with backoff/)
+    assert.equal(await page.locator('#detail-rail .d-head .surf-pill.surf-cli').count(), 1, 'card detail rail head renders CLI .surf-pill')
+    assert.equal((await page.locator('#detail-rail .d-head .d-meta').innerText()).includes('Claude'), false, 'card detail rail meta omits visible AI vendor name')
     await page.keyboard.press('Escape')
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
     assert.equal(await cardBtn.evaluate(node => document.activeElement === node), true, 'closing rail should restore focus to the card detail button')

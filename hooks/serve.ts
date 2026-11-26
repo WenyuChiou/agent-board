@@ -1143,6 +1143,7 @@ ${sheetCss}
 .card.open .q-toggle .q{white-space:normal;overflow:visible;text-overflow:clip}
 .c-line2{display:flex;align-items:center;gap:var(--s2);min-width:0;font-size:var(--text-xs);line-height:1.4;color:var(--muted)}
 .c-line2 .c-meta{flex:1 1 auto;min-width:0;flex-wrap:nowrap;gap:var(--s2);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.c-line2 .c-meta>span:not(.surf-pill):not(.ag){min-width:0;overflow:hidden;text-overflow:ellipsis}
 .c-line2 .answers{margin-left:auto;flex:none;padding-top:0;gap:var(--s1)}
 .c-line2 .answers button{min-height:28px;padding:0 var(--s2);font-size:var(--text-xs)}
 .c-line2 .answers button.quiet{padding:0 var(--s1)}
@@ -1216,7 +1217,14 @@ div.row-btn{cursor:default}
 .r-text{min-width:0;display:flex;flex-direction:column;gap:2px}
 .r-title{font-size:var(--text-sm);line-height:1.3;font-weight:600;overflow-wrap:anywhere}
 .r-meta{font-size:var(--text-xs);line-height:1.4;color:var(--muted);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
-.r-meta span+span{margin-left:var(--s3)}
+.r-meta>span+span{margin-left:var(--s3)}
+.surf-wrap{display:inline-flex;align-items:center;gap:var(--s1);flex:none}
+.surf-pill{display:inline-flex;align-items:center;gap:var(--s1);padding:0 var(--s1);border:1px solid transparent;border-radius:var(--radius-s);font:600 var(--text-xs)/1.3 var(--font-mono);white-space:nowrap;flex:none}
+.surf-pill svg.si{width:10px;height:10px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.surf-cli{background:var(--surf-cli-bg);border-color:var(--surf-cli-line);color:var(--surf-cli-ink)}
+.surf-app{background:var(--surf-app-bg);border-color:var(--surf-app-line);color:var(--surf-app-ink)}
+.surf-pill.surf-icon{padding:2px var(--s1)}
+.r-meta .surf-pill{vertical-align:-1px}
 .r-chev{width:16px;height:16px;color:var(--muted);transition:transform var(--dur-base) var(--ease-out)}
 .r-chev::before{content:'';display:block;width:7px;height:7px;margin:4px 0 0 2px;border-top:2px solid currentColor;border-right:2px solid currentColor;transform:rotate(45deg)}
 .row-btn[aria-expanded="true"] .r-chev{transform:rotate(90deg)}
@@ -1326,10 +1334,13 @@ ${ICON_CSS}
 .v-needs>svg.i{color:var(--waiting-text)}.v-working>svg.i{color:var(--alive)}.v-others>svg.i,.v-done>svg.i{color:var(--muted)}
 .s-project::before{content:"";flex:none;width:18px;height:18px;margin-inline:3px;background:var(--muted);-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M2 4.5h4l1.5 1.5H14v6.5H2z'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M2 4.5h4l1.5 1.5H14v6.5H2z'/%3E%3C/svg%3E") center/contain no-repeat}
 .s-txt{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.s-agent{gap:var(--s2)}
+.s-agent .s-txt{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .s-n{flex:none;font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums}
 .s-n:empty{display:none}
-.s-n.hot,.side .badge{position:static;flex:none;min-width:22px;height:22px;padding:0 6px;border:0;border-radius:var(--radius-round);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-xs);font-weight:600;line-height:22px;text-align:center;font-variant-numeric:tabular-nums}
-.side .badge.bad{background:var(--alert)}
+.s-n.hot,.side .badge{position:static;flex:none;min-width:22px;height:22px;padding:0 6px;border:0;border-radius:var(--radius-round);background:var(--waiting-fill);color:var(--waiting-on);font-size:var(--text-xs);font-weight:600;line-height:22px;text-align:center;font-variant-numeric:tabular-nums}
+.side .badge{margin-left:auto}
+.side .badge.bad{background:var(--alert);color:var(--on-accent)}
 .s-agent[data-presence] .ag::after,.s-agent.working .ag::after{content:"";position:absolute;right:-5px;bottom:-5px;width:9px;height:9px;border:2px solid var(--ground);border-radius:var(--radius-round)}
 .s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after{border-color:var(--alive);background:var(--ground)}
 .s-agent[data-presence="offline"] .ag::after{border-radius:var(--radius-s);background:var(--muted)}
@@ -1404,8 +1415,9 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
   .shell[data-rail="1"] .s-item{width:44px;height:44px;min-height:44px;padding:0;justify-content:center}
   .shell[data-rail="1"] .s-item>svg.i{margin:0}
   .shell[data-rail="1"] .s-txt{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  .shell[data-rail="1"] .s-agent .surf-wrap{display:none}
   .shell[data-rail="1"] .s-n:not(.hot){display:none}
-  .shell[data-rail="1"] :is(.s-n.hot,.side .badge){position:absolute;top:-3px;right:-5px;border:2px solid var(--ground);line-height:18px}
+  .shell[data-rail="1"] :is(.s-n.hot,.side .badge){position:absolute;top:-3px;right:-5px;margin-left:0;border:2px solid var(--ground);line-height:18px}
 }
 @media (max-width:559px){
   /* A narrow window shows the same sidebar as a drawer from the left, over the work, with a backdrop behind it.
@@ -1439,6 +1451,7 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
   .page,#board{gap:var(--s5)}
   .page{padding-top:var(--s4)}
   .card{padding:var(--s3)}
+  .c-line2{flex-wrap:wrap}
   .row-open{padding-left:var(--s2)}
   .pfoot{gap:var(--s2)}
 }
@@ -1514,6 +1527,8 @@ ${settingsCss}
 </div>
 <aside class="detail-rail" id="detail-rail" aria-label="${esc(s.pgDetailRail)}" hidden></aside>
 <template id="detail-close-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></template>
+<template id="surf-cli-icon"><svg class="si" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 5 3.5 3-3.5 3M8 11h4.5"/></svg></template>
+<template id="surf-app-icon"><svg class="si" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="2"/><path d="M2.2 6h11.6"/></svg></template>
 </div>
 ${settingsPanel(s, language, isLan, isLangOverridden)}
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
@@ -2350,7 +2365,7 @@ const PAGE_SCRIPT = String.raw`
     closeBtn.title = w('sideClose');
     var tpl = document.getElementById('detail-close-icon');
     if (tpl && tpl.content) closeBtn.appendChild(tpl.content.cloneNode(true));
-    var head = add(el('div', 'd-head'), markOf(entry.ref), el('span', 'd-meta', entry.meta || ''), closeBtn);
+    var head = add(el('div', 'd-head'), markOf(entry.ref), surfaceBadge(interfaceOf(entry.ref), false), el('span', 'd-meta', entry.meta || ''), closeBtn);
     var body = el('div', 'd-body');
     add(body, el('h2', 'd-title', entry.title));
     if (entry.renderBody) add(body, entry.renderBody());
@@ -2425,6 +2440,51 @@ const PAGE_SCRIPT = String.raw`
     if (one.isOwn || ref.isOwn || !id || id === '?' || id === 'cursor') return '';
     if (id === 'antigravity' || id === 'claude-web' || id === 'chatgpt' || id === 'gemini-web' || id === 'grok-web') return 'app';
     return 'cli';
+  }
+  function surfaceBadge(iface, iconOnly) {
+    if (iface !== 'cli' && iface !== 'app') return null;
+    var label = w(iface === 'app' ? 'pgInterfaceApp' : 'pgInterfaceCli');
+    var pill = el('span', 'surf-pill surf-' + iface + (iconOnly ? ' surf-icon' : ''));
+    pill.setAttribute('translate', 'no');
+    if (iconOnly) pill.setAttribute('aria-hidden', 'true');
+    var tpl = document.getElementById('surf-' + iface + '-icon');
+    if (tpl && tpl.content && tpl.content.firstChild) pill.appendChild(tpl.content.firstChild.cloneNode(true));
+    if (!iconOnly) add(pill, el('span', 'surf-lbl', label));
+    return pill;
+  }
+  function agentSurfaces(id) {
+    if (!id || id === 'own' || id === '?') return [];
+    var view = pg.model && pg.model.view;
+    var activeRefs = view ? [].concat(view.needs && view.needs.cards || [], view.needs && view.needs.waitingOthers || [], view.working || [], view.all && view.all.open || []) : [];
+    var fallbackRefs = view ? [].concat(view.needs && view.needs.older || [], view.all && view.all.stopped || [], view.all && view.all.done || []) : [];
+    var seen = { cli: false, app: false };
+    var scan = function (refs) {
+      refs.forEach(function (ref) {
+        if (!ref || agentOf(ref) !== id) return;
+        var one = source(ref);
+        if (one.isOwn || ref.isOwn) return;
+        var iface = interfaceOf(ref);
+        if (iface === 'cli' || iface === 'app') seen[iface] = true;
+      });
+    };
+    scan(activeRefs);
+    if (!seen.cli && !seen.app) {
+      scan(fallbackRefs);
+      if (!seen.cli && !seen.app) {
+        Object.keys(pg.sources).forEach(function (key) {
+          var one = pg.sources[key];
+          if (!one || one.isOwn) return;
+          var a = one.agent || 'claude';
+          if (String(a).toLowerCase() !== id) return;
+          var iface = interfaceOf({ key: key, agent: a });
+          if (iface === 'cli' || iface === 'app') seen[iface] = true;
+        });
+      }
+    }
+    var out = [];
+    if (seen.cli) out.push('cli');
+    if (seen.app) out.push('app');
+    return out;
   }
   // Search folding adapted from T3 Code (paletteSearch): NFKD + strip combining marks + apostrophe fold + case-fold.
   function foldSearchText(value) {
@@ -2633,14 +2693,15 @@ const PAGE_SCRIPT = String.raw`
       add(qToggle, question);
       add(body, qToggle);
     }
+    var cardSurf = surfaceBadge(interfaceOf(ref), false);
     var meta;
     if (isOwnCard) {
       var smallMark = agent ? agentMark(agent, agentName(agent)) : null;
       if (smallMark) smallMark.className += ' ag-sm';
       var age = ageOf(ref);
-      meta = add(el('div', 'c-meta'), smallMark, project ? el('span', '', project) : null, age ? el('span', '', age) : null, detailBtn);
+      meta = add(el('div', 'c-meta'), smallMark, cardSurf, project ? el('span', '', project) : null, age ? el('span', '', age) : null, detailBtn);
     } else {
-      meta = add(el('div', 'c-meta'), project ? el('span', '', project) : null, el('span', '', ageOf(ref)), detailBtn);
+      meta = add(el('div', 'c-meta'), cardSurf, project ? el('span', '', project) : null, el('span', '', ageOf(ref)), detailBtn);
     }
     var detailIn = el('div', 'fold-in');
     var detailHost = isOlder ? body : detailIn;
@@ -2825,7 +2886,7 @@ const PAGE_SCRIPT = String.raw`
         node: card,
         trigger: detailBtn,
         title: text,
-        meta: [agent ? agentName(agent) : '', project, ageOf(ref)].filter(Boolean).join(' · '),
+        meta: [project, ageOf(ref)].filter(Boolean).join(' · '),
         renderBody: function () {
           var wrap = el('div', 'row-open');
           if (ask.task && clean(String(ask.task)) !== text) add(wrap, el('p', 'context', clean(String(ask.task))));
@@ -2965,7 +3026,8 @@ const PAGE_SCRIPT = String.raw`
     var project = showProject ? clean(ref.repo || row.project) : '';
     if (sameName(project, title)) project = '';
     var progress = isTask && row.total > 0 && (section === 'working' || section === 'stopped' || section === 'others') ? progressNode(row.cells || '', row.done, row.total, current ? clean(current.text) : '') : null;
-    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null, project ? el('span', '', project) : null, sameTitle ? el('span', '', sameTitle) : null, detail ? el('span', '', detail) : null);
+    var rowSurf = surfaceBadge(interfaceOf(ref), false);
+    var meta = add(el('span', 'r-meta'), progress, rowSurf, status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null, project ? el('span', '', project) : null, sameTitle ? el('span', '', sameTitle) : null, detail ? el('span', '', detail) : null);
     var titleNode = el('span', 'r-title', title);
     titleNode.setAttribute('title', title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
@@ -2990,13 +3052,15 @@ const PAGE_SCRIPT = String.raw`
     var block = el('div', 'fx');
     add(block, add(el('div', 'fx-in'), head, isExpandable ? fold : null));
     add(li, block);
+    var railProject = clean(ref.repo || row.project);
+    if (sameName(railProject, title)) railProject = '';
     railItems[ref.key] = {
       kind: 'row',
       ref: ref,
       node: li,
       trigger: head,
       title: title,
-      meta: [agentName(row.agent), project, dueOf(ref) || ageOf(ref)].filter(Boolean).join(' · '),
+      meta: [railProject, dueOf(ref) || ageOf(ref)].filter(Boolean).join(' · '),
       renderBody: isExpandable ? function () { return inner; } : null,
     };
     return { li: li, block: block };
@@ -3060,8 +3124,10 @@ const PAGE_SCRIPT = String.raw`
   function newChip(entry, isSide) {
     var node = navButton('', function () { setFilter(pg.filter === entry.id ? '' : entry.id); });
     node.setAttribute('data-agent', entry.id);
-    var chip = { node: node, name: el('span', isSide ? 's-txt' : 'c-name'), badge: null, isSide: isSide };
-    add(node, agentMark(entry.agent), chip.name);
+    var surf = el('span', 'surf-wrap');
+    if (!isSide) surf.setAttribute('aria-hidden', 'true');
+    var chip = { node: node, name: el('span', isSide ? 's-txt' : 'c-name'), surf: surf, badge: null, isSide: isSide };
+    add(node, agentMark(entry.agent), chip.name, surf);
     return chip;
   }
   function paintChip(chip, entry, label) {
@@ -3070,6 +3136,11 @@ const PAGE_SCRIPT = String.raw`
     chip.node.className = (chip.isSide ? 's-item s-agent' : 'chip') + (entry.working > 0 ? ' working' : '');
     if (entry.presence) chip.node.setAttribute('data-presence', entry.presence);
     setText(chip.name, stateWord(entry) ? entry.name + ' · ' + stateWord(entry) : entry.name);
+    if (chip.surf) {
+      chip.surf.textContent = '';
+      (entry.surfaces || []).forEach(function (iface) { add(chip.surf, surfaceBadge(iface, !chip.isSide)); });
+      chip.surf.hidden = !chip.surf.firstChild;
+    }
     var text = entry.unreadable ? '!' : entry.needs > 0 ? String(entry.needs) : '';
     if (text && !chip.badge) { chip.badge = el('span', 'badge'); chip.node.appendChild(chip.badge); }
     if (!text && chip.badge) { chip.node.removeChild(chip.badge); chip.badge = null; }
@@ -3088,7 +3159,7 @@ const PAGE_SCRIPT = String.raw`
     pg.ids.forEach(function (id) {
       var group = view.agents.filter(function (one) { return one.agent === id; })[0];
       if (!group) return;
-      entries.push({ id: id, name: agentName(id), agent: id, needs: waiting(group.counts.needs, id), working: view.working.filter(function (ref) { return agentOf(ref) === id; }).length, unreadable: group.isUnreadable, presence: agentPresence[id] });
+      entries.push({ id: id, name: agentName(id), agent: id, needs: waiting(group.counts.needs, id), working: view.working.filter(function (ref) { return agentOf(ref) === id; }).length, unreadable: group.isUnreadable, presence: agentPresence[id], surfaces: agentSurfaces(id) });
     });
     if (pg.filters.agents.length) {
       pg.filters.agents = pg.filters.agents.filter(function (id) { return entries.some(function (one) { return one.id === id; }); });
@@ -3995,8 +4066,11 @@ const PAGE_SCRIPT = String.raw`
     var body = el('div', 'shelf-body');
     items.forEach(function (one) {
       var item = el('div', 'hid');
-      var line = [one.project, one.isOwn && !one.agent ? '' : agentName(one.agent)].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : '');
-      add(item, el('p', 'c-meta', line), el('p', 'q', one.text));
+      var hidAgent = one.isOwn && !one.agent ? '' : (one.agent || 'claude');
+      var hidMark = agentMark(hidAgent, hidAgent ? agentName(hidAgent) : '');
+      hidMark.className += ' ag-sm';
+      var line = [one.project, one.task].filter(Boolean).join(' › ');
+      add(item, add(el('div', 'c-meta'), hidMark, line ? el('span', '', line) : null), el('p', 'q', one.text));
       if (!hasActiveRestore(one.key)) add(item, add(el('div', 'acts'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
       resultSlot(item, one.key, one.text, one.task);
       add(body, item);

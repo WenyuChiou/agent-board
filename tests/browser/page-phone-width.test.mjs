@@ -33,6 +33,19 @@ test('at phone widths nothing on the page runs past its edge', { timeout: 180_00
     await board.open(await startServer())
     await page.locator('nav#agents [data-agent]').first().waitFor({ state: 'visible' })
 
+    // On a phone, .ag, .surf-wrap, and .badge inside .chip never overlap.
+    const chipOverlaps = await page.locator('nav#agents .chip').evaluateAll(chips => chips.flatMap(chip => {
+      const ag = chip.querySelector('.ag')?.getBoundingClientRect()
+      const surf = chip.querySelector('.surf-wrap')?.getBoundingClientRect()
+      const badge = chip.querySelector('.badge')?.getBoundingClientRect()
+      const problems = []
+      if (ag && surf && surf.width > 0 && ag.right > surf.left + 0.5) problems.push(`${chip.dataset.agent}: ag overlaps surf`)
+      if (surf && surf.width > 0 && badge && surf.right > badge.left + 0.5) problems.push(`${chip.dataset.agent}: surf overlaps badge`)
+      if (ag && badge && ag.right > badge.left + 0.5) problems.push(`${chip.dataset.agent}: ag overlaps badge`)
+      return problems
+    }))
+    assert.deepEqual(chipOverlaps, [])
+
     // Ten agents do not fit one phone row: the row scrolls sideways and the page does not.
     const row = await page.locator('nav#agents .agents-in').evaluate(element => ({
       clientWidth: element.clientWidth,

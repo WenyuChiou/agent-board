@@ -206,9 +206,9 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
   const text = ['ink', 'muted', 'accent', 'done', 'running', 'soon', 'alert', 'project', 'waiting-text']
   const marks = ['waiting', 'brand', 'accent', 'done', 'running', 'soon', 'alert', 'ink', 'muted']
   const pairs = []
-  assert.equal(light.waiting.toLowerCase(), '#9a7200', 'the light waiting flag uses the page mark colour')
+  assert.equal(light.waiting.toLowerCase(), '#8a5d00', 'the light waiting flag uses the page mark colour')
   assert.equal(dark.waiting.toLowerCase(), '#f8b500', 'the dark waiting flag keeps its page mark colour')
-  assert.equal(light['waiting-text'].toLowerCase(), '#715c1f', 'light waiting text has its separate readable colour')
+  assert.equal(light['waiting-text'].toLowerCase(), '#8a5200', 'light waiting text has its separate readable colour')
   assert.equal(dark['waiting-text'].toLowerCase(), '#f8b500', 'dark waiting text has its readable colour')
   // The roles: ink acts (the primary button is ink on the surface colour), green is alive, amber is only what needs you.
   for (const palette of [light, dark]) {
@@ -221,17 +221,16 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
   assert.equal(dark.brand.toLowerCase(), '#f8b500', 'the dark logo is the waiting amber')
   for (const [mode, palette] of Object.entries({ light, dark })) {
     const automatic = valuesOf(tokenRules.find(rule => rule.selector.includes(':not(')))
-    for (const name of [...text, ...marks, 'ground', 'surface', 'inset', 'on-accent', 'waiting-fill']) assert.equal(automatic[name], dark[name], `system dark and explicit dark agree for ${name}`)
+    for (const name of [...text, ...marks, 'ground', 'surface', 'inset', 'on-accent', 'waiting-fill', 'waiting-on', 'surf-cli-bg', 'surf-cli-line', 'surf-cli-ink', 'surf-app-bg', 'surf-app-line', 'surf-app-ink']) assert.equal(automatic[name], dark[name], `system dark and explicit dark agree for ${name}`)
     for (const [kind, tokens, threshold] of [['text', text, 4.5], ['mark', marks, 3]]) {
       for (const surface of ['ground', 'surface', 'inset']) {
         for (const token of tokens) pairs.push({ mode, rule: `${kind}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
       }
     }
-    // The count on an agent's badge and on the Needs you flag (on-accent on the amber fill), the "!" badge (on-accent on
-    // the alert colour), the primary button, and the glyph on an offline agent's muted tile. The 13px semibold numerals
-    // are not "large text", so the badge pairs need the full 4.5:1.
+    // The count on an agent's badge and on the Needs you flag (waiting-on on the Yamabuki amber fill), the "!" badge (on-accent on
+    // the alert colour), the surface pills (CLI and App), the primary button, and the glyph on an offline agent's muted tile.
     // 'surface' on 'ink' is a primary button: its text (--on-act) on its fill (--act), both of which are the ink pair.
-    for (const [token, surface, threshold] of [['on-accent', 'accent', 4.5], ['on-accent', 'waiting-fill', 4.5], ['on-accent', 'alert', 4.5], ['on-accent', 'muted', 3], ['ground', 'ink', 4.5], ['surface', 'ink', 4.5]]) pairs.push({ mode, rule: `${token}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
+    for (const [token, surface, threshold] of [['on-accent', 'accent', 4.5], ['waiting-on', 'waiting-fill', 4.5], ['on-accent', 'alert', 4.5], ['surf-cli-ink', 'surf-cli-bg', 4.5], ['surf-app-ink', 'surf-app-bg', 4.5], ['on-accent', 'muted', 3], ['ground', 'ink', 4.5], ['surface', 'ink', 4.5]]) pairs.push({ mode, rule: `${token}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
     // An outlined button's border (ink 55% over the surface) is a 3:1 boundary on the ground and on the sheet.
     const outline = `rgb(${mix(palette.ink, palette.surface, .55).join(',')})`
     for (const background of ['ground', 'surface']) pairs.push({ mode, rule: `btn-line/${background}`, token: 'btn-line', surface: background, threshold: 3, ratio: contrast(outline, palette[background]) })
@@ -265,8 +264,9 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
       assert.equal(declared(rules, '.s-blocked', 'color'), 'var(--alert)', `${name}: a blocked step is the alert red`)
     }
     assert.equal(declared(rules, '.badge', 'background'), 'var(--waiting-fill)', `${name}: the badge sits on the amber fill`)
-    assert.equal(declared(rules, '.badge', 'color'), 'var(--on-accent)', `${name}: the badge numerals are on-accent`)
+    assert.equal(declared(rules, '.badge', 'color'), 'var(--waiting-on)', `${name}: the badge numerals use waiting-on`)
     assert.equal(declared(rules, '.badge.bad', 'background'), 'var(--alert)', `${name}: the "!" badge is the alert colour`)
+    assert.equal(declared(rules, '.badge.bad', 'color'), 'var(--on-accent)', `${name}: the "!" badge numerals use on-accent`)
     assert.equal(declared(rules, '.badge', 'border'), '2px solid var(--ground)', `${name}: the badge has the 2px ground ring`)
     assert.ok(!rules.some(rule => /data-presence[^,]*\.ag(?!::)/.test(rule.selector)), `${name}: no state repaints an agent's icon`)
     assert.equal(declared(rules, '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', 'border-color'), 'var(--alive)', `${name}: an open agent's mark is a green ring`)
@@ -275,6 +275,9 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
     assert.equal(declared(rules, '.chip.working::after', 'background'), 'var(--alive)', `${name}: a working agent's mark is a green dot`)
     assert.ok(!rules.some(rule => rule.selector.includes('.chip') && rule.declarations.some(item => item.property === 'opacity')), `${name}: no icon is dimmed with opacity`)
     assert.equal(declared(rules, '.flag', 'background'), 'var(--waiting-fill)', `${name}: the flag sits on the amber fill`)
+    assert.equal(declared(rules, '.flag', 'color'), 'var(--waiting-on)', `${name}: the flag text uses waiting-on`)
+    assert.equal(declared(rules, '.s-n.hot,.side .badge', 'color'), 'var(--waiting-on)', `${name}: sidebar waiting badge uses waiting-on`)
+    assert.equal(declared(rules, '.side .badge.bad', 'color'), 'var(--on-accent)', `${name}: sidebar alert badge uses on-accent`)
   }
 })
 
@@ -827,4 +830,103 @@ test('parseProgress -> buildView -> serveModel orders cards by updated= age, put
   assert.equal(olderFold.inert, false)
   assert.ok(olderFold.visibleText.includes('Ten-day-old stopped question?'))
   assert.ok(olderFold.visibleText.includes('Four-day-old reminder question?'))
+})
+
+test('Redesign 2 pale washi & Yamabuki palette tokens keep terminal LIGHT/DARK untouched', async () => {
+  const { LIGHT, DARK, PAGE_LIGHT, PAGE_DARK } = await import('../hooks/palette.ts')
+  assert.equal(LIGHT.accent, '#165E83')
+  assert.equal(LIGHT.ground, undefined)
+  assert.equal(DARK.accent, '#00A3AF')
+  assert.equal(PAGE_LIGHT.ground, '#F3F5F7')
+  assert.equal(PAGE_LIGHT.surface, '#FCFDFE')
+  assert.equal(PAGE_LIGHT.inset, '#EAEFF2')
+  assert.equal(PAGE_LIGHT.ink, '#172026')
+  assert.equal(PAGE_LIGHT.accent, '#185A7D')
+  assert.equal(PAGE_LIGHT['waiting-fill'], '#F4B41A')
+  assert.equal(PAGE_LIGHT['waiting-on'], '#231800')
+  assert.equal(PAGE_LIGHT['surf-cli-bg'], '#ECEFF2')
+  assert.equal(PAGE_LIGHT['surf-app-bg'], '#E7F2F8')
+  assert.equal(PAGE_DARK['waiting-on'], '#141617')
+  assert.equal(PAGE_DARK['surf-cli-bg'], '#25282B')
+  assert.equal(PAGE_DARK['surf-app-bg'], '#182930')
+})
+
+test('Redesign 2 uses icon-only AI identity, distinct CLI/App .surf-pill badges, and keeps vendor names in [AI] filter checklist', async () => {
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const updated = new Date(now - 2 * 60_000).toISOString()
+  const md = [
+    '## cli-repo',
+    `<!-- auto session=cc100001 agent=codex state=waiting updated=${updated} -->`,
+    '### Codex CLI task',
+    '- [?] Ship CLI build?',
+    '<!-- /auto session=cc100001 -->',
+    '',
+    '## app-repo',
+    `<!-- auto session=cc100002 agent=antigravity state=working updated=${updated} -->`,
+    '### Antigravity App task',
+    '- [~] Running IDE task',
+    '<!-- /auto session=cc100002 -->',
+    '',
+  ].join('\n')
+  const s = STRINGS.en
+  const group = { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }
+  const view = buildView(parseProgress(md), ['cli-repo', 'app-repo'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  view.hidden = [{ hideKey: 'hid-1', project: 'cli-repo', agent: 'codex', task: 'Hidden plan', text: 'Hidden question?' }]
+  const model = serveModel(view, [], s, new Set(), false, {
+    connections: [
+      { id: 'c-cli', agent: 'codex', session: 'cc100001', surface: 'Codex CLI', scope: 'session', turn: 't1', contested: false, expires: now + 60_000 },
+      { id: 'c-app', agent: 'antigravity', session: 'cc100002', surface: 'IDE', scope: 'session', turn: 't2', contested: false, expires: now + 60_000 },
+    ],
+    messages: [],
+  }, false, group)
+  const html = servePage(s, 'n')
+  const rules = styleRules(html)
+  const ruleFor = sel => rules.find(r => r.selector === sel)
+  assert.ok(ruleFor('.s-agent .s-txt')?.declarations.some(d => d.property === 'clip-path' && d.value === 'inset(50%)'))
+  assert.ok(ruleFor('.chip .c-name')?.declarations.some(d => d.property === 'clip-path' && d.value === 'inset(50%)'))
+  assert.ok(!rules.some(r => r.selector === '.chip[aria-pressed="true"] .c-name'))
+  assert.ok(ruleFor('.shell[data-rail="1"] .s-agent .surf-wrap')?.declarations.some(d => d.property === 'display' && d.value === 'none'))
+  assert.ok(ruleFor('.side .badge')?.declarations.some(d => d.property === 'margin-left' && d.value === 'auto'))
+  assert.ok(ruleFor('.r-meta>span+span'), 'uses direct-child combinator .r-meta>span+span')
+  assert.ok(ruleFor('.surf-cli')?.declarations.some(d => d.property === 'background' && d.value === 'var(--surf-cli-bg)'))
+  assert.ok(ruleFor('.surf-app')?.declarations.some(d => d.property === 'background' && d.value === 'var(--surf-app-bg)'))
+  assert.ok(ruleFor('.surf-pill.surf-icon'), 'has compact icon-only pill rule for #chips')
+  assert.match(html, /<template id="surf-cli-icon">/)
+  assert.match(html, /<template id="surf-app-icon">/)
+
+  const dom = await pageDom(html, model)
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const hasClass = (node, name) => String(node.className ?? '').split(' ').includes(name)
+
+  // #side-agents renders full CLI/App .surf-pill badges while keeping vendor names in aria-label/title.
+  const sideCodex = dom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+  const sideAntig = dom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'antigravity')
+  assert.ok(sideCodex.getAttribute('aria-label').includes('Codex'))
+  assert.ok(sideAntig.getAttribute('aria-label').includes('Antigravity'))
+  assert.ok(walk(sideCodex).some(n => hasClass(n, 'surf-cli') && !hasClass(n, 'surf-icon') && n.textContent.includes('CLI')))
+  assert.ok(walk(sideAntig).some(n => hasClass(n, 'surf-app') && !hasClass(n, 'surf-icon') && n.textContent.includes('App')))
+
+  // #chips renders compact icon-only .surf-icon pills.
+  const chipCodex = dom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+  const chipAntig = dom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'antigravity')
+  assert.ok(walk(chipCodex).some(n => hasClass(n, 'surf-cli') && hasClass(n, 'surf-icon') && n.textContent.trim() === ''))
+  assert.ok(walk(chipAntig).some(n => hasClass(n, 'surf-app') && hasClass(n, 'surf-icon') && n.textContent.trim() === ''))
+
+  // .c-meta and .r-meta render .surf-pill and zero visible vendor names.
+  const cardMeta = walk(dom.node('needs')).find(n => hasClass(n, 'c-meta'))
+  assert.ok(walk(cardMeta).some(n => hasClass(n, 'surf-cli') && n.textContent.includes('CLI')))
+  assert.ok(!cardMeta.textContent.includes('Codex'))
+  const rowMeta = walk(dom.node('working-now')).find(n => hasClass(n, 'r-meta'))
+  assert.ok(walk(rowMeta).some(n => hasClass(n, 'surf-app') && n.textContent.includes('App')))
+  assert.ok(!rowMeta.textContent.includes('Antigravity'))
+
+  // .hid .c-meta renders agentMark icon instead of visible vendor name.
+  const hidNode = walk(dom.node('board')).find(n => hasClass(n, 'hid'))
+  assert.ok(walk(hidNode).some(n => hasClass(n, 'ag') && n.getAttribute('title') === 'Codex'))
+  assert.ok(!walk(hidNode).find(n => hasClass(n, 'c-meta')).textContent.includes('Codex'))
+
+  // [AI ▾] filter checklist retains vendor names.
+  const aiGroup = walk(dom.node('filter-bar')).find(n => n.getAttribute?.('data-filter-kind') === 'agent')
+  const aiLabels = walk(aiGroup).filter(n => hasClass(n, 'f-opt-lbl')).map(n => n.textContent)
+  assert.ok(aiLabels.includes('Codex') && aiLabels.includes('Antigravity'))
 })

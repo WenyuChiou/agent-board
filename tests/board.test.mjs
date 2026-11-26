@@ -11818,7 +11818,8 @@ test('the page names each agent by its brand name on questions, older questions,
       assert.equal(markTitleOf('ask'), name)
       assert.equal(markTitleOf('retained'), name)
       assert.equal(markTitleOf('reminder'), name)
-      assert.equal(pressWalk(cardWithKey(dom, 'hidden')).find(node => node.className === 'c-meta').textContent, `Demo · ${name} › Hidden plan`)
+      assert.equal(pressWalk(cardWithKey(dom, 'hidden')).find(node => node.className?.startsWith('ag '))?.getAttribute('title'), name)
+      assert.equal(pressWalk(cardWithKey(dom, 'hidden')).find(node => node.className === 'c-meta').childNodes.find(node => !String(node.className).includes('ag')).textContent, 'Demo › Hidden plan')
       const chip = dom.node('chips').childNodes.find(node => node.getAttribute('data-agent') === agent)
       assert.ok(chip, `${lang}: ${name}`)
       assert.ok(chip.getAttribute('title').startsWith(name), chip.getAttribute('title'))
@@ -11869,9 +11870,10 @@ test('a Claude Code card says Claude Code, a hand-kept card shows a round check 
     { key: 'hid-own', project: 'Home', agent: '', isOwn: true, task: 'Own task', text: 'Hidden own item' },
   ]
   const hiddenDom = await pageDom(await sourcePage(), hiddenModel)
-  const hiddenLines = pressWalk(hiddenDom.node('board')).filter(node => node.className === 'hid').map(node => node.textContent)
-  assert.ok(hiddenLines.some(line => line.includes('Hidden Claude question?') && line.includes('Claude Code')), JSON.stringify(hiddenLines))
-  assert.ok(hiddenLines.some(line => line.includes('Hidden own item') && !line.includes('Claude Code') && !line.includes('Your own')), JSON.stringify(hiddenLines))
+  const hiddenNodes = pressWalk(hiddenDom.node('board')).filter(node => node.className === 'hid')
+  const hiddenLines = hiddenNodes.map(node => node.textContent)
+  assert.ok(hiddenNodes.some(node => node.textContent.includes('Hidden Claude question?') && pressWalk(node).some(one => String(one.className).includes('ag-claude-code') && one.getAttribute('title') === 'Claude Code')), JSON.stringify(hiddenLines))
+  assert.ok(hiddenNodes.some(node => node.textContent.includes('Hidden own item') && !node.textContent.includes('Claude Code') && !node.textContent.includes('Your own') && pressWalk(node).some(one => String(one.className).includes('ag-own'))), JSON.stringify(hiddenLines))
 })
 
 test('an agent without a brand name keeps its own name', async () => {
@@ -11898,10 +11900,10 @@ test("every card kind on the page carries its agent's mark", async () => {
     const root = cardRoot(cardWithKey(dom, key))
     assert.equal(pressWalk(root).filter(node => node.className === 'ag ag-codex').length, 1, key)
   }
-  // A line on the hidden shelf has no mark; it names its agent in words.
+  // A line on the hidden shelf carries its agent's mark and keeps its visible meta vendor-free.
   const hidden = cardWithKey(dom, 'hidden')
-  assert.equal(pressWalk(hidden).filter(node => node.className?.startsWith('ag')).length, 0)
-  assert.ok(pressWalk(hidden).find(node => node.className === 'c-meta').textContent.includes('Codex'))
+  assert.equal(pressWalk(hidden).filter(node => String(node.className).startsWith('ag ag-codex')).length, 1)
+  assert.equal(pressWalk(hidden).find(node => node.className === 'c-meta').textContent.trim(), 'Demo › Hidden plan')
 })
 
 test('a question card puts choices before its copy button and the hide button last', async () => {
