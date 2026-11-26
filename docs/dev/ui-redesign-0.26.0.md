@@ -275,49 +275,38 @@ Related follow-up tightenings (same rule, outside the 16 primary cuts):
 
 ---
 
-## Redesign 3: mainstream AI capability cues & background-wait controls
+## Redesign 3: mainstream AI capability cues for 0.26.0
 
-> **Status: design proposal — this section changes no code or string table.** Interactive synthetic prototype in `docs/dev/ui-mockup-0.26.0.html` (`<title>Agent Board · Redesign 3 提案（合成資料）</title>`), preserving Redesign 1's layout skeleton and all Redesign 2 foundations (Corner Light `.ab-logo`/`.ab-icon`, Ai-tinted pale washi + `#185A7D` + Yamabuki `#F4B41A` light / Inkstone dark palettes, swallowtail `.flag`, `.pulse-bar` + in-place `.sync-btn`, icon-only AI tiles + `>_ CLI`/`❐ App` `.surf-pill`, 4-shape presence, `320 px` rail, keyboard triage, and phone `.sheet`).
+> **Status: design proposal aligned with 2026-11-26 owner & PM decisions — this section changes no code or string table.** Interactive synthetic prototype in `docs/dev/ui-mockup-0.26.0.html` (`<title>Agent Board · Redesign 3 提案（合成資料）</title>`), preserving Redesign 1's layout skeleton and all Redesign 2 foundations (Corner Light `.ab-logo`/`.ab-icon`, Ai-tinted pale washi + `#185A7D` + Yamabuki `#F4B41A` light / Inkstone dark palettes, swallowtail `.flag`, `.pulse-bar` + in-place `.sync-btn`, icon-only AI tiles + `>_ CLI`/`❐ App` `.surf-pill`, 4-shape presence, `320 px` rail, keyboard triage, and phone `.sheet`).
 
-Redesign 3 extends the triage desk to surface **five next-wave mainstream AI capabilities** without turning rows back into multi-paragraph cards or breaking the `<= 3` folded-control budget:
+Redesign 3 aligns the 0.26.0 UI cues with the approved delivery rules in `docs/dev/plan-0.26.0.md` (no emoji, luminous gold kept as the sole loud colour, one send control `送出` with existing `收回`, and sub-agent counts / handoff copy deferred or dropped):
 
-### 3.1 Top 2-line `30s` live-countdown `Approval Row` & `native=` read-only option previews
+### 3.1 Top 2-line `30s` Claude Approval Row & `native=` `在視窗回答` tag
 
-1. **Live `Approval Row` (`.it-r.is-approval`):**
-   - Pinned at the top of `需要你` (`needs`) above standard questions so time-bounded permission prompts are never buried below older asks.
-   - **Line 1:** leading `[AI SVG]` (`.mk`) + **`.approval-badge`** (`[🛡 權限請求]`) + optional **`.subagent-tag`** (`↳ 子代理` when triggered by a subagent) + single-line monospace command preview (**`.approval-cmd`**, e.g. `rm -rf dist && bun run build`, truncated on folded row and shown in full inside `.cmd` on open).
-   - **Line 2:** `[>_ CLI / ❐ App .surf-pill]` + liveness dot + `project` + optional `.pr-pill` + live ticking countdown badge **`.approval-ttl`** (`⏱ 24s` counting down toward `0s`, `tabular-nums`, honoring `prefers-reduced-motion: reduce`), right-aligned with `[✓ 允許一次]` (`data-act="allow-once"`, primary action resolving with toast `已允許執行一次`) and `[✕ 拒絕]` (`data-act="deny"`). Pressing `[✕ 拒絕]` toggles a compact 1-line inline **`.approval-why`** reason input + `確認拒絕` (`data-act="deny-confirm"`) / `取消` (`data-act="deny-cancel"`) across folded/opened desktop and phone `.sheet` views.
-   - **Timeout fallback (`0s`):** when `.approval-ttl` reaches `0s` (or when triggered immediately via the mockup's `提案` switcher toggle **`倒數歸零`**, `data-demo="ttl0"`), `.approval-ttl.is-expired` degrades in-place to **`已轉回原視窗`** and `.acts` swaps allow/deny buttons for the `.native-pill` **`↗ 已轉回原視窗`** so stale permissions never fire blindly after the hook returns control to the host window.
-2. **Native TUI-only question preview (`.it-r.is-native` / `native=`):**
-   - For host-native questions (`hooks/register.tsx` TUI prompts that the board mirrors rather than submits), folded line 2 and opened detail display **dashed, non-clickable preview pills (`.pill.is-readonly`)** marked `disabled` and `aria-disabled="true"` alongside a compact **`.native-pill`** **`[↗ 回視窗選]`** (`data-act="focus-win"`) + `[data-tip]` tooltip (`終端機原生選單 · 請切回原視窗選擇`).
-   - Seeing the exact options (`[Option A]` `[Option B]`) without mistaking them for clickable board buttons lets the person decide whether to switch to the terminal window at a glance.
+1. **Claude Code `30s` `Approval Row` (`.it-r.is-approval`, `hooks/approvals.ts:18`; Codex approvals stay in 0.27.0 `#1318`):**
+   - Pinned at the top of `需要你` (`needs`) above standard questions so time-bounded tool approvals never sit below older asks. Uses only the page's own monochrome inline SVG icons (`I.shield`, `I.clock`, `I.checkSm`, `I.xSm`, zero emoji).
+   - **Line 1:** leading `[AI SVG]` (`.mk`) + **`.approval-badge`** (`權限請求` with `I.shield` SVG) + optional **`子代理`** tag (`isSubagent`, `hooks/approvals.ts:55`) + single-line monospace command preview (**`.approval-cmd`**, truncated on folded row and shown in full inside `.cmd` on open).
+   - **Line 2:** `[>_ CLI / ❐ App .surf-pill]` + `project` + optional muted worktree/`#PR` tag when ambiguous + live ticking countdown **`.approval-ttl`** (`I.clock` SVG + `24s` counting down toward `0s`, `tabular-nums`, honoring `prefers-reduced-motion: reduce`), right-aligned with `[允許一次]` (`data-act="allow-once"`) and `[拒絕]` (`data-act="deny"`, toggling `.approval-why` 1-line reason input across folded, `inline`, `320 px` rail, and phone `.sheet`).
+   - **Timeout fallback (`0s`):** when `.approval-ttl` reaches `0s` (or via `提案` toggle **`倒數歸零`**, `data-demo="ttl0"`), `.approval-ttl.is-expired` reads **`已轉回原視窗`** and all allow/deny/generic answer controls are disabled/removed so expired requests cannot fire or resume into `進行中`.
+2. **Native TUI-only question (`native=` / `docs/FORMAT.md:94`):**
+   - Options render as **plain text** (never dashed pseudo-buttons) paired with one quiet **`在視窗回答`** tag (`native-pill`, `I.win` SVG + `在視窗回答`) so the person immediately sees what the host asks without mistaking mirrored options for clickable buttons.
 
-### 3.2 `◷ 等背景` (`Waiting on Background`, `[>]`) row state + `[◷ 暫存]` & `[✕ 撤回]` pre-claim withdrawal
+### 3.2 Unified `送出` + existing `收回` (B4), setup-step cue, and `[>]` past-30-min rule
 
-- **Row state badge (`.st-bg`):** sessions actively blocked on background jobs or CI (`[>]`) display a 藤紫 (`--running` tint) pill **`◷ 等背景`** (`>= 4.5:1` WCAG AA contrast in both light and dark themes), cleanly distinguishing background-gated sessions from idle/stopped sessions whose `[↵ 送出]` wakes a turn within `~3s` -> `進行中`.
-- **Stage-for-background composer (`[◷ 暫存]`):** opening a `◷ 等背景` row (inline detail, `320 px` Detail Rail, or Phone `.sheet`) switches the composer submit button to **`.btn.bg-stage`** **`[◷ 暫存]`** (`data-act="stage-bg"`).
-- **Pre-claim receipt & withdrawal (`.bg-hold` + `[✕ 撤回]`):** submitting renders an inline receipt **`.bg-hold`** (`◷ 已暫存 · 等背景跑完自動送出`) displaying the exact staged note preview (`.bg-hold-msg`) and **`[✕ 撤回]`** (`data-act="withdraw-bg"`). Pressing `[✕ 撤回]` cancels the pre-claim hold before hand-out and **restores the exact typed draft text back into the composer `<textarea>`** (preserving user input per `#782` and `plan-0.26.0.md` B3/B4).
+- **Single send button (`送出`) everywhere (`plan-0.26.0.md` §2 & B4):**
+  - Every composer uses one primary button **`送出`** with no AI name (never `排入 … 的下一回合`, `暫存`, or `↵`). When a message will land is carried by B4's status line (`已排入 · 現在` / `已排入 · 步驟結束` / `已排入 · 下一回合`).
+  - Rows under **`已停止`** (`#sec-stop`) and **`已完成`** (`#sec-done`) open cleanly in `inline`, `320 px` rail, and phone `.sheet` with a follow-up composer (`placeholder="接著交代下一步…"`) + **`送出`** (`data-act="followup"`) to start the next turn (`~3s` -> `進行中`).
+  - A message still waiting on the queue offers one existing action: **`收回`** (`data-act="dismiss-wait"`, `docs/MESSAGING.md:743`), cancelling pre-claim wait and restoring the exact raw draft text back into the composer `<textarea>`.
+- **Where one setup step is missing:** beside `需貼上`, if a single setup step unlocks direct sending (e.g. switching on the sidecar or hook approval), the item offers that one setup step pill rather than multi-sentence instructions.
+- **`[>]` background-step row past 30 min (`docs/FORMAT.md:162`):** shows the `[>]` step's note (`I.stepWait` SVG + step text) and age; it stays under `進行中` past 30 minutes **only** while its block carries a live `agentpid` process record (a step mark alone never proves liveness).
 
-### 3.3 `已完成` / `已停止` inline & rail follow-up composer ("跑完停下直接接著講")
+### 3.3 Multi-worktree muted tag, `不確定` state, and 0.27.0 scope boundaries
 
-- Rows under **`已停止`** (`#sec-stop`) and **`已完成`** (`#sec-done`) open cleanly in inline detail (`< 1440 px`), the `320 px` Detail Rail (`>= 1440 px`), and Phone `.sheet` (`< 640 px`) with a built-in follow-up composer (`.reply` textarea with `placeholder="接著交代下一步…"`, `16 px` font on phone to prevent zoom) + **`[↵ 送出]`** (`data-act="followup"`).
-- Submitting a follow-up moves the item directly back into **`進行中`** (`~3s` wake transition + flash highlight + toast) without requiring the person to hunt back to the original CLI/App window for routine next instructions (`plan-0.26.0.md` §2).
+- **Disambiguation without coloured dots:** only when **two or more open rows share the same project name**, line 2 displays the worktree folder or `#PR` as quiet **muted text** (`.wt-tag`, zero coloured CI dots so Yamabuki gold stays the sole loud colour on the page).
+- **Session uncertainty (`不確定`, no hollow ring on rows/cards):** hollow green ring remains exclusively `"open, idle"` in the sidebar (§6). When a row/card cannot be vouched for (`mayBeClosed` / stale without live lease), line 2 displays the single muted word **`不確定`**, and the explanation renders only when opened (`inline` / `320 px` rail / phone `.sheet`).
+- **Explicitly excluded from 0.26.0 (deferred/rejected per owner & PM review):** sub-agent counts (`0.27.0`), Codex approvals (`0.27.0`, `#1318`), and one-click Markdown handoff copy (rejected — zero Copy; `#317` agent-to-board handoff in `0.27.0`).
 
-### 3.4 Multi-worktree `#PR ●` CI micro-pill & `⑂ N` subagent count pill
+### 3.4 Token, accessibility & verification contract
 
-- **`#PR ●` CI micro-pill (`.pr-pill` + `.pr-detail`):** rows tied to a worktree/PR carry a compact `#PR` badge on line 2 with a `.ci-dot` status dot (e.g. `#1895 ●` green pass, `#1880 ●` amber pending, or red fail) and a CI summary tooltip (`[data-tip]`). Folded rows stay two-line and quiet; selecting or opening the row renders **`.pr-detail`** (branch + CI summary, zero external URLs) inside the `320 px` Detail Rail, inline detail, or Phone `.sheet`.
-- **`⑂ N` subagent pill (`.sub-pill`) & `.sub-list`:** running tasks that spawn subagents display **`⑂ 3`** (`.sub-pill`) right beside the `2/5` `.prog` progress indicator. Opening detail renders **`.sub-list`** (`⑂ 3 個子代理：2 進行中 · 1 完成` plus per-subagent mini status lines) cleanly inside `320 px` Detail Rail, inline detail, and Phone `.sheet` without overflowing.
-
-### 3.5 Verified liveness (`●` vs `◌`) & one-click `[⇄ 複製交接]` (`data-act="copy-handoff"`)
-
-- **Verified liveness indicator (`.live-dot` vs `.unsure-dot`):**
-  - **`.live-dot` (`●`):** solid green dot indicating a verified live lease / active host PID (`即時連線中（租約有效）`).
-  - **`.unsure-dot` (`◌`):** hollow amber/muted ring indicating `mayBeClosed` or `>30m` silent (`超過 30 分鐘無活動（exceeded 30m · 可能已關閉）`), surfacing uncertainty honestly without false "running" status.
-- **One-click `[⇄ 複製交接]` (`.handoff-btn`, `data-act="copy-handoff"`):**
-  - Rendered as a `26×26 px` / `28×28 px` `.ib.handoff-btn` icon button (`aria-label="複製交接"`, `data-tip="複製交接"`) in `.r-tools` (`320 px` Detail Rail) and `.d-head` (inline detail), and as a `44 px` icon+label touch button (`複製交接`) on Phone `.sheet`.
-  - Clicking copies a structured Markdown handoff summary (project, surface, liveness/status, PR/subagent breakdown, steps, command, and latest context) via `navigator.clipboard` with `<textarea>` `execCommand('copy')` fallback, popping the 8-second toast **`已複製交接摘要`**.
-
-### 3.6 Redesign 3 token, accessibility & verification contract
-
-- **Contrast (`>= 4.5:1` WCAG AA across light & dark):** `.st-bg` 藤紫 pill, `.approval-ttl` / `已轉回原視窗`, `.pill.is-readonly`, `.pr-pill`, `.sub-pill`, `.bg-hold`, and `.live-dot`/`.unsure-dot` text/surface pairs all meet `>= 4.5:1` in both Ai-tinted pale washi light and Inkstone dark modes.
-- **Hygiene & motion:** zero external URLs (`http`/`https`), zero `>= 8`-hex strings (`/[0-9a-f]{8,}/i`), `0 px` horizontal overflow at `375 px`, `1280 px`, and `1440 px` (light & dark), `prefers-reduced-motion: reduce` disables continuous timer/pulse motion while preserving manual `倒數歸零` verification, and `npx --yes impeccable --json docs/dev/ui-mockup-0.26.0.html` outputs `[]`.
+- **Contrast (`>= 4.5:1` WCAG AA across light & dark):** `.approval-ttl` / `已轉回原視窗`, `.native-pill` (`在視窗回答`), `.wt-tag`, `.unsure-word`, `.wait-hold`, and `.setup-pill` pairs all meet `>= 4.5:1` in both Ai-tinted pale washi light and Inkstone dark themes.
+- **Hygiene & motion:** zero emoji, zero external URLs (`http`/`https`), zero `>= 8`-hex strings (`/[0-9a-f]{8,}/i`), `0 px` horizontal overflow across `375 px`, `1280 px`, and `1440 px` (light & dark), `prefers-reduced-motion: reduce` disables continuous timer/pulse motion while keeping `倒數歸零` verification active, and `npx --yes impeccable --json docs/dev/ui-mockup-0.26.0.html` outputs `[]`.
