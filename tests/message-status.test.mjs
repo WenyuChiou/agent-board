@@ -483,3 +483,24 @@ test('one store fed to the board script gives the same status line on --print an
     assert.deepEqual(json.working.find(row => row.agent === 'codex')?.message, { state: 'unsure', line, updatedAt: new Date(now - 5 * MINUTE).toISOString() })
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
+
+// The owner's rule (#1843): a message on a route that goes in now reads Unsure 20 s after its last event. A wake that is
+// sent or started is on that route; a failed one or one with no sidecar waits for the next turn, which has no clock.
+test('a woken Antigravity message that nothing takes for 20 s reads Unsure', () => {
+  for (const [wake, key] of [['sent', 'agyWoken'], ['started', 'agyWaking']]) {
+    const one = at(shown('queued'), { to: 'antigravity:s1', line: 'now', wake })
+    assert.equal(statusOf(one, NOW + NOW_ROUTE_MS - 1).line, en[key], wake)
+    assert.deepEqual(statusOf(one, NOW + NOW_ROUTE_MS), { state: 'unsure', line: en.statusUnsure(en.statusWhyNoAnswer), tone: 'alert', updatedAt: NOW }, wake)
+    assert.equal(nextStatusDeadline([one], NOW), NOW + NOW_ROUTE_MS, wake)
+  }
+})
+
+test('a failed Antigravity wake keeps its words with no 20 s clock', () => {
+  // The contrast: a sent wake has the clock, a failed one and one with no sidecar do not.
+  assert.equal(statusOf(at(shown('queued'), { to: 'antigravity:s1', line: 'now', wake: 'sent' }), NOW + 10 * MINUTE).state, 'unsure')
+  for (const [wake, key] of [['failed', 'agyWakeFailed'], ['off', 'agySidecarOff']]) {
+    const one = at(shown('queued'), { to: 'antigravity:s1', line: 'now', wake })
+    assert.deepEqual(statusOf(one, NOW + 10 * MINUTE), { state: 'queued', line: en[key], tone: 'wait', updatedAt: NOW }, wake)
+    assert.equal(nextStatusDeadline([one], NOW), null, wake)
+  }
+})

@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { test } from 'node:test'
 
@@ -17,7 +17,7 @@ registerHooks({ resolve(specifier, context, next) {
     return next(`${specifier}.ts`, context)
   }
 } })
-const { createMessaging, readTurnOrder } = await import('../scripts/board-messaging.ts')
+const { createMessaging, readTurnOrder, markTurnOrder } = await import('../scripts/board-messaging.ts')
 const { RECEIVER_ROUTES } = await import('../hooks/receiver-routes.ts')
 const { mailboxId, SIDECAR_ALIVE_MS, WAKE_IDLE_MS } = await import('../hooks/hook-messages.ts')
 const { ANTIGRAVITY_POLL_MS } = await import('../hooks/antigravity-sidecar.ts')
@@ -708,10 +708,10 @@ test('the hook worker marks an Antigravity turn before the board script runs, so
   const file = join(messages, `${mailboxId('antigravity', APP)}.turns.json`)
   const opened = `${mailboxId('antigravity', APP)}.turns.open.`
   const records = () => readdirSync(messages).filter(name => name.startsWith(opened)).sort()
-  const hook = (event, extra = {}, deadline) => {
+  const hook = (event, extra = {}, deadline, began) => {
     rmSync(seen, { force: true })
     const args = ['--hook-version', String(HOOK_VERSION), '--hook-event', event, '--agent-status', '--agent', 'antigravity', '--state', event === 'Stop' ? 'waiting' : 'working', '--event', event, '--progress-file', progress]
-    const result = spawnSync(process.execPath, [worker, ...args, ...(deadline === undefined ? [] : ['--hook-deadline', String(deadline)])], {
+    const result = spawnSync(process.execPath, [worker, ...args, ...(deadline === undefined ? [] : ['--hook-deadline', String(deadline)]), ...(began === undefined ? [] : ['--hook-started', String(began)])], {
       env: { ...env, AGY_SEEN: seen, ...extra }, input: JSON.stringify({ conversationId: APP, hookEventName: event }), encoding: 'utf8', windowsHide: true, timeout: 10000,
     })
     assert.equal(result.status, 0, result.stderr)
@@ -758,12 +758,106 @@ test('the hook worker marks an Antigravity turn before the board script runs, so
     assert.equal(records().length, 2)
     rmSync(lock)
     // A Stop removes the records made before it began, both of this turn's, and keeps one made after it, a next turn's.
-    const later = `${opened}${Date.now() + 60_000}.1`
+    // The next turn's record is dated after the Stop began and before its present time: the Stop is told it began a second
+    // earlier, since the process cannot be timed between its start and its removal.
+    const madeAt = Date.now()
+    const later = `${opened}${madeAt}.1`
     writeFileSync(join(messages, later), '')
-    assert.deepEqual(JSON.parse(hook('Stop')), { file, mark: 'stop', count: 2 })
+    assert.deepEqual(JSON.parse(hook('Stop', {}, undefined, madeAt - 1000)), { file, mark: 'stop', count: 2 })
     assert.deepEqual(records(), [later])
     // Nothing else is left beside the order file: no lock and no temporary file.
     assert.deepEqual(readdirSync(messages).sort(), [basename(file), later].sort())
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+})
+
+// A Stop that died after writing its number and before removing its record leaves the record (and its lock). The order file
+// then holds the Stop's own start time, so a poll tells which records that Stop would have removed had it lived.
+const deadLock = (w, session, age = 31_000) => {
+  const lock = `${w.order(session)}.lock`
+  const dead = spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid
+  writeFileSync(lock, JSON.stringify({ version: 1, pid: dead, started: Date.now(), token: 'c'.repeat(32) }))
+  const old = (Date.now() - age) / 1000
+  utimesSync(lock, old, old)
+  return lock
+}
+const diedStop = (w, session, order) => writeFileSync(w.order(session), JSON.stringify({ started: 1, stopped: 1, stoppedAt: T - 20_000, ...order }))
+
+test('a start record made before a Stop that died after writing its number no longer holds the wake', () => using(w => {
+  w.enroll(APP, IDE, T - 30_000)
+  diedStop(w, APP, { stopBegan: T - 20_000 })
+  deadLock(w, APP)
+  w.report(APP, T - 20_000)
+  w.poll(T)
+  w.send(APP, 'm-covered', T)
+  const [wake] = w.poll(T + 2000).wakes
+  assert.equal(wake?.id, 'm-covered')
+  assert.equal(existsSync(`${w.order(APP)}.lock`), false)
+}))
+
+test('a start record made after that Stop began still holds the wake', () => using(w => {
+  w.enroll(APP, IDE, T - 30_000)
+  w.openRecord(APP, T - 10_000)
+  diedStop(w, APP, { stopBegan: T - 20_000 })
+  deadLock(w, APP)
+  w.report(APP, T - 20_000)
+  w.poll(T)
+  w.send(APP, 'm-later', T)
+  assert.deepEqual(w.poll(T + 2000), { wakes: [] })
+  // Without the later record only the covered one is left, which holds nothing.
+  rmSync(join(dirname(w.order(APP)), w.records(APP).find(name => name.includes(`.${T - 10_000}.`))))
+  assert.deepEqual(w.poll(T + 3000).wakes.map(one => one.id), ['m-later'])
+}))
+
+test('an order file with no stopBegan keeps a start record holding the wake', () => using(w => {
+  w.enroll(APP, IDE, T - 30_000)
+  diedStop(w, APP, {})
+  deadLock(w, APP)
+  w.report(APP, T - 20_000)
+  w.poll(T)
+  w.send(APP, 'm-bare', T)
+  assert.deepEqual(w.poll(T + 2000), { wakes: [] })
+  // The same file with the Stop's start time reads the record as covered.
+  diedStop(w, APP, { stopBegan: T - 20_000 })
+  assert.deepEqual(w.poll(T + 3000).wakes.map(one => one.id), ['m-bare'])
+}))
+
+test('the board script\'s Stop removes a start record dated after the present', () => using(w => {
+  const folder = dirname(w.order(APP)), opened = `${mailboxId('antigravity', APP)}.turns.open.`
+  // A record made before the clock was set back is dated later than any Stop that follows.
+  const future = `${opened}${Date.now() + 3_600_000}.1`
+  writeFileSync(join(folder, future), '')
+  markTurnOrder(folder, 'antigravity', APP, 'stop', Date.now(), 0)
+  assert.deepEqual(w.records(APP), [])
+  assert.equal(JSON.parse(readFileSync(w.order(APP), 'utf8')).stopped, 0)
+}))
+
+test('a hook worker\'s Stop removes a start record dated after the present', async () => {
+  const { hookWorker, HOOK_VERSION } = await import('../hooks/hook-safety.ts')
+  const { defaultMessagesDirectory } = await import('../scripts/runtime-folder.ts')
+  const home = mkdtempSync(join(tmpdir(), 'agy-worker-'))
+  const env = { ...process.env }
+  delete env.XDG_RUNTIME_DIR
+  delete env.AGENT_BOARD_TURN_MARK
+  const root = join(home, '.agent-board'), progress = join(root, 'progress.md'), script = join(root, 'agent-board.mjs'), worker = join(root, 'agent-board-hook.mjs'), seen = join(home, 'seen.json')
+  const messages = defaultMessagesDirectory(progress, home, env, process.platform)
+  const opened = `${mailboxId('antigravity', APP)}.turns.open.`
+  try {
+    mkdirSync(root, { recursive: true })
+    writeFileSync(script, standIn(HOOK_VERSION))
+    writeFileSync(worker, hookWorker(home, script, 'const isBoardRequest = () => false', root))
+    const named = process.platform === 'win32' ? resolve(progress).toLowerCase() : resolve(progress)
+    writeFileSync(join(root, `hook-recovery-${createHash('sha256').update(named).digest('hex')}.json`), JSON.stringify({ version: 1, pid: process.pid, token: createHash('sha256').update(root).digest('hex').slice(0, 32), created: Date.now() }))
+    mkdirSync(messages, { recursive: true })
+    // A record made before the clock was set back is dated later than the Stop that follows.
+    const future = `${opened}${Date.now() + 3_600_000}.1`
+    writeFileSync(join(messages, future), '')
+    const args = ['--hook-version', String(HOOK_VERSION), '--hook-event', 'Stop', '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop', '--progress-file', progress]
+    const result = spawnSync(process.execPath, [worker, ...args], { env: { ...env, AGY_SEEN: seen }, input: JSON.stringify({ conversationId: APP, hookEventName: 'Stop' }), encoding: 'utf8', windowsHide: true, timeout: 10000 })
+    assert.equal(result.status, 0, result.stderr)
+    assert.deepEqual(readdirSync(messages).filter(name => name.startsWith(opened)), [])
+    assert.equal(JSON.parse(readFileSync(join(messages, `${mailboxId('antigravity', APP)}.turns.json`), 'utf8')).stopped, 0)
   } finally {
     rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
   }
