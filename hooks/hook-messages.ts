@@ -27,9 +27,14 @@ export const enrollMcp = (state: MessageState, agent: string, session: string, s
       ? { ...one, contested: true }
       : { ...one, mcpOwner: owner, folderDigest, mcpLeaseUntil: until, contested: false }) }
 }
-export const takeMailboxMessage = (state: MessageState, agent: string, session: string, surface: string, now: number, ttlMs: number, nonce: string, ref?: string): { state: MessageState; message: Message | null } => {
-  const next = enrollMailbox(state, agent, session, surface, now, ttlMs)
-  const claimed = claimMessages(next, next.mailboxes!.find(one => one.id === mailboxId(agent, session))!, now, nonce, ref)
+// The turn a hook names (`hostTurn`, Codex's `turn_id`) and whether its take is at a step end (Codex's Stop hook, #319).
+export type TakeTurn = { hostTurn?: string; isStepEnd?: boolean }
+export const takeMailboxMessage = (state: MessageState, agent: string, session: string, surface: string, now: number, ttlMs: number, nonce: string, ref?: string, turn: TakeTurn = {}): { state: MessageState; message: Message | null } => {
+  const enrolled = enrollMailbox(state, agent, session, surface, now, ttlMs)
+  const id = mailboxId(agent, session)
+  // The mailbox keeps the turn its hook last named, so the board binds an answer queued while that turn runs to it.
+  const next = turn.hostTurn === undefined ? enrolled : { ...enrolled, mailboxes: enrolled.mailboxes!.map(one => one.id === id ? { ...one, hostTurn: turn.hostTurn } : one) }
+  const claimed = claimMessages(next, next.mailboxes!.find(one => one.id === id)!, now, nonce, ref, false, turn.isStepEnd === true ? turn.hostTurn : undefined)
   return { state: claimed.state, message: claimed.messages[0] ?? null }
 }
 // A hook that stopped waiting never showed what the board claimed for it, so it hands the claim back
@@ -81,6 +86,13 @@ export const isTurnStart = (agent: string, event: string): boolean => ({
   codex: ['SessionStart', 'UserPromptSubmit'], antigravity: ['SessionStart', 'PreInvocation'],
   gemini: ['SessionStart', 'BeforeAgent'], muse: ['UserPromptSubmit'], cursor: ['sessionStart'],
 } as Record<string, string[]>)[agent]?.includes(event) ?? false
+// Codex runs its Stop hook when a step ends, and `decision: block` continues the turn with `reason` as its next input (#319).
+// A Stop that a hook already continued says so (`stop_hook_active` true); only one where the field is exactly false hands a
+// message over, so no turn is continued without end.
+export const isStepEnd = (agent: string, event: string, raw: Record<string, unknown>): boolean => agent === 'codex' && event === 'Stop' && raw.stop_hook_active === false
+export const stepEndEnvelope = (text: string): { decision: 'block'; reason: string } => ({ decision: 'block', reason: text })
+// The least time a Stop hook needs left to take, print and accept one message; with less it takes nothing.
+export const STEP_END_MIN_MS = 1300
 export const isSessionEnd = (agent: string, event: string): boolean => agent === 'cursor' ? event === 'sessionEnd' : ['codex', 'gemini', 'muse'].includes(agent) && event === 'SessionEnd'
 export const turnStartEnvelope = (agent: string, event: string, text: string, base: string | null = null, session = ''): object => {
   const context = (agent === 'antigravity' || agent === 'codex' && event === 'SessionStart' ? [base, text] : [text]).filter(Boolean).join('\n\n')

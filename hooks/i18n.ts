@@ -319,6 +319,7 @@ export const ZH_TW = {
   statusWhyRefused: '被拒絕',
   statusWhyStopped: '被停止',
   statusWhyAppOpen: '程式一直開著',
+  statusWhyMovedOn: '對話已往下進行',
   statusWhyTakenBack: '你收回了',
   statusWhySurfaceLost: '它不再讀這個介面',
   statusWhyHeldTooLong: '放太久了',

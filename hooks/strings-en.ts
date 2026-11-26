@@ -279,6 +279,7 @@ export const EN: Strings = {
   statusWhyRefused: 'refused',
   statusWhyStopped: 'stopped',
   statusWhyAppOpen: 'the app stayed open',
+  statusWhyMovedOn: 'the conversation moved on',
   statusWhyTakenBack: 'taken back',
   statusWhySurfaceLost: 'its session no longer reads here',
   statusWhyHeldTooLong: 'held too long',

@@ -5032,7 +5032,7 @@ export const LINES = [
 "  if (one.status === \"acknowledged\")",
 "    return shown(\"read\", s.statusRead(replyOf(one)), \"done\");",
 "  if (one.status === \"rejected\")",
-"    return one.hasAccepted === true ? unsure(s.statusWhyDelivered) : notDelivered(one.error === \"STOPPED\" ? s.statusWhyStopped : one.error === \"APP_STILL_OPEN\" ? s.statusWhyAppOpen : s.statusWhyRefused);",
+"    return one.hasAccepted === true ? unsure(s.statusWhyDelivered) : notDelivered(one.error === \"STOPPED\" ? s.statusWhyStopped : one.error === \"APP_STILL_OPEN\" ? s.statusWhyAppOpen : one.error === MOVED_ON ? s.statusWhyMovedOn : s.statusWhyRefused);",
 "  if (one.status === \"accepted\")",
 "    return one.error === \"\" ? shown(\"delivered\", s.statusDelivered(relativeTime(one.updated, now, s)), \"done\") : unsure(s.statusWhyDelivered);",
 "  if (one.hasAccepted === true)",
