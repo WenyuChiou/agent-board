@@ -6179,6 +6179,25 @@ test('a window closed after its thread sat idle for over 10 minutes: the 10-minu
   } finally { await stepped.receiver.close() }
 }))
 
+test('no Codex window, thread still listed: the message goes once the 10-minute wait is over even when every claim comes after the thread\'s hold has ended (#1652)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  // A tick of 5 ms makes the thread's 10-tick hold 50 ms, shorter than a poll of the board: a claim the board hands out after the
+  // hold has ended reads the process list again, finds no window, and must not give the message back once its wait is over.
+  const stepped = codexStepped(board, daemon, { clients: async () => [], tickMs: 5 })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    const sentAt = stepped.now()
+    assert.equal(await codexSend(board, connection), 200)
+    let at = null
+    await stepped.advance(sentAt + 900_000, { step: 10_000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    assert.equal(codexStarts(daemon), 1)
+    assert.ok(at - sentAt >= 600_000, `started ${Math.round((at - sentAt) / 1000)} s after the message by the receiver's clock`)
+  } finally { await stepped.receiver.close() }
+}))
+
 test('a thread the daemon closes while the process list is read before the join is not joined, which would load it again (#1652)', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person')
   writeFileSync(person, '')
