@@ -113,7 +113,7 @@ export const WAKE_IDLE_MS = 10_000
 // order file and sends that number with its take, and its Stop hook sets `stopped` to the number of the turn it ends. Both
 // write the file before any board call, so the order comes from the hooks' own sequence, not from any clock. A progress
 // report says nothing of this, since a model may report waiting before its turn ends.
-export type TurnOrder = { started: number; stopped: number; stoppedAt: number }
+export type TurnOrder = { started: number; stopped: number; stoppedAt: number; stopBegan?: number }
 // The order file as the running board reads it now; undefined when there is none or it cannot be read, which holds a wake.
 export type TurnsOfSession = (agent: string, session: string) => TurnOrder | undefined
 // The board keeps the highest number a take sent, so a turn whose file write failed still reads as started.

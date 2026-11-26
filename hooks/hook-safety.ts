@@ -198,7 +198,9 @@ ${hookRecoverySource(home, script, dataRoot)}
 // out of the running turn. Same file, lock file and rules as the board script's own mark, with shorter waits: the board
 // script takes the number only for the file it would write itself, and marks the turn on its own when this wrote nothing.
 // A turn start first makes its record, with no lock, so a start whose locked write fails or waits still holds a wake; a
-// Stop removes the records made before it began, once it has written its number (design A, #1612).
+// Stop removes the records made before it began, or dated after its own present time (made before the clock was set back),
+// once it has written its number, and writes when it began beside its number, so a poll can tell a record that a Stop which
+// died would have removed (design A, #1612).
 const turnMarks = { SessionStart: 'start', PreInvocation: 'start', Stop: 'stop' }
 const markTurn = (payload, began) => {
   const event = value('--event'), progress = value('--progress-file')
@@ -245,7 +247,8 @@ const markTurn = (payload, began) => {
         if (isCount(started) && isCount(stopped) && isCount(stoppedAt) && stopped <= started) was = { started, stopped, stoppedAt }
       }
     } catch {}
-    const next = mark === 'start' ? { ...was, started: was.started + 1 } : { ...was, stopped: was.started, stoppedAt: Date.now() }
+    // A start leaves the Stop's start time out: once started passes stopped it no longer covers any record.
+    const next = mark === 'start' ? { ...was, started: was.started + 1 } : { ...was, stopped: was.started, stoppedAt: Date.now(), stopBegan: began }
     try { fs.unlinkSync(temp) } catch (error) { if (error.code !== 'ENOENT') throw error }
     fs.writeFileSync(temp, JSON.stringify(next), { flag: 'wx', mode: 0o600 })
     // A scanner that holds the file for a moment is waited for briefly; the board script waits longer.
@@ -256,7 +259,12 @@ const markTurn = (payload, began) => {
       }
     }
     if (mark === 'stop') try {
-      for (const name of fs.readdirSync(root)) if (name.startsWith(opened) && Number(name.slice(opened.length).split('.')[0]) < began) try { fs.unlinkSync(path.join(root, name)) } catch {}
+      // A record dated after the present was made before the clock was set back, so before this Stop.
+      const present = Date.now()
+      for (const name of fs.readdirSync(root)) if (name.startsWith(opened)) {
+        const made = Number(name.slice(opened.length).split('.')[0])
+        if (made < began || made > present) try { fs.unlinkSync(path.join(root, name)) } catch {}
+      }
     } catch {}
     return { file, mark, count: next.started }
   } catch { return undefined }

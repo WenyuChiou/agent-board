@@ -758,12 +758,12 @@ test('the hook worker marks an Antigravity turn before the board script runs, so
     assert.equal(records().length, 2)
     rmSync(lock)
     // A Stop removes the records made before it began, both of this turn's, and keeps one made after it, a next turn's.
-    // The next turn's record is dated after the Stop began and before its present time: the Stop is told it began a second
+    // The next turn's record is dated after the Stop began and before its present time: the Stop is told it began a millisecond
     // earlier, since the process cannot be timed between its start and its removal.
     const madeAt = Date.now()
     const later = `${opened}${madeAt}.1`
     writeFileSync(join(messages, later), '')
-    assert.deepEqual(JSON.parse(hook('Stop', {}, undefined, madeAt - 1000)), { file, mark: 'stop', count: 2 })
+    assert.deepEqual(JSON.parse(hook('Stop', {}, undefined, madeAt - 1)), { file, mark: 'stop', count: 2 })
     assert.deepEqual(records(), [later])
     // Nothing else is left beside the order file: no lock and no temporary file.
     assert.deepEqual(readdirSync(messages).sort(), [basename(file), later].sort())

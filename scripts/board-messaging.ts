@@ -747,13 +747,21 @@ export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(di
 const turnOrderFile = (directory: string, agent: string, session: string): string => join(resolve(directory), `${mailboxId(agent, session)}.turns.json`)
 // A turn start's record (design A, #1612): an empty file the turn-start hook makes before anything else and with no lock,
 // named by when it was made and by the process that made it, so a start the order file does not show yet holds the
-// wake. The turn's Stop removes the records made before the Stop began, once it has written its number, so the next
-// turn's record stays. A folder that cannot be read holds the wake too.
+// wake. The turn's Stop removes the records made before the Stop began, or dated after its own present time (made before
+// the clock was set back), once it has written its number, so the next turn's record stays. A Stop that died after
+// writing its number leaves its records, so a record that Stop would have removed, one dated before the `stopBegan` in an
+// order file that reads `stopped === started`, holds no wake: that is the rule the Stop applies, so it opens no new window.
+// An order file that cannot be read, and a folder that cannot be read, hold the wake.
 const turnRecords = (agent: string, session: string): string => `${mailboxId(agent, session)}.turns.open.`
 export const isTurnOpen = (directory: string, agent: string, session: string): boolean => {
   try {
     const prefix = turnRecords(agent, session)
-    return readdirSync(resolve(directory)).some(name => name.startsWith(prefix))
+    const open = readdirSync(resolve(directory)).filter(name => name.startsWith(prefix))
+    if (open.length === 0) return false
+    const order = readTurnOrder(directory, agent, session)
+    const covered = order?.stopBegan
+    if (covered === undefined || order?.stopped !== order?.started) return true
+    return open.some(name => !(Number(name.slice(prefix.length).split('.')[0]) < covered))
   } catch { return true }
 }
 export const openTurnRecord = (directory: string, agent: string, session: string, now: number): void => {
@@ -765,8 +773,12 @@ export const openTurnRecord = (directory: string, agent: string, session: string
 const closeTurnRecords = (root: string, agent: string, session: string, before: number): void => {
   const prefix = turnRecords(agent, session)
   try {
+    // A record dated after the present was made before the clock was set back, so before this Stop.
+    const present = Date.now()
     for (const name of readdirSync(root)) {
-      if (name.startsWith(prefix) && Number(name.slice(prefix.length).split('.')[0]) < before) try { unlinkSync(join(root, name)) } catch {}
+      if (!name.startsWith(prefix)) continue
+      const made = Number(name.slice(prefix.length).split('.')[0])
+      if (made < before || made > present) try { unlinkSync(join(root, name)) } catch {}
     }
   } catch {}
 }
@@ -776,12 +788,15 @@ export const readTurnOrder = (directory: string, agent: string, session: string)
   try {
     const file = turnOrderFile(directory, agent, session)
     if (!lstatSync(file).isFile()) return undefined
-    const { started, stopped, stoppedAt } = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
-    return isCount(started) && isCount(stopped) && isCount(stoppedAt) && stopped <= started ? { started, stopped, stoppedAt } : undefined
+    const { started, stopped, stoppedAt, stopBegan } = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+    if (!(isCount(started) && isCount(stopped) && isCount(stoppedAt) && stopped <= started)) return undefined
+    // `stopBegan` is optional: a file written without it reads as before.
+    return isCount(stopBegan) ? { started, stopped, stoppedAt, stopBegan } : { started, stopped, stoppedAt }
   } catch { return undefined }
 }
 // A turn-start hook adds one to `started` and gets the new number back; a Stop hook sets `stopped` to the number of the
-// turn it ends, and `stoppedAt` to now, then removes the start records made before `began`, when the Stop hook began. A
+// turn it ends, `stoppedAt` to now and `stopBegan` to `began`, when the Stop hook began, then removes the start records
+// made before `began` or dated after now. A
 // file that cannot be read starts again from nothing, which holds wakes until its numbers pass the board's. Nothing is
 // written where no board has made the folder, since a folder made here would not be the private one a board makes.
 export const markTurnOrder = (directory: string, agent: string, session: string, mark: 'start' | 'stop', now: number, waitMs: number, began = now): number => {
@@ -790,7 +805,8 @@ export const markTurnOrder = (directory: string, agent: string, session: string,
   if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING')
   return withLocalLock(`${file}.lock`, () => {
     const was = readTurnOrder(root, agent, session) ?? { started: 0, stopped: 0, stoppedAt: 0 }
-    const next: TurnOrder = mark === 'start' ? { ...was, started: was.started + 1 } : { ...was, stopped: was.started, stoppedAt: now }
+    // A start leaves `stopBegan` out: once started passes stopped it no longer covers any record.
+    const next: TurnOrder = mark === 'start' ? { started: was.started + 1, stopped: was.stopped, stoppedAt: was.stoppedAt } : { started: was.started, stopped: was.started, stoppedAt: now, stopBegan: began }
     const temp = `${file}.${process.pid}.tmp`
     try {
       try { unlinkSync(temp) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }

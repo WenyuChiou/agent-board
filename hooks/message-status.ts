@@ -69,10 +69,11 @@ export const messageStatus = (one: StatusMessage, now: number, s: Strings = ZH_T
   // Given up at the open limit before anything took it: it never left the board.
   if (one.status === 'uncertain' && one.error === 'EXPIRED' && one.claimed === 0) return notDelivered(s.statusWhyHeldTooLong)
   if (one.status === 'uncertain' && one.error !== '') return unsure(unsureWhy(one, s))
-  // A message the Antigravity sidecar wakes is queued until the new turn takes it, so it says how the wake went and has no
-  // 20 s clock: the wake starts a turn, which takes longer than that (#1396).
-  if (one.status === 'queued' && one.wake !== undefined) return shown('queued', one.wake === 'sent' ? s.agyWoken : one.wake === 'failed' ? s.agyWakeFailed : one.wake === 'started' ? s.agyWaking : s.agySidecarOff, 'wait')
-  const hasClock = one.status === 'uncertain' || isNowRoute(one)
+  // A message the Antigravity sidecar wakes is queued until the new turn takes it, so it says how the wake went (#1396). A
+  // wake that was sent or started is on a route that goes in now, so it keeps the 20 s clock (#1843); one that failed or
+  // has no sidecar waits for the next turn, which has none.
+  if (one.status === 'queued' && one.wake !== undefined && (one.wake === 'failed' || one.wake === 'off' || now - one.updated < NOW_ROUTE_MS)) return shown('queued', one.wake === 'sent' ? s.agyWoken : one.wake === 'failed' ? s.agyWakeFailed : one.wake === 'started' ? s.agyWaking : s.agySidecarOff, 'wait')
+  const hasClock = one.status === 'uncertain' || isNowRoute(one) || one.wake === 'sent' || one.wake === 'started'
   if (hasClock && now - one.updated >= NOW_ROUTE_MS) return unsure(s.statusWhyNoAnswer)
   return shown('queued', s.statusQueued(hasClock ? s.statusWhenNow : `${whenOf(one, s)} · ${relativeTime(one.updated, now, s)}`), 'wait')
 }
