@@ -1,6 +1,6 @@
 # Plan for 0.26.0, draft 2: the mainstream AIs work end to end
 
-Written 2026-11-24 for the owner's review. **A draft: not in force.** It revises draft 1 (Fable 5.2) after two adversarial reviews (Opus: accept with changes, 12 must-fix; Codex Sol: reject, 13 must-fix) and the owner's decisions of 2026-11-24, late (#209 comment 7149125740). Each must-fix was checked in the code at `origin/main` `8bbe938f` or in its issue before it was taken (appendix).
+Written 2026-11-24 for the owner's review. **In force:** the owner approved it on #1837 (2026-11-24); later decisions are in section G. It revises draft 1 (Fable 5.2) after two adversarial reviews (Opus: accept with changes, 12 must-fix; Codex Sol: reject, 13 must-fix) and the owner's decisions of 2026-11-24, late (#209 comment 7149125740). Each must-fix was checked in the code at `origin/main` `8bbe938f` or in its issue before it was taken (appendix).
 
 **Fixed inputs.** (1) 「記住這一次0.25.2 一定要把主流AI的 全部功能實現好」: the next release makes every function work for the mainstream AIs: the Claude Code CLI and desktop app, the Codex CLI and app, the Antigravity app and `agy`, DeepSeek Harness. The board opens, a question is one card, the reply goes in, the status is correct and timely. (2) Mainstream first: the self-update (U1 to U4, #1819 to #1822) moves to the release after. (3) The routes change hooks and R7 bars a hook change in a patch, so the release is **0.26.0**. It absorbs the no-hook part of milestone 17; there is no separate 0.25.2 unless the owner says so; the next release is 0.27.0. (4) Still in force: desktop apps and CLIs, no VS Code extensions (7147735354); every supported AI takes a reply, never Copy (principle 3); our own delivery design; in the UI, order and layout first, then the card, then wording (7148340095).
 
@@ -8,7 +8,7 @@ Written 2026-11-24 for the owner's review. **A draft: not in force.** It revises
 
 ## What changed from draft 1
 
-**Added by the PM after round 2, at the owner's word (2026-11-24):** the page goes first (「另外UI應該要先行優化 你可以先做這部分優化的設計」), so the layout the owner named is must-ship and lane P starts on day 1 (D, P5 to P7, three new issues); and how the PM tests the release (owner: "Add it to the plan"), with a matrix runner as a new issue (E6a). Must-ship: 55 issues.
+**Added by the PM after round 2, at the owner's word (2026-11-24):** the page goes first (「另外UI應該要先行優化 你可以先做這部分優化的設計」), so the layout the owner named is must-ship and lane P starts on day 1 (D, P5 to P7, three new issues); and how the PM tests the release (owner: "Add it to the plan"), with a matrix runner as a new issue (E6a). Must-ship: 55 issues (56 since 2026-11-26, with #1890).
 
 **Round 2:** one must-ship list for 0.26.0, U1 to U4 to 0.27.0 (section 1). Cell c passes only if the answer goes in; a failed spike goes to the owner (section 2). C1 per host, with the smallest repair a test shows (C). One rule for who owns a message, and a status line tied to message, session, turn and question (B3, B4). DeepSeek's terminal gets code. An owner app session in week 1. A Done-when, a test and a hook status per line (E3). RELEASING.md's gate in full (E6). 51 issues, not 25. New owner questions (G).
 
@@ -40,7 +40,7 @@ Written 2026-11-24 for the owner's review. **A draft: not in force.** It revises
 
 ## 1. The release shape
 
-**0.26.0 must-ship: 55 issues.** 17 are milestone 17's no-hook part, 24 come from milestone 15, and 14 are new (E2). E3 lists them by line.
+**0.26.0 must-ship: 56 issues.** 17 are milestone 17's no-hook part, 24 come from milestone 15, 14 are new (E2), and #1890 (the Antigravity app wake within about 3 s) was added on 2026-11-26. N15 ships if ready and is not counted. E3 lists them by line.
 
 **Kept from milestone 17,** as each issue and plan-0.25.2 say: #1650, #1779 (the token leaves the chat; T1 then T2); #1812 (with U1 gone, 0.26.0 must not ask about a daily check it lacks); #1796, #1773, #1553, #1813, #1814 (Codex's card); #1823 (H1), #1824 (H2); #1830, #1831, #1836 (pulled in by the owner); #1657 (the 0.25.1 sitting; closes when its pending rows run in week 1); #1825 (baseline 0.25.1, still the last release); #1826 (F10 rerun); #1827 (first-try green, for the 0.26.0 tag).
 
@@ -58,6 +58,7 @@ Written 2026-11-24 for the owner's review. **A draft: not in force.** It revises
 
 - **Cell c passes only when the answer goes in:** a turn in that session carries it, as its reply or transcript shows, with no Copy and no window switch, within the route's budget.
 - **A stopped session takes the answer within about 3 s** (owner, 2026-11-26: 「每一家 AI 都是這樣子，有問題停下來嘛，所以他就是馬上要傳進去，或比如說在三秒就傳進去」). An AI stops when it has a question, and that is when the person answers on the board. So on every supported surface, an idle session with a question waiting starts the turn that carries the answer within about 3 s of the press. This replaces the 10 s budgets in B2 and E3. The live note for each surface records the seconds; a surface whose route cannot reach about 3 s goes to the owner that day, as below.
+- **A message to a stopped session with no question is measured the same way** (owner, 2026-11-26). After a turn ends with no question, a person often sends the next instruction from the board. On the surfaces whose idle route is a door (Claude Code CLI, Codex CLI, the Antigravity app, DeepSeek's terminal) it must start a turn within about 3 s, as an answer does. Route H cannot carry it: H waits only when a turn ends on a question. So on a surface that passes c through H, this row is recorded with its limit named and is not a gate line.
 - A card that only says why it could not, or a route that waits for the person's next message in the AI's window, is a **FAIL** on that surface, with its limit named.
 - A spike that fails, or a check not run by its day, goes to the owner **that day** (Q3): ship with that surface's named FAIL, hold the release, or give the surface another kind of route. The bar is never lowered quietly. A surface that ships on a FAIL says so in the release notes' first lines and in the support table.
 - One-time steps (switching on the Antigravity sidecar; approving a changed hook in Codex's `/hooks`) are setup steps, counted once, not per answer.
@@ -105,7 +106,7 @@ DeepSeek's Web surface is Verified (2026-11-08) and stays a regression row. Its 
 - The wait crosses four time limits, and all four change for a long wait: the host's `timeout` in its hook file (`hooks/connect-pure.ts:666`); `HOOK_TIMEOUTS` (Codex Stop 10 s, Antigravity 3 s, `hooks/hook-safety.ts:21`, `:27`); the worker's deadline (`:211-212`); its child's kill (`:290-292`).
 - A hook killed after its output may have reached the host cannot be "unsent".
 
-**Rule.** H is on for a surface only if S3 finds a host signal that the person typed during the wait; with none, H stays off there and the surface goes to Q3. The wait is capped at 10 minutes (a proposal; S3 checks what the host allows), runs only while a page that drew the card is visible, and ends when that page has been hidden for 30 s.
+**Rule.** H is on for a surface only if S3 finds a host signal that the person typed during the wait; with none, H stays off there and the surface goes to Q3. The wait is capped at 10 minutes (a proposal; S3 checks what the host allows), runs only while a page that drew the card is visible, and ends when that page has been hidden for 30 s. While H holds a turn, the board's row for that session reads 需要你, with the question's age, never 進行中: the host shows the turn as running, and the board must not repeat that (principle 6). S3 item 3 records, with a picture kept out of the repository, what the app's window shows during the wait and when its "finished" notice fires. The 10-minute cap stays as the owner accepted it (Q3); a shorter cap would fail every answer given after it.
 
 ### B2. Per surface
 
@@ -115,7 +116,7 @@ DeepSeek's Web surface is Verified (2026-11-08) and stays a regression row. Its 
 | Claude desktop, Code tab | S1: the same receiver if it registers there; else the inbox pipe | As idle | Q3 | No for the plugin's receiver; the pipe: S1 says |
 | Codex CLI | Door: the daemon's `turn/start` at the next receiver tick (about 3 s), also right after a turn ends, while a Codex terminal process is alive (#1652; owner's decisions 2026-11-18 and 2026-11-26) | The Stop hook hands over at step end (#319) | Q3 | #1652: none expected. #319: none on S (the Stop hook exists with 10 s), on P through L1 (unchecked) |
 | Codex desktop app | H, if S3 shows it safe | Stop hook at step end, as the CLI | Q3. Today's after-quit route stays, as a choice | Yes: the Stop limits (B1) |
-| Antigravity app | Door: the sidecar calls Antigravity's own `agentapi send-message`, and the turn-start hook hands over (`docs/MESSAGING.md:181-236`; PR #1612, sized as new work) | Mailbox: a working conversation starts its next turn by itself (live note 2026-11-13) | Q3 | Yes (the wake, plan-0.25.2 section 2; which line: unchecked) |
+| Antigravity app | Door: the sidecar calls Antigravity's own `agentapi send-message`, and the turn-start hook hands over (`docs/MESSAGING.md:181-236`). PR #1612 merges with a 10 s wait after the turn's end; #1890 lowers it to about 1 s after a live run (owner, 2026-11-26) | Mailbox: a working conversation starts its next turn by itself (live note 2026-11-13) | Q3 | Yes (the wake, plan-0.25.2 section 2; which line: unchecked) |
 | `agy` CLI | S2: H on Antigravity's turn-end hook, or a documented continue command that is not a second writer, or `--wait-message` (G); never a port, token or sign-in | Mailbox | Q3 | Yes if H (the 3 s limit) |
 | DeepSeek, terminal | Door: the board's plugin calls `Agent.followup` (`hooks/receivers/deepseek.ts:3-7`), once the terminal is detected and allowed | Held until idle | Q3 | Possibly: it lives in the generated plugin (`hooks/portable-agents.ts:135-137`); unchecked |
 
@@ -141,7 +142,7 @@ One line under the reply box, the same words on the page, the terminal board (#2
 | Shown | Means | Tied to | Unsure, or the next step, when |
 |---|---|---|---|
 | 傳送中 Sending | pressed, no answer from the board yet | the page's message id | no answer in 2 s: "not confirmed, trying again", with the same id (B3.1); after 30 s: "cannot reach the board", text kept |
-| 已排入 Queued · when | stored, not handed out. "When" is: now, at its step's end, or at its next turn | message, session | a "now" route: past 20 s, a fixed limit of its own (owner, #1843, 2026-11-25), apart from the about 3 s delivery bar. Step-end and next-turn routes have no clock: the line shows its age and what it waits for; a lapsed mailbox follows #1432 |
+| 已排入 Queued · when | stored, not handed out. "When" is: now, at its step's end, or at its next turn | message, session | a "now" route: past 20 s, a fixed limit of its own (owner, #1843, 2026-11-25), apart from the about 3 s delivery bar. Step-end and next-turn routes have no clock: the line shows its age and what it waits for; a lapsed mailbox follows #1432. On a "now" route the page keeps 傳送中 on screen until the message is delivered or 2 s have passed, so 已排入 · 現在 shows only when it lasts. A message that waits for a step's end or a next turn offers one action, 收回 (the existing dismiss call, `docs/MESSAGING.md:743`), which frees the session for a new message at once |
 | 已送達 Delivered · time | a claim holder handed it out | message, session, the turn it started or continued | the session ends or goes silent with no reply in that turn |
 | 已讀 Read | that session's `ACK <code>` line, in that turn | message, session, turn | — |
 | 已回覆 Answered · on the board, or · in its window | the turn after the question has started, with the board's hand-over or without it | the question (session and turn) | — |
@@ -149,6 +150,8 @@ One line under the reply box, the same words on the page, the terminal board (#2
 | 未送達 Not delivered · why | refused, expired, withdrawn, or moved past | message | one action: send as a new message, or open its window |
 
 Read shows only where the route collects an ACK: the Codex daemon, Antigravity (`hooks/receivers/hook-mailbox-antigravity.ts:6-9`, #1416), and the Codex Stop hook at the next Stop (#319). An ACK proves receipt, not that the task was done (`docs/MESSAGING.md:323`). Answered closes the card and is never read from an ACK. A receiver that holds a message says why (#1511, #700). A typed answer survives its receiver going away (#782).
+
+**One send control** (owner, 2026-11-26). The reply box has one button, 送出, on every route. It never changes to 「排入 … 的下一回合」 and never carries an AI's name (today: `hooks/serve.ts:2205`). When the message will land is the status line's "when".
 
 ### B5. Spikes, and the owner's app session
 
@@ -185,7 +188,13 @@ All in week 1. Each is a dated note in `docs/validation/`; no key or token is wr
 
 **C6. Blind spots.** The simulated user sends nothing real: every session is synthetic. Every receiver test runs against a stand-in host, and none takes its hook files from a shape-P install (L1's test adds one). A host update can break a row between releases (#1824 watches). DeepSeek had no live row. No macOS run.
 
-**C7. Speed.** Dated baselines: 14 minutes from Send to turn start on Codex CLI (0.25.1 parity); 291 file operations per idle poll (#254, ships if ready). Never measured on Claude Code. H1 (#1823) times the hook on the 2.09 MB script. H holds one process per waiting question (S3 item 7).
+**C7. Speed.** Dated baselines: 14 minutes from Send to turn start on Codex CLI (0.25.1 parity); 291 file operations per idle poll (#254, ships if ready). Never measured on Claude Code. What sits between a turn's end and its row, by install shape:
+- **Shape S, and Antigravity on P:** the hook runs the board script, which writes the block itself. No model call. The cost is the hook's own start on the 2.09 MB script; #1823's 100-run check gives the first number, and it runs in week 2 (E5).
+- **Codex on P, today:** the reporter writes an inbox file; an open Claude Code session looks at the inbox every 5 s (`hooks/register.tsx:161`), sums the turn up with a model call of up to 30 s (`:169`, `:2473`), and only then writes the block (`:2502-2513`). The question's card shows earlier, with no model (`scripts/board-cli.ts:315`). L1 removes this for Codex: after it, a Codex turn's state is written with no model call.
+- **The page:** it wakes on a change to `progress.md` or the inbox (`scripts/board-watch.ts:21-74`) and on any request to the server (`scripts/board-serve.ts:813`). The message store's folder is not watched, so a receipt a hook writes there shows at the next wake, at most 10 s later (`:133`). L10 adds the watch.
+- **Not in 0.26.0:** a hook that posts to the server, and a hook on every tool call. Both change hooks on every host and add a hook run where the hook's start is the unmeasured cost. They come back at the re-plan if #1823's number shows the hook start is over 1 s at the median.
+
+H holds one process per waiting question (S3 item 7).
 
 ---
 
@@ -216,7 +225,7 @@ The reply status on the item uses B4's words and lands with L10, not here.
 | P8 | Undo (#566) | Archive and Confirm done offer Undo for 8 s | #566's five tests, with "Undo refuses with the reason when the block changed after the press" |
 | P9 | Narrow width | Below 640 px: search, the AI chips with names and badges, the three views as tabs; pressing an item opens a bottom sheet with its answers as 44 px buttons | browser at 375×812: "pressing a waiting question opens its sheet with its answers" |
 
-Then, if ready: #1023 (first line, live line, folds), #922 (tidying by itself). Step 2, card design and wording (#1640, #1500, the 16 strings), ships only what is ready by week 4.
+Then, if ready: #1023 (first line, live line, folds), #922 (tidying by itself). Step 2 ships only what is ready by week 4: the item's small controls (N15), the 16 strings of Redesign 2, and the choice buttons (#1640, #1500).
 
 ---
 
@@ -229,25 +238,25 @@ Then, if ready: #1023 (first line, live line, folds), #922 (tidying by itself). 
 - **Later (37).** After Q1, frozen hosts: Cursor #1834, #1793, #1403, #1159, #1025; OpenCode #1795, #1598, #1597, #1379, #1413; Grok Build, OpenClaw, Hermes #1404, #726, #233, #1780. To 0.27.0: approvals and native prompts #1318, #1119, #1320, #1319 (Q4); agents use the board #317, #1372, #1636, #723, #722, #685, #884, #961. Later: #1409, #1613, #866 (0.30.0), #548, #559, #1280. Backlog: #1635, #695, #1696, #1298, #702.
 - **Close:** none outright.
 
-### E2. New issues (14), opened after the plan merges
+### E2. New issues (15), opened after the plan merges
 
-N1 the install repair per host (C0, L1). N2 Antigravity rows: a block leaves `waiting` when its last step is ticked, and Done rows offer Archive and Confirm done (sitting). N3 the Codex desktop app's route (S3). N4 the `agy` route (S2). N5 the Claude desktop app's reply route (S1). N6 the one-owner rule and the status line (B3, B4). N7 no storage notices (P1). N8 no 你的待辦 group (P2). N9 the footer flush (P4). N10 the owner's end sitting for 0.26.0. N11 search and filters (P5). N12 one work column and the rail (P6). N13 two-line items and smaller type (P7). N14 the matrix runner (E6a). Also filed, for Backlog only: #1457 cases 1 and 2; the plugin's saved options lost on reinstall; the Antigravity page coming up in English.
+N1 the install repair per host (C0, L1). N2 Antigravity rows: a block leaves `waiting` when its last step is ticked, and Done rows offer Archive and Confirm done (sitting). N3 the Codex desktop app's route (S3). N4 the `agy` route (S2). N5 the Claude desktop app's reply route (S1). N6 the one-owner rule and the status line (B3, B4). N7 no storage notices (P1). N8 no 你的待辦 group (P2). N9 the footer flush (P4). N10 the owner's end sitting for 0.26.0. N11 search and filters (P5). N12 one work column and the rail (P6). N13 two-line items and smaller type (P7). N14 the matrix runner (E6a). N15 the item's small controls (D, step 2; ships if ready, about 4 lane-days on lane P; owner, 2026-11-26). Also filed, for Backlog only: #1457 cases 1 and 2; the plugin's saved options lost on reinstall; the Antigravity page coming up in English.
 
 ### E3. The must-ship lines
 
 | Line | Issues | Done when (a person can check) | Test or journey that fails without it | Hook change |
 |---|---|---|---|---|
 | L0 Carried | the 17 of section 1 | each issue's own lines | as each issue and plan-0.25.2 (sections 3, 7) name, among them the late-ACK case in `tests/messaging.test.mjs` | No |
-| L1 Install repair | N1 | On shape P, Codex hands a queued message over at turn start and at step end, as on S; on P, Antigravity's card offers Queue and Send | `tests/legacy-connect.test.mjs`: "a connector-wired Codex home hands a queued message over at its next turn start"; `tests/e2e/host-journeys.test.mjs`, one row per shape | Codex on P: likely yes |
+| L1 Install repair | N1 | On shape P, Codex hands a queued message over at turn start and at step end, as on S; on P, Antigravity's card offers Queue and Send; on P, a Codex turn's end writes its state with no model call | `tests/legacy-connect.test.mjs`: "a connector-wired Codex home hands a queued message over at its next turn start"; "a connector-wired Codex home writes a turn's state without a model call"; `tests/e2e/host-journeys.test.mjs`, one row per shape | Codex on P: likely yes |
 | L2 One card, one row | #1829, #1832, #155, N2 | One question is one card (Codex app, CLI; Cursor too); one conversation is one row; a `done` block is under Done; no "Still running" on an ended session; the Antigravity block leaves `waiting` | `tests/question-merge.test.ts`: "a `[?]` step and the same closing question in one turn give one card"; `tests/codex-done-lifecycle.test.mjs`: "a skill report and hook turns give one row"; `tests/row-state.test.ts`; each failing at `8ccb458b`, as the issues say | No (N2: unless its fix is in the Stop hook's write) |
 | L3 Claude desktop, question | #1833, #286 | In the Code tab a turn with no Task list that ends on a question writes a `[?]` step and shows one card; the footer opens the page in one click | `tests/claude-questions.test.tsx`: "a turn with no Task list that ends on a question writes its block"; a dated live note in the Code tab in week 2 | No |
 | L4 Codex CLI | #1652, #319 | Idle, window open: starts within about 3 s, also right after a turn ends. Window closed: does not start. Working: at step end | `tests/messaging.test.mjs`: "terminal alive, thread idle: starts at once"; "terminal gone, thread still listed: does not start"; #319's six tests; a live note with seconds | #1652: none expected; #319: none on S (unchecked) |
-| L5 Codex app | N3 | An idle thread with a question takes the board's answer in the same turn within about 3 s of the press, while a visible page drew the card; the person's own typed answer wins | the B3 cases below, on a stand-in host; a live note on the owner's app | Yes |
-| L6 Antigravity app and `agy` | #1396, #1750, #1751, #1609, N4 | App: an idle conversation starts within about 3 s with the sidecar on; a lock a dead hook left and a dismissed failed wake no longer hold the wake. `agy`: as S2 decides | `tests/antigravity-sidecar.test.mjs`; #1751: "a lock a dead hook left is reclaimed for the poll"; #1609's and #1750's tests; a live note for each surface | Yes (app); `agy` yes if H |
+| L5 Codex app | N3 | An idle thread with a question takes the board's answer in the same turn within about 3 s of the press, while a visible page drew the card; the person's own typed answer wins; while the hook waits, the board's row reads 需要你, not 進行中 | the B3 cases below, on a stand-in host; "while H holds a turn, the session's row is under Needs you"; a live note on the owner's app | Yes |
+| L6 Antigravity app and `agy` | #1396, #1890, #1750, #1751, #1609, N4 | App: an idle conversation starts within about 3 s with the sidecar on; a lock a dead hook left and a dismissed failed wake no longer hold the wake. `agy`: as S2 decides | `tests/antigravity-sidecar.test.mjs`; #1751: "a lock a dead hook left is reclaimed for the poll"; #1609's and #1750's tests; a live note for each surface | Yes (app); `agy` yes if H |
 | L7 Claude desktop, reply | N5 | An idle Code-tab session starts a turn on a board answer within about 3 s, labelled as the person's answer sent through the board | `tests/receiver.test.ts` with a stand-in; a live note | No for the plugin's receiver |
 | L8 DeepSeek terminal | #686, #1449, #1457 | The terminal is detected and its idle route is "now", starting within about 3 s; one hand-out; an old agent's end does not reject the new agent's message | `tests/deepseek-receiver.test.mjs`: "a terminal session is detected and starts on a board message"; #1449's and #1457 case 3's tests; a live note | Possibly (B2) |
 | L9 Never twice | #1407, #1638, N6 | B3's eight rules hold | #1407's test per row; #1638: "a cut or timed-out take on an older board leaves the message queued"; the B3 cases | No |
-| L10 Status | N6, #1511, #700, #1579, #1432, #782, #232 | B4 on the page, the terminal board and `--json` | `tests/browser/message-receipts.test.mjs`: "a lost response retries with the same id and shows one message"; "a now route with no event for 20 s reads Unsure"; #232's `knownFailure` markers in `tests/e2e/l3b-messaging.test.mjs` flip (terminal); #782's test | No |
+| L10 Status | N6, #1511, #700, #1579, #1432, #782, #232 | B4 on the page, the terminal board and `--json`. One 送出 control with no AI name; a waiting message offers 收回; a row the board cannot vouch for reads 不確定, with the reason on open; a receipt a hook writes to the store shows on a waiting page within 1 s (owner, 2026-11-26) | `tests/browser/message-receipts.test.mjs`: "a lost response retries with the same id and shows one message"; "a now route with no event for 20 s reads Unsure"; "收回 on a message waiting for its next turn frees the card to send again"; "a receipt a hook writes to the store wakes a waiting page"; `tests/page-look.test.mjs`: "the send button reads 送出 on a next-turn route and names no AI"; "a card that may be closed shows 不確定 and no sentence"; #232's `knownFailure` markers in `tests/e2e/l3b-messaging.test.mjs` flip (terminal); #782's test | No |
 | L11 Page | #269, N7, N8, N9, N11, N12, N13 | D, P1 to P7 | D | No |
 | L12 Gate | N10, N14, #844 | E6, E6a | E6, E6a | No |
 
@@ -260,22 +269,22 @@ N1 the install repair per host (C0, L1). N2 Antigravity rows: a block leaves `wa
 | When | Work | Checkpoint |
 |---|---|---|
 | Week 1 | C0, K-live, S1 to S4, K1, K5; the owner's app session (day 2 or 3); Q2 answered; the carried issues continue; lane P starts on day 1 and P1 to P4 merge; the matrix runner (N14) and the baseline run of the 28 cells (E6a) | **Day 5:** every spike has its note. A failed one goes to the owner that day (Q3) |
-| Week 2 | L1, L2, L3, L4; L9 after Q2; L10 starts; P5 and P6 merge | **Day 10:** L1 and L2 merged, or the owner gets a new date that day |
+| Week 2 | L1, L2, L3, L4; L9 after Q2; L10 starts; P5 and P6 merge; #1823's timing run (lane R) | **Day 10:** L1 and L2 merged, or the owner gets a new date that day |
 | Week 3 | L5, L6, L7, L8; L10; P7 merges | **Day 15:** every hook-changing line has its pull request in review, or that surface goes to the owner that day |
 | Week 4 | Live notes per surface; the declaration list; acceptance tests; ships-if-ready | **Day 20:** every hook change merged. A late no-hook item goes to Q5 |
 | Week 5 | The gate (E6): parity, journeys, upgrade, simulated user, outside reads, the owner's end sitting, the release | |
 
-**Size.** 55 issues, about 90 lane-days by line (carried 15, L1 4, L2 4, L3 3, L4 5, L5 6, L6 11, L7 5, L8 5, L9 5, L10 11, L11 9, L12 6). Lane P's 9 days run beside the delivery lanes and do not lengthen the critical path. Five weeks needs five lanes busy from day 1 and fewer review rounds than 0.25.1, whose two spine pull requests took 6 and 7 change requests (#1778, #1783). The diagnosis's pace says less: "the team ships about one week's worth per release … whatever the plan says"; the last five-week plan was cut on day 6 (E2.1). So **five weeks is the owner's target; six to seven is what the pace says.** The date moves; the bar does not.
+**Size.** 56 must-ship issues, about 92.5 lane-days by line (carried 15.5, L1 4, L2 4, L3 3, L4 5, L5 6, L6 11, L7 5, L8 5, L9 5, L10 13, L11 9, L12 7; N15 ships if ready and is not counted). Lane P's 9 days run beside the delivery lanes and do not lengthen the critical path. Five weeks needs five lanes busy from day 1 and fewer review rounds than 0.25.1, whose two spine pull requests took 6 and 7 change requests (#1778, #1783). The diagnosis's pace says less: "the team ships about one week's worth per release … whatever the plan says"; the last five-week plan was cut on day 6 (E2.1). So **five weeks is the owner's target; six to seven is what the pace says.** The date moves; the bar does not.
 
 ### E5. If it runs late: the cut order
 
 First to last. Each cut is named in the notes, and a must-ship cut needs the owner's word (R1).
 1. Page work that ships if ready (P8, P9, #1023, #922, #254, step 2).
-2. #232's pane half (the terminal board's half stays).
-3. Carried no-hook items off the journey: #1823 and #1836, to 0.26.1 (Q5).
+2. #232's pane half (the terminal board's half stays). It goes first if L10 runs over its 13 days (owner, 2026-11-26).
+3. Carried no-hook items off the journey: #1823's doctor line, to 0.26.1 (Q5; #1836 merged as a8108327). #1823's timing run (100 hook runs on Windows, with and without the record line) is not cut: it runs in week 2 and its numbers go into C7 (owner, 2026-11-26).
 4. P5 to P7, to 0.26.1 (Q5). They are page files only, so a cut here does not bring any route forward; it only frees the date.
 
-**Never cut:** L1 to L10; P1 to P4 (the owner's page items, about four days); the token (#1650, #1779); #1773, #1553, #1812; the gate issues. A surface whose route fails is not cut: it goes to the owner (Q3).
+**Never cut:** L1 to L10, except #232's pane half (item 2); P1 to P4 (the owner's page items, about four days); the token (#1650, #1779); #1773, #1553, #1812; the gate issues. A surface whose route fails is not cut: it goes to the owner (Q3).
 
 ### E6. The release gate
 
@@ -299,6 +308,7 @@ First to last. Each cut is named in the notes, and a must-ship cut needs the own
   - (a) the board opens;
   - (b) a question shows as one card;
   - (c) a reply from the board goes in, and the agent goes on with it;
+  - (c2) a message to the stopped session with no question starts a turn (recorded on every surface; a gate line only on door surfaces, section 2);
   - (d) the status is right and timely: sent, delivered, answered, or "unsure" once its time budget is past.
   Hide, done and undo are checked in the same run.
 - **Two install shapes:** one set up by `setup`, and one wired by the Claude Code plugin's connector. Every cell runs on both.
@@ -361,11 +371,13 @@ Generated files (`hooks/board-script*.ts`, `hooks/released.ts`, `tests/fixtures/
 
 ## G. Owner questions (five)
 
+**Answered.** All five as recommended (owner, 2026-11-24, 「全按照建議」; #209 comment 7152245492). Later decisions: the about-3 s bar (section 2, 2026-11-26); #1652's start at the next receiver tick (#1652, 2026-11-26); #1407's rule holds from the next board start (#1407, 7167038254); the review of Antigravity Carbon's proposal, all as recommended (owner, 2026-11-26, 「全照建議」): the no-question row of section 2, L10's send control and status items, #1823's timing run in week 2, Redesign 2 in force, and #1612 at 10 s with #1890 to follow.
+
 1. **Frozen hosts.** Freeze Cursor IDE and `cursor-agent`, OpenCode, Grok Build, Hermes, OpenClaw and Muse Code in 0.26.0, plus DeepSeek's desktop surface and Cordis CLI if S4 finds the plugin does not load there, with principle 4 reading "every supported agent" for this release? **Recommend yes:** nothing is removed and the weekly row keeps watching them. If no: about a week per host (Cursor: K2; OpenCode: #1795).
 2. **#1407, the store version.** A new store version that older readers refuse, or the rule "nothing handed out before a board start is handed out after it"? **Recommend the rule.** The way back is a typed install of 0.25.1, which must still read the store, and a second install in the same home writes `version: 2` from its own hooks (#1407). Cost: a message handed out before a board restart and never acknowledged reads Unsure after it, text kept, instead of going out again. A new version would need a step that converts the store down, which 0.26.0 lacks.
 3. **A route that fails** (most likely the Codex app, if S3 finds no sign that the person typed). Ship 0.26.0 with that surface as a named FAIL (5 steps, as Copy today), hold the release for it, or have the board host Codex sessions (F5, a different product)? And where H passes, accept that the app shows the turn as running while it waits, at most 10 minutes, only while a visible page drew the card? **Recommend:** accept H's cost. For a failed surface, decide from its note on day 5; if nothing better is shown by day 10, ship with the named FAIL and take F5 to the next re-plan.
 4. **Native prompts and approvals.** Is "every function" met by questions asked in the reply text, plus Archive, Confirm done and hide, with the host's own question tool and Codex approvals (#1318, #1319) in 0.27.0? **Recommend yes.** Claude Code approvals (#1678) already work and stay a regression row. Cost: Claude Code's question tool is mirrored, not answered (`hooks/register.tsx:4761-4773`); its card says "answer in its window". If no: about two weeks more, with #1318's safeguards in whole.
-5. **The date lever.** If on day 20 a no-hook must-ship item has not merged: ship 0.26.0 without it and finish it in 0.26.1 (no hook change, as R7 allows), or hold 0.26.0? **Recommend 0.26.1 for E5's items 3 and 4 only** (#1823, #1836, P5 to P7). Hold for L9 and L10: a reply that goes in with a wrong status fails the owner's word.
+5. **The date lever.** If on day 20 a no-hook must-ship item has not merged: ship 0.26.0 without it and finish it in 0.26.1 (no hook change, as R7 allows), or hold 0.26.0? **Recommend 0.26.1 for E5's items 3 and 4 only** (#1823, #1836, P5 to P7; since 2026-11-26, #1823's timing run is not cut and #1836 has merged, E5). Hold for L9 and L10: a reply that goes in with a wrong status fails the owner's word.
 
 **Back to #209, not asked here:** the cloud-bot bridge before the phone, and standing allow rules ("after 1.0" or "never"). Nothing in 0.26.0 depends on either.
 
@@ -379,7 +391,7 @@ Generated files (`hooks/board-script*.ts`, `hooks/released.ts`, `tests/fixtures/
 - Whether the Claude plugin's receiver runs in the Code tab; the inbox pipe's format (S1). Whether `agy` has a continue command that is not a second writer (S2).
 - Which line of #1396's wake changes a hook; whether #319 and DeepSeek's terminal change compared text.
 - #992 (under Q2's rule), #1622, #1467: read from titles only.
-- The 80 lane-days is a judgment per line, not a count.
+- The lane-day total (Size, E4) is a judgment per line, not a count.
 - T3 Code's search was not read (P5 says it is read first).
 
 ---
