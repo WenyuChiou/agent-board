@@ -59,6 +59,12 @@ const CLIENTS_ASK_LIMIT_MS = 3500
 const HOLD_TICKS = 10
 // A Codex program running as a server, not as a person's window: the command anywhere after the flags.
 const SERVER_COMMAND = /(?:^|[\s"])(?:app|exec|mcp)-server(?=\s|"|$)/
+// Codex's commands that run with no window of a person's (`codex --help`, 0.174): a one-shot run (`exec`, `e`, `review`) such as
+// another tool's, the account and setup tools, and the servers. Only the word right after the program is read: Codex reads that
+// word as its command, never as a prompt, so a prompt or a resumed session (`resume`, `fork`) is still a window. A command after
+// flags (`codex -c k=v exec`) is still read as a window, the wait the person's own window would give.
+const NO_WINDOW_COMMANDS = new Set(['exec', 'e', 'review', 'login', 'logout', 'mcp', 'plugin', 'app-server', 'remote-control', 'app', 'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'a', 'queue', 'archive', 'delete', 'migrate-rollouts', 'migrate-nfs-db', 'unarchive', 'exec-server', 'mcp-server', 'features', 'help'])
+const commandWord = argv => /^\s*(?:"[^"]*"|\S+)\s+([^\s"]+)(?=\s|$)/.exec(argv)?.[1] ?? ''
 // Whether a listing asked at `listedAt` is one wait after a stretch that began at `since`: the longer of `unloadMs` and the
 // folder's unload delay (`delay`) with its margin (#1578).
 export const isWaitOver = ({ since, listedAt, delay, unloadMs = UNLOAD_MS, unloadMarginMs = UNLOAD_MARGIN_MS }) =>
@@ -91,7 +97,7 @@ export const terminalClients = (rows, platform = process.platform) => {
     const isKnown = typeof row.argv === 'string' && row.argv !== '' && Number.isSafeInteger(row.started) && row.started > 0 && Number.isSafeInteger(row.pid) && row.pid > 0
     if (!isKnown) { isUnsure = true; continue }
     // The app-server, and the servers the Codex desktop app starts (exec-server) or a host starts (mcp-server), are no window.
-    if (SERVER_COMMAND.test(row.argv)) continue
+    if (SERVER_COMMAND.test(row.argv) || NO_WINDOW_COMMANDS.has(commandWord(row.argv))) continue
     clients.push(`${row.pid}:${row.started}`)
   }
   return { clients, isUnsure: isUnsure && clients.length === 0 }
