@@ -8,7 +8,7 @@ Written 2026-11-24 for the owner's review. **In force:** the owner approved it o
 
 ## What changed from draft 1
 
-**Added by the PM after round 2, at the owner's word (2026-11-24):** the page goes first (「另外UI應該要先行優化 你可以先做這部分優化的設計」), so the layout the owner named is must-ship and lane P starts on day 1 (D, P5 to P7, three new issues); and how the PM tests the release (owner: "Add it to the plan"), with a matrix runner as a new issue (E6a). Must-ship: 55 issues.
+**Added by the PM after round 2, at the owner's word (2026-11-24):** the page goes first (「另外UI應該要先行優化 你可以先做這部分優化的設計」), so the layout the owner named is must-ship and lane P starts on day 1 (D, P5 to P7, three new issues); and how the PM tests the release (owner: "Add it to the plan"), with a matrix runner as a new issue (E6a). Must-ship: 55 issues (56 since 2026-11-26, with #1890).
 
 **Round 2:** one must-ship list for 0.26.0, U1 to U4 to 0.27.0 (section 1). Cell c passes only if the answer goes in; a failed spike goes to the owner (section 2). C1 per host, with the smallest repair a test shows (C). One rule for who owns a message, and a status line tied to message, session, turn and question (B3, B4). DeepSeek's terminal gets code. An owner app session in week 1. A Done-when, a test and a hook status per line (E3). RELEASING.md's gate in full (E6). 51 issues, not 25. New owner questions (G).
 
@@ -40,7 +40,7 @@ Written 2026-11-24 for the owner's review. **In force:** the owner approved it o
 
 ## 1. The release shape
 
-**0.26.0 must-ship: 55 issues.** 17 are milestone 17's no-hook part, 24 come from milestone 15, and 14 are new (E2). E3 lists them by line.
+**0.26.0 must-ship: 56 issues.** 17 are milestone 17's no-hook part, 24 come from milestone 15, 14 are new (E2), and #1890 (the Antigravity app wake within about 3 s) was added on 2026-11-26. N15 ships if ready and is not counted. E3 lists them by line.
 
 **Kept from milestone 17,** as each issue and plan-0.25.2 say: #1650, #1779 (the token leaves the chat; T1 then T2); #1812 (with U1 gone, 0.26.0 must not ask about a daily check it lacks); #1796, #1773, #1553, #1813, #1814 (Codex's card); #1823 (H1), #1824 (H2); #1830, #1831, #1836 (pulled in by the owner); #1657 (the 0.25.1 sitting; closes when its pending rows run in week 1); #1825 (baseline 0.25.1, still the last release); #1826 (F10 rerun); #1827 (first-try green, for the 0.26.0 tag).
 
@@ -274,7 +274,7 @@ N1 the install repair per host (C0, L1). N2 Antigravity rows: a block leaves `wa
 | Week 4 | Live notes per surface; the declaration list; acceptance tests; ships-if-ready | **Day 20:** every hook change merged. A late no-hook item goes to Q5 |
 | Week 5 | The gate (E6): parity, journeys, upgrade, simulated user, outside reads, the owner's end sitting, the release | |
 
-**Size.** 57 issues, about 93.5 lane-days by line (carried 15.5, L1 4, L2 4, L3 3, L4 5, L5 6, L6 11, L7 5, L8 5, L9 5, L10 13, L11 9, L12 7; N15 ships if ready and is not counted). Lane P's 9 days run beside the delivery lanes and do not lengthen the critical path. Five weeks needs five lanes busy from day 1 and fewer review rounds than 0.25.1, whose two spine pull requests took 6 and 7 change requests (#1778, #1783). The diagnosis's pace says less: "the team ships about one week's worth per release … whatever the plan says"; the last five-week plan was cut on day 6 (E2.1). So **five weeks is the owner's target; six to seven is what the pace says.** The date moves; the bar does not.
+**Size.** 56 must-ship issues, about 92.5 lane-days by line (carried 15.5, L1 4, L2 4, L3 3, L4 5, L5 6, L6 11, L7 5, L8 5, L9 5, L10 13, L11 9, L12 7; N15 ships if ready and is not counted). Lane P's 9 days run beside the delivery lanes and do not lengthen the critical path. Five weeks needs five lanes busy from day 1 and fewer review rounds than 0.25.1, whose two spine pull requests took 6 and 7 change requests (#1778, #1783). The diagnosis's pace says less: "the team ships about one week's worth per release … whatever the plan says"; the last five-week plan was cut on day 6 (E2.1). So **five weeks is the owner's target; six to seven is what the pace says.** The date moves; the bar does not.
 
 ### E5. If it runs late: the cut order
 
@@ -284,7 +284,7 @@ First to last. Each cut is named in the notes, and a must-ship cut needs the own
 3. Carried no-hook items off the journey: #1823's doctor line, to 0.26.1 (Q5; #1836 merged as a8108327). #1823's timing run (100 hook runs on Windows, with and without the record line) is not cut: it runs in week 2 and its numbers go into C7 (owner, 2026-11-26).
 4. P5 to P7, to 0.26.1 (Q5). They are page files only, so a cut here does not bring any route forward; it only frees the date.
 
-**Never cut:** L1 to L10; P1 to P4 (the owner's page items, about four days); the token (#1650, #1779); #1773, #1553, #1812; the gate issues. A surface whose route fails is not cut: it goes to the owner (Q3).
+**Never cut:** L1 to L10, except #232's pane half (item 2); P1 to P4 (the owner's page items, about four days); the token (#1650, #1779); #1773, #1553, #1812; the gate issues. A surface whose route fails is not cut: it goes to the owner (Q3).
 
 ### E6. The release gate
 
@@ -377,7 +377,7 @@ Generated files (`hooks/board-script*.ts`, `hooks/released.ts`, `tests/fixtures/
 2. **#1407, the store version.** A new store version that older readers refuse, or the rule "nothing handed out before a board start is handed out after it"? **Recommend the rule.** The way back is a typed install of 0.25.1, which must still read the store, and a second install in the same home writes `version: 2` from its own hooks (#1407). Cost: a message handed out before a board restart and never acknowledged reads Unsure after it, text kept, instead of going out again. A new version would need a step that converts the store down, which 0.26.0 lacks.
 3. **A route that fails** (most likely the Codex app, if S3 finds no sign that the person typed). Ship 0.26.0 with that surface as a named FAIL (5 steps, as Copy today), hold the release for it, or have the board host Codex sessions (F5, a different product)? And where H passes, accept that the app shows the turn as running while it waits, at most 10 minutes, only while a visible page drew the card? **Recommend:** accept H's cost. For a failed surface, decide from its note on day 5; if nothing better is shown by day 10, ship with the named FAIL and take F5 to the next re-plan.
 4. **Native prompts and approvals.** Is "every function" met by questions asked in the reply text, plus Archive, Confirm done and hide, with the host's own question tool and Codex approvals (#1318, #1319) in 0.27.0? **Recommend yes.** Claude Code approvals (#1678) already work and stay a regression row. Cost: Claude Code's question tool is mirrored, not answered (`hooks/register.tsx:4761-4773`); its card says "answer in its window". If no: about two weeks more, with #1318's safeguards in whole.
-5. **The date lever.** If on day 20 a no-hook must-ship item has not merged: ship 0.26.0 without it and finish it in 0.26.1 (no hook change, as R7 allows), or hold 0.26.0? **Recommend 0.26.1 for E5's items 3 and 4 only** (#1823, #1836, P5 to P7). Hold for L9 and L10: a reply that goes in with a wrong status fails the owner's word.
+5. **The date lever.** If on day 20 a no-hook must-ship item has not merged: ship 0.26.0 without it and finish it in 0.26.1 (no hook change, as R7 allows), or hold 0.26.0? **Recommend 0.26.1 for E5's items 3 and 4 only** (#1823, #1836, P5 to P7; since 2026-11-26, #1823's timing run is not cut and #1836 has merged, E5). Hold for L9 and L10: a reply that goes in with a wrong status fails the owner's word.
 
 **Back to #209, not asked here:** the cloud-bot bridge before the phone, and standing allow rules ("after 1.0" or "never"). Nothing in 0.26.0 depends on either.
 
@@ -391,7 +391,7 @@ Generated files (`hooks/board-script*.ts`, `hooks/released.ts`, `tests/fixtures/
 - Whether the Claude plugin's receiver runs in the Code tab; the inbox pipe's format (S1). Whether `agy` has a continue command that is not a second writer (S2).
 - Which line of #1396's wake changes a hook; whether #319 and DeepSeek's terminal change compared text.
 - #992 (under Q2's rule), #1622, #1467: read from titles only.
-- The 80 lane-days is a judgment per line, not a count.
+- The lane-day total (Size, E4) is a judgment per line, not a count.
 - T3 Code's search was not read (P5 says it is read first).
 
 ---

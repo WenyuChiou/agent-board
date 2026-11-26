@@ -1,6 +1,6 @@
 # The board page, redesign 1: order and layout first
 
-Written by the PM on 2026-11-24, at the owner's ask: 「另外UI應該要先行優化 你可以先做這部分優化的設計」. Approved by the owner on 2026-11-24 (「照這版」, with plan #1837) and in force. The mockup, on synthetic data, is `docs/dev/ui-mockup-0.26.0.html`: its 提案 switch (bottom right) shows the 沒事, 過時 and 深色 states, and it was checked at 1280, 1440 (detail rail) and 375 px.
+Written by the PM on 2026-11-24, at the owner's ask: 「另外UI應該要先行優化 你可以先做這部分優化的設計」. Approved by the owner with plan #1837 (2026-11-24, US Eastern) and in force. The mockup, on synthetic data, is `docs/dev/ui-mockup-0.26.0.html`: its 提案 switch (bottom right) shows the 沒事, 過時 and 深色 states, and it was checked at 1280, 1440 (detail rail) and 375 px.
 
 The work order is the owner's: order and layout first, then the card, then the wording. The page code is `hooks/serve.ts` (CSS around `:1059-1350`, the page script after `:2000`). It needs no hook change, so this lane can start at once and run beside the delivery work.
 
