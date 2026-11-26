@@ -31,6 +31,7 @@ import { moveLockAside, readQueuedMessaging } from './board-messaging'
 import { explicitCodexExecutable, resolveCodexExecutable, testClients, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, holderDeps, ownerRecordOf, pageState as storePageState, patiently, settleStoreHolder, untilDeadline, type OwnerRead, type PageProbe, type PageState as StorePageState, type StartPass } from './message-store-claim'
+import { waitForPublishedRecord } from './backoff-publish'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -2906,7 +2907,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     } else if (storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
       // Collision in claims or another start is in flight: back off with randomized jitter, then retry or wait for its page
       await new Promise(done => setTimeout(done, Math.floor(Math.random() * 150) + 50))
-      const afterWait = await runningPage(true, false, replaced)
+      const afterWait = await waitForPublishedRecord(file, () => runningPage(true, false, replaced), deadline)
       // The server it reuses may predate this launcher: tell it the package before returning its URL.
       if (afterWait !== null) { await refreshServerPackage(afterWait.page.url); return { result: { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs } } }
       return again()

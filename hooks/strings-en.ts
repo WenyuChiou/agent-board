@@ -190,11 +190,7 @@ export const EN: Strings = {
     "updateTrustUnread": "{host}: the update could not read whether the board's hooks are approved, so it changed no approval. To check, preview {command}; to approve them, run it again with --apply.",
     "updateLater": "Nothing changed. To update, run this in a terminal and answer y: {command}",
     "updatePlugin": "This board comes from the Claude Code plugin, so setup leaves it alone. Update the plugin with claude plugin update agent-board@agent-board, then start a new Claude Code session.",
-    "updateNone": "Agent Board is not set up here, so there is nothing to update. Set it up: {command}",
-    "useVersionCheck": "Once a day, the board asks npm for the newest version number.",
-    "useVersionCheckOff": "\"Check for new versions\" in the board's Settings.",
-    "useCodexSessions": "The board reads the list of your Codex sessions (folder, start time, id, last-written time), never the conversation.",
-    "useCodexSessionsOff": "\"Show Codex sessions\" in the board's Settings."
+    "updateNone": "Agent Board is not set up here, so there is nothing to update. Set it up: {command}"
   },
   setupNoAgent: {
     "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
