@@ -22,11 +22,14 @@ try {
     import('../hooks/retention.ts'),
     import('../hooks/view.ts'),
     import('../hooks/parse.ts'),
+    import('../hooks/questions.ts'),
+    import('../hooks/board-status.ts'),
+    import('../hooks/board-json.ts'),
     import('./e2e/lib/surfaces.mjs'),
   ])
 } finally { loader.deregister() }
 
-const [{ pageTokens, BOARD_PATH: boardPath }, { serveModel, servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }, { RETENTION, sizeWarnings, storageDetails }, { buildView }, { parseProgress }, { pageDom }] = source
+const [{ pageTokens, BOARD_PATH: boardPath }, { serveModel, servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }, { RETENTION, sizeWarnings, storageDetails }, { buildView }, { parseProgress }, { observeQuestions }, { boardCounts }, { boardDocument }, { pageDom }] = source
 const SANS = 'Inter,"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const SANS_SC = 'Inter,"PingFang SC","Noto Sans SC","Microsoft YaHei UI","Microsoft YaHei","PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
@@ -631,4 +634,197 @@ test('no text inside an item is over 14 px', () => {
     const rule = rules.find(one => one.selector === viewSel)
     assert.equal(resolveFontPx(rule?.declarations.find(d => d.property === 'font-size')?.value), 18, `${viewSel} view title is 18 px`)
   }
+})
+
+test('waiting-on-others task folds under Needs you without duplicating in Other work', async () => {
+  const now = Date.now()
+  const updated = new Date(now - 5 * 60_000).toISOString()
+  const md = [
+    '## wait-only-repo',
+    `<!-- auto session=ww112233 agent=codex state=waiting updated=${updated} -->`,
+    '### Review downstream feedback',
+    '- [?] Waiting for reviewer reply',
+    '<!-- /auto session=ww112233 -->',
+    '',
+  ].join('\n')
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const othersSection = dom => dom.node('board').childNodes.find(node => node.getAttribute?.('data-sec') === 'others')
+
+  const enView = buildView(parseProgress(md), ['wait-only-repo'], null, now, 0, {}, STRINGS.en, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const enModel = serveModel(enView, [], STRINGS.en, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const enDom = await pageDom(servePage(STRINGS.en, 'n'), enModel)
+  const needsNodes = walk(enDom.node('needs'))
+  const waitToggle = needsNodes.find(node => node.tag === 'button' && node.textContent === 'Waiting on others 1')
+  assert.ok(waitToggle, 'EN toggle Waiting on others 1 renders under #needs')
+  assert.equal(waitToggle.getAttribute('aria-expanded'), 'false')
+  const waitWrap = waitToggle.parentNode.parentNode
+  const waitFold = waitWrap.childNodes.find(node => String(node.className ?? '').split(' ').includes('fold'))
+  assert.ok(waitFold, 'wait-only fold wrapper exists')
+  assert.equal(waitFold.inert, true, 'wait-only fold starts inert')
+  const others = othersSection(enDom)
+  assert.ok(!others || !others.visibleText.includes('Review downstream feedback'), 'wait-only task does not render a duplicate row in Other work')
+  assert.ok(enDom.node('side-projects').textContent.includes('wait-only-repo'), 'solo wait-only project stays in sidebar')
+
+  waitToggle.click()
+  assert.equal(waitToggle.getAttribute('aria-expanded'), 'true')
+  assert.equal(waitFold.inert, false)
+  const waitCard = walk(waitFold).find(node => node.tag === 'article' && String(node.className ?? '').split(' ').includes('card'))
+  assert.ok(waitCard, 'waitingOthers card renders inside expanded fold')
+  assert.ok(waitCard.textContent.includes('Waiting for reviewer reply'))
+  const writeOwn = walk(waitCard).find(node => node.tag === 'button' && node.textContent === STRINGS.en.pgWriteOwn)
+  assert.ok(writeOwn, 'Write your own control renders on waitingOthers card')
+  writeOwn.click()
+  assert.ok(walk(waitCard).some(node => node.tag === 'textarea'), 'clicking Write your own reveals composer textarea')
+
+  const twView = buildView(parseProgress(md), ['wait-only-repo'], null, now, 0, {}, STRINGS['zh-TW'], [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const twModel = serveModel(twView, [], STRINGS['zh-TW'], new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const twDom = await pageDom(servePage(STRINGS['zh-TW'], 'n'), twModel)
+  const twToggle = walk(twDom.node('needs')).find(node => node.tag === 'button' && node.textContent === '等別人 1')
+  assert.ok(twToggle, 'zh-TW toggle 等別人 1 renders under #needs')
+})
+
+test('row-backed wait task folds into Waiting on others without duplicating in Other work or Working, while staying in boardDocument.waiting', async () => {
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const updated = new Date(now - 5 * 60_000).toISOString()
+  const md = [
+    '## wait-row-repo',
+    `<!-- auto session=wr112233 agent=codex state=working updated=${updated} -->`,
+    '### Ship API endpoint',
+    '- [~] Implementing API',
+    '- [?] Waiting for reviewer reply',
+    '<!-- /auto session=wr112233 -->',
+    '',
+    '## manual-wait-repo',
+    '### Manual review wait',
+    '- [ ] Draft release note',
+    '- [?] Waiting for team sign-off',
+    '',
+  ].join('\n')
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const sectionBy = (dom, sec) => dom.node('board').childNodes.find(node => node.getAttribute?.('data-sec') === sec)
+  const group = { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }
+
+  const view = buildView(parseProgress(md), ['wait-row-repo', 'manual-wait-repo'], null, now, 0, {}, STRINGS.en, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const model = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, group)
+
+  assert.equal(model.view.needs.n, 0)
+  assert.equal(model.view.needs.waitingOthers.length, 2)
+  assert.deepEqual(model.view.working, [])
+  assert.equal(model.view.all.open.length, 2)
+  assert.ok(model.view.all.open.every(ref => ref.waitsOnOthers === true && ref.key.startsWith('row:')))
+  assert.deepEqual(boardCounts(view, [], STRINGS.en, now), { needs: 0, queued: 0, working: 0 })
+
+  const doc = boardDocument(view, [], [], STRINGS.en, '', false, now, group)
+  assert.equal(doc.counts.needs, 0)
+  assert.equal(doc.counts.working, 0)
+  assert.equal(doc.counts.waiting, 2)
+  assert.deepEqual(doc.waiting.map(one => one.title).sort(), ['Manual review wait', 'Ship API endpoint'])
+
+  const dom = await pageDom(servePage(STRINGS.en, 'n'), model)
+  const waitToggle = walk(dom.node('needs')).find(node => node.tag === 'button' && node.textContent === 'Waiting on others 2')
+  assert.ok(waitToggle, 'toggle Waiting on others 2 renders under #needs')
+  const waitFold = waitToggle.parentNode.parentNode.childNodes.find(node => String(node.className ?? '').split(' ').includes('fold'))
+  assert.ok(waitFold, 'wait fold exists')
+  assert.equal(waitFold.inert, true, 'wait fold starts inert')
+  waitToggle.click()
+  assert.equal(waitFold.inert, false, 'wait fold opens on click')
+  assert.ok(waitFold.visibleText.includes('Waiting for reviewer reply'))
+  assert.ok(waitFold.visibleText.includes('Waiting for team sign-off'))
+
+  const working = sectionBy(dom, 'working')
+  assert.ok(!working || !working.visibleText.includes('Ship API endpoint'), 'row-backed wait task must not duplicate in Working')
+  const others = sectionBy(dom, 'others')
+  assert.ok(!others || (!others.visibleText.includes('Ship API endpoint') && !others.visibleText.includes('Manual review wait')), 'row-backed wait tasks must not duplicate in Other work')
+  assert.ok(dom.node('side-projects').textContent.includes('wait-row-repo'), 'row-backed wait project stays in sidebar')
+  assert.ok(dom.node('side-projects').textContent.includes('manual-wait-repo'), 'manual row-backed wait project stays in sidebar')
+})
+
+test('parseProgress -> buildView -> serveModel orders cards by updated= age, puts AI before manual, and folds reminder/older into Earlier', async () => {
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const day = 24 * 60 * 60_000
+  const min = 60_000
+  const iso = ts => new Date(ts).toISOString()
+  const s = STRINGS.en
+  const group = { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }
+
+  const md = [
+    '## alpha-repo',
+    `<!-- auto session=aa100001 agent=codex state=waiting updated=${iso(now - 5 * min)} -->`,
+    '### New AI task',
+    '- [?] Newer AI question?',
+    '<!-- /auto session=aa100001 -->',
+    '',
+    `<!-- auto session=aa100002 agent=codex state=waiting updated=${iso(now - 30 * day)} -->`,
+    '### Long-waiting AI task',
+    '- [?] Thirty-day-old AI question?',
+    '<!-- /auto session=aa100002 -->',
+    '',
+    '### Hand-kept task',
+    '- [?] Manual checklist question?',
+    '',
+    `<!-- auto session=aa100003 agent=codex state=waiting updated=${iso(now - 10 * min)} -->`,
+    '### Reminder task',
+    '- [?] Four-day-old reminder question?',
+    '<!-- /auto session=aa100003 -->',
+    '',
+    `<!-- auto session=aa100004 agent=codex state=waiting updated=${iso(now - 10 * day)} -->`,
+    '### Stopped old task',
+    '- [?] Ten-day-old stopped question?',
+    '<!-- /auto session=aa100004 -->',
+    '',
+  ].join('\n')
+
+  const projects = parseProgress(md)
+  let ledger = { version: 1, next: 1, records: [], legacy: {} }
+  // Seed firstObserved timestamps via observeQuestions at historical observation times.
+  const reminderOnly = parseProgress([
+    '## alpha-repo',
+    `<!-- auto session=aa100003 agent=codex state=waiting updated=${iso(now - 4 * day)} -->`,
+    '### Reminder task',
+    '- [?] Four-day-old reminder question?',
+    '<!-- /auto session=aa100003 -->',
+    '',
+  ].join('\n'))
+  ledger = observeQuestions(ledger, reminderOnly, null, [], now - 4 * day).ledger
+  const olderOnly = parseProgress([
+    '## alpha-repo',
+    `<!-- auto session=aa100004 agent=codex state=waiting updated=${iso(now - 10 * day)} -->`,
+    '### Stopped old task',
+    '- [?] Ten-day-old stopped question?',
+    '<!-- /auto session=aa100004 -->',
+    '',
+  ].join('\n'))
+  ledger = observeQuestions(ledger, olderOnly, null, [], now - 10 * day).ledger
+  ledger = observeQuestions(ledger, projects, null, [], now).ledger
+
+  // With staleMs covering the 30-day block, observedTime flows updated= into ask.at so it ranks before the 5-min AI card and manual step.
+  const view = buildView(projects, ['alpha-repo'], null, now, 0, {}, s, [], {}, ledger, undefined, [], new Set(), undefined, 60 * day)
+  const model = serveModel(view, [], s, new Set(), false, undefined, false, group)
+  const askText = ref => model.asks.find(one => one.key === ref.key)?.text
+
+  assert.deepEqual(
+    model.view.needs.cards.map(askText),
+    ['Thirty-day-old AI question?', 'Newer AI question?', 'Manual checklist question?'],
+    '30-day updated= AI card precedes 5-min AI card, and AI questions precede hand-kept manual steps',
+  )
+  assert.equal(model.view.needs.olderLabel, 'Earlier 2')
+  assert.deepEqual(
+    model.view.needs.older.map(ref => [...model.reminder, ...model.older].find(one => one.key === (ref.sourceKey ?? ref.key))?.text),
+    ['Ten-day-old stopped question?', 'Four-day-old reminder question?'],
+    'both >7d stopped/older and 3-7d reminder questions flow into model.view.needs.older',
+  )
+
+  const dom = await pageDom(servePage(s, 'n'), model)
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const activeCardsList = walk(dom.node('needs')).find(node => node.tag === 'ul' && String(node.className ?? '').split(' ').includes('cards'))
+  const cardQuestions = walk(activeCardsList).filter(node => String(node.className ?? '').split(' ').includes('q')).map(node => node.textContent)
+  assert.deepEqual(cardQuestions, ['Thirty-day-old AI question?', 'Newer AI question?', 'Manual checklist question?'])
+  const olderToggle = walk(dom.node('needs')).find(node => node.tag === 'button' && node.textContent === s.pgSeeAll)
+  assert.ok(olderToggle, 'See all toggle renders for older questions')
+  const olderFold = olderToggle.parentNode.parentNode.childNodes.find(node => String(node.className ?? '').split(' ').includes('fold'))
+  assert.equal(olderFold.inert, true)
+  olderToggle.click()
+  assert.equal(olderFold.inert, false)
+  assert.ok(olderFold.visibleText.includes('Ten-day-old stopped question?'))
+  assert.ok(olderFold.visibleText.includes('Four-day-old reminder question?'))
 })

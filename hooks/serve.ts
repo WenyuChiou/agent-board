@@ -330,8 +330,8 @@ export type ServeTurn = { key: string; project: string; agent: string; text: str
 
 export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[]; olderScript?: { update: 'setup' | 'plugin'; command?: string; lanCommand?: string } }
 type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; surface?: string; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
-type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
-type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
+type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string; waitsOnOthers?: true }
+type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[]; olderLabel: string; waitingOthers: PageRef[]; waitingOthersLabel: string }
 type PageView = {
   now: number
   n: number
@@ -341,7 +341,7 @@ type PageView = {
   agents: Array<PageBucket & { agent: string; name: string; icon: string; last: number; isUnreadable: boolean }>
   // handled: the cards whose answer is on its way (sent, or queued for the session's next turn). They stay on the
   // sheet with their line and leave the count, on the page and on every other surface (#1296).
-  needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[]; handled: string[] }
+  needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[]; olderLabel: string; waitingOthers: PageRef[]; waitingOthersLabel: string; handled: string[] }
   working: PageRef[]
   // Rows whose derived state is 'unsure' (#1317). They stay on their shelf in
   // the lists above; this only names them, and no count reads it.
@@ -828,8 +828,9 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     repo: one.repo,
     at: one.at,
     ...('shelf' in one && one.source.key !== one.key ? { sourceKey: one.source.key } : {}),
+    ...('waitsOnOthers' in one && one.waitsOnOthers ? { waitsOnOthers: true as const } : {}),
   })
-  const bucket = (one: Bucket): PageBucket => ({ counts: one.counts, cards: one.cards.map(ref), open: one.open.map(ref), stopped: one.stopped.map(ref), done: one.done.map(ref), older: one.older.map(ref) })
+  const bucket = (one: Bucket): PageBucket => ({ counts: one.counts, cards: one.cards.map(ref), open: one.open.map(ref), stopped: one.stopped.map(ref), done: one.done.map(ref), older: one.older.map(ref), olderLabel: one.olderLabel, waitingOthers: one.waitingOthers.map(ref), waitingOthersLabel: one.waitingOthersLabel })
   model.view = {
     now: group.now,
     n: grouped.needs.n,
@@ -837,7 +838,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     stuck: grouped.needs.stuck,
     versions: group.versions,
     agents: grouped.agents.map(one => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),
-    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref), held, failed) },
+    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), waitingOthers: grouped.needs.waitingOthers.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref), held, failed) },
     working: grouped.working.map(ref),
     unsure: grouped.unsure.map(ref),
     quiet: grouped.quiet,
@@ -1048,7 +1049,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
   'claudeSendWorking', 'messageTakeBack', 'messageDismiss',
-  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenWaitingCodexApp', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'pressFailed', 'messagesQueued', 'messagesFailed',
+  'serveLineStepEnd', 'serveReopenRunning', 'serveReopenWaitingCodexApp', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'pressFailed', 'messagesQueued', 'messagesFailed', 'statusSending', 'statusRetrying', 'statusUnreachable',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
   'archiveNow', 'cleanUp', 'boardLarge', 'stoppedCount',
@@ -1066,7 +1067,7 @@ const PAGE_WORDS = [
   'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent', 'settingsApprovals', 'approvalSwitchFailed',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen', 'sideClose', 'pgDetailRail',
-  'pgSearchPlaceholder', 'pgSearchLabel', 'pgFilterBar', 'pgFilterAgent', 'pgFilterProject', 'pgFilterInterface', 'pgInterfaceCli', 'pgInterfaceApp', 'pgFilterClear', 'pgSearchEmpty',
+  'pgSearchPlaceholder', 'pgSearchLabel', 'pgFilterBar', 'pgFilterAgent', 'pgFilterProject', 'pgFilterInterface', 'pgInterfaceCli', 'pgInterfaceApp', 'pgFilterClear', 'pgSearchEmpty', 'groupWaitOthersCount',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -1659,6 +1660,8 @@ const PAGE_SCRIPT = String.raw`
   var ACT_WAIT_MS = 10000;
   // The last message sent from each card or row, so a failed one can go again or be copied.
   var sentLast = {};
+  // The board's answer to a card's last press, its status line and tone, until the board's next read brings the receipt (#1843, B4).
+  var pressNotes = {};
   var agentPresence = {};
   var resultSlots = {};
   var lostResults = [];
@@ -1979,6 +1982,11 @@ const PAGE_SCRIPT = String.raw`
     var slot = resultSlots[key];
     if (slot) { slot.node.textContent = ''; slot.node.className = 'press-result'; }
   }
+  // The board drew this message's stored receipt on the card: a line the press would write over it says less.
+  function isReceiptShown(key, id) {
+    var one = key && pg.sources[key];
+    return !!(one && one.receipt && one.receipt.id === id);
+  }
   function clearEnqueueResult(key, receipt) {
     var result = key && results[key];
     if (!result || !receipt || result.messageId !== receipt.id) return;
@@ -1990,9 +1998,9 @@ const PAGE_SCRIPT = String.raw`
   }
   // A send that gets no answer within 2 s is sent again under the same id, while the earlier tries may still answer: the
   // first answer wins, and the board answers an id it knows with the message it stored, so a lost or late answer never
-  // makes a second message. After 15 tries and 30 s with no answer the send failed. It stops when the page has moved,
-  // or when the person pressed other words (#1843, B3.1).
-  function sendTries(attempt, body) {
+  // makes a second message. After 15 tries and 30 s with no answer the board cannot be reached. It stops when the page
+  // has moved, or when the person pressed other words (#1843, B3.1). The first try again calls onRetry (B4).
+  function sendTries(attempt, body, onRetry) {
     return new Promise(function (resolve, reject) {
       var tries = 0, isSettled = false, wait = 0;
       function settle(isAnswer, data) {
@@ -2006,6 +2014,7 @@ const PAGE_SCRIPT = String.raw`
         if (isSettled) return;
         if (attempt.isStopped || isClosed) { settle(true, null); return; }
         if (tries >= SEND_TRIES) { settle(false); return; }
+        if (tries === 1 && onRetry) onRetry();
         tries++;
         call('/api/act', body, undefined, false, true).then(function (data) {
           // A body cut off on its way is no answer the page can trust; a refusal with one is an answer.
@@ -2028,22 +2037,18 @@ const PAGE_SCRIPT = String.raw`
       attempt = messageAttempts[slot] = { id: 'AB-' + crypto.randomUUID(), text: text };
     }
     var who = agentName(delivery.agent);
-    var waitingText = line === 'nextTurn'
-      ? w('serveQueuingNextTurn', who)
-      : line === 'chatOpen'
-        ? w('serveQueuingNextOpen', who)
-        : line === 'reopen'
-          ? reopenQueued(delivery.agent, delivery.isAfterAppQuit === true)
-          : line === 'stepEnd' && isClaudeAgent(delivery.agent)
-            ? w('claudeSendWorking')
-            : line === 'stepEnd'
-              ? w('serveLineStepEnd', who)
-              : w('serveSending', who);
+    // Until the board answers, the card reads Sending, the same word for every route and agent (#1843, B4). The line it
+    // leaves names this message, so the message's stored receipt replaces it on the next read of the board.
     busyOn(go);
-    say(waitingText, 'wait', key);
+    say(w('statusSending'), 'wait', key);
+    if (results[key]) results[key].messageId = attempt.id;
     var body = { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp };
     // A press made again while its send still tries joins that send: one send per message on this page (#1843, B3.1).
-    if (!attempt.sending) attempt.sending = sendTries(attempt, body);
+    if (!attempt.sending) attempt.sending = sendTries(attempt, body, function () {
+      if (attempt.isStopped || isReceiptShown(key, attempt.id)) return;
+      say(w('statusRetrying'), 'wait', key);
+      if (results[key]) results[key].messageId = attempt.id;
+    });
     return attempt.sending.then(function (data) {
       if (attempt.isStopped || !data) { busyOff(go, false); return false; }
       var receiptStatus = data.receipt && data.receipt.status;
@@ -2063,13 +2068,25 @@ const PAGE_SCRIPT = String.raw`
               : w('messagesQueued');
       var noteText = data.note && !(data.ok && line === 'nextTurn' && data.note === w('messagesQueued')) ? data.note : fallback;
       say(noteText, tone, key, undefined, !data.ok);
+      if (data.ok) pressNotes[key] = { text: noteText, tone: tone };
       if (data.ok && results[key]) {
         results[key].messageId = attempt.id;
         clearEnqueueResult(key, pg.sources[key] && pg.sources[key].receipt);
       }
       busyOff(go, data.ok || isUnreachable);
       return data.ok;
-    }, function () { say(w('messagesFailed'), 'alert', key, undefined, true); busyOff(go, false); unreachable(); return false; }).then(function (ok) { refresh(); return ok; });
+    }, function () {
+      // No answer in 30 s, but a read of the board drew this message's receipt: the board has it and answers, so the
+      // press went in and the page stays online.
+      if (isReceiptShown(key, attempt.id)) { busyOff(go, false); return true; }
+      // No answer in 30 s: the board cannot be reached, the words stay in the box, and the board may still have stored
+      // the message, so its receipt replaces this line once the board answers again (owner, #1843 B4).
+      say(w('statusUnreachable'), 'alert', key, undefined, true);
+      if (results[key]) results[key].messageId = attempt.id;
+      busyOff(go, false);
+      unreachable();
+      return false;
+    }).then(function (ok) { refresh(); return ok; });
   }
   // A draft that was sent is gone from the box on the page now, whatever redraw happened since it was pressed.
   function clearDraft(draftKey) {
@@ -2241,7 +2258,7 @@ const PAGE_SCRIPT = String.raw`
     }
     return node;
   }
-  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
+  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, hasWaitingOthers: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
   var cardState = {};
   var cardParts = {};
   var cardChoices = Object.create(null);
@@ -2496,10 +2513,12 @@ const PAGE_SCRIPT = String.raw`
     }
     if (!isAfter || hasReceiptAfter) return;
     var isQueuedState = state.mode === 'queued';
-    if (parts.afterRow) parts.afterRow.className = isQueuedState ? 'state receipt t-wait' : 'state';
+    // A sent card says what the board answered, in the status line's words; its own words only with no answer kept.
+    var pressNote = isQueuedState ? pressNotes[key] : undefined;
+    if (parts.afterRow) parts.afterRow.className = isQueuedState ? 'state receipt t-' + (pressNote && pressNote.tone === 'done' ? 'done' : pressNote && pressNote.tone === 'alert' ? 'alert' : 'wait') : 'state';
     if (parts.afterMk) parts.afterMk.hidden = isQueuedState;
     parts.msg.className = isQueuedState ? 'msg' : 'msg ok';
-    parts.msg.textContent = isQueuedState
+    parts.msg.textContent = pressNote ? pressNote.text : isQueuedState
       ? (parts.line === 'stepEnd'
           ? (isClaudeAgent(parts.agent) ? w('claudeSendWorking') : w('serveLineStepEnd', agentName(parts.agent)))
           : parts.line === 'nextTurn'
@@ -2516,6 +2535,7 @@ const PAGE_SCRIPT = String.raw`
   function setMode(key, mode, text) {
     var previous = cardState[key];
     cardState[key] = { mode: mode, text: text === undefined ? previous ? previous.text : '' : text };
+    if (mode !== 'queued') delete pressNotes[key];
     if ((mode === 'sent' || mode === 'queued') && results[key] && results[key].messageId) clearResultSlot(key);
     paintMode(key);
     if (mode === 'write') {
@@ -3459,7 +3479,7 @@ const PAGE_SCRIPT = String.raw`
   // What the filter shows: rows, cards and shelves of that agent only; the rest closes up. Counts, empty
   // lines and headings follow what is left, so every number on the page agrees with what is shown.
   function layout() {
-    var count = { cards: 0, shown: 0, older: 0, working: 0, others: 0, stopped: 0, done: 0 };
+    var count = { cards: 0, shown: 0, older: 0, waitingOthers: 0, working: 0, others: 0, stopped: 0, done: 0 };
     var projects = [];
     var byProject = Object.create(null);
     var allProjects = Object.create(null);
@@ -3474,7 +3494,7 @@ const PAGE_SCRIPT = String.raw`
       reveal(one.block, one.show);
       if (one.project) allProjects[one.project] = true;
       // the sidebar lists every project with something open, and counts it for the agent that is pressed
-      if (one.project && !one.sent && (one.list === 'cards' || one.list === 'working' || one.list === 'others')) {
+      if (one.project && !one.sent && (one.list === 'cards' || one.list === 'working' || one.list === 'others' || (one.list === 'waitingOthers' && one.soloWait))) {
         var held = byProject['p:' + one.project];
         if (!held) { held = byProject['p:' + one.project] = { name: one.project, n: 0 }; projects.push(held); }
         if (matchesAgent(one.id)) held.n += 1;
@@ -3512,6 +3532,8 @@ const PAGE_SCRIPT = String.raw`
     reveal(pg.nodes.workingEmpty, count.working === 0 && !isFiltered);
     // The line counts every older question the filters allow, drawn or not.
     if (pg.olderRefs) count.older = pg.olderRefs.filter(function (ref) { return matches(agentOf(ref), projectOf(ref), interfaceOf(ref), searchHaystack(ref), tokens); }).length;
+    if (pg.nodes.waitingOthersToggle) setText(pg.nodes.waitingOthersToggle, w('groupWaitOthersCount', count.waitingOthers));
+    reveal(pg.nodes.waitingOthersBlock, count.waitingOthers > 0);
     if (pg.nodes.olderLine) setText(pg.nodes.olderLine, plural('pgOlder', count.older));
     reveal(pg.nodes.olderBlock, count.older > 0);
     Object.keys(pg.nodes.counts).forEach(function (name) { setText(pg.nodes.counts[name], name === 'done' ? w('pgDoneWeek', count.done) : count[name]); });
@@ -3758,6 +3780,59 @@ const PAGE_SCRIPT = String.raw`
     pg.nodes.needsEmpty = fx(add(el('div', 'empty'), pg.nodes.needsText, pg.nodes.needsSub));
     add(sheet, list, pg.nodes.needsEmpty);
     var foot = el('div', 'sheet-foot');
+    var soloWaitKeys = Object.create(null);
+    var waitOpenRows = [];
+    ((view.all && view.all.open) || []).forEach(function (ref) {
+      if (ref.key.indexOf('waiting:') === 0 && ref.sourceKey) soloWaitKeys[ref.sourceKey] = true;
+      else if (ref.waitsOnOthers) waitOpenRows.push(ref);
+    });
+    var matchesWaitRow = function (askRef, rowRef) {
+      if ((askRef.agent || '') !== (rowRef.agent || '')) return false;
+      var askSrc = source(askRef);
+      var rowSrc = source(rowRef);
+      if (askSrc.project !== rowSrc.project || askSrc.task !== rowSrc.title) return false;
+      var askSess = askSrc.session || askSrc.sessionId || '';
+      var rowSess = rowSrc.session || rowSrc.sessionId || '';
+      return !askSess || !rowSess || askSess === rowSess;
+    };
+    if ((view.needs.waitingOthers || []).length) {
+      var waitingList = el('ul', 'cards');
+      settle('waitingOthers', view.needs.waitingOthers).forEach(function (ref) {
+        var li = el('li');
+        li.setAttribute('data-k', ref.key);
+        var block = el('div', 'fx');
+        add(block, add(el('div', 'fx-in'), buildCard(ref)));
+        add(li, block);
+        add(waitingList, li);
+        pg.cardNodes[ref.key] = li;
+        var one = entry(li, block, ref, 'waitingOthers');
+        if (soloWaitKeys[ref.key] === true) one.soloWait = true;
+        else {
+          for (var wi = 0; wi < waitOpenRows.length; wi += 1) {
+            if (matchesWaitRow(ref, waitOpenRows[wi])) {
+              one.soloWait = true;
+              waitOpenRows.splice(wi, 1);
+              break;
+            }
+          }
+        }
+      });
+      var waitMore = el('div', pg.hasWaitingOthers ? 'open' : '');
+      var waitFold = el('div', 'fold');
+      waitFold.inert = !pg.hasWaitingOthers;
+      var waitToggle = navButton(w('groupWaitOthersCount', view.needs.waitingOthers.length), function () {
+        pg.hasWaitingOthers = !hasClass(waitMore, 'open');
+        toggleClass(waitMore, 'open', pg.hasWaitingOthers);
+        waitFold.inert = !pg.hasWaitingOthers;
+        waitToggle.setAttribute('aria-expanded', String(pg.hasWaitingOthers));
+      });
+      waitToggle.className = 'link';
+      waitToggle.setAttribute('aria-expanded', String(pg.hasWaitingOthers));
+      pg.nodes.waitingOthersToggle = waitToggle;
+      add(waitMore, add(el('div', 'older-line'), waitToggle), add(waitFold, add(el('div', 'fold-in'), waitingList)));
+      pg.nodes.waitingOthersBlock = fx(waitMore);
+      add(foot, pg.nodes.waitingOthersBlock);
+    }
     var older = view.needs.older;
     pg.olderRefs = older;
     if (older.length) {
@@ -3822,7 +3897,9 @@ const PAGE_SCRIPT = String.raw`
     return sec;
   }
   function othersSection(view, workingKeys) {
-    var refs = settle('others', view.all.open.filter(function (ref) { return !workingKeys[ref.key]; }).sort(byTime));
+    var refs = settle('others', view.all.open.filter(function (ref) {
+      return !workingKeys[ref.key] && !ref.waitsOnOthers;
+    }).sort(byTime));
     var order = [];
     var by = {};
     refs.forEach(function (ref) {
@@ -4167,7 +4244,7 @@ const PAGE_SCRIPT = String.raw`
     else {
       var titleCounts = Object.create(null);
       var seenKeys = Object.create(null);
-      view.needs.cards.concat(view.working, view.all.open, view.all.stopped, view.all.done).forEach(function (ref) {
+      view.needs.cards.concat(view.needs.waitingOthers || [], view.working, view.all.open, view.all.stopped, view.all.done).forEach(function (ref) {
         var one = source(ref);
         var id = one.session ? 's:' + one.session : String(ref.sourceKey || ref.key).replace(/^(?:stuck:|row:|ask:)+/, '').replace(/@[^@]*$/, '').replace(/::\d+$/, '');
         if (seenKeys[id]) return;

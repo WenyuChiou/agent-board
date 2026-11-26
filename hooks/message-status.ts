@@ -1,6 +1,6 @@
 import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
-import { BOARD_RESTARTED, HOLDER_LOST, UNCONFIRMED, address, isEndedUncertain, isMailboxTarget } from './messaging'
+import { BOARD_RESTARTED, HOLDER_LOST, MOVED_ON, UNCONFIRMED, address, isEndedUncertain, isMailboxTarget } from './messaging'
 import type { Message } from './messaging'
 import { relativeTime } from './view'
 
@@ -59,7 +59,8 @@ export const messageStatus = (one: StatusMessage, now: number, s: Strings = ZH_T
   if (one.answers !== undefined && isHanded && reportedAt !== undefined && reportedAt > one.updated) return shown('answered', s.statusAnswered, 'done')
   if (one.status === 'acknowledged') return shown('read', s.statusRead(replyOf(one)), 'done')
   // Once something took it, it is never said to be undelivered: a refusal after an acceptance reads Unsure (answer 4).
-  if (one.status === 'rejected') return one.hasAccepted === true ? unsure(s.statusWhyDelivered) : notDelivered(one.error === 'STOPPED' ? s.statusWhyStopped : one.error === 'APP_STILL_OPEN' ? s.statusWhyAppOpen : s.statusWhyRefused)
+  if (one.status === 'rejected') return one.hasAccepted === true ? unsure(s.statusWhyDelivered)
+    : notDelivered(one.error === 'STOPPED' ? s.statusWhyStopped : one.error === 'APP_STILL_OPEN' ? s.statusWhyAppOpen : one.error === MOVED_ON ? s.statusWhyMovedOn : s.statusWhyRefused)
   // A delivered message whose holder went away is never said to be delivered, nor queued again (answer 4).
   if (one.status === 'accepted') return one.error === '' ? shown('delivered', s.statusDelivered(relativeTime(one.updated, now, s)), 'done') : unsure(s.statusWhyDelivered)
   // Once something took it, it is never said to be undelivered, even when its mailbox now reads another surface.
@@ -71,4 +72,13 @@ export const messageStatus = (one: StatusMessage, now: number, s: Strings = ZH_T
   const hasClock = one.status === 'uncertain' || isNowRoute(one)
   if (hasClock && now - one.updated >= NOW_ROUTE_MS) return unsure(s.statusWhyNoAnswer)
   return shown('queued', s.statusQueued(hasClock ? s.statusWhenNow : `${whenOf(one, s)} · ${relativeTime(one.updated, now, s)}`), 'wait')
+}
+
+// When the next message turns Unsure on the 20 s clock with no event of its own: the board wakes the pages waiting on it
+// then, so they show the line as it turns (#1843, B4). Null when no message is on that clock.
+export const nextStatusDeadline = (messages: readonly StatusMessage[], now: number): number | null => {
+  const due = messages
+    .filter(one => messageStatus(one, now)?.state === 'queued' && messageStatus(one, one.updated + NOW_ROUTE_MS)?.state === 'unsure')
+    .map(one => one.updated + NOW_ROUTE_MS)
+  return due.length === 0 ? null : Math.min(...due)
 }

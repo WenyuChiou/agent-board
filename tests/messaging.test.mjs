@@ -177,6 +177,75 @@ test('a DeepSeek hook claim nobody accepted is still handed out again after the 
   assert.equal(takeMailboxMessage(inbox, 'codex', 'mailbox-session', 'CLI', now + 10 * MAILBOX_LEASE_MS, '555555', 'a1b2c3d4e5f6').message, null)
 })
 
+// #319: a board answer is bound to the turn the session's hook last named. Codex's Stop hook hands a message over at a step
+// end; one ending a later turn than the answer's refuses it (#319, question 3 (a)), and a turn start does not.
+test('a mailbox message whose bound turn changed is rejected or left unclaimed at step end', () => {
+  const now = Date.now()
+  const take = (state, at, hostTurn, isStepEnd, nonce = 'abcdef') => takeMailboxMessage(state, 'codex', 'mailbox-session', 'CLI', at, 43_200_000, nonce, 'a1b2c3d4e5f6', { hostTurn, isStepEnd })
+  // Turn A starts: its hook names the turn and finds nothing.
+  const started = take(mailboxSeed(now), now, 'turn-a', false)
+  assert.equal(started.message, null)
+  const answer = queueMessage(started.state, { id: 'AB-319-ANSWER', target: mailboxId('codex', 'mailbox-session'), turn: 'session', text: 'AB-319-ANSWER', answers: 'question-319' }, 'board', started.state.mailboxes[0], now + 1).state
+  // Turn A's own step end hands it over.
+  assert.equal(take(answer, now + 2, 'turn-a', true).message?.id, 'AB-319-ANSWER')
+  // Turn B's step end refuses it as moved on and hands over the message behind it, which answers no question (from
+  // another sender: the board keeps one open message per sender).
+  const moved = take(mailboxQueue(answer, 'AB-319-BEHIND', 'claude:synthetic-peer', now + 1), now + 2, 'turn-b', true)
+  assert.equal(moved.message?.id, 'AB-319-BEHIND')
+  const refused = moved.state.messages.find(one => one.id === 'AB-319-ANSWER')
+  assert.deepEqual([refused.status, refused.error], ['rejected', 'MOVED_ON'])
+  // Refused for good: no later take hands it out, whatever turn it names.
+  for (const [hostTurn, isStepEnd] of [['turn-a', true], ['turn-b', false], ['turn-c', true]]) assert.equal(take(moved.state, now + 3, hostTurn, isStepEnd).message, null, `${hostTurn} ${isStepEnd}`)
+  // Turn B's start hands the answer over: only a step end refuses it.
+  assert.equal(take(answer, now + 2, 'turn-b', false).message?.id, 'AB-319-ANSWER')
+})
+
+test('a message refused because the conversation moved on reads Not delivered', async () => {
+  const { messageStatus } = await import('../hooks/message-status.ts')
+  const now = Date.now()
+  const one = { id: 'AB-319-MOVED', status: 'rejected', error: 'MOVED_ON', reply: '', updated: now, claimed: now, target: mailboxId('codex', 'mailbox-session'), answers: 'question-319' }
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    assert.equal(typeof s.statusWhyMovedOn, 'string')
+    assert.ok(![s.statusWhyRefused, s.statusWhyStopped, s.statusWhyAppOpen].includes(s.statusWhyMovedOn))
+    assert.deepEqual(messageStatus(one, now, s), { state: 'notDelivered', line: s.statusNotDelivered(s.statusWhyMovedOn), tone: 'alert', updatedAt: now })
+  }
+})
+
+test('a take with a turn id that is not one, a stepEnd other than true or a step end with no claim name is refused', () => {
+  const now = Date.now()
+  const state = mailboxQueue(mailboxSeed(now), 'AB-319-TURN', 'board', now)
+  const turn = body => mailboxAction(state, 'mailbox-turn', { agent: 'codex', session: 'mailbox-session', surface: 'CLI', ref: 'a1b2c3d4e5f6', ...body }, now + 1)
+  for (const body of [{ hostTurn: '' }, { hostTurn: 'turn\nforged' }, { hostTurn: 7 }, { hostTurn: 't'.repeat(201) }, { stepEnd: false }, { stepEnd: 'true' }, { stepEnd: true, ref: undefined }]) {
+    assert.throws(() => turn(body), /INVALID_TURN/, JSON.stringify(body))
+  }
+  // The same take, well formed, hands the message over and names the mailbox's turn.
+  const taken = turn({ hostTurn: 'turn-a', stepEnd: true })
+  assert.equal(taken.result.message?.id, 'AB-319-TURN')
+  assert.equal(taken.state.mailboxes[0].hostTurn, 'turn-a')
+})
+
+test('a receiver cannot report MOVED_ON, which only the board writes', () => {
+  const now = Date.now()
+  const taken = takeMailboxMessage(mailboxQueue(mailboxSeed(now), 'AB-319-RECEIPT', 'board', now), 'codex', 'mailbox-session', 'CLI', now, 43_200_000, 'abcdef', 'a1b2c3d4e5f6')
+  assert.equal(taken.message?.id, 'AB-319-RECEIPT')
+  for (const status of ['uncertain', 'rejected']) {
+    assert.throws(() => messageReceipt(taken.state, taken.state.mailboxes[0], { id: 'AB-319-RECEIPT', nonce: 'abcdef', status, error: 'MOVED_ON' }, now + 1), /INVALID_RECEIPT/, status)
+  }
+})
+
+test('a store whose bound turn or mailbox turn is not a turn id is refused', () => {
+  const now = Date.now()
+  const state = mailboxQueue(mailboxSeed(now), 'AB-319-STORE', 'board', now)
+  const read = patch => parseMessageStore(JSON.stringify({ version: 2, ...state, ...patch }), now)
+  // Well formed, both are kept.
+  const kept = read({ messages: [{ ...state.messages[0], boundTurn: 'turn-a' }], mailboxes: [{ ...state.mailboxes[0], hostTurn: 'turn-a' }] })
+  assert.deepEqual([kept.messages[0].boundTurn, kept.mailboxes[0].hostTurn], ['turn-a', 'turn-a'])
+  for (const bad of ['', 'turn\nforged', 7, 't'.repeat(201)]) {
+    assert.throws(() => read({ messages: [{ ...state.messages[0], boundTurn: bad }] }), /INVALID_MESSAGE_STORE/, `boundTurn ${JSON.stringify(bad)}`)
+    assert.throws(() => read({ mailboxes: [{ ...state.mailboxes[0], hostTurn: bad }] }), /INVALID_MESSAGE_STORE/, `hostTurn ${JSON.stringify(bad)}`)
+  }
+})
+
 const mailboxAt = (id, agent = 'codex') => ({ id, target: mailboxId(agent, 'mailbox-session'), turn: 'session', text: id })
 const mailboxBound = (state, id, surface, now, agent = 'codex') => queueMessage(state, mailboxAt(id, agent), 'board', state.mailboxes[0], now, 'local', undefined, undefined, surface).state
 const mailboxHook = (state, surface, at, nonce, agent = 'codex') => takeMailboxMessage(state, agent, 'mailbox-session', surface, at, 43_200_000, nonce, 'a1b2c3d4e5f6')
@@ -4075,7 +4144,8 @@ test('an existing card sends only to its exact live receiver and preserves mark 
   const shown = (await board.call('/api/board')).body.model
   assert.equal(shown.asks[0].receipt.reply, 'on it')
   assert.ok(!JSON.stringify(shown).includes(claimed.nonce))
-  assert.equal((await board.call('/api/act', request)).body.note, 'Replied')
+  // The press made again answers with the message's status line: Read, with the agent's words (#1843, B4).
+  assert.equal((await board.call('/api/act', request)).body.note, EN.statusRead('on it'))
   await board.call('/api/messages/disconnect', { ...credentials, turn: 'turn1' })
   const disconnected = (await board.call('/api/board')).body.model.asks[0]
   assert.ok(!['send', 'connected'].includes(disconnected.send)); assert.equal(disconnected.delivery, undefined)
@@ -4151,9 +4221,35 @@ test("two pages on one question make one message and the second page shows the f
   assert.equal((await press('AB-PAGE-A', 'Blue')).status, 200)
   // A second page drew the same card and answers before it hears of the first answer (#1843, B3.2).
   const second = await press('AB-PAGE-B', 'Green')
-  assert.deepEqual([second.status, second.body.note, second.body.receipt?.id, second.body.receipt?.status], [409, EN.messagesQueued, 'AB-PAGE-A', 'queued'])
+  // The refusal says another answer went first, and that answer's own status line (#1843, B4).
+  assert.deepEqual([second.status, second.body.note, second.body.receipt?.id, second.body.receipt?.status], [409, EN.statusAnswerOpen(EN.statusQueued(EN.statusWhenNow)), 'AB-PAGE-A', 'queued'])
   const stored = (await board.call('/api/board')).body.messaging.messages
   assert.deepEqual(stored.map(one => [one.id, one.status]), [['AB-PAGE-A', 'queued']])
+}))
+
+test('a refused second answer shows the first answer as Delivered once its session took it', async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Taken fixture\n- [?] Blue or green?\n<!-- /auto session=abcdef01 -->\n`)
+  const connected = (await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli })).body
+  const ask = (await board.call('/api/board')).body.model.asks.find(one => one.session === thread)
+  const press = (id, text) => board.call('/api/act', { key: ask.key, type: 'message', id, text, session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn })
+  assert.equal((await press('AB-TAKEN-A', 'Blue')).status, 200)
+  const credentials = { connection: connected.id, secret: connected.secret }
+  const claimed = (await board.call('/api/messages/poll', { ...credentials, turn: 'turn1' })).body.messages[0]
+  await board.call('/api/messages/receipt', { ...credentials, id: 'AB-TAKEN-A', nonce: claimed.nonce, status: 'accepted' })
+  const second = await press('AB-TAKEN-B', 'Green')
+  assert.deepEqual([second.status, second.body.note, second.body.receipt?.id], [409, EN.statusAnswerOpen(EN.statusDelivered(EN.justNow)), 'AB-TAKEN-A'])
+  assert.deepEqual((await board.call('/api/board')).body.messaging.messages.map(one => one.id), ['AB-TAKEN-A'])
+}))
+
+test("the board's answer to a press carries the status line's own words", async () => fixture(async (board, dir) => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Words fixture\n- [?] Blue or green?\n<!-- /auto session=abcdef01 -->\n`)
+  await board.call('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli, unclaimed: true })
+  const ask = (await board.call('/api/board')).body.model.asks.find(one => one.session === thread)
+  const pressed = await board.call('/api/act', { key: ask.key, type: 'message', id: 'AB-WORDS-1', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn })
+  // The page writes the same words the terminal board reads from the stored receipt (#1843, B4).
+  assert.deepEqual([pressed.status, pressed.body.note, pressed.body.receipt?.id], [200, EN.statusQueued(EN.statusWhenNow), 'AB-WORDS-1'])
 }))
 
 test('a retry of a known message id after its question left the board returns the stored message', async () => fixture(async (board, dir) => {
@@ -8190,17 +8286,20 @@ test('a lost response retries with the same id and shows one message', async () 
   assert.equal(page.requests.length, 2)
 })
 
-test('a send that gets no answer stops trying again after 30 s and says it failed', async () => {
+test('a send that gets no answer stops trying again after 30 s and says it cannot reach the board, with the words kept', async () => {
   const { page, press } = await retryPage(async () => { throw new Error('synthetic board gone') }, claudeLive())
   await press('Continue')
   // Every 2 s for 30 s: the first try and 14 more, all under the first press's id.
   for (let i = 0; i < 14; i++) assert.deepEqual(await page.runTimers('retrySend'), [2000])
   assert.equal(page.requests.length, 15)
   assert.equal(new Set(page.requests.map(one => one.body.id)).size, 1)
-  // The fifteenth try's 2 s end with no answer: the send failed, and nothing more is tried.
+  // The fifteenth try's 2 s end with no answer: the board cannot be reached, and nothing more is tried (#1843, B4).
   assert.deepEqual(await page.runTimers('retrySend'), [2000])
   assert.equal(page.requests.length, 15)
-  assert.ok(page.text().includes(EN.messagesFailed), page.text())
+  assert.ok(page.text().includes(EN.statusUnreachable), page.text())
+  assert.ok(!page.text().includes(EN.messagesFailed), page.text())
+  const card = page.cards().find(one => page.inputs(one).length)
+  assert.equal(page.inputs(card)[0].value, 'Continue')
   assert.deepEqual(await page.runTimers('retrySend'), [])
 })
 
@@ -8240,6 +8339,64 @@ test('a try that gets no answer and no close is sent again after 2 s, and its la
   assert.equal(stored().length, 1)
 })
 
+test('a press reads Sending until the board answers, and says it is trying again after 2 s with no answer', async () => {
+  const connection = claudeLive()
+  const held = []
+  const { post, stored } = await storingPost(connection, (request, answer) => {
+    // Each try stays open until the test answers it.
+    const open = new Promise(done => { held.push(() => done(answer)) })
+    open.isHeld = true
+    return open
+  })
+  const { page, press } = await retryPage(post, connection)
+  const slotText = () => page.slot(page.cards().find(one => page.inputs(one).length))?.textContent ?? ''
+  await press('Continue')
+  // One line for every route while the board has not answered: the status line's own word (#1843, B4).
+  assert.equal(slotText(), EN.statusSending)
+  assert.equal(page.requests.length, 1)
+  assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.equal(slotText(), EN.statusRetrying)
+  assert.deepEqual(page.requests.map(one => one.body.id), [page.requests[0].body.id, page.requests[0].body.id])
+  // Trying again is not offline: the page still takes presses.
+  assert.notEqual(page.node('offline').textContent, EN.serveOffline)
+  // The second try's answer arrives: the line is the board's, no longer Sending.
+  held[1]()
+  await page.flush()
+  assert.ok(![EN.statusSending, EN.statusRetrying].includes(slotText()), slotText())
+  assert.equal(stored().length, 1)
+})
+
+test('a press whose stored receipt a board read already drew says neither trying again nor cannot reach the board', async () => {
+  const connection = claudeLive()
+  // The board stores the first try, but no answer of any try reaches the page; the page's next read of the board brings
+  // the message it stored.
+  const { post, stored } = await storingPost(connection, () => {
+    const open = new Promise(() => {})
+    open.isHeld = true
+    return open
+  })
+  const { page, press, modelOf } = await retryPage(post, connection)
+  const slotText = () => page.slot(page.cards().find(one => page.inputs(one).length))?.textContent ?? ''
+  await press('Continue')
+  assert.equal(slotText(), EN.statusSending)
+  // The board's read brings the stored message: its receipt replaces Sending.
+  await page.redraw(modelOf(stored()))
+  assert.ok(page.text().includes(EN.statusQueued(EN.statusWhenNow)), page.text())
+  assert.ok(!page.text().includes(EN.statusSending), page.text())
+  // 2 s: the page tries again under the same id, and writes nothing over the receipt it shows.
+  assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.equal(page.requests[1].body.id, page.requests[0].body.id)
+  assert.ok(!page.text().includes(EN.statusRetrying), page.text())
+  // 30 s with no answer: the board has the message and its read answered, so the page neither says it cannot reach the
+  // board nor goes offline.
+  for (let i = 0; i < 14; i++) await page.runTimers('retrySend')
+  assert.equal(page.requests.length, 15)
+  assert.ok(!page.text().includes(EN.statusUnreachable), page.text())
+  assert.notEqual(page.node('offline').textContent, EN.serveOffline)
+  assert.ok(page.text().includes(EN.statusQueued(EN.statusWhenNow)), page.text())
+  assert.equal(stored().length, 1)
+})
+
 test('an answer cut off on its way is no answer: the page sends the same id again', async () => {
   const connection = claudeLive()
   let isCut = true
@@ -8257,6 +8414,28 @@ test('an answer cut off on its way is no answer: the page sends the same id agai
   assert.equal(page.requests[1].body.id, page.requests[0].body.id)
   assert.equal(stored().length, 1)
   assert.deepEqual(await page.runTimers('retrySend'), [])
+})
+
+test('after cannot reach the board, the stored receipt replaces the line and the same words keep their id', async () => {
+  const connection = claudeLive()
+  // The board stores every try, and no answer reaches the page.
+  const { post, stored } = await storingPost(connection, () => Promise.reject(new Error('synthetic lost response')))
+  const { page, press, modelOf } = await retryPage(post, connection)
+  const slotText = () => page.slot(page.cards().find(one => page.inputs(one).length))?.textContent ?? ''
+  await press('Continue')
+  for (let i = 0; i < 15; i++) await page.runTimers('retrySend')
+  assert.ok(slotText().startsWith(EN.statusUnreachable), slotText())
+  // The same words pressed again go under the first press's id, so the board can answer with the message it has.
+  await press('Continue')
+  assert.equal(page.requests.length, 16)
+  assert.equal(page.requests[15].body.id, page.requests[0].body.id)
+  for (let i = 0; i < 15; i++) await page.runTimers('retrySend')
+  assert.ok(slotText().startsWith(EN.statusUnreachable), slotText())
+  // The board answers again, and its read brings the message it stored: its own line replaces what the press left.
+  await page.redraw(modelOf(stored()))
+  assert.ok(!slotText().includes(EN.statusUnreachable) && !slotText().includes(EN.statusSending), slotText())
+  assert.ok(page.text().includes(EN.statusQueued(EN.statusWhenNow)), page.text())
+  assert.equal(stored().length, 1)
 })
 
 test('a press made again while its send still tries joins that send, and other words stop it', async () => {
@@ -8798,10 +8977,12 @@ test('a question asked while its session is working reads the working route, not
       : { connections: [{ id: 'table-receiver', agent: record.agent, session, surface, turn: record.kind === 'turn' ? 'turn1' : 'session', scope: record.kind === 'turn' ? 'turn' : 'session', expires: now + 60_000 }], messages: [] }
     const ask = realServeModel(view, [], EN, new Set(), false, live, false, group, RECEIVER_ROUTES).asks[0]
     const label = `${record.agent}/${record.kind}`
-    assert.equal(ask.line, route.line, label)
-    assert.equal(ask.canSend, route.line !== 'none' && route.record !== null, label)
+    // The line and note on the card's own surface, read as the send gate reads them (a surface may have its own line).
+    const line = routeLine(route, surface)
+    assert.equal(ask.line, line, label)
+    assert.equal(ask.canSend, line !== 'none' && routeRecord(route, surface) !== null, label)
     assert.equal(ask.send === 'connected' || ask.send === 'mailbox', ask.canSend, label)
-    if (route.line === 'now' && record.agent !== 'claude') assert.ok(!ask.lineText.includes('waiting'), label + ' ' + ask.lineText)
+    if (line === 'now' && record.agent !== 'claude') assert.ok(!ask.lineText.includes('waiting'), label + ' ' + ask.lineText)
     checked += 1
   }
   // Nine records since Gemini CLI's was retired (#1327).
@@ -8826,10 +9007,11 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.deepEqual(RECEIVER_ROUTES.find(one => one.agent === 'deepseek').routes.idle.surfaces, ['Web'])
   assert.equal(routeOf(RECEIVER_ROUTES, 'deepseek', 'mailbox', 'idle', 'Web').canSend, true)
   assert.equal(routeOf(RECEIVER_ROUTES, 'deepseek', 'mailbox', 'idle', 'TUI').canSend, false)
-  // The Codex note ran the interactive CLI with the session idle: only that route and surface gain Send (#826).
+  // The Codex notes ran the interactive CLI, one idle (#826) and one working (#319): those routes gain Send on that surface only.
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'CLI').canSend, true)
-  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'CLI').canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'CLI').canSend, true)
   assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', 'TUI').canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', 'TUI').canSend, false)
   // The agy TUI note ran the interactive TUI with the session idle; the desktop app note ran the app idle and
   // working, and the app reads as IDE. The headless `agy` note is no record for any surface.
   assert.equal(routeOf(RECEIVER_ROUTES, 'antigravity', 'mailbox', 'idle', 'agy TUI').canSend, true)
@@ -8886,6 +9068,26 @@ test('a route recorded for one surface is not offered on another, and the matrix
   assert.match(cells(rowOf('Antigravity', '2.0 Desktop App'))[8], /2026-11-13-antigravity-app-mailbox-live\.md/)
   assert.match(cells(rowOf('Antigravity', 'IDE'))[4], /Implemented/)
   assert.match(cells(rowOf('Antigravity', 'IDE'))[7], /2026-11-13-antigravity-app-mailbox-live\.md/)
+})
+
+test('a working Codex CLI card sends at step end once its record names the live note', async () => {
+  // The live run sent from the page while an interactive Codex CLI turn ran, and its Stop hook handed the message over
+  // at the step end (#319). Only the terminal ran: the desktop app, the background service and a mailbox that names
+  // no surface keep Copy while working.
+  const note = 'docs/validation/2026-11-26-codex-cli-stop-live.md'
+  const mailbox = RECEIVER_ROUTES.find(one => one.agent === 'codex' && one.kind === 'mailbox').routes
+  assert.deepEqual(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', SURFACE_IDS.cli), { line: 'stepEnd', canSend: true })
+  assert.equal(routeRecord(mailbox.working, SURFACE_IDS.cli), note)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', SURFACE_IDS.codexApp).canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working', SURFACE_IDS.codexDaemon).canSend, false)
+  assert.equal(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'working').canSend, false)
+  // The idle route keeps its own note, and the generated matrix names the new note in the Working cell.
+  assert.deepEqual(routeOf(RECEIVER_ROUTES, 'codex', 'mailbox', 'idle', SURFACE_IDS.cli), { line: 'nextTurn', canSend: true })
+  assert.equal(routeRecord(mailbox.idle, SURFACE_IDS.cli), 'docs/validation/2026-11-12-codex-cli-mailbox-live.md')
+  const { readReceiverRecords, renderMatrix } = await import('../scripts/messaging-matrix.mjs')
+  const root = join(import.meta.dirname, '..')
+  const row = renderMatrix(await readReceiverRecords(root), 'docs/MESSAGING.md', root).split('\n').find(one => one.startsWith('| Codex | CLI |'))
+  assert.match(row.split(' | ')[8], /^stepEnd · \[docs\/validation\/2026-11-26-codex-cli-stop-live\.md\]/)
 })
 
 test('the line and Send of a route come from its record: no record gives none and Copy', () => {
@@ -9024,7 +9226,8 @@ test('a board reply to a Codex desktop app conversation is answered with the wai
   const sent = await board.call('/api/act', { key: ask.key, type: 'message', id: 'AB-APP-QUIT', text: 'Teal', session: codex, asked: ask.text, fp: ask.fp, connection: app.id, turn: 'session' })
   assert.equal(sent.status, 200)
   assert.equal(sent.body.receipt.status, 'queued')
-  assert.equal(sent.body.note, EN.serveReopenWaitingCodexApp)
+  // The press's note is the status line: queued until the app quits (#1843, B4).
+  assert.equal(sent.body.note, EN.statusQueued(`${EN.statusWhenReopen} · ${EN.justNow}`))
   // The card's receipt after a redraw keeps the same wait.
   const after = (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'codex')
   assert.equal(after.receipt.status, 'queued'); assert.equal(after.receipt.isAfterAppQuit, true)
@@ -9409,10 +9612,11 @@ test('shape 27: a Codex live connection takes the mailbox\'s place only on its r
   const daemon = (await w.call('/api/messages/register', { agent: 'codex', session: w.session, surface: SURFACE_IDS.codexDaemon, turn: 'session', scope: 'session', unclaimed: true })).body
   const live = await w.card()
   assert.deepEqual([live.delivery?.id, live.line, live.canSend], [daemon.id, 'afterWait', true])
-  // While the session works, the receiver's route has no note: the card is the one the mailbox gives without the receiver.
+  // While the session works, the receiver's route has no note: the card is the one the mailbox gives without the
+  // receiver, which on the CLI sends at the step end (#319).
   shapeFile = stateFile('codex', 'working', w.session)
   const busy = await w.card()
-  assert.equal(busy.canSend, false)
+  assert.deepEqual([busy.delivery?.id, busy.line, busy.canSend], [w.target.id, 'stepEnd', true])
   assert.equal((await w.call('/api/messages/disconnect', { connection: daemon.id, secret: daemon.secret, turn: 'session' })).status, 200)
   assert.deepEqual(busy, await w.card())
 })
@@ -9578,11 +9782,14 @@ test('next-turn route explains in plain words in EN, ZH_TW, and ZH_CN, and in-fl
     await new Promise(done => setImmediate(done))
     assert.equal(queueBtn.disabled, true)
     assert.ok(queueBtn.textContent.startsWith(s.serveQueueNextTurn('Codex')))
-    assert.ok(page.text().includes(s.serveQueuingNextTurn('Codex')), page.text())
+    // In flight it reads Sending, the word every route uses (#1843, B4), and claims no reply.
+    assert.ok(page.text().includes(s.statusSending), page.text())
     assert.ok(!page.text().includes(s.serveSending('Codex')), page.text())
-    release({ ok: true, json: async () => ({ ok: true, note: s.serveQueuedNextTurn('Codex'), receipt: { id: 'next-turn-1', status: 'queued', line: 'nextTurn', isMailbox: true } }) })
+    // The board answers with the message's status line.
+    const answered = s.statusQueued(`${s.statusWhenNextTurn} · ${s.justNow}`)
+    release({ ok: true, json: async () => ({ ok: true, note: answered, receipt: { id: 'next-turn-1', status: 'queued', line: 'nextTurn', isMailbox: true } }) })
     await page.flush()
-    assert.ok(page.text().includes(s.serveQueuedNextTurn('Codex')), page.text())
+    assert.ok(page.text().includes(answered), page.text())
     const queued = queueMessage(seed, { id: 'next-turn-1', target: mailbox.id, turn: 'session', text: 'Answer for next turn' }, 'board', mailbox, now, 'local', undefined, 'nextTurn').state
     // The stored receipt, in the board's words (hooks/message-status.ts): queued for its next turn, never a reply.
     await page.redraw(makeModel(queued.messages))

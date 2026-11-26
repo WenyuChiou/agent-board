@@ -31,6 +31,7 @@ import { moveLockAside, readQueuedMessaging } from './board-messaging'
 import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, holderDeps, ownerRecordOf, pageState as storePageState, patiently, settleStoreHolder, untilDeadline, type OwnerRead, type PageProbe, type PageState as StorePageState, type StartPass } from './message-store-claim'
+import { waitForPublishedRecord } from './backoff-publish'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
@@ -2005,7 +2006,8 @@ const answerAttempts = new Map<string, { id: string; text: string }>()
 // the line, the question and the session again, and answers with what came of it.
 const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 'alert' }> => {
   const running = await runningAddress()
-  if (running === null) return { note: s.messagesFailed, tone: 'alert' }
+  // No page to send through, or no answer from it after its one try: the board cannot be reached (owner, #1843 B4 answer 3).
+  if (running === null) return { note: s.statusUnreachable, tone: 'alert' }
   const { route } = action
   const slot = JSON.stringify([action.key, route.session, route.asked])
   const kept = answerAttempts.get(slot)
@@ -2026,7 +2028,7 @@ const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 
     // What was sent leads the note, so a key pressed by mistake shows at once.
     return res.ok ? { note: s.boardAnswered(action.text, note), tone: 'done' } : { note, tone: 'alert' }
   } catch {
-    return { note: s.messagesFailed, tone: 'alert' }
+    return { note: s.statusUnreachable, tone: 'alert' }
   }
 }
 
@@ -2904,7 +2906,7 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     } else if (storeCode === 'MESSAGE_STORE_IN_USE' && flag('--messages-dir') === undefined) {
       // Collision in claims or another start is in flight: back off with randomized jitter, then retry or wait for its page
       await new Promise(done => setTimeout(done, Math.floor(Math.random() * 150) + 50))
-      const afterWait = await runningPage(true, false, replaced)
+      const afterWait = await waitForPublishedRecord(file, () => runningPage(true, false, replaced), deadline)
       // The server it reuses may predate this launcher: tell it the package before returning its URL.
       if (afterWait !== null) { await refreshServerPackage(afterWait.page.url); return { result: { url: afterWait.page.url, port: afterWait.page.port, isKept: afterWait.isKept, isNew: false, idleMs: afterWait.idleMs } } }
       return again()

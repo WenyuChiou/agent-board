@@ -445,8 +445,10 @@ ${block('c0123457', 'cursor', 'waiting', 'Open question', '- [?] What should the
   const view = viewOf(source)
   const document = documentOf(view)
   assert.equal(document.needs[0]?.kind, 'question')
-  assert.deepEqual(document.needs[0]?.options, ['Postgres', 'SQLite'])
-  assert.deepEqual(document.needs[1]?.options, [])
+  // c0123457 (NOW - 2 * MINUTE, options: []) waited longer than c0123456 (NOW - MINUTE, options: ['Postgres', 'SQLite']),
+  // so longest-wait-first ordering puts [] first.
+  assert.deepEqual(document.needs[0]?.options, [])
+  assert.deepEqual(document.needs[1]?.options, ['Postgres', 'SQLite'])
 
   const cliNow = Date.now()
   const cliSource = `## synthetic-api
@@ -456,6 +458,20 @@ ${block('c0123457', 'cursor', 'waiting', 'Open question', '- [?] What should the
   const ran = jsonRun(['--json'], { files: { 'progress.md': cliSource } })
   assert.equal(ran.status, 0, ran.stderr)
   const cliDoc = JSON.parse(ran.stdout)
-  assert.deepEqual(cliDoc.needs[0]?.options, ['Postgres', 'SQLite'])
-  assert.deepEqual(cliDoc.needs[1]?.options, [])
+  // Longest-wait-first ordering puts c0123457 (cliNow - 2 * MINUTE, options: []) before c0123456 (cliNow - MINUTE).
+  assert.deepEqual(cliDoc.needs[0]?.options, [])
+  assert.deepEqual(cliDoc.needs[1]?.options, ['Postgres', 'SQLite'])
+})
+
+test('a task whose only question waits on someone else stays in waiting rather than disappearing from boardDocument (#269)', () => {
+  const source = `## synthetic-api
+${block('d0123456', 'codex', 'waiting', 'Await review', '- [?] Waiting for reviewer reply', NOW - 5 * MINUTE)}
+`
+  const view = viewOf(source)
+  const document = documentOf(view)
+  assert.equal(document.counts.needs, 0)
+  assert.deepEqual(document.needs, [])
+  assert.equal(document.counts.working, 0)
+  assert.equal(document.counts.waiting, 1)
+  assert.equal(document.waiting[0]?.title, 'Await review')
 })

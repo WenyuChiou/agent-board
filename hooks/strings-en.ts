@@ -190,11 +190,7 @@ export const EN: Strings = {
     "updateTrustUnread": "{host}: the update could not read whether the board's hooks are approved, so it changed no approval. To check, preview {command}; to approve them, run it again with --apply.",
     "updateLater": "Nothing changed. To update, run this in a terminal and answer y: {command}",
     "updatePlugin": "This board comes from the Claude Code plugin, so setup leaves it alone. Update the plugin with claude plugin update agent-board@agent-board, then start a new Claude Code session.",
-    "updateNone": "Agent Board is not set up here, so there is nothing to update. Set it up: {command}",
-    "useVersionCheck": "Once a day, the board asks npm for the newest version number.",
-    "useVersionCheckOff": "\"Check for new versions\" in the board's Settings.",
-    "useCodexSessions": "The board reads the list of your Codex sessions (folder, start time, id, last-written time), never the conversation.",
-    "useCodexSessionsOff": "\"Show Codex sessions\" in the board's Settings."
+    "updateNone": "Agent Board is not set up here, so there is nothing to update. Set it up: {command}"
   },
   setupNoAgent: {
     "anywhere": "Setup found no agent on this computer. It looked for their folders in {home}, their commands on the PATH and their apps. Install an agent and run setup again, or name one: {next} (or cursor, opencode, grok, muse, hermes, openclaw, antigravity, deepseek, all).",
@@ -252,12 +248,15 @@ export const EN: Strings = {
 
   // A message's status line (#1843 B4): the same words on the page, the terminal board, --print and --json
   statusSending: 'Sending',
+  statusRetrying: 'Sending · not confirmed, trying again',
   statusQueued: (when: string): string => `Queued · ${when}`,
   statusDelivered: (when: string): string => `Delivered · ${when}`,
   statusRead: (reply: string): string => reply === '' ? 'Read' : `Read · ${reply}`,
   statusAnswered: 'Answered · on the board',
   statusUnsure: (why: string): string => `Unsure · ${why} · check its window`,
   statusNotDelivered: (why: string): string => `Not delivered · ${why}`,
+  statusUnreachable: 'Cannot reach the board · your words are kept',
+  statusAnswerOpen: (line: string): string => `Another answer went first · ${line}`,
   statusWhenNow: 'now',
   statusWhenStepEnd: 'when its step ends',
   statusWhenNextTurn: 'at its next turn',
@@ -276,6 +275,7 @@ export const EN: Strings = {
   statusWhyRefused: 'refused',
   statusWhyStopped: 'stopped',
   statusWhyAppOpen: 'the app stayed open',
+  statusWhyMovedOn: 'the conversation moved on',
   statusWhyTakenBack: 'taken back',
   statusWhySurfaceLost: 'its session no longer reads here',
   statusWhyHeldTooLong: 'held too long',
@@ -642,6 +642,8 @@ export const EN: Strings = {
   sectionWaiting: 'Waiting on you',
   sectionQuestionReminders: 'Earlier unanswered questions',
   sectionOlderQuestions: 'Older unanswered questions',
+  groupOlderCount: (n: number): string => `Earlier ${n}`,
+  groupWaitOthersCount: (n: number): string => `Waiting on others ${n}`,
   stoppedAsking: (n: number): string => `${n} unanswered in stopped sessions`,
   showAllQuestions: (n: number): string => `Show all (${n})`,
   questionAgingHint: 'Still unanswered; expand to review. Viewing does not reset age, approve or complete anything.',

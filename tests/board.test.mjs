@@ -5774,7 +5774,7 @@ test('a press that finds the board gone keeps the typed reply', async () => {
       dom.boxes()[0].value = draft
       dom.send().click()
       await dom.settle()
-      // A send to a connected session tries again every 2 s under the same id, for 30 s, before it says it failed (#1843, B3.1).
+      // A send to a connected session tries again every 2 s under the same id, for 30 s, before it says it cannot reach the board (#1843, B3.1, B4).
       const tries = mode === 'connected' ? 15 : 1
       if (mode === 'connected') {
         assert.equal(dom.node('offline').textContent, '', mode)
@@ -5789,7 +5789,7 @@ test('a press that finds the board gone keeps the typed reply', async () => {
       // The failed press also says so beside its own card, in words the page was given.
       const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
       // A message that did not go carries Send again and Copy message under its line.
-      assert.ok(pageCardResults(dom, model.asks[0].key).some(node => node.textContent.startsWith(mode === 'connected' ? words.messagesFailed : words.serveOffline)), mode)
+      assert.ok(pageCardResults(dom, model.asks[0].key).some(node => node.textContent.startsWith(mode === 'connected' ? words.statusUnreachable : words.serveOffline)), mode)
       assert.ok(dom.node('offline').textContent.includes('agent-board'))
       assert.equal(dom.requests.length, tries)
       isReachable = true
@@ -8996,6 +8996,54 @@ test('the terminal board resends a lost answer under the same id', { timeout: 60
 
 test("the terminal board keeps the answer's id when its reply is cut off", { timeout: 60_000 }, () => terminalLostAnswer('cut'))
 
+test('an answer key whose page cannot be reached says it cannot reach the board after its one try, and never that it answered', { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, ROUTES_ENV, ['--messages-dir', messages])
+  // A page in front of the real one that drops every press before it reaches the board.
+  let presses = 0
+  const front = createServer((req, res) => {
+    if (req.url === '/api/act') {
+      presses += 1
+      return req.resume().on('end', () => req.socket.destroy())
+    }
+    const back = request({ host: '127.0.0.1', port: board.port, method: req.method, path: req.url, headers: { ...req.headers, host: `127.0.0.1:${board.port}` }, agent: false }, answer => {
+      res.writeHead(answer.statusCode ?? 502, answer.headers)
+      answer.pipe(res)
+    })
+    req.pipe(back)
+  })
+  await new Promise(done => front.listen(0, '127.0.0.1', done))
+  const served = readFileSync(board.served, 'utf8')
+  const address = JSON.parse(served)
+  const url = new URL(address.url)
+  url.port = String(front.address().port)
+  writeFileSync(board.served, JSON.stringify({ ...address, url: url.href, ...('port' in address ? { port: Number(url.port) } : {}) }))
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  // Not spawnSync: the page in front answers from this process.
+  const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
+  try {
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
+    const out = await play('y')
+    // One try, then the owner's words for it (#1843, B4 answer 3): the board was not reached, and the answer is kept.
+    assert.equal(presses, 1, out)
+    assert.ok(out.includes(EN.statusUnreachable), out)
+    assert.ok(!out.includes('You answered'), out)
+    const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
+    assert.deepEqual(polled.messages, [])
+  } finally {
+    writeFileSync(board.served, served)
+    await new Promise(done => front.close(done))
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
 test("a terminal answer to a question whose page answer is still open is refused with the first one's status", { timeout: 60_000 }, async () => {
   const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
   const board = await page(`
@@ -9016,7 +9064,8 @@ test("a terminal answer to a question whose page answer is still open is refused
     const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
     assert.deepEqual(polled.messages.map(message => message.id), ['AB-PAGE-1'])
     const out = await play('y')
-    assert.ok(out.includes(EN.messagesUncertain), out)
+    // The refusal says another answer went first, with that answer's own status line (#1843, B4).
+    assert.ok(out.includes(EN.statusAnswerOpen(EN.statusQueued(EN.statusWhenNow))), out)
     const stored = (await board.call('GET', '/api/board')).json().messaging.messages
     assert.deepEqual(stored.map(one => one.id), ['AB-PAGE-1'])
   } finally {
@@ -14634,9 +14683,10 @@ test('the page of a grouped board draws each question once, copies an answer and
       // With nothing connected the empty board names no agent and tells how to start.
       assert.ok(fresh.node('board').textContent.includes(words.pgStartAny))
       // (The version label and the project's name on GitHub are the same in every language.)
+      // The owner's tags AI, CLI and App stay as written in Chinese too (#1884): the page names no AI and marks CLI or App.
       const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ')
       if (words === EN) assert.doesNotMatch(labels, /\p{Script=Han}/u)
-      else assert.doesNotMatch(labels.replaceAll('Agent Board', '').replaceAll('GitHub', '').replaceAll('Claude Code', '').replaceAll('Codex', ''), /[A-Za-z]/)
+      else assert.doesNotMatch(labels.replaceAll('Agent Board', '').replaceAll('GitHub', '').replaceAll('Claude Code', '').replaceAll('Codex', '').replace(/\b(?:AI|CLI|App)\b/g, ''), /[A-Za-z]/)
     }
   } finally { await board.close() }
 })
@@ -15741,7 +15791,8 @@ test('busy or connected card shows one honest message status after Send instead 
       post: async request => {
         if (request.path === '/api/act' && request.body.type === 'message') {
           lastMsgId = request.body.id
-          return { ok: true, json: async () => ({ ok: true, note: s.messagesQueued }) }
+          // The board answers a press with the message's own status line.
+          return { ok: true, json: async () => ({ ok: true, note: s.statusQueued(s.statusWhenNow) }) }
         }
         if (request.path === '/api/messages/dismiss') {
           currentClaude = { ...base, asks: [claudeAsk] }
@@ -15758,7 +15809,7 @@ test('busy or connected card shows one honest message status after Send instead 
     await claudeDom.settle()
 
     const afterSendWords = shownWords(findCard(claudeDom, claudeAsk.key))
-    assert.equal(countMatches(afterSendWords, s.messagesQueued), 1, `right after Send: single queued status (${afterSendWords})`)
+    assert.equal(countMatches(afterSendWords, s.statusQueued(s.statusWhenNow)), 1, `right after Send: single queued status (${afterSendWords})`)
     assert.equal(afterSendWords.includes(s.claudeSendNow), false, 'pre-send line hides after Send')
     assert.equal(afterSendWords.includes(s.pgSentTo(claudeName, replyText)), false, 'never pgSentTo on connected card')
 
@@ -15770,7 +15821,7 @@ test('busy or connected card shows one honest message status after Send instead 
     const queuedWords = shownWords(findCard(claudeDom, claudeAsk.key))
     assert.equal(countMatches(queuedWords, s.statusQueued(s.statusWhenStepEnd)), 1, `queued receipt: one status line (${queuedWords})`)
     // The press's own Queued note is gone once the board's line is drawn: no second Queued beside it.
-    assert.equal(countMatches(queuedWords.split(s.statusQueued(s.statusWhenStepEnd)).join(''), s.messagesQueued), 0, `queued receipt: no second Queued beside it (${queuedWords})`)
+    assert.equal(countMatches(queuedWords, s.statusQueued(s.statusWhenNow)), 0, `queued receipt: no second Queued beside it (${queuedWords})`)
     assert.equal(queuedWords.includes(s.pgSentTo(claudeName, replyText)), false, 'no pgSentTo above queued receipt')
     assert.equal(queuedWords.includes(s.claudeSendNow), false, 'no stale claudeSendNow')
     assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
@@ -15825,15 +15876,17 @@ test('busy or connected card shows one honest message status after Send instead 
       currentModel: () => currentCodex,
       post: async request => {
         lastMsgId = request.body.id
-        return { ok: true, json: async () => ({ ok: true, note: s.messagesQueued }) }
+        return { ok: true, json: async () => ({ ok: true, note: s.statusQueued(`${s.statusWhenStepEnd} · ${s.justNow}`) }) }
       },
     })
     selectAnswer(findCard(codexDom, codexAsk.key), 'Ship it').click()
     await codexDom.settle()
     const codexAfterSend = shownWords(findCard(codexDom, codexAsk.key))
-    assert.equal(countMatches(codexAfterSend, s.serveLineStepEnd(codexName)), 1, `busy codex after Send (${codexAfterSend})`)
+    // One status after Send, the board's note; the route's own hint is not drawn beside it.
+    assert.equal(countMatches(codexAfterSend, s.statusQueued(`${s.statusWhenStepEnd} · ${s.justNow}`)), 1, `busy codex after Send (${codexAfterSend})`)
+    assert.equal(codexAfterSend.includes(s.serveLineStepEnd(codexName)), false, `no route hint beside the note (${codexAfterSend})`)
     assert.equal(codexAfterSend.includes(s.pgSentTo(codexName, 'Ship it')), false, 'never pgSentTo on busy stepEnd codex card')
-    assert.equal(codexAfterSend.includes(s.messagesQueued), false, 'no redundant Queued line beside serveLineStepEnd')
+    assert.equal(codexAfterSend.split(s.statusQueued(`${s.statusWhenStepEnd} · ${s.justNow}`)).join('').includes(s.messagesQueued), false, 'no redundant Queued line beside the note')
 
     currentCodex = {
       ...base,

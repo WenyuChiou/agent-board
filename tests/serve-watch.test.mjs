@@ -22,6 +22,7 @@ const { startServer, boardVersion, quoteArg } = await import('../scripts/board-s
 const { parseProgress } = await import('../hooks/parse.ts')
 const { buildView } = await import('../hooks/view.ts')
 const { EN } = await import('../hooks/strings-en.ts')
+const { SURFACE_IDS } = await import('../hooks/messaging.ts')
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
 const roots = []
@@ -35,14 +36,15 @@ const blockOf = title => `## Synthetic watch\n<!-- auto session=abcd1234 agent=c
 
 // A board started from source. `fs` stands in for fs.watch; `holdMs` for how long an open request waits.
 // `reads` counts how often the server built the board, which is where its file work is.
-const startBoard = async ({ fs, holdMs, idleMs = 0, name = 'progress.md' } = {}) => {
+// `text` is the board's first progress.md, `routes` the receiver routes it sends by.
+const startBoard = async ({ fs, holdMs, idleMs = 0, name = 'progress.md', text = blockOf('First synthetic task'), routes = [] } = {}) => {
   const root = mkdtempSync(join(tmpdir(), 'serve-watch-'))
   roots.push(root)
   const claude = join(root, '.claude')
   mkdirSync(claude)
   const progress = join(claude, name)
   const inbox = join(claude, 'progress-inbox')
-  writeFileSync(progress, blockOf('First synthetic task'))
+  writeFileSync(progress, text)
   const messages = join(root, 'messages')
   mkdirSync(messages)
   let reads = 0
@@ -50,7 +52,7 @@ const startBoard = async ({ fs, holdMs, idleMs = 0, name = 'progress.md' } = {})
   const isStopped = new Promise(done => { stopped = done })
   const address = await new Promise((resolve, reject) => {
     startServer({
-      port: 0, messagesDirectory: messages, routes: [], s: EN, ping: {},
+      port: 0, messagesDirectory: messages, routes, s: EN, ping: {},
       view: () => { reads += 1; return buildView(parseProgress(readFileSync(progress, 'utf8')), [], null, Date.now(), 0, {}, EN) },
       pending: () => [], act: () => '', tidy: () => '', clean: () => '', sweep: () => {}, sweepMs: 60_000,
       paste: () => ({ isAdded: false, note: '' }), failure: () => null, idleMs,
@@ -450,5 +452,52 @@ test('serve: the update command leaves a retired agent out, even with its record
       if (before === undefined) delete globalThis.AGENT_BOARD
       else globalThis.AGENT_BOARD = before
     }
+  } finally { await board.close() }
+})
+
+test('serve: a waiting page is answered when a message passes its 20 s, with no store change, and two waiting pages get the same line (#1843)', async () => {
+  const thread = '11111111-2222-4333-8444-555555555555'
+  const route = { line: 'now', record: 'docs/validation/synthetic.md', surfaces: [SURFACE_IDS.cli] }
+  // A synthetic recorded route that goes in now, for a Codex receiver joined by turn or by session.
+  const routes = ['live', 'turn'].map(kind => ({ agent: 'codex', kind, routes: { idle: route, working: route, ended: { line: 'none', record: null, surfaces: [] } } }))
+  const text = `## Synthetic watch\n<!-- auto session=abcd1234 agent=codex resume=${thread} state=waiting updated=${new Date().toISOString()} -->\n### Clock fixture\n- [?] Blue or green?\n<!-- /auto session=abcd1234 -->\n`
+  const board = await startBoard({ holdMs: 60_000, text, routes })
+  try {
+    // No wait for the minute: a minute turning only answers a page early with a board that is not yet Unsure, and it asks again.
+    assert.equal((await board.post('/api/messages/register', { agent: 'codex', session: thread, turn: 'turn1', surface: SURFACE_IDS.cli, unclaimed: true })).status, 200)
+    const ask = JSON.parse((await board.ask()).text).model.asks.find(one => one.session === thread)
+    const pressed = await board.post('/api/act', { key: ask.key, type: 'message', id: 'AB-CLOCK-1', text: 'Blue', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn })
+    assert.equal(pressed.status, 200, pressed.text)
+    const pressedAt = performance.now()
+    const store = join(board.root, 'messages', 'messages.json')
+    // What the clock reads: the receipt and when it last changed. (The idle receiver's lease ends meanwhile, and the store
+    // notes that it left; that is its own event, not the clock's.)
+    const receiptOf = () => JSON.parse(readFileSync(store, 'utf8')).messages.map(({ id, status, updated, claimed, error, reply }) => ({ id, status, updated, claimed, error, reply }))
+    const stored = receiptOf()
+    const unsure = EN.statusUnsure(EN.statusWhyNoAnswer)
+    // Each page holds the board it has and asks again whenever it is answered, until its card reads Unsure.
+    const watch = async page => {
+      let held = await board.ask(undefined, { page })
+      assert.ok(!held.text.includes(unsure), 'the message read Unsure as soon as it was sent')
+      while (performance.now() - pressedAt < 26_000) {
+        const next = await settledWithin(board.ask(held.etag, { page }), 26_000 - (performance.now() - pressedAt))
+        if (next === undefined) break
+        assert.equal(next.status, 200, next.text)
+        held = next
+        if (held.text.includes(unsure)) return held
+      }
+      return undefined
+    }
+    // A page in sight, and a second one on the same board (#1843, B4: only now-route messages have this clock).
+    const [first, second] = await Promise.all([watch('p-watch'), watch('')])
+    assert.ok(first !== undefined, 'the waiting page was not answered when the message passed its 20 s')
+    assert.ok(second !== undefined, 'the second waiting page was not answered when the message passed its 20 s')
+    const after = first.at - pressedAt
+    assert.ok(after >= 19_000 && after <= 25_000, `the page was answered ${Math.round(after)} ms after the press`)
+    // One wake answers both: the second page gets the Unsure line at the same time, not at a later check.
+    assert.ok(Math.abs(second.at - first.at) < 2_000, `the second page was answered ${Math.round(second.at - first.at)} ms after the first`)
+    // Reading the clock is no write: the store holds what the press stored, and a later read still says Unsure.
+    assert.deepEqual(receiptOf(), stored)
+    assert.ok((await board.ask()).text.includes(unsure))
   } finally { await board.close() }
 })

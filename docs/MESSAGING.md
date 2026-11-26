@@ -158,6 +158,10 @@ are `SessionEnd` for Codex and Muse, and `sessionEnd` for Cursor.
 
 Antigravity's `Stop` hook (the end of every turn, in the app and in agy TUI) reads the model's ACK (#1416). The turn-start hook keeps the id and the `ACK` code of each message it hands over (in the board's data folder, or beside the message store when that write fails; no text); the `Stop` hook reads the first line of each reply the model gave in the turn from the conversation's own transcript, because the hook does not carry the reply. A line that is `ACK <code>` of a message handed over in that turn acknowledges it, and only that line is kept as the reply. A reply with no such line, or with another message's code, changes nothing, and neither does a turn that handed over no message. The kept code is spent at the first `Stop` after the hand-over; one the board did not take (busy or stopped) is tried again at the next `Stop`, and so is one a `Stop` could not read (no transcript path, or a transcript it cannot open), which the next `Stop` still reads only in the turn of its hand-over.
 
+Codex CLI's `Stop` hook hands over one queued message when a step of a turn ends (#319). Only a `Stop` that says `stop_hook_active` is `false` takes one, and only with at least 1.3 seconds of the hook's time left; it takes only a message stored for the terminal (`CLI`), never one for the session's daemon connection or for Codex outside the terminal. The hook first writes the session's progress, as every Codex hook does; when that write is queued behind another process, nothing is taken. It then prints one JSON object, `{"decision":"block","reason":…}`, whose reason is the same text a turn start hands over, and Codex runs it as the next step of the same turn. It keeps the message's id and `ACK` code (no text) in `codex-acks` in the board's data folder, or beside the message store when that write fails, and only then marks the message accepted; a print that fails accepts nothing, so the claim reads Unsure once its 30-second lease runs out. Every `Stop` reads the first non-empty line of `last_assistant_message`: `ACK <code>` of a message handed over acknowledges it and only that line is kept, as for Antigravity above; a reply without it leaves the message Delivered. A `Stop` that a hook already continued (`stop_hook_active` `true`) reads the ACK and hands nothing over.
+
+An answer to a question waits for the turn that asked it. Each Codex turn start names its turn id on the session's mailbox, and an answer queued while that turn ran carries the id. At a step end, an answer that carries the id of an earlier turn is refused (`rejected`, `MOVED_ON`) and reads Not delivered · the conversation moved on; a message that answers no question goes in at any step end, and a turn start still hands over either. A board started before step-end takes refuses their fields; the `Stop` hook then takes nothing, while a turn start asks such a board again without them. A live run on 2026-11-26 sent a message from the page while a Codex CLI turn ran: it went in at the step end within the same turn, and the next `Stop` recorded its ACK ([docs/validation/2026-11-26-codex-cli-stop-live.md](validation/2026-11-26-codex-cli-stop-live.md)). So a working Codex CLI card offers Send with the step-end line; the desktop app, the editor and the background service keep Copy while working.
+
 The separate legacy `--allow-resume` option deliberately allows a local reply to
 start an ended Codex or Grok Build session. It is disabled by default, never enabled by
 setup, and works for closed sessions even with the message hub running. It is not live delivery.
@@ -358,18 +362,24 @@ question shows only the answer sent to it, never another message to its session.
 
 | Line | When |
 | --- | --- |
-| Sending | The page's own line while a send has no answer yet; never read from a store |
+| Sending | The page's own line while a send has no answer yet, on every route; never read from a store |
+| Sending · not confirmed, trying again | The page's line once a send had no answer in 2 seconds and goes again under the same id |
+| Cannot reach the board · your words are kept | The page after 30 seconds with no answer, and the terminal board after its one try; the typed words stay, and the message's own line replaces this one if the board stored it |
 | Queued · when | Stored and not handed out, with when it goes in: now, when its step ends, at its next turn (a mailbox with no route says this too), when its wait ends, when its chat next opens, or once the app quits. A route other than now adds the message's age. A claim handed out less than 20 seconds ago also reads Queued · now |
 | Delivered · age | `accepted`, with no error since |
 | Read · reply | `acknowledged`, with the reply the session gave (a version 1 store's `ACK <id>` is left out) |
 | Answered · on the board | An answer to a question, handed over (`accepted`, `acknowledged`, or accepted before), whose session reported after its last receipt |
 | Unsure · why · check its window | A message on a route that goes in now, or a claim, with no event for 20 seconds; any `uncertain` receipt; and a message that was accepted once whose holder went away (`delivered, reply not confirmed`) |
-| Not delivered · why | `rejected` (refused, stopped, the app stayed open, taken back); a queued mailbox message whose session now reads another surface; one given up at the open limit before anything took it |
+| Not delivered · why | `rejected` (refused, stopped, the app stayed open, the conversation moved on, taken back); a queued mailbox message whose session now reads another surface; one given up at the open limit before anything took it |
 
 The 20 seconds count from the receipt's last change, so the line reads the same with or without a live
 connection, and reading it changes nothing in the store. The one exception is a Codex app turn the receiver
 still holds: the page reads it as delivered while the receiver keeps its connection. A route that waits on a step, a turn or the
-app has no such clock. A message taken back after it was handed out shows no line.
+app has no such clock. A message taken back after it was handed out shows no line. When a message on that clock turns
+Unsure with no event of its own, the server wakes every page waiting on the board, so each shows the line as it turns.
+
+The board's answer to a press is the message's status line. A second answer to a question whose first answer is still
+open is refused with "Another answer went first" and the first answer's line.
 
 ### Message ids
 
@@ -572,7 +582,7 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Claude Code | CLI | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | stepEnd · [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | none · no live note |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| Codex | CLI | 3 | Unknown | Verified | [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | nextTurn · no live note | none · no live note |
+| Codex | CLI | 3 | Unknown | Verified | [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | stepEnd · [docs/validation/2026-11-26-codex-cli-stop-live.md](../docs/validation/2026-11-26-codex-cli-stop-live.md) | none · no live note |
 | Codex | Daemon | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | [scripts/codex-receiver.mjs](../scripts/codex-receiver.mjs) | afterWait · [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | stepEnd · no live note | none · no live note |
 | Codex | Desktop App | 2 | Unknown | Verified | [docs/validation/2026-11-22-codex-app-reopen-live.md](../docs/validation/2026-11-22-codex-app-reopen-live.md) | [hooks/receivers/codex-app.ts](../hooks/receivers/codex-app.ts) | reopen · [docs/validation/2026-11-22-codex-app-reopen-live.md](../docs/validation/2026-11-22-codex-app-reopen-live.md) | stepEnd · no live note | none · no live note |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |

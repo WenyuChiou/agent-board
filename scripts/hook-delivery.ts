@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, unlinkSync } from 'node:fs'
 import { request } from 'node:http'
 import { join, posix } from 'node:path'
-import { deliveryText, SURFACE_IDS } from '../hooks/messaging.ts'
-import { isSessionEnd, isTurnStart, turnStartEnvelope } from '../hooks/hook-messages.ts'
+import { deliveryText, isHostTurn, SURFACE_IDS } from '../hooks/messaging.ts'
+import { isSessionEnd, isStepEnd, isTurnStart, STEP_END_MIN_MS, stepEndEnvelope, turnStartEnvelope } from '../hooks/hook-messages.ts'
 import { sessionPushNote } from '../hooks/others.ts'
 import { parseProgress } from '../hooks/parse.ts'
 import { STRINGS } from '../hooks/strings.ts'
@@ -28,8 +28,9 @@ type Json = Record<string, unknown>
 // one failed write does not lose an ACK. Both are read; a save writes one and removes the other.
 type AckClaim = { id: string; nonce: string; matched?: true; from?: number }
 const ACK_CLAIMS_KEEP = 8
-const ackClaimsFiles = (root: string, messages: string, owner: string): string[] =>
-  [join(root, 'antigravity-acks', `${owner}.json`), join(`${messages}-acks`, `${owner}.json`)]
+// Codex's Stop hook keeps its hand-overs the same way, in a folder of its own (#319); `owner` names the agent and session.
+const ackClaimsFiles = (root: string, messages: string, owner: string, folder = 'antigravity-acks'): string[] =>
+  [join(root, folder, `${owner}.json`), join(`${messages}-acks`, `${owner}.json`)]
 const isAckClaim = (one: unknown): one is AckClaim =>
   typeof one === 'object' && one !== null && typeof (one as Json).id === 'string' && typeof (one as Json).nonce === 'string' && /^[0-9a-f]{6}$/.test((one as Json).nonce as string)
 const readAckClaimsFile = (file: string, readLocal: (file: string) => string | null): AckClaim[] => {
@@ -183,13 +184,67 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
         }
         if (!saveAckClaims(files, kept, atomic, checkDeadline)) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
       }
+    } else if (agent === 'codex' && event === 'Stop') {
+      // A step end (#319). First the reply: its first line acknowledges a message an earlier Stop handed over. It is read at
+      // every Stop, one that hands nothing over too, and only its code is kept, never the rest of the reply. A claim is spent
+      // at the first Stop after its hand-over, matched or not; only an acknowledgement the board did not take is kept, as matched.
+      const owner = hash(`${agent}:${session}`)
+      const files = ackClaimsFiles(root, messages, owner, 'codex-acks')
+      const claims = readAckClaims(files, readLocal)
+      if (claims.length > 0) {
+        const reply = raw.last_assistant_message
+        const first = typeof reply === 'string' ? reply.split(/\r?\n/).find(line => line.trim() !== '')?.trim() : undefined
+        const kept: AckClaim[] = []
+        let isAckFailed = false
+        for (const claim of claims) {
+          if (claim.matched !== true && !(first !== undefined && (first === `ACK ${claim.nonce}` || first.startsWith(`ACK ${claim.nonce} `)))) continue
+          try {
+            if (mailbox === undefined) throw new Error(setupError ?? 'MAILBOX_FAILED')
+            await mailbox.ack(agent, session, claim.id, claim.nonce, `ACK ${claim.nonce}`, Date.now())
+          } catch { kept.push({ id: claim.id, nonce: claim.nonce, matched: true }); isAckFailed = true }
+        }
+        if (isAckFailed) {
+          if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
+          else process.stderr.write(`${s.localAgentMailboxFailed(mailbox?.error ?? setupError ?? 'MAILBOX_FAILED')}\n`)
+        }
+        if (!saveAckClaims(files, kept, atomic, checkDeadline)) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
+      }
+      // Then one message, only at a Stop no hook has continued yet and with the time to take, print and accept it. This runs
+      // after the progress write, as a turn start does (#319, question 1): a hook stopped before it claims nothing.
+      if (!isStepEnd(agent, event, raw) || hookDeadline - Date.now() < STEP_END_MIN_MS || mailbox === undefined) return false
+      const transcript = raw.transcript_path
+      const surface = codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null, process.env[CODEX_CLIENT_VARIABLE], process.env[CODEX_DAEMON_VARIABLE])
+      // Only Codex in a terminal is shown to continue a turn this way; anywhere else (the desktop app, an editor, the
+      // background service, or no transcript to tell) takes nothing, even a message that names no surface.
+      if (surface !== SURFACE_IDS.cli) return false
+      const turnId = raw.turn_id
+      const message = await mailbox.turn(agent, session, surface, Date.now(), undefined, { ...(isHostTurn(turnId) ? { hostTurn: turnId } : {}), isStepEnd: true })
+      if (mailbox.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
+      else if (mailbox.error !== null) process.stderr.write(`${s.localAgentMailboxFailed(mailbox.error)}\n`)
+      if (message === null) return false
+      // Printed before anything says it was handed over: a write that fails leaves the claim unaccepted, so it reads Unsure
+      // after its lease and is never handed out again, rather than Delivered for a message Codex never got.
+      try {
+        await new Promise<void>((done, fail) => process.stdout.write(`${JSON.stringify(stepEndEnvelope(deliveryText(message, s)))}\n`, error => error ? fail(error) : done()))
+      } catch { return true }
+      // The code is kept for the next Stop before the acceptance, so a hook stopped after Codex has the message still leaves it.
+      // A handed-over message holds nothing until its ACK, as every hook's (#319, question 2).
+      let isSaved = false
+      if (/^[0-9a-f]{6}$/.test(message.nonce)) {
+        try { isSaved = saveAckClaims(files, [...readAckClaims(files, readLocal).filter(one => one.id !== message.id), { id: message.id, nonce: message.nonce }].slice(-ACK_CLAIMS_KEEP), atomic, checkDeadline) } catch {}
+      }
+      if (!isSaved) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
+      try { await mailbox.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
+      return true
     } else if (isTurnStart(agent, event)) {
       let message = null
       const transcript = raw.transcript_path
       const surface = agent === 'cursor' ? SURFACE_IDS.cursor : agent === 'antigravity' ? antigravitySurface(raw.transcriptPath, raw.artifactDirectoryPath)
         : agent === 'codex' ? codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null, process.env[CODEX_CLIENT_VARIABLE], process.env[CODEX_DAEMON_VARIABLE])
         : SURFACE_IDS.cli
-      try { message = await mailbox?.turn(agent, session, surface, Date.now()) ?? null } catch {}
+      // A Codex turn start names its turn, so an answer the board queues while it runs is bound to it (#319).
+      const turnId = raw.turn_id
+      try { message = await mailbox?.turn(agent, session, surface, Date.now(), undefined, agent === 'codex' && isHostTurn(turnId) ? { hostTurn: turnId } : undefined) ?? null } catch {}
       const failed = mailbox?.error ?? setupError
       if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
       else if (failed !== null) process.stderr.write(`${s.localAgentMailboxFailed(failed)}\n`)
