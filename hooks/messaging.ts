@@ -58,7 +58,7 @@ export type Message = {
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
-// now (goes in at once), afterWait (goes in after a wait, such as the Codex daemon's ~10-minute watch, #1814),
+// now (goes in at once), afterWait (goes in after a wait, such as the Codex daemon's, within seconds with a Codex window open and up to 10 minutes without, #1814, #1652),
 // stepEnd (when its current step ends), nextTurn (at its next turn; it does not wake it), chatOpen (when this
 // chat is opened again), reopen (the board reopens the session and sends), none (cannot receive yet). `record`
 // is the docs/validation note that showed the route live, or null.

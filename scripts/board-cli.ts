@@ -28,7 +28,7 @@ import type { ConfirmedTask } from '../hooks/blocks'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
-import { explicitCodexExecutable, resolveCodexExecutable, testUnloadMs } from './codex-receiver.mjs'
+import { explicitCodexExecutable, resolveCodexExecutable, testClients, testUnloadMs } from './codex-receiver.mjs'
 import { readSettings, settingsLockName, updateSettings } from './settings-file'
 import { claimMessageStore, hasLiveClaims, holderDeps, ownerRecordOf, pageState as storePageState, patiently, settleStoreHolder, untilDeadline, type OwnerRead, type PageProbe, type PageState as StorePageState, type StartPass } from './message-store-claim'
 import { immutableQuestionFiles } from './question-files'
@@ -2340,6 +2340,7 @@ const serveChild = (): void => {
         // The daemon's own unload delay and a margin, which the receiver knows, unless a test process started this page and
         // names a shorter wait for its stand-in daemon (`testUnloadMs`).
         unloadMs: testUnloadMs(process.env, process.ppid),
+        clients: testClients(process.env, process.ppid),
         appSessions: codexAppSessions(path),
         // Only a home `--codex-dir` names is handed on: without it the run keeps the CODEX_HOME of this environment, or none.
         ...(flag('--codex-dir') ? { appHome: resolve(flag('--codex-dir') as string) } : {}),
