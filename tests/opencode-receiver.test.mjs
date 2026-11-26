@@ -1173,9 +1173,13 @@ test('the card says sent, not confirmed in all three languages, and the board wo
   const texts = Object.values(STRINGS).map(one => one.statusUnsure(one.statusWhyUnconfirmed))
   for (const text of texts) assert.ok(typeof text === 'string' && text.length > 8)
   assert.equal(new Set(texts).size, 3)
-  // The board words every card's status line (hooks/message-status.ts); the page draws it.
-  const status = readFileSync(new URL('../hooks/message-status.ts', import.meta.url), 'utf8')
-  assert.ok(status.includes('one.error === UNCONFIRMED ? s.statusWhyUnconfirmed'))
+  // The board words every card's status line (hooks/message-status.ts) and sends it with the receipt; the page draws it.
+  const { rowReceipt } = await importTs('../hooks/serve.ts')
+  for (const s of Object.values(STRINGS)) {
+    const sent = { id: 'AB-OC-1', to: 'opencode:ses_synthetic', target: 'synthetic-connection', turn: 'session', from: 'board', text: 'Blue', origin: 'local', status: 'uncertain', reply: '', error: 'UNCONFIRMED', hops: 0, updated: 1, claimed: 1 }
+    const { receipt } = rowReceipt('opencode', 'ses_synthetic', [sent], 2, s)
+    assert.deepEqual([receipt?.shown?.state, receipt?.shown?.line], ['unsure', s.statusUnsure(s.statusWhyUnconfirmed)])
+  }
 })
 
 test('the agent_board_ack tool takes no summary as well as one', () => fixture(async f => {
