@@ -360,7 +360,7 @@ if (args.at(-1)?.includes('SLOW_TURN')) {
 })
 })
 
-test('an idle Codex card says its message starts within about 10 minutes, not right away, in EN, ZH_TW and ZH_CN (#1506, #1578)', async () => {
+test('an idle Codex card says its message goes in within a few seconds while a Codex window is open, and within about 10 minutes otherwise, in EN, ZH_TW and ZH_CN (#1506, #1578, #1652)', async () => {
   const { agentLabel } = await import('../hooks/strings.ts')
   for (const s of [EN, ZH_TW, ZH_CN]) {
     // Codex's daemon receiver takes `afterWait` on idle because it watches a thread for about 10 minutes, or longer if configured (#1814).
