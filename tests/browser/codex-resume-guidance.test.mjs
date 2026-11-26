@@ -44,12 +44,13 @@ test('a stopped Codex card shows the reconnect prompt beside its resume action i
           await page.locator('.shelf-head').filter({ hasText: s.pgStopped }).click()
           const row = page.locator('.row').filter({ has: page.getByText(title, { exact: true }) })
           await row.locator('.row-btn').click()
-          await row.getByText(s.serveCodexResumePrompt, { exact: true }).waitFor({ state: 'visible' })
-          await row.getByRole('button', { name: s.serveCopyResume, exact: true }).waitFor({ state: 'visible' })
+          const detail = width >= 1440 ? page.locator('#detail-rail') : row
+          await detail.getByText(s.serveCodexResumePrompt, { exact: true }).waitFor({ state: 'visible' })
+          await detail.getByRole('button', { name: s.serveCopyResume, exact: true }).waitFor({ state: 'visible' })
           for (const name of [s.serveSend('Codex'), s.serveQueueNextTurn('Codex'), s.serveQueueNextOpen('Codex')]) {
-            assert.equal(await row.getByRole('button', { name, exact: true }).count(), 0, 'an ended task does not offer an unverified send action')
+            assert.equal(await detail.getByRole('button', { name, exact: true }).count(), 0, 'an ended task does not offer an unverified send action')
           }
-          await row.getByRole('button', { name: s.pgCopyAnswer, exact: true }).waitFor({ state: 'visible' })
+          await detail.getByRole('button', { name: s.pgCopyAnswer, exact: true }).waitFor({ state: 'visible' })
           assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), `${lang}/${width}: the instruction fits`)
           await page.screenshot({ path: join(artifacts, `synthetic-codex-resume-${lang}-${width}.png`), fullPage: true, animations: 'disabled' })
         } finally { await context.close() }

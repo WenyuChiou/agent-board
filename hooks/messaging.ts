@@ -154,10 +154,11 @@ export const isReceiverRoutes = (value: unknown): value is ReceiverRoutes[] => A
 export const routeKind = (scope: Connection['scope']): RouteKind => scope === 'mailbox' ? 'mailbox' : scope === 'session' ? 'live' : 'turn'
 export const isMailboxTarget = (id: string): boolean => /^mailbox_[0-9a-f]{24}$/.test(id)
 const isHookDelivered = (one: Message): boolean => one.status === 'accepted' && isMailboxTarget(one.target) && !one.awaitsAck
-// A hook can stop waiting after the board has claimed a message for it, and then nobody accepts it. A
-// claim a hook named is handed out again once the lease has passed, a few times at most, with the same
-// ACK code and a line saying it may be a repeat (#990). A claim with no name (board_inbox, a live
-// receiver) is handed over once.
+// A hook can stop waiting after the board has claimed a message for it, and then nobody accepts it. A claim a hook
+// named and nobody accepted in its lease reads Unsure with HOLDER_LOST (below) and is never handed out again (#1843).
+// DeepSeek's plugin holds a claim while its session works and delivers it at the next idle, so until it can give a held
+// claim back (#1870) its claims are still handed out again once the lease has passed, a few times at most, with the same
+// ACK code and a line saying it may be a repeat (#990). A claim with no name (board_inbox, a live receiver) is handed over once.
 export const MAILBOX_LEASE_MS = 30_000
 export const MAILBOX_REDELIVERIES = 3
 // The error a started wake carries once 30 minutes passed with no receipt: the card says "sent, not confirmed".
@@ -173,8 +174,17 @@ export const isAcceptedOnce = (one: Pick<Message, 'status' | 'hasAccepted'>): bo
 // The error the board writes at its start on a message a hook was handed before it: nothing handed out before a board start is
 // handed out after it (#1407). Only the board writes it; a receiver cannot send it.
 export const BOARD_RESTARTED = 'BOARD_RESTARTED'
+// The error the board writes on a hook's named claim nobody accepted in its lease: its holder may have been killed before or
+// after its output reached the host, and the board cannot tell which, so the claim loses its name and is never handed out
+// again (#1843). It holds its session as BOARD_RESTARTED does, until a dismiss or the open limit. Only the board writes it.
+export const HOLDER_LOST = 'HOLDER_LOST'
+const isLeaseKept = (one: Pick<Message, 'to'>): boolean => one.to.startsWith('deepseek:')
+// A named claim whose lease is over and that no rule hands out again: not OpenCode's (#724), not DeepSeek's, not one its host
+// accepted (#1407). An error a receipt wrote does not change it: a later receipt with no error would clear that error.
+export const isLeaseOver = (one: Message, now: number): boolean => one.status === 'uncertain' && one.ref !== undefined && isMailboxTarget(one.target)
+  && !isAtMostOnce(one) && !isLeaseKept(one) && !isAcceptedOnce(one) && now - one.claimed >= MAILBOX_LEASE_MS
 const isLeasePassed = (one: Message, now: number): boolean => one.status === 'uncertain' && one.error === '' && one.ref !== undefined && isMailboxTarget(one.target) && now - one.claimed >= MAILBOX_LEASE_MS
-const isLapsed = (one: Message, now: number): boolean => isLeasePassed(one, now) && !isAcceptedOnce(one) && (isAtMostOnce(one) ? one.attempted === undefined : (one.redelivered ?? 0) < MAILBOX_REDELIVERIES)
+const isLapsed = (one: Message, now: number): boolean => isLeasePassed(one, now) && !isAcceptedOnce(one) && (isAtMostOnce(one) ? one.attempted === undefined : isLeaseKept(one) && (one.redelivered ?? 0) < MAILBOX_REDELIVERIES)
 // An OpenCode claim nobody marked: its plugin lost the answer to the take, or gave up before the attempt. The plugin's next take
 // from the same mailbox gets it at once instead of waiting out the lease; the old ref then answers CLAIM_LOST to an attempt.
 const isUnmarked = (one: Message): boolean => isAtMostOnce(one) && one.status === 'uncertain' && one.error === '' && one.attempted === undefined && !isAcceptedOnce(one) && isMailboxTarget(one.target)
@@ -271,8 +281,12 @@ export const pruneMessages = (state: MessageState, now: number): MessageState =>
   // accepted (it reads "sent, not confirmed" and keeps its text); every other message follows the open limit.
   // A queued message that carries an acceptance mark, as an earlier board saved a hand-back of an accepted message, is never
   // handed out (#1407): it reads Unsure with no claim time, so it ages and expires as one does.
+  // A hook's named claim past its lease loses its name, and reads HOLDER_LOST unless a receipt wrote an error; its times stay,
+  // so the open limit still counts from its claim (#1843).
   const kept = state.messages.filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(saved => {
-    const one = saved.status === 'queued' && saved.hasAccepted === true ? { ...saved, status: 'uncertain' as const, error: '', claimed: 0 } : saved
+    const marked = saved.status === 'queued' && saved.hasAccepted === true ? { ...saved, status: 'uncertain' as const, error: '', claimed: 0 } : saved
+    const { ref: _ref, ...unnamed } = marked
+    const one = isLeaseOver(marked, now) ? { ...unnamed, error: unnamed.error || HOLDER_LOST } : marked
     const wake = settleWake(one, now)
     if (wake !== undefined) return wake
     // A reply the Codex desktop app held for the whole open limit is refused as not sent, with no receiver to ask (#557).
@@ -337,6 +351,13 @@ export const messageText = (value: unknown, max = 8000): string => {
   return value
 }
 export const isAnswersId = (value: unknown): value is string => typeof value === 'string' && value.length >= 1 && value.length <= 200 && !/[\r\n\0]/.test(value)
+// The board's open answer to a question, for one answer per question (#1843, B3.2): the last one that still holds its session.
+// One a hook put into a turn holds nothing, but its answer is still on its way until the session reports after it; a session
+// that never reports holds it until the open limit or a dismiss. `reportedAt` is the session's last report, -1 for none.
+export const openAnswer = (state: MessageState, to: string, answers: string, reportedAt: number): Message | undefined => {
+  const open = state.messages.filter(one => one.from === 'board' && one.to === to && one.answers === answers && isHolding(one) && (!isHookDelivered(one) || reportedAt <= one.updated))
+  return open[open.length - 1]
+}
 export const messageId = (value: unknown): string => {
   if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) throw new Error('INVALID_ID')
   return value
@@ -456,8 +477,9 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   const reply = input.reply === undefined ? '' : input.reply
   const error = input.error === undefined ? '' : messageId(input.error)
   // These are the board's own states: EXPIRED and DISMISSED it writes at the limit or for the person, "sent, not
-  // confirmed" only for an OpenCode wake it started, and BOARD_RESTARTED at its start; a receiver cannot claim them (#1366 review).
-  if (error === 'EXPIRED' || error === 'DISMISSED' || error === UNCONFIRMED || error === BOARD_RESTARTED) throw new Error('INVALID_RECEIPT')
+  // confirmed" only for an OpenCode wake it started, BOARD_RESTARTED at its start and HOLDER_LOST at a lease's end; a
+  // receiver cannot claim them (#1366 review, #1843).
+  if (error === 'EXPIRED' || error === 'DISMISSED' || error === UNCONFIRMED || error === BOARD_RESTARTED || error === HOLDER_LOST) throw new Error('INVALID_RECEIPT')
   if (status === 'acknowledged' && (typeof reply !== 'string' || reply.length > ACK_MAX || /[\r\n]/.test(reply) || reply !== `ACK ${one.nonce}` && !reply.startsWith(`ACK ${one.nonce} `))) throw new Error('ACK_REQUIRED')
   if (typeof reply !== 'string' || reply && messageText(reply) !== reply) throw new Error('INVALID_TEXT')
   if (one.status === 'acknowledged' || one.status === 'rejected') {
@@ -470,9 +492,8 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   // it must not hold the session's next message for another 30 minutes (#1366 review). Its day-long retention does not restart.
   if (one.status === 'uncertain' && one.error === UNCONFIRMED && status === 'accepted' && one.to.startsWith('opencode:')) return one.hasAccepted === true ? state : { ...state, messages: state.messages.map(message => message === one ? { ...one, hasAccepted: true } : message) }
   const { awaitsStart: _awaitsStart, ...rest } = one
-  // An uncertain receipt with no error says nothing new of a message a board start made Unsure, and must not make it a hook's
-  // claim again (#1407).
-  const kept = status === 'uncertain' && error === '' && one.status === 'uncertain' && one.error === BOARD_RESTARTED ? BOARD_RESTARTED : error
+  // An uncertain receipt with no error says nothing new of a message a board start or a lease's end made Unsure (#1407, #1843).
+  const kept = status === 'uncertain' && error === '' && one.status === 'uncertain' && (one.error === BOARD_RESTARTED || one.error === HOLDER_LOST) ? one.error : error
   return { ...state, messages: state.messages.map(message => message === one ? settled({ ...rest, status, reply, error: kept, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
 }
 // A wake the plugin started (marked by an attempt) whose reply may still be on its way, accepted by the host or not: a

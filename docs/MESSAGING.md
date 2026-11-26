@@ -65,11 +65,19 @@ a message queued for it then is saved for `IDE`, and from its next turn the hook
 without a surface, by an older board or from another agent's session, is not held to one.
 A turn-start hook marks a message `accepted` only after it has written the message to its output
 for the host; that does not prove the model read it, and the hook collects no ACK. A hook that
-stops waiting can hand its claim back, and a claim handed back is queued again. A claim the hook
-named that is still uncertain with no error can be handed out again after 30 seconds, with the
-same ACK code and a line saying it may be a repeat: at most three times for one message (a claim
-after a hand-back does not count), and not while it has an error (`EXPIRED` and `DISMISSED` are
-final; a later receipt from the session can clear a disconnected mark). A message its host accepted
+stops waiting can hand its claim back within its 30-second lease, and a claim handed back is queued
+again. A claim the hook named that nobody accepted or handed back in those 30 seconds becomes
+`uncertain` / `HOLDER_LOST` and is never handed out or handed back again: the hook that took it may
+still have shown it to its host, so the board does not risk showing it twice (#1843). It keeps its
+text and takes a late accept or ACK; until then it holds the session as any open uncertain claim
+does (below), so a new send to that session gets `PAIR_BUSY` and nothing queued goes out until it
+is dismissed or its 30 minutes pass. The page shows it as no reply confirmed. A later receipt from
+the session, even one with no error, keeps `HOLDER_LOST`. DeepSeek's claims are the one exception,
+until its plugin can give a held claim back (#1870): a DeepSeek claim that is still uncertain with
+no error can be handed out again after 30 seconds, with the same ACK code and a line saying it may
+be a repeat: at most three times for one message (a claim after a hand-back does not count), and
+not while it has an error (`EXPIRED` and `DISMISSED` are final; a later receipt from the session
+can clear a disconnected mark). A message its host accepted
 is never handed out or handed back again, even after a later receipt from its session makes it
 uncertain with no error, and dismissing it keeps the mark (#1407). At a board start, a claim a hook
 named that is still uncertain with no error, and a message a hook handed back with its ACK code,
@@ -77,8 +85,9 @@ become `uncertain` / `BOARD_RESTARTED` with their text, and every claim a hook n
 uncertain loses its name (one with an error keeps the error): nothing a hook was handed before a
 board start is handed out after it, whatever receipts its session sends later, and the page shows
 them as no reply confirmed. The rule holds from the next board start: with no board running, a hook
-takes from the store itself, and a claim an earlier board run made is handed out again once its
-lease passes, until a board starts (#1868). OpenCode's claims keep
+takes from the store itself, and a DeepSeek claim an earlier board run made is handed out again once
+its lease passes, until a board starts (#1868); any other hook's claim is not taken or handed back
+past its lease there either, and the next save marks it `HOLDER_LOST`. OpenCode's claims keep
 their own rules (below). While a claim stays open as uncertain (not yet `EXPIRED` or
 `DISMISSED`), none of the session's queued messages is handed out. A claim is taken again only when
 every message that holds the session (the condition is under "stdio MCP") is one of this mailbox's
@@ -350,6 +359,22 @@ out of Needs you; the receipt still distinguishes delivery from a confirmed mode
   message was handed out does not learn it either. Once the receiver acknowledges, the reply
   a send or the board returns is what follows `ACK <nonce>`, without that ACK line's prefix.
 - Reusing an id with a different text, source, binding or turn fails with `ID_CONFLICT`.
+- A press on the page or an answer key on the terminal board keeps its id for the same words to
+  the same question of the same session, whatever connection the card names by then. A press
+  that gets no answer is sent again under that id: the page tries every 2 s for 30 s, and the
+  terminal board when the key is pressed again. An answer whose body is cut off counts as no
+  answer. On the page, a try still waiting does not hold back the next one, the first answer
+  wins, and a press made again while the send still tries joins it; other words stop it. The
+  board answers a press with an id it already stored with that message, before it checks the
+  card, so a receiver that connected again under a new connection gets no second message. The
+  same id on another session's card, or on another agent's, is refused; a press whose card has
+  left the board since gets the stored message (#1843).
+- A question has one open answer at a time. A second answer to it under another id, from another
+  page or the terminal board, is refused (`409`) with the first answer's receipt, so it shows
+  what came of the first one, while the first still holds the session: queued, handed out,
+  uncertain with no final error, or accepted and waiting for the turn. An answer a hook already
+  wrote for its host stops counting once the session reports again after it. Once the first is
+  refused, given back, expired or dismissed, a new answer goes out as a new message (#1843).
 
 IDs are scoped to this message store. A claim is never automatically replayed, except a hook's
 mailbox claim as above. Before each action or snapshot, finished messages older than 24 hours
@@ -365,7 +390,7 @@ it waits for the turn; after disconnect, the 30-minute limit applies. The page c
 to show expired messages as no reply confirmed. The one exception is a wake the OpenCode
 plugin started: at 30 minutes it reads "sent, not confirmed" (`uncertain` / `UNCONFIRMED`)
 instead, keeps its text and takes a late accept or ACK, and becomes `EXPIRED` a day later.
-Only the board writes `UNCONFIRMED` and `BOARD_RESTARTED`; a receipt that sends either, like one
+Only the board writes `UNCONFIRMED`, `BOARD_RESTARTED` and `HOLDER_LOST`; a receipt that sends one, like one
 that sends `EXPIRED` or `DISMISSED`, fails with `INVALID_RECEIPT`.
 
 The store holds at most 1,000 open messages (`MESSAGE_LIMIT`); finished ones do not count,
