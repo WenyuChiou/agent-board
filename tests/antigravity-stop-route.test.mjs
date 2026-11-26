@@ -436,9 +436,25 @@ test('StopWait worker preserves complete continue stdout when child exits non-ze
     const out = JSON.parse(res.stdout.trim())
     assert.equal(out.decision, 'continue')
     assert.equal(out.reason, 'Accepted board reply')
+    const logFile = join(root, 'hook-errors.log')
+    assert.equal(existsSync(logFile), true)
+    assert.match(readFileSync(logFile, 'utf8'), /antigravity REPORTER_FAILED\r?\n/)
     const pendingDir = join(root, 'pending')
     const queued = existsSync(pendingDir) ? readdirSync(pendingDir).filter(name => name.endsWith('.json')) : []
     assert.deepEqual(queued, [])
+
+    writeFileSync(fakeScript, `globalThis.AGENT_BOARD = {"hookVersion":${tsMod.HOOK_VERSION},"x":1}\nprocess.stdout.write(JSON.stringify({ decision: 'continue', reason: 'Accepted before timeout' }) + '\\n')\nsetTimeout(() => {}, 10000)\n`)
+    const resTimeout = spawnSync(process.execPath, [
+      worker, '--hook-version', String(tsMod.HOOK_VERSION), '--hook-event', 'StopWait', '--hook-deadline', String(Date.now() + 300),
+      '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'StopWait', '--progress-file', progress,
+    ], { cwd: home, encoding: 'utf8', windowsHide: true, timeout: 10000, input: JSON.stringify({ conversationId: session, hook_event_name: 'Stop' }) })
+    assert.equal(resTimeout.status, 0, resTimeout.stderr)
+    const timeoutOut = JSON.parse(resTimeout.stdout.trim())
+    assert.equal(timeoutOut.decision, 'continue')
+    assert.equal(timeoutOut.reason, 'Accepted before timeout')
+    assert.match(readFileSync(logFile, 'utf8'), /antigravity REPORTER_TIMEOUT\r?\n/)
+    const queuedAfterTimeout = existsSync(pendingDir) ? readdirSync(pendingDir).filter(name => name.endsWith('.json')) : []
+    assert.deepEqual(queuedAfterTimeout, [])
   } finally {
     try { rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) } catch {}
   }
