@@ -3,9 +3,13 @@ import { hookRecoverySource } from './hook-recovery.ts'
 // Milliseconds internally; Gemini stores milliseconds, the other command hosts seconds.
 // Keep the existing per-event host floors until the host descriptors own this table.
 export const HOOK_VERSION = 1
-// Only GROK_SESSION_ID for Grok is read by replayed lifecycle events.
+// The board's own background turn of a Codex desktop app conversation (#557): the board sets this to 1 for that `codex exec`
+// run only, whose SessionEnd ends the run and not the conversation.
+export const BACKGROUND_TURN_ENV = 'AGENT_BOARD_BACKGROUND_TURN'
+// Replayed lifecycle events read only these: GROK_SESSION_ID for Grok, and the background-turn mark above for Codex.
 // Other lifecycle identities come from stdin; configuration and credentials stay out.
 export const HOOK_SESSION_ENV: Record<string, string[]> = {
+  codex: [BACKGROUND_TURN_ENV],
   grok: ['GROK_SESSION_ID'],
 }
 // Let the worker reap its reporter before an SDK caller applies its outer backstop.
@@ -304,6 +308,9 @@ const run = async () => {
   const turn = markTurn(payload, started)
   const internal = ['--hook-version', '--hook-event', '--hook-deadline', '--hook-started', '--home']
   const reporterArgs = args.filter((arg, index) => !internal.includes(arg) && !internal.includes(args[index - 1]))
+  // The board script names the copy it queues with this id. A worker that has to stop it at the deadline can then tell
+  // that the event is already saved, and does not save a second copy of it (#1781).
+  let queueId
   // A reporter run that failed passes its own log code as 'failure'; a saved copy is logged after it as REPORTER_QUEUED.
   const queue = failure => {
     let temporary
@@ -313,6 +320,11 @@ const run = async () => {
       if (isReport || isPlan) return fail('REPORTER_TIMEOUT')
       const pending = path.join(${dataRoot === undefined ? `path.dirname(${JSON.stringify(script)})` : JSON.stringify(dataRoot)}, 'pending')
       fs.mkdirSync(pending, { recursive: true, mode: 0o700 })
+      if (queueId !== undefined && fs.existsSync(path.join(pending, String(started).padStart(15, '0') + '-' + queueId + '.json'))) {
+        requestRecovery()
+        if (failure) hookError(failure)
+        return fail('REPORTER_QUEUED')
+      }
       // Concurrent workers can pass 64 by a few because the count and write are separate.
       if (fs.readdirSync(pending).filter(name => name.endsWith('.json')).length >= 64) return fail(failure ?? 'REPORTER_TIMEOUT')
       const env = Object.fromEntries((${JSON.stringify(HOOK_SESSION_ENV)}[agent] ?? []).filter(name => typeof process.env[name] === 'string').map(name => [name, process.env[name]]))
@@ -352,6 +364,8 @@ const run = async () => {
   // Only a mark this worker wrote is handed on, never one from its own parent.
   delete childEnv.AGENT_BOARD_TURN_MARK
   if (turn !== undefined) childEnv.AGENT_BOARD_TURN_MARK = JSON.stringify(turn)
+  delete childEnv.AGENT_BOARD_HOOK_QUEUE_ID
+  if (!isReport && !isPlan) childEnv.AGENT_BOARD_HOOK_QUEUE_ID = queueId = randomUUID()
   if (agent === 'opencode' && Number.isSafeInteger(process.ppid) && process.ppid > 1) childEnv.AGENT_BOARD_HOOK_PARENT = String(process.ppid)
   const result = spawnSync(process.execPath, [${JSON.stringify(script)}, ...childArgs], {
     input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, env: childEnv,

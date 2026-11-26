@@ -1,5 +1,5 @@
 import { ANTIGRAVITY_POLL_MS } from './antigravity-sidecar'
-import { address, claimMessages, disconnectMessages, MAILBOX_LEASE_MS, messageFields, messageId, messageReceipt, SURFACE_IDS } from './messaging'
+import { address, claimMessages, disconnectMessages, isAcceptedOnce, isLeaseOver, MAILBOX_LEASE_MS, messageFields, messageId, messageReceipt, SURFACE_IDS } from './messaging'
 import type { Connection, Message, MessageState } from './messaging'
 import { sha256 } from './sha256'
 
@@ -28,28 +28,36 @@ export const enrollMcp = (state: MessageState, agent: string, session: string, s
       ? { ...one, contested: true }
       : { ...one, mcpOwner: owner, folderDigest, mcpLeaseUntil: until, contested: false }) }
 }
-export const takeMailboxMessage = (state: MessageState, agent: string, session: string, surface: string, now: number, ttlMs: number, nonce: string, ref?: string): { state: MessageState; message: Message | null } => {
-  const next = enrollMailbox(state, agent, session, surface, now, ttlMs)
-  const claimed = claimMessages(next, next.mailboxes!.find(one => one.id === mailboxId(agent, session))!, now, nonce, ref)
+// The turn a hook names (`hostTurn`, Codex's `turn_id`), whether its take is at a step end (Codex's Stop hook, #319), and
+// `seq`, Antigravity's turn number for this start, which the board keeps (#1396).
+export type TakeTurn = { hostTurn?: string; isStepEnd?: boolean; seq?: number }
+export const takeMailboxMessage = (state: MessageState, agent: string, session: string, surface: string, now: number, ttlMs: number, nonce: string, ref?: string, turn: TakeTurn = {}): { state: MessageState; message: Message | null } => {
+  const enrolled = enrollMailbox(state, agent, session, surface, now, ttlMs)
+  const id = mailboxId(agent, session)
+  // The mailbox keeps the turn its hook last named, so the board binds an answer queued while that turn runs to it.
+  const next = turn.hostTurn === undefined ? enrolled : { ...enrolled, mailboxes: enrolled.mailboxes!.map(one => one.id === id ? { ...one, hostTurn: turn.hostTurn } : one) }
+  const claimed = claimMessages(next, next.mailboxes!.find(one => one.id === id)!, now, nonce, ref, false, turn.isStepEnd === true ? turn.hostTurn : undefined)
   return { state: claimed.state, message: claimed.messages[0] ?? null }
 }
 // A hook that stopped waiting never showed what the board claimed for it, so it hands the claim back
-// and the message is queued again for a later hook (#990). The ACK code stays, for a message shown before.
+// and the message is queued again for a later hook (#990). The ACK code stays, for a message shown before. Past its lease the
+// claim is no longer its to give back: a store a hook writes itself is pruned after the hand-back, not before (#1843).
 // A started OpenCode wake (marked by attemptMailboxMessage) is handed back only with isUnsent, which the plugin sets
 // when it knows the host was never called (#724); a plain release leaves it as it is. Only an active started wake goes back:
 // once it reads "sent, not confirmed" (after 30 minutes) it is the person's to copy, and the board never hands it out again,
-// so a hand resend cannot run twice (#1366 review).
+// so a hand resend cannot run twice (#1366 review). A message its host accepted is never queued again (#1407).
 export const releaseMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number, isUnsent = false): MessageState => {
   const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref && message.status === 'uncertain' && message.error === '')
-  if (one === undefined || one.attempted !== undefined && !isUnsent) return state
+  if (one === undefined || one.attempted !== undefined && !isUnsent || isAcceptedOnce(one) || isLeaseOver(one, now)) return state
   const { ref: _ref, attempted: _attempted, ...kept } = one
   return { ...state, messages: state.messages.map(message => message === one ? { ...kept, status: 'queued' as const, error: '', claimed: 0, updated: now } : message) }
 }
 // The OpenCode plugin tells the board it is about to wake the session with the message it holds under ref. Only the
-// current claim can be marked; asking again with the same ref answers the same, and any other ref has lost the claim.
+// current claim can be marked; asking again with the same ref answers the same, and any other ref has lost the claim. A
+// message its host accepted, even one a later receipt made uncertain, has lost it too: waking for it again would run it twice (#1407).
 export const attemptMailboxMessage = (state: MessageState, agent: string, session: string, ref: string, now: number): MessageState => {
   const one = state.messages.find(message => message.target === mailboxId(agent, session) && message.ref === ref)
-  if (one === undefined) throw new Error('CLAIM_LOST')
+  if (one === undefined || isAcceptedOnce(one)) throw new Error('CLAIM_LOST')
   // Answered again only while it is still an active started wake; a message dismissed or read "sent, not confirmed"
   // since is offered to the person to copy, so a receiver that repeats its attempt must not wake it.
   if (one.attempted !== undefined) {
@@ -80,6 +88,13 @@ export const isTurnStart = (agent: string, event: string): boolean => ({
   codex: ['SessionStart', 'UserPromptSubmit'], antigravity: ['SessionStart', 'PreInvocation'],
   gemini: ['SessionStart', 'BeforeAgent'], muse: ['UserPromptSubmit'], cursor: ['sessionStart'],
 } as Record<string, string[]>)[agent]?.includes(event) ?? false
+// Codex runs its Stop hook when a step ends, and `decision: block` continues the turn with `reason` as its next input (#319).
+// A Stop that a hook already continued says so (`stop_hook_active` true); only one where the field is exactly false hands a
+// message over, so no turn is continued without end.
+export const isStepEnd = (agent: string, event: string, raw: Record<string, unknown>): boolean => agent === 'codex' && event === 'Stop' && raw.stop_hook_active === false
+export const stepEndEnvelope = (text: string): { decision: 'block'; reason: string } => ({ decision: 'block', reason: text })
+// The least time a Stop hook needs left to take, print and accept one message; with less it takes nothing.
+export const STEP_END_MIN_MS = 1300
 export const isSessionEnd = (agent: string, event: string): boolean => agent === 'cursor' ? event === 'sessionEnd' : ['codex', 'gemini', 'muse'].includes(agent) && event === 'SessionEnd'
 export const turnStartEnvelope = (agent: string, event: string, text: string, base: string | null = null, session = ''): object => {
   const context = (agent === 'antigravity' || agent === 'codex' && event === 'SessionStart' ? [base, text] : [text]).filter(Boolean).join('\n\n')

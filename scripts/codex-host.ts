@@ -2,7 +2,6 @@ import { spawn } from 'node:child_process'
 import type { ChildProcess } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { closeSync, fstatSync, openSync, readdirSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
-import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 
 type Json = Record<string, unknown>
@@ -194,10 +193,13 @@ const codexShimTarget = (executable: string): string => {
 
 // A control-only app-server process: no thread/read, resume, model call or transcript access.
 // A deadline is on the performance.now() clock, which a change of the wall clock cannot move.
-const client = (executable: string, timeoutMs = 5000, deadline?: number, initializeMs = timeoutMs) => {
+const client = (executable: string, timeoutMs = 5000, deadline?: number, initializeMs = timeoutMs, codexHome?: string) => {
   if (!isAbsolute(executable)) throw new Error('ABSOLUTE_CODEX_BINARY_REQUIRED')
   const target = process.platform === 'win32' && /\.(cmd|ps1)$/i.test(executable) ? codexShimTarget(executable) : executable
-  const child = /\.m?js$/i.test(target) ? spawn(process.execPath, [target, 'app-server', '--stdio'], { windowsHide: true }) : spawn(target, ['app-server', '--stdio'], { windowsHide: true })
+  // The app-server reads its home from CODEX_HOME: an explicit --codex-dir names another
+  // directory, so the child must see that home or it answers for the inherited one (#1303).
+  const env = codexHome === undefined ? process.env : { ...process.env, CODEX_HOME: codexHome }
+  const child = /\.m?js$/i.test(target) ? spawn(process.execPath, [target, 'app-server', '--stdio'], { windowsHide: true, env }) : spawn(target, ['app-server', '--stdio'], { windowsHide: true, env })
   let next = 0, buffer = ''
   const pending = new Map<number, { resolve: (value: Json) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>()
   const fail = (): void => {
@@ -250,7 +252,7 @@ export const inspectCodexHooks = async (executable: string, config: string, expe
   if (expected.length === 0 || expected.length > 16 || expected.some(one => !/^[a-z][A-Za-z]+$/.test(one.event) || typeof one.command !== 'string' || one.command.trim() === '') || new Set(expected.map(one => JSON.stringify(one))).size !== expected.length) throw new Error('OWNED_HOOK_IDENTITIES_REQUIRED')
   const before = readFileSync(config)
   if ([timeoutMs, initializeMs].some(limit => !Number.isSafeInteger(limit) || limit < 1 || limit > 5000)) throw new Error('INVALID_CONTROL_TIMEOUT')
-  const control = client(executable, timeoutMs, deadline, initializeMs)
+  const control = client(executable, timeoutMs, deadline, initializeMs, dirname(resolve(config)))
   try {
     await control.initialize()
     const owned = ownedHooks(await control.request('hooks/list', { cwds: [process.cwd()] }), config, expected)
@@ -269,8 +271,9 @@ export const inspectCodexHooks = async (executable: string, config: string, expe
 export const trustCodex = async (executable: string, config: string, groups: Record<string, unknown>, apply: boolean) => {
   const before = readFileSync(config, 'utf8')
   const expected = Object.entries(groups).map(([event, group]) => ({ event: event[0]!.toLowerCase() + event.slice(1), command: (group as { hooks: { command: string }[] }).hooks[0]!.command }))
-  if (expected.length !== 7) throw new Error('SEVEN_OWNED_HOOKS_REQUIRED')
-  const control = client(executable)
+  // Trust is written only for all seven; a read may cover fewer, the groups an update finds still installed (#1314).
+  if (apply ? expected.length !== 7 : expected.length === 0 || expected.length > 7) throw new Error('SEVEN_OWNED_HOOKS_REQUIRED')
+  const control = client(executable, undefined, undefined, undefined, dirname(resolve(config)))
   try {
     await control.initialize()
     const list = async (): Promise<Hook[]> => {
@@ -281,7 +284,9 @@ export const trustCodex = async (executable: string, config: string, groups: Rec
     const values = Object.fromEntries(hooks.map(hook => [hook.key, { trusted_hash: hook.currentHash }]))
     // Hook state is a user preference even when the definitions are project-local.
     // Codex ignores project-level trust state, so never write it next to that source.
-    const plan = { file: join(resolve(process.env.CODEX_HOME || join(homedir(), '.codex')), 'config.toml'), hooks: hooks.map(hook => ({ event: hook.eventName, key: hook.key, hash: hook.currentHash, trust: hook.trustStatus })), changes: hooks.filter(hook => hook.trustStatus !== 'trusted').length }
+    // The trust file sits beside the hooks.json this call was asked about, not the
+    // inherited home: an explicit --codex-dir names another directory (#1303).
+    const plan = { file: join(dirname(resolve(config)), 'config.toml'), hooks: hooks.map(hook => ({ event: hook.eventName, key: hook.key, hash: hook.currentHash, trust: hook.trustStatus })), changes: hooks.filter(hook => hook.trustStatus !== 'trusted').length }
     if (!apply || plan.changes === 0) return { ...plan, applied: false }
     if (readFileSync(config, 'utf8') !== before || JSON.stringify((await list()).map(hook => [hook.key, hook.currentHash])) !== JSON.stringify(hooks.map(hook => [hook.key, hook.currentHash]))) throw new Error('HOOK_DEFINITION_CHANGED')
     // Codex performs the TOML merge. Only the reviewed declarations receive trust;

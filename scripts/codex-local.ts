@@ -7,6 +7,7 @@ import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { installCommand, installContext } from './setup-command.mjs'
+import { newestUse } from './setup-discovery.mjs'
 import { blockClaimOf, blockHostOf, boardConfirmedReport, claimText, cleanAntigravityIdentity, codexClaimOf, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, resolveAntigravityIdentity, seenClaimOf, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { AntigravityIdentity, CodexReport } from '../hooks/codex'
 import { hermesHome } from '../hooks/hermes-home'
@@ -24,7 +25,7 @@ import { antigravityCommand, antigravityHooks, cursorEvent, cursorEvents, hookCo
 import type { LocalAgent } from '../hooks/local-agents'
 import type { AgentClaim } from '../hooks/session-liveness'
 import { deepseekLocalPlugin, deepseekPatch, openclawLocalPlugin } from '../hooks/portable-agents'
-import { HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
+import { BACKGROUND_TURN_ENV, HOOK_SESSION_ENV, HOOK_VERSION, hookWorker, hostHookTimeout } from '../hooks/hook-safety'
 import { discoverCodexBinary, inspectCodexConfigToml, trustCodex } from './codex-host'
 import { withLocalLock } from './local-lock'
 import { installControlRoot, withInstallLock } from './install-control'
@@ -296,8 +297,43 @@ const sortedKeys = (value: unknown): unknown => Array.isArray(value) ? value.map
 // Hermes writes this file as ASCII and reads it in the system code page, so a raw non-ASCII byte would stop
 // every shell hook from loading: escape it the way Python's json.dumps does.
 const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), null, 2).replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
-// A root that is not a mapping (a list, a flow document) is not something to add a key to.
-const isYamlMapping = (text: string): boolean => text.split(/\r?\n/).every(line => !/^\S/.test(line) || /^(?:#|---|\.\.\.)/.test(line) || /^(?:"[^"\n]*"|'[^'\n]*'|[^\s#{[!&*|>%@`"'-][^\n]*?)\s*:(?:\s|$)/.test(line))
+// A root that is not a mapping (a list, a flow document) is not something to add a key to. Hermes saves config.yaml
+// with PyYAML, which writes a list's items at the left edge right under their key (`toolsets:` then `- hermes-cli`, #1588):
+// such an item belongs to the key above it, so the root is still a mapping. Under `hooks:` it is not one the board's
+// hooks can go into. The line editor finds the hooks key only as written plain or quoted, so a double-quoted key whose
+// escapes spell `hooks` (`"ho\x6fks"`) is refused, as is one it cannot decode; PyYAML's escapes for a key that is not
+// ASCII (`"caf\xE9"`) are some other key and pass. A document end marker or a second document is refused too: hooks
+// added at the end of the file would land outside the one document Hermes reads.
+const YAML_TOP_KEY = /^(?:"([^"\n]*)"|'([^'\n]*)'|([^\s#{[!&*|>%@`"'-][^\n]*?))\s*:(?:\s|$)/
+const YAML_ESCAPES: Record<string, string> = { '0': '\0', a: '\x07', b: '\b', t: '\t', '\t': '\t', n: '\n', v: '\v', f: '\f', r: '\r', e: '\x1b', ' ': ' ', '"': '"', '/': '/', '\\': '\\', N: '\x85', _: '\xa0', L: ' ', P: ' ' }
+const yamlDoubleQuoted = (raw: string): string | undefined => {
+  let isBad = false
+  const text = raw.replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[\s\S]|$)/g, (_, escape: string) => {
+    const point = escape.length > 1 ? parseInt(escape.slice(1), 16) : undefined
+    if (point !== undefined && point <= 0x10ffff) return String.fromCodePoint(point)
+    const plain = point === undefined ? YAML_ESCAPES[escape] : undefined
+    if (plain === undefined) isBad = true
+    return plain ?? ''
+  })
+  return isBad ? undefined : text
+}
+const isYamlMapping = (text: string): boolean => {
+  let listKey: string | undefined
+  let hasContent = false
+  return text.split(/\r?\n/).every(line => {
+    if (!/^\S/.test(line) || line.startsWith('#')) return true
+    if (/^---\s*(?:#.*)?$/.test(line)) return !hasContent
+    hasContent = true
+    if (/^-(?:\s|$)/.test(line)) return listKey !== undefined && listKey !== 'hooks'
+    const key = YAML_TOP_KEY.exec(line)
+    if (key === null) return false
+    const name = key[1] === undefined ? key[2] ?? key[3] : yamlDoubleQuoted(key[1])
+    if (name === undefined || (name === 'hooks' && key[1] !== undefined && key[1] !== 'hooks')) return false
+    const rest = line.slice(key[0].length).trim()
+    listKey = rest === '' || rest.startsWith('#') ? name : undefined
+    return true
+  })
+}
 // A name that was free when setup planned (`isFresh`) is created, never written over (#1693): a rename would replace a
 // file that landed there after the last check. A hard link of the finished temporary file places it whole in one step
 // and fails when the name is taken, and setup then stops as busy. Where a link is refused for any other reason, as on a
@@ -1007,6 +1043,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const now = Date.now(), supplied = Number(flag('--hook-started'))
     // Keep the source time even after a slow launch: re-dating an old Stop can replace a newer prompt.
     const started = Number.isSafeInteger(supplied) && supplied >= 0 && supplied <= now ? supplied : now
+    // The hook worker names the copy this run queues, so a worker that stops this run can tell the event is saved (#1781).
+    // Read once and taken out of the environment: no board run started from here names its own copy the same.
+    const suppliedQueueId = process.env.AGENT_BOARD_HOOK_QUEUE_ID
+    delete process.env.AGENT_BOARD_HOOK_QUEUE_ID
+    const queueId = typeof suppliedQueueId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(suppliedQueueId) ? suppliedQueueId : undefined
     const value = flag('--hook-deadline')
     const suppliedDeadline = value === undefined ? Infinity : Number(value)
     if (value !== undefined && !Number.isSafeInteger(suppliedDeadline)) throw new Error('INVALID_HOOK_DEADLINE')
@@ -1106,6 +1147,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           session_id: payload.session_id, hook_event_name: payload.hook_event_name,
           turn_id: payload.turn_id, prompt_submitted: payload.prompt_submitted,
           ...(hasResponse ? { has_response: true } : {}),
+          // The end of a `codex exec` run the board started for a Codex app conversation (#557), told by the board's mark.
+          ...(agent === 'codex' && payload.hook_event_name === 'SessionEnd' && env[BACKGROUND_TURN_ENV] === '1' ? { background_turn: true } : {}),
           ...(question === null ? {} : { question }),
         } : {
           ...(antigravityTitle === null ? {} : antigravityTitle),
@@ -1445,7 +1488,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (current === undefined || queuedFile !== undefined) return
       mkdirSync(pending, { recursive: true })
       if (pendingFiles().length >= 64) throw error
-      const file = join(pending, `${String(started).padStart(15, '0')}-${randomUUID()}.json`)
+      const file = join(pending, `${String(started).padStart(15, '0')}-${queueId ?? randomUUID()}.json`)
       atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
       queuedFile = file
     }
@@ -1753,6 +1796,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const hookArgs = (event: string, state?: string): string[] => hookCommandArgs(hookNode, home, agent, worker, progress, event, state)
   const isSame = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b)
   const remove = mode === '--codex-remove'
+  // setup --update (#1314): keeps what the person turned off, and reports what its one question must show.
+  const isUpdate = !remove && args.includes('--update')
+  // The board's hook groups the person removed, which an update leaves removed and does not read trust for.
+  const removedByPerson = new Set<string>()
   const conflicts: string[] = []
   const changes: { file: string; action: string }[] = []
   // Beside the hooks.json it trusts, as the doctor reads it, so --codex-dir finds the same installation.
@@ -1806,6 +1853,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       if (remove && Array.isArray(foreign) && hasUnknown) conflicts.push(`${config}:${event}`)
       else if (remove) alreadyGone.push(`${config}:${event}`)
       else if (entries.length && hasUnknown) conflicts.push(`${config}:${event}`)
+      // An update leaves a hook group the person removed removed, and keeps it in the record so the next one does too.
+      else if (isUpdate) { groups[event] = old; removedByPerson.add(event); continue }
       else hasMissingGroup = true
     }
     if (!remove) {
@@ -1831,13 +1880,18 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (isReadable && existing !== undefined && !(owned !== undefined && isSame(existing, owned)) && !(!remove && isSame(existing, desired))) conflicts.push(`${config}:${name}`)
     if (isReadable && owned !== undefined && existing === undefined) {
       if (remove) alreadyGone.push(`${config}:${name}`)
+      // An update leaves the group the person removed removed, and keeps it in the record so the next one does too.
+      else if (isUpdate) removedByPerson.add(name)
       else hasMissingGroup = true
     }
     nextConfig = { ...hookConfig }
-    if (!remove) { nextConfig[name] = desired; groups[name] = desired }
+    if (removedByPerson.has(name)) groups[name] = owned
+    else if (!remove) { nextConfig[name] = desired; groups[name] = desired }
     else if (owned !== undefined) delete nextConfig[name]
   }
   let nextConfigText: string | null = null
+  // An update that finds the board's whole part of a config removed leaves that config as the person left it.
+  let isConfigKept = false
   if (agent === 'openclaw') {
     const id = 'agent-board-local'
     const pluginFile = join(root, 'adapters', 'openclaw', 'agent-board-local.mjs')
@@ -1852,15 +1906,20 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (isReadable && (plugins.enabled === false || existing !== undefined && !isSame(existing, owned ?? desired) || owned !== undefined && existing !== undefined && (!paths.includes(pluginFile) || allow?.length && !allow.includes(id)))) conflicts.push(`${nativeConfig}:${id}`)
     if (isReadable && owned !== undefined && existing === undefined) {
       if (remove) alreadyGone.push(`${nativeConfig}:${id}`)
+      // An update leaves the entry the person removed removed, with its path and allow list as the person left them.
+      else if (isUpdate) removedByPerson.add(id)
       else hasMissingGroup = true
     }
-    nextConfig = { ...hookConfig, plugins: {
+    nextConfig = removedByPerson.has(id) ? { ...hookConfig } : { ...hookConfig, plugins: {
       ...plugins,
       load: { ...load, paths: remove ? paths.filter(path => path !== pluginFile) : [...paths.filter(path => path !== pluginFile), pluginFile] },
       entries: { ...entries, ...(!remove ? { [id]: desired } : {}) },
       ...(allow === undefined ? {} : { allow: remove && manifest.groups.allowAdded === true ? allow.filter(one => one !== id) : !remove && allow.length && !allow.includes(id) ? [...allow, id] : allow }),
     } }
-    if (remove) delete object(object(nextConfig.plugins).entries)[id]
+    if (removedByPerson.has(id)) {
+      groups[id] = owned
+      if (manifest.groups.allowAdded !== undefined) groups.allowAdded = manifest.groups.allowAdded
+    } else if (remove) delete object(object(nextConfig.plugins).entries)[id]
     else {
       groups[id] = desired
       groups.allowAdded = manifest.groups.allowAdded ?? Boolean(allow?.length && !allow.includes(id))
@@ -1870,9 +1929,11 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const text = initial(nativeConfig) ?? ''
     if (manifest.groups.patch !== undefined && !text.includes('agent-board-local')) {
       if (remove) alreadyGone.push(`${nativeConfig}:agent-board-local`)
+      else if (isUpdate) removedByPerson.add('patch')
       else hasMissingGroup = true
     }
     if (isUnreadable(nativeConfig)) { if (!conflicts.includes(nativeConfig)) conflicts.push(nativeConfig) }
+    else if (removedByPerson.has('patch')) { groups.patch = manifest.groups.patch; isConfigKept = true }
     else {
       const patch = deepseekPatch(text, manifest.groups.patch, pathToFileURL(join(root, 'adapters', 'deepseek.mjs')).href, remove)
       if (patch.conflict) conflicts.push(nativeConfig)
@@ -1895,10 +1956,16 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     const text = initial(nativeConfig) ?? ''
     const events = hermesEvents()
     const recorded = new Map(Object.entries(object(manifest.groups.hooks ?? {})).filter((pair): pair is [string, string] => typeof pair[1] === 'string'))
-    const patch = !isUnreadable(nativeConfig) && isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove) : null
+    let patch = !isUnreadable(nativeConfig) && isYamlMapping(text) ? editHermesSetup(text, events, recorded, remove, isUpdate) : null
+    // An update leaves an entry the person removed removed: its event is not written again, and the record keeps its
+    // command so the next update does too.
+    if (isUpdate && patch !== null && patch.missing.length) {
+      for (const event of patch.missing) removedByPerson.add(event)
+      patch = editHermesSetup(text, events.filter(([event]) => !removedByPerson.has(event)), new Map([...recorded].filter(([event]) => !removedByPerson.has(event))), false, isUpdate)
+    }
     if (manifest.groups.hooks !== undefined && patch !== null && !patch.hasOwned) {
       if (remove) alreadyGone.push(`${nativeConfig}:hooks`)
-      else hasMissingGroup = true
+      else if (!isUpdate) hasMissingGroup = true
     }
     if (patch === null) conflicts.push(nativeConfig)
     // An entry the person changed is refused by its event, like the JSON agents' `${config}:${event}`,
@@ -1906,7 +1973,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     else for (const event of patch.refused) conflicts.push(`${nativeConfig}:${event}`)
     isHermesPartial = manifest.groups.hooks !== undefined && patch !== null && !patch.isComplete
     nextConfigText = patch?.text ?? text
-    if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, command]))
+    if (!remove && patch !== null) groups.hooks = Object.fromEntries(events.map(([event, command]) => [event, removedByPerson.has(event) ? recorded.get(event) : command]))
     if (remove) {
       const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
       const mine = Object.entries(object(manifest.groups.hooks ?? {}))
@@ -1925,9 +1992,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // The connect writes its board beside the progress file it connected: the default one, one a
   // CLAUDE_CONFIG_DIR or CLAUDE_PROGRESS_FILE names, or the one its own record keeps (#285).
   // Releases before de40dde wrote the command as node "<path>" for any path; later ones use boardRun.
-  const connected = ((): unknown => {
-    try { return object(JSON.parse(readFileSync(join(installControlRoot(home), 'legacy-connect.json'), 'utf8'))).connectedProgress } catch { return undefined }
+  const connectRecord = ((): Json => {
+    try { return object(JSON.parse(readFileSync(join(installControlRoot(home), 'legacy-connect.json'), 'utf8'))) } catch { return {} }
   })()
+  const connected = connectRecord.connectedProgress
+  // The folder Hermes' config still names when a connect's move did not reach it, or the one a
+  // session start's connect wrote there (#1664).
+  const hermesConnected = connectRecord.hermesProgress
   const legacyProgress = [join(home, '.claude', 'progress.md'), process.env.CLAUDE_CONFIG_DIR ? join(process.env.CLAUDE_CONFIG_DIR, 'progress.md') : '', process.env.CLAUDE_PROGRESS_FILE ?? '', typeof connected === 'string' ? connected : '']
   const legacyBoards = legacyProgress.filter(path => path !== '').flatMap(path => [path.replace(/[\\/][^\\/]*$/, '') + (process.platform === 'win32' ? '\\' : '/') + 'agent-board.mjs', join(dirname(path), 'agent-board.mjs')])
   const legacySkills = Object.values(STRINGS).flatMap(words => [...new Set(legacyBoards.flatMap(board => [boardRun(board), `node "${board}"`]))].map(run => `---\nname: agent-board\ndescription: ${JSON.stringify(words.boardCommandDescription)}\n---\n\n${words.boardSkillPrompt(run)}\n`))
@@ -2123,7 +2194,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (parsedConfig === null) conflicts.push(nativeConfig)
     else if (remove && initial(nativeConfig) === null) alreadyGone.push(nativeConfig)
     else if (remove && isReadable && isEmptyCreatedConfig) changes.push({ file: nativeConfig, action: 'remove' })
-    else if (!isHeld && (agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig))) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
+    else if (!isHeld && !isConfigKept && (agent === 'deepseek' || agent === 'hermes' ? initial(nativeConfig) !== nextConfigText : !isSame(hookConfig, nextConfig))) changes.push({ file: nativeConfig, action: initial(nativeConfig) === null || hasMissingGroup ? 'create' : 'update' })
   }
   if (!remove && readLocal(progress) === null) { before.set(progress, NO_PATH); changes.push({ file: progress, action: 'create' }) }
   const createdDirs = new Set(Array.isArray(loaded.createdDirs) ? loaded.createdDirs.filter((value): value is string => typeof value === 'string') : [])
@@ -2150,8 +2221,28 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     for (let folder = dirname(file); folder !== dirname(folder) && folder !== home && !isBelow(home, folder) && !existsSync(folder); folder = dirname(folder)) createdDirs.add(folder)
   }
   const createdConfig = hasNativeConfig && (initial(nativeConfig) === null || loaded.createdConfig === true)
+  // Whether the host trusts the board's hooks now, as an update reads it before it asks (#1314): Hermes from its trust
+  // file, Codex from Codex itself, never from config.toml. A Codex setup cannot ask is 'unknown', never trusted.
+  const hermesTrust = (): boolean | 'unknown' => {
+    const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
+    // An entry the person removed is not asked about, as for Codex; with every entry removed there is nothing left to approve.
+    const recordedHooks = Object.entries(object(manifest.groups.hooks ?? {})), wanted = recordedHooks.filter(([event]) => !removedByPerson.has(event))
+    return approvals === null ? 'unknown' : recordedHooks.length > 0 && wanted.every(([event, command]) => approvals.list.some(entry => entry.event === event && entry.command === command))
+  }
+  let trustNow: boolean | 'unknown' | undefined
+  if (isUpdate && !args.includes('--apply') && (agent === 'codex' || agent === 'hermes') && initial(manifestFile) !== null) {
+    const executable = flag('--codex-bin')
+    try { trustNow = agent === 'hermes' ? hermesTrust() : executable ? (await trustCodex(executable, config, Object.fromEntries(Object.entries(manifest.groups).filter(([event]) => !removedByPerson.has(event))), false)).hooks.every(hook => hook.trust === 'trusted') : 'unknown' } catch { trustNow = 'unknown' }
+  }
+  // Whether this board approved the hooks before, so an update tells an approval the person revoked from one never given
+  // (#1314). A record from before this field says neither, and an update treats that as revoked.
+  const isApproved = loaded.approved === true || args.includes('--hooks-approved') || trustNow === true
+  const approval = agent !== 'codex' && agent !== 'hermes' ? {} : isApproved ? { approved: true } : loaded.approved === false || initial(manifestFile) === null && flag('--setup-version') !== undefined ? { approved: false } : {}
+  // A new record keeps the newest use's version however it was set up (Settings, or this script's own setup), as setup
+  // writes it, so an update does not ask about a use the install has had from the start. An older record without one keeps none.
+  const setupVersion = flag('--setup-version') ?? (typeof loaded.version === 'string' ? loaded.version : initial(manifestFile) === null ? newestUse : undefined)
   // A kept /board file keeps its record entry, so it still goes as setup wrote it once the script is taken (#1698).
-  const nextManifest = `${JSON.stringify({ files: Object.fromEntries([...Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]]), ...keptBoards.flatMap(file => manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])]), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}) }, null, 2)}\n`
+  const nextManifest = `${JSON.stringify({ files: Object.fromEntries([...Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]]), ...keptBoards.flatMap(file => manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])]), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}), ...(setupVersion === undefined ? {} : { version: setupVersion }), ...approval }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })
   if (remove && agent === 'antigravity' && initial(sidecarRecord) !== null) changes.push({ file: sidecarRecord, action: 'remove' })
   if (remove && listOf(ownList) !== null) changes.push({ file: pendingFile(agent), action: 'remove' })
@@ -2193,8 +2284,19 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
   }
+  // What an update's question shows (#1314): each hook whose command changes, as the host will run it, and every changed
+  // file a host loads as code (not text it only reads, which keeps the person's edit beside it).
+  const commandsIn = (value: unknown): string[] => typeof value !== 'object' || value === null ? [] : Object.entries(value).flatMap(([key, one]) => key === 'command' && typeof one === 'string' ? [one] : commandsIn(one))
+  const hookCommands = (all: Json): Map<string, string[]> => new Map(agent === 'hermes' ? Object.entries(object(all.hooks ?? {})).map(([event, command]) => [event, typeof command === 'string' ? [command] : []]) : Object.entries(all).map(([event, group]) => [event, commandsIn(group)]))
+  const wasHooks = hookCommands(manifest.groups), nowHooks = hookCommands(groups)
+  const update = !isUpdate ? undefined : {
+    version: typeof loaded.version === 'string' ? loaded.version : null, approved: typeof loaded.approved === 'boolean' ? loaded.approved : null,
+    ...(trustNow === undefined ? {} : { trust: trustNow }),
+    hooks: [...new Set([...wasHooks.keys(), ...nowHooks.keys()])].filter(event => !isSame(wasHooks.get(event) ?? [], nowHooks.get(event) ?? [])).map(event => ({ event, before: wasHooks.get(event) ?? [], after: nowHooks.get(event) ?? [] })),
+    loaded: changes.filter(change => change.action !== 'remove' && Object.hasOwn(files, change.file) && !isTextFile(change.file) && !change.file.endsWith('.new')).map(change => change.file),
+  }
   const plan = {
-    mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts,
+    mode: remove ? 'remove' : 'install', agent, progress, data: root, changes, conflicts, ...(update === undefined ? {} : { update }),
     alreadyGone, ...(keptShared.length ? { keptShared } : {}), ...(keptEdited.length ? { keptEdited } : {}), ...(keptText.length ? { keptText } : {}), ...(keptCode.length ? { keptCode } : {}), ...(keptHeld.length ? { keptHeld } : {}), ...(missingHeld.length ? { missingHeld } : {}), ...(opens === undefined ? {} : { opens }), notice: [agent === 'codex' ? s.codexTrust : s.localHostReview, ...(alreadyGone.length ? [s.setupAlreadyGone(alreadyGone.join(', '))] : [])].join(' '), privacy: s.codexPrivacy,
     capabilities: { ui: 'web-and-tui', progress: 'explicit-reports', lifecycle: lifecycleCapability(agent), turnBinding: agent === 'codex' || agent === 'cursor' || agent === 'openclaw' ? 'host-event-id' : 'unavailable-in-status-events', liveReply: false },
   }
@@ -2205,11 +2307,20 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     else if (remove) process.stdout.write(codexRemoveOutput(result, s, nextCommand('--codex-remove')))
     else process.stdout.write(codexSetupOutput(result, s, nextCommand('--codex-setup', ['--plain']), nextCommand('--codex-doctor')))
   }
+  // An approval this board gave is written in the record, so a later update tells it revoked from never given (#1314).
+  const markApproved = (): void => {
+    if (loaded.approved !== true) withInstallLock(home, () => {
+      if (!isAsPlanned(manifestFile)) throw new Error('INSTALL_CHANGED')
+      put(manifestFile, `${JSON.stringify({ ...loaded, approved: true }, null, 2)}
+`)
+    })
+  }
   if (mode === '--codex-trust') {
     if (agent !== 'codex' || conflicts.length || changes.length || readLocal(manifestFile) === null) throw new Error('OWNED_CODEX_INSTALL_REQUIRED')
     const executable = flag('--codex-bin')
     if (!executable) throw new Error('CODEX_BINARY_REQUIRED')
     const result = await trustCodex(executable, config, manifest.groups, args.includes('--apply'))
+    if (args.includes('--apply')) markApproved()
     if (local) output(result)
     else process.stdout.write(codexTrustOutput(result, s, args.includes('--json'), home))
     return true
@@ -2232,6 +2343,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         put(allowlistFile, allowlistText({ ...approvals.data, approvals: [...approvals.list, ...missing.map(([event, command]) => ({ event, command, approved_at: stamp, script_mtime_at_approval: null }))] }))
       })
     }
+    if (isApplied) markApproved()
     output({ mode: 'trust', agent, file: allowlistFile, entries: wanted.map(([event, command]) => ({ event, command, trusted: isApplied || !missing.some(one => one[0] === event) })), changes: missing.length, ...(isApplied ? { applied: true } : {}) })
     return true
   }
@@ -2253,23 +2365,25 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       }
     }
     let hooksTrusted: boolean | 'unknown' = 'unknown'
-    if (agent === 'hermes' && installed) {
-      const approvals = readAllowlist(initial(allowlistFile), isUnreadable(allowlistFile))
-      const wanted = Object.entries(object(manifest.groups.hooks ?? {}))
-      hooksTrusted = approvals === null ? 'unknown' : wanted.length > 0 && wanted.every(([event, command]) => approvals.list.some(entry => entry.event === event && entry.command === command))
-    }
+    if (agent === 'hermes' && installed) hooksTrusted = hermesTrust()
     if (host) {
       hooksTrusted = host.hooks.every(hook => hook.trust === 'trusted')
     } else if (installed && agent === 'codex') {
       hooksTrusted = inspectCodexConfigToml(configToml)
     }
     // /progress connect may have hooked the host instead, or left only its skill (#285).
-    const connected = agentHooks({
-      home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32', script: '', inbox: '',
+    // Exact Hermes attribution needs the connection's actual data path even in this read-only check.
+    const connectorProgress = typeof connected === 'string' && isAbsolute(connected) ? connected : progress
+    const connectorFolder = dirname(connectorProgress)
+    const connectedHooks = agentHooks({
+      home, sep: process.platform === 'win32' ? '\\' : '/', isWindows: process.platform === 'win32',
+      script: join(connectorFolder, `progress-report.${process.platform === 'win32' ? 'ps1' : 'sh'}`), inbox: join(connectorFolder, 'progress-inbox'),
       codexHome: dirname(configs.codex!), grokHome: dirname(dirname(configs.grok!)), hermesHome: hermesDir,
-      openclawHome: openclawDir, opencodeHome: opencodeDir, board: script,
+      openclawHome: openclawDir, opencodeHome: opencodeDir, board: join(connectorFolder, 'agent-board.mjs'),
+      node: process.execPath, progress: connectorProgress,
+      ...(typeof hermesConnected === 'string' && isAbsolute(hermesConnected) ? { previousProgress: hermesConnected } : {}),
     })
-    const hasConnectHook = connected.some(one => {
+    const hasConnectHook = connectedHooks.some(one => {
       if (one.agent !== agent || one.label === '') return false
       const original = readLocal(one.file)
       if (original === null) return false
@@ -2279,7 +2393,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       return typeof removed === 'string' && removed !== text
     })
     // The board files this host reads: the shared skill only where it reads that one.
-    const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connected.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
+    const skills = [...Object.keys(files).filter(file => file.endsWith('SKILL.md') && (file !== skill || BOARD_FOR.skills!.includes(agent))), ...connectedHooks.filter(one => one.label === '' && BOARD_FOR[one.agent]?.includes(agent)).map(one => one.file)]
     const reportHook = installed ? 'installer' : hasConnectHook ? 'connect' : 'none'
     const isSkillOnly = reportHook === 'none' && skills.some(file => readLocal(file) !== null)
     const result = { ...plan, installed, ready: installed && lifecycleCapability(agent) !== 'adapter-pending', connected: 'unverified', hooksTrusted, reportHook, ...(isSkillOnly ? { problem: s.setupAgent(s.agentNames[agent] ?? agent, [s.setupSkillOnly]) } : {}), notice: s.codexDoctor }

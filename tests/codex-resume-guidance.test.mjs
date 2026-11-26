@@ -30,7 +30,7 @@ const hints = [
 ]
 const languages = [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]
 const routes = [{ agent: 'codex', kind: 'live', routes: {
-  idle: { line: 'now', record: 'docs/validation/synthetic-codex-route.md', surfaces: [SURFACE_IDS.cli, SURFACE_IDS.codexDaemon] },
+  idle: { line: 'now', record: 'docs/validation/synthetic-codex-route.md', surfaces: [SURFACE_IDS.cli, SURFACE_IDS.codexDaemon], surfaceLines: { [SURFACE_IDS.codexDaemon]: 'afterWait' } },
   working: { line: 'none', record: null, surfaces: [] },
   ended: { line: 'none', record: null, surfaces: [] },
 } }]

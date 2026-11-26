@@ -16,6 +16,7 @@ export const settingsPanel = (s: Strings, language: SettingsLang, isLan = false,
   (isLan ? '' : `<section id="settings-approvals"><h3>${esc(s.settingsApprovals)}</h3><button type="button" id="settings-approvals-toggle" role="switch" aria-checked="true" aria-label="${esc(s.settingsApprovals)}">${esc(s.settingsOn)}</button></section>`) +
   `<section id="settings-agents"><h3 id="settings-agents-title">${esc(s.settingsAgents)}</h3><ul id="settings-agent-list" aria-labelledby="settings-agents-title"></ul>` +
   (isLan ? '' : `<div id="settings-agent-confirm" hidden><p id="settings-agent-question"></p><div class="settings-choices"><button type="button" id="settings-agent-yes">${esc(s.settingsAgentConfirm)}</button><button type="button" id="settings-agent-cancel">${esc(s.settingsAgentCancel)}</button></div></div>`) + `</section>` +
+  `<section id="settings-storage" hidden><h3>${esc(s.settingsStorage)}</h3><p class="settings-label" id="settings-storage-line"></p><div class="acts" id="settings-storage-acts"></div></section>` +
   `<p id="settings-result" role="status" aria-live="polite" aria-atomic="true"></p></div></div>`
 
 export const settingsCss = `
@@ -78,6 +79,7 @@ export const settingsScript = String.raw`
     settings.hidden = true;
     settingsButton.setAttribute('aria-expanded', 'false');
     document.getElementById('shell').inert = false;
+    if (typeof onSettingsClose === 'function') onSettingsClose();
     settingsButton.focus();
   }
   settingsButton.addEventListener('click', openSettings);

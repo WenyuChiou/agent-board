@@ -19,10 +19,17 @@ try {
     import('../hooks/strings.ts'),
     import('../hooks/agent-icons.ts'),
     import('../hooks/page-fonts.ts'),
+    import('../hooks/retention.ts'),
+    import('../hooks/view.ts'),
+    import('../hooks/parse.ts'),
+    import('../hooks/questions.ts'),
+    import('../hooks/board-status.ts'),
+    import('../hooks/board-json.ts'),
+    import('./e2e/lib/surfaces.mjs'),
   ])
 } finally { loader.deregister() }
 
-const [{ pageTokens, BOARD_PATH: boardPath }, { servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }] = source
+const [{ pageTokens, BOARD_PATH: boardPath }, { serveModel, servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }, { RETENTION, sizeWarnings, storageDetails }, { buildView }, { parseProgress }, { observeQuestions }, { boardCounts }, { boardDocument }, { pageDom }] = source
 const SANS = 'Inter,"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const SANS_SC = 'Inter,"PingFang SC","Noto Sans SC","Microsoft YaHei UI","Microsoft YaHei","PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
@@ -110,7 +117,7 @@ const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input|select)(?=$|[:[\s]
 
 test('the page uses only colour, size, radius, spacing and motion tokens from page-look', () => {
   const expected = {
-    text: { 'text-xs': 'max(13px,.8125rem)', 'text-sm': 'max(14px,.875rem)', 'text-md': 'max(16px,1rem)', 'text-lg': 'max(20px,1.25rem)' },
+    text: { 'text-xs': 'max(13px,.8125rem)', 'text-sm': 'max(14px,.875rem)', 'text-md': 'max(16px,1rem)', 'text-lg': 'max(18px,1.125rem)' },
     radius: { 'radius-s': '6px', 'radius-m': '10px', 'radius-round': '999px' },
     dur: { 'dur-fast': '120ms', 'dur-base': '200ms', 'dur-layout': '260ms', 'dur-glow': '1.6s', 'dur-dots': '1.2s', 'dur-theme': '.28s' },
     ease: { 'ease-out': 'cubic-bezier(.2,0,0,1)', 'ease-in': 'cubic-bezier(.4,0,1,1)' },
@@ -477,4 +484,347 @@ test('receipt state groups have distinct tokens with >= 4.5:1 contrast and disab
   assert.equal(disabledPrimary?.declarations.find(item => item.property === 'opacity')?.value, '1')
   const disabledSendingArrow = pageRules.find(rule => rule.selector === '.answers button.answer-send[data-sending="1"]:disabled')
   assert.equal(disabledSendingArrow?.declarations.find(item => item.property === 'opacity')?.value, '1')
+})
+
+test('a board over every size limit shows no storage notice on the first screen', async () => {
+  const sizes = { progress: RETENTION.progressSoftBytes + 128 * 1024, store: RETENTION.storeWarnBytes + 512 * 1024 }
+  const projects = parseProgress('## Synthetic project\n### Synthetic task\n- [ ] Check size notice placement\n')
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+    const s = STRINGS[lang]
+    const base = buildView(projects, ['Synthetic project'], null, now, 0, {}, s)
+    const details = storageDetails(sizes, 0, s)
+    const largeView = { ...base, warning: sizeWarnings(sizes, s).join(' · '), isLarge: true, details }
+    const group = { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }
+    const html = servePage(s, 'synthetic')
+    const dom = await pageDom(html, serveModel(largeView, [], s, new Set(), false, undefined, false, group))
+    const boardText = `${dom.node('board').readText}\n${dom.node('board').textContent}`
+    assert.ok(!boardText.includes(s.boardLarge), `${lang}: boardLarge must not appear on the first screen`)
+    assert.ok(!boardText.includes(s.progressLarge(Math.round(sizes.progress / 1024), RETENTION.progressSoftBytes / 1024)), `${lang}: progressLarge must not appear on the first screen`)
+    assert.ok(!boardText.includes(s.storeLarge((sizes.store / (1024 * 1024)).toFixed(1), (RETENTION.storeCapBytes / (1024 * 1024)).toFixed(1))), `${lang}: storeLarge must not appear on the first screen`)
+
+    const storageHtml = /<section id="settings-storage"[^>]*>([\s\S]*?)<\/section>/.exec(html)?.[1] ?? ''
+    assert.equal((storageHtml.match(/<p\b/g) ?? []).length, 1, `${lang}: Settings has one storage line`)
+    const storageSection = dom.node('settings-storage')
+    const storageLine = dom.node('settings-storage-line')
+    assert.equal(storageSection.hidden, false, `${lang}: Settings shows the storage section when over a limit`)
+    assert.equal(storageLine.textContent, details, `${lang}: Settings line carries the full storage details`)
+
+    const smallDom = await pageDom(html, serveModel(base, [], s, new Set(), false, undefined, false, group))
+    assert.equal(smallDom.node('settings-storage').hidden, true, `${lang}: Settings hides the storage section under the limits`)
+    assert.equal(smallDom.node('settings-storage-line').textContent, '', `${lang}: Settings storage line is empty under the limits`)
+
+    const writeFailView = { ...largeView, warning: [s.journalFailed, s.boardLarge].join(' · ') }
+    const writeFailDom = await pageDom(html, serveModel(writeFailView, [], s, new Set(), false, undefined, false, group))
+    const writeFailBoardText = `${writeFailDom.node('board').readText}\n${writeFailDom.node('board').textContent}`
+    assert.ok(writeFailBoardText.includes(s.journalFailed), `${lang}: write failure still speaks on the first screen`)
+    assert.ok(!writeFailBoardText.includes(s.boardLarge), `${lang}: boardLarge stays hidden alongside a write failure`)
+  }
+})
+
+test("a waiting question's folded item is two lines at 1280 px", async () => {
+  const s = STRINGS.en
+  const html = servePage(s, 'n')
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const md = [
+    '## weather-model',
+    `<!-- auto session=aa11bb22 agent=codex state=waiting updated=${new Date(now - 7 * 60000).toISOString()} -->`,
+    '### Compare rainfall model error rates across stations',
+    '> Context: Need the Q4 report pick before Friday review.',
+    '- [x] Load station series',
+    '- [?] Choose model for `bun run compare-models`?',
+    '<!-- options=["ECMWF","Local model","Hybrid","Skip"] -->',
+    '<!-- /auto session=aa11bb22 -->',
+    '',
+  ].join('\n')
+  const view = buildView(parseProgress(md), ['weather-model'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const model = serveModel(view, [], s, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const dom = await pageDom(html, model)
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const isInert = node => {
+    for (let cur = node; cur; cur = cur.parentNode) if (cur.inert || cur.hidden) return true
+    return false
+  }
+  const card = walk(dom.node('needs')).find(node => node.tag === 'article' && node.getAttribute('data-ref-key'))
+  assert.ok(card, 'question card renders in Needs you')
+  const descendants = walk(card)
+  const mark = descendants.find(node => String(node.className ?? '').split(' ').includes('ag'))
+  assert.equal(mark?.getAttribute('title'), 'Codex', 'AI mark tooltip carries the AI name')
+  assert.equal(mark?.getAttribute('role'), 'img', 'AI mark exposes role="img" to screen readers')
+  assert.equal(mark?.getAttribute('aria-label'), 'Codex', 'AI mark exposes AI name to screen readers')
+  assert.equal(mark?.getAttribute('aria-hidden'), null, 'AI mark is not hidden from screen readers')
+  assert.equal(descendants.some(node => String(node.className ?? '').split(' ').includes('who')), false, 'folded item carries no inline AI name word')
+  const toggle = descendants.find(node => node.tag === 'button' && String(node.className ?? '').split(' ').includes('q-toggle'))
+  assert.ok(toggle, 'line 1 question uses a collapsible toggle button')
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false', 'waiting question item starts folded')
+  const qNode = descendants.find(node => String(node.className ?? '').split(' ').includes('q'))
+  assert.ok(qNode?.textContent.includes('Choose model for'), qNode?.textContent)
+  const line2 = descendants.find(node => String(node.className ?? '').split(' ').includes('c-line2'))
+  assert.ok(line2, 'folded item has line 2 container (.c-line2)')
+  assert.ok(line2.textContent.includes('weather-model') && line2.textContent.includes('7'), 'line 2 shows project and age')
+  const visibleButtons = descendants.filter(node => node.tag === 'button' && node !== toggle && !isInert(node))
+  assert.ok(visibleButtons.length <= 3, `folded item shows at most 3 controls, got ${visibleButtons.length}`)
+  const foldedText = card.visibleText
+  for (const hiddenSnippet of [
+    'Compare rainfall model error rates across stations',
+    'Need the Q4 report pick before Friday review.',
+    'Load station series',
+    'Hybrid',
+    'Skip',
+    '$ bun run compare-models',
+    s.pgWriteOwn,
+    s.answeredHide,
+  ]) {
+    assert.ok(!foldedText.includes(hiddenSnippet), `folded item hides "${hiddenSnippet}"`)
+  }
+  toggle.click()
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true', 'clicking item opens it')
+  const openText = card.visibleText
+  for (const detailSnippet of [
+    'Compare rainfall model error rates across stations',
+    'Need the Q4 report pick before Friday review.',
+    'Load station series',
+    'Hybrid',
+    'Skip',
+    '$ bun run compare-models',
+    s.pgWriteOwn,
+    s.answeredHide,
+  ]) {
+    assert.ok(openText.includes(detailSnippet), `opened item shows "${detailSnippet}"`)
+  }
+})
+
+test('no text inside an item is over 14 px', () => {
+  const html = servePage(STRINGS.en, 'n')
+  const rules = styleRules(html)
+  const pxFloor = value => Number(/^max\((\d+)px/.exec(String(value ?? ''))?.[1] ?? NaN)
+  const tokenPx = Object.fromEntries(
+    ['text-xs', 'text-sm', 'text-md', 'text-lg'].map(name => [name, pxFloor(light[name])]),
+  )
+  const resolveFontPx = value => {
+    const match = /var\(--(text-(?:xs|sm|md|lg))\)/.exec(String(value ?? ''))
+    return match ? tokenPx[match[1]] : null
+  }
+  const isItemSelector = selector => selector.split(',').some(part => {
+    const sel = part.trim()
+    return /(?:^|[\s.>])(?:card|q|c-meta|c-line2|answers|answer-send|row|r-title|r-meta|r-right|row-open|hid|note|context)\b/.test(sel) ||
+      /^(?:code|textarea)(?:$|:|\s)/.test(sel)
+  })
+  const checkedItemSizes = []
+  for (const rule of rules.filter(one => !isTokenRule(one) && isItemSelector(one.selector))) {
+    for (const decl of rule.declarations) {
+      if (decl.property !== 'font-size' && decl.property !== 'font') continue
+      const px = resolveFontPx(decl.value)
+      if (px !== null) {
+        checkedItemSizes.push({ selector: rule.selector, property: decl.property, value: decl.value, px })
+        assert.ok(px <= 14, `${rule.selector} { ${decl.property}: ${decl.value} } resolves to ${px}px > 14px`)
+      }
+    }
+  }
+  assert.ok(checkedItemSizes.length > 0, 'item font sizes must be checked')
+  const qRule = rules.find(rule => rule.selector === '.q')
+  assert.equal(resolveFontPx(qRule?.declarations.find(d => d.property === 'font-size')?.value), 14, '.q question title is 14 px')
+  assert.equal(qRule?.declarations.find(d => d.property === 'font-weight')?.value, '600', '.q question title weight is 600')
+  assert.notEqual(qRule?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap', '.q without .q-toggle (Older cards) wraps instead of truncating')
+  const toggleQRule = rules.find(rule => rule.selector === '.q-toggle .q')
+  assert.equal(toggleQRule?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap', '.q-toggle .q folded question stays one line')
+  const line2Rule = rules.find(rule => rule.selector === '.c-line2')
+  assert.equal(resolveFontPx(line2Rule?.declarations.find(d => d.property === 'font-size')?.value), 13, '.c-line2 second line is 13 px')
+  for (const viewSel of ['.sec-head h2', '.flag']) {
+    const rule = rules.find(one => one.selector === viewSel)
+    assert.equal(resolveFontPx(rule?.declarations.find(d => d.property === 'font-size')?.value), 18, `${viewSel} view title is 18 px`)
+  }
+})
+
+test('waiting-on-others task folds under Needs you without duplicating in Other work', async () => {
+  const now = Date.now()
+  const updated = new Date(now - 5 * 60_000).toISOString()
+  const md = [
+    '## wait-only-repo',
+    `<!-- auto session=ww112233 agent=codex state=waiting updated=${updated} -->`,
+    '### Review downstream feedback',
+    '- [?] Waiting for reviewer reply',
+    '<!-- /auto session=ww112233 -->',
+    '',
+  ].join('\n')
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const othersSection = dom => dom.node('board').childNodes.find(node => node.getAttribute?.('data-sec') === 'others')
+
+  const enView = buildView(parseProgress(md), ['wait-only-repo'], null, now, 0, {}, STRINGS.en, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const enModel = serveModel(enView, [], STRINGS.en, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const enDom = await pageDom(servePage(STRINGS.en, 'n'), enModel)
+  const needsNodes = walk(enDom.node('needs'))
+  const waitToggle = needsNodes.find(node => node.tag === 'button' && node.textContent === 'Waiting on others 1')
+  assert.ok(waitToggle, 'EN toggle Waiting on others 1 renders under #needs')
+  assert.equal(waitToggle.getAttribute('aria-expanded'), 'false')
+  const waitWrap = waitToggle.parentNode.parentNode
+  const waitFold = waitWrap.childNodes.find(node => String(node.className ?? '').split(' ').includes('fold'))
+  assert.ok(waitFold, 'wait-only fold wrapper exists')
+  assert.equal(waitFold.inert, true, 'wait-only fold starts inert')
+  const others = othersSection(enDom)
+  assert.ok(!others || !others.visibleText.includes('Review downstream feedback'), 'wait-only task does not render a duplicate row in Other work')
+  assert.ok(enDom.node('side-projects').textContent.includes('wait-only-repo'), 'solo wait-only project stays in sidebar')
+
+  waitToggle.click()
+  assert.equal(waitToggle.getAttribute('aria-expanded'), 'true')
+  assert.equal(waitFold.inert, false)
+  const waitCard = walk(waitFold).find(node => node.tag === 'article' && String(node.className ?? '').split(' ').includes('card'))
+  assert.ok(waitCard, 'waitingOthers card renders inside expanded fold')
+  assert.ok(waitCard.textContent.includes('Waiting for reviewer reply'))
+  const writeOwn = walk(waitCard).find(node => node.tag === 'button' && node.textContent === STRINGS.en.pgWriteOwn)
+  assert.ok(writeOwn, 'Write your own control renders on waitingOthers card')
+  writeOwn.click()
+  assert.ok(walk(waitCard).some(node => node.tag === 'textarea'), 'clicking Write your own reveals composer textarea')
+
+  const twView = buildView(parseProgress(md), ['wait-only-repo'], null, now, 0, {}, STRINGS['zh-TW'], [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const twModel = serveModel(twView, [], STRINGS['zh-TW'], new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const twDom = await pageDom(servePage(STRINGS['zh-TW'], 'n'), twModel)
+  const twToggle = walk(twDom.node('needs')).find(node => node.tag === 'button' && node.textContent === '等別人 1')
+  assert.ok(twToggle, 'zh-TW toggle 等別人 1 renders under #needs')
+})
+
+test('row-backed wait task folds into Waiting on others without duplicating in Other work or Working, while staying in boardDocument.waiting', async () => {
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const updated = new Date(now - 5 * 60_000).toISOString()
+  const md = [
+    '## wait-row-repo',
+    `<!-- auto session=wr112233 agent=codex state=working updated=${updated} -->`,
+    '### Ship API endpoint',
+    '- [~] Implementing API',
+    '- [?] Waiting for reviewer reply',
+    '<!-- /auto session=wr112233 -->',
+    '',
+    '## manual-wait-repo',
+    '### Manual review wait',
+    '- [ ] Draft release note',
+    '- [?] Waiting for team sign-off',
+    '',
+  ].join('\n')
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const sectionBy = (dom, sec) => dom.node('board').childNodes.find(node => node.getAttribute?.('data-sec') === sec)
+  const group = { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }
+
+  const view = buildView(parseProgress(md), ['wait-row-repo', 'manual-wait-repo'], null, now, 0, {}, STRINGS.en, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const model = serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, group)
+
+  assert.equal(model.view.needs.n, 0)
+  assert.equal(model.view.needs.waitingOthers.length, 2)
+  assert.deepEqual(model.view.working, [])
+  assert.equal(model.view.all.open.length, 2)
+  assert.ok(model.view.all.open.every(ref => ref.waitsOnOthers === true && ref.key.startsWith('row:')))
+  assert.deepEqual(boardCounts(view, [], STRINGS.en, now), { needs: 0, queued: 0, working: 0 })
+
+  const doc = boardDocument(view, [], [], STRINGS.en, '', false, now, group)
+  assert.equal(doc.counts.needs, 0)
+  assert.equal(doc.counts.working, 0)
+  assert.equal(doc.counts.waiting, 2)
+  assert.deepEqual(doc.waiting.map(one => one.title).sort(), ['Manual review wait', 'Ship API endpoint'])
+
+  const dom = await pageDom(servePage(STRINGS.en, 'n'), model)
+  const waitToggle = walk(dom.node('needs')).find(node => node.tag === 'button' && node.textContent === 'Waiting on others 2')
+  assert.ok(waitToggle, 'toggle Waiting on others 2 renders under #needs')
+  const waitFold = waitToggle.parentNode.parentNode.childNodes.find(node => String(node.className ?? '').split(' ').includes('fold'))
+  assert.ok(waitFold, 'wait fold exists')
+  assert.equal(waitFold.inert, true, 'wait fold starts inert')
+  waitToggle.click()
+  assert.equal(waitFold.inert, false, 'wait fold opens on click')
+  assert.ok(waitFold.visibleText.includes('Waiting for reviewer reply'))
+  assert.ok(waitFold.visibleText.includes('Waiting for team sign-off'))
+
+  const working = sectionBy(dom, 'working')
+  assert.ok(!working || !working.visibleText.includes('Ship API endpoint'), 'row-backed wait task must not duplicate in Working')
+  const others = sectionBy(dom, 'others')
+  assert.ok(!others || (!others.visibleText.includes('Ship API endpoint') && !others.visibleText.includes('Manual review wait')), 'row-backed wait tasks must not duplicate in Other work')
+  assert.ok(dom.node('side-projects').textContent.includes('wait-row-repo'), 'row-backed wait project stays in sidebar')
+  assert.ok(dom.node('side-projects').textContent.includes('manual-wait-repo'), 'manual row-backed wait project stays in sidebar')
+})
+
+test('parseProgress -> buildView -> serveModel orders cards by updated= age, puts AI before manual, and folds reminder/older into Earlier', async () => {
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const day = 24 * 60 * 60_000
+  const min = 60_000
+  const iso = ts => new Date(ts).toISOString()
+  const s = STRINGS.en
+  const group = { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }
+
+  const md = [
+    '## alpha-repo',
+    `<!-- auto session=aa100001 agent=codex state=waiting updated=${iso(now - 5 * min)} -->`,
+    '### New AI task',
+    '- [?] Newer AI question?',
+    '<!-- /auto session=aa100001 -->',
+    '',
+    `<!-- auto session=aa100002 agent=codex state=waiting updated=${iso(now - 30 * day)} -->`,
+    '### Long-waiting AI task',
+    '- [?] Thirty-day-old AI question?',
+    '<!-- /auto session=aa100002 -->',
+    '',
+    '### Hand-kept task',
+    '- [?] Manual checklist question?',
+    '',
+    `<!-- auto session=aa100003 agent=codex state=waiting updated=${iso(now - 10 * min)} -->`,
+    '### Reminder task',
+    '- [?] Four-day-old reminder question?',
+    '<!-- /auto session=aa100003 -->',
+    '',
+    `<!-- auto session=aa100004 agent=codex state=waiting updated=${iso(now - 10 * day)} -->`,
+    '### Stopped old task',
+    '- [?] Ten-day-old stopped question?',
+    '<!-- /auto session=aa100004 -->',
+    '',
+  ].join('\n')
+
+  const projects = parseProgress(md)
+  let ledger = { version: 1, next: 1, records: [], legacy: {} }
+  // Seed firstObserved timestamps via observeQuestions at historical observation times.
+  const reminderOnly = parseProgress([
+    '## alpha-repo',
+    `<!-- auto session=aa100003 agent=codex state=waiting updated=${iso(now - 4 * day)} -->`,
+    '### Reminder task',
+    '- [?] Four-day-old reminder question?',
+    '<!-- /auto session=aa100003 -->',
+    '',
+  ].join('\n'))
+  ledger = observeQuestions(ledger, reminderOnly, null, [], now - 4 * day).ledger
+  const olderOnly = parseProgress([
+    '## alpha-repo',
+    `<!-- auto session=aa100004 agent=codex state=waiting updated=${iso(now - 10 * day)} -->`,
+    '### Stopped old task',
+    '- [?] Ten-day-old stopped question?',
+    '<!-- /auto session=aa100004 -->',
+    '',
+  ].join('\n'))
+  ledger = observeQuestions(ledger, olderOnly, null, [], now - 10 * day).ledger
+  ledger = observeQuestions(ledger, projects, null, [], now).ledger
+
+  // With staleMs covering the 30-day block, observedTime flows updated= into ask.at so it ranks before the 5-min AI card and manual step.
+  const view = buildView(projects, ['alpha-repo'], null, now, 0, {}, s, [], {}, ledger, undefined, [], new Set(), undefined, 60 * day)
+  const model = serveModel(view, [], s, new Set(), false, undefined, false, group)
+  const askText = ref => model.asks.find(one => one.key === ref.key)?.text
+
+  assert.deepEqual(
+    model.view.needs.cards.map(askText),
+    ['Thirty-day-old AI question?', 'Newer AI question?', 'Manual checklist question?'],
+    '30-day updated= AI card precedes 5-min AI card, and AI questions precede hand-kept manual steps',
+  )
+  assert.equal(model.view.needs.olderLabel, 'Earlier 2')
+  assert.deepEqual(
+    model.view.needs.older.map(ref => [...model.reminder, ...model.older].find(one => one.key === (ref.sourceKey ?? ref.key))?.text),
+    ['Ten-day-old stopped question?', 'Four-day-old reminder question?'],
+    'both >7d stopped/older and 3-7d reminder questions flow into model.view.needs.older',
+  )
+
+  const dom = await pageDom(servePage(s, 'n'), model)
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const activeCardsList = walk(dom.node('needs')).find(node => node.tag === 'ul' && String(node.className ?? '').split(' ').includes('cards'))
+  const cardQuestions = walk(activeCardsList).filter(node => String(node.className ?? '').split(' ').includes('q')).map(node => node.textContent)
+  assert.deepEqual(cardQuestions, ['Thirty-day-old AI question?', 'Newer AI question?', 'Manual checklist question?'])
+  const olderToggle = walk(dom.node('needs')).find(node => node.tag === 'button' && node.textContent === s.pgSeeAll)
+  assert.ok(olderToggle, 'See all toggle renders for older questions')
+  const olderFold = olderToggle.parentNode.parentNode.childNodes.find(node => String(node.className ?? '').split(' ').includes('fold'))
+  assert.equal(olderFold.inert, true)
+  olderToggle.click()
+  assert.equal(olderFold.inert, false)
+  assert.ok(olderFold.visibleText.includes('Ten-day-old stopped question?'))
+  assert.ok(olderFold.visibleText.includes('Four-day-old reminder question?'))
 })

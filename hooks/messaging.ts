@@ -6,7 +6,7 @@ import { sha256 } from './sha256.ts'
 export type Origin = 'local'
 // A connected session is a live lease from a host adapter, never a name in progress.md.
 // busySeq: the highest turn number an Antigravity mailbox's turn-start hook sent with its take (#1396).
-export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin; folderDigest?: string; mcpOwner?: string; mcpLeaseUntil?: number; busySeq?: number }
+export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin; folderDigest?: string; mcpOwner?: string; mcpLeaseUntil?: number; hostTurn?: string; busySeq?: number }
 export type Message = {
   id: string
   target: string
@@ -37,6 +37,9 @@ export type Message = {
   attempted?: number
   // The id of the question this message answers, set only by the board: a kept question finds its own receipt by it.
   answers?: string
+  // For an answer to a mailbox, the turn its session's hook last named when the board queued it (#319): a step end of a
+  // later turn refuses it as moved on (MOVED_ON) instead of handing it over.
+  boundTurn?: string
   // The route line the board showed when it sent this message (set only by the board), so a receipt is worded
   // for the route the message took, not for whatever the card shows after its mailbox has expired.
   line?: RouteLine
@@ -56,18 +59,22 @@ export type Message = {
   woke?: number
   wakeAfter?: number
   wake?: 'sent' | 'failed'
+  // When the Codex desktop app first refused this message, with nothing sent, because it held the conversation (#557).
+  // Later refusals keep it: from the open limit after it, the message is never handed out or begun, and is refused as not sent.
+  heldSince?: number
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
-// now (goes in at once), stepEnd (when its current step ends), nextTurn (at its next turn; it does not
-// wake it), chatOpen (when this chat is opened again), reopen (the board reopens the session and sends),
-// none (cannot receive yet). `record` is the docs/validation note that showed the route live, or null.
-export type RouteLine = 'now' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none'
-export const ROUTE_LINES: readonly RouteLine[] = ['now', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
+// now (goes in at once), afterWait (goes in after a wait, such as the Codex daemon's ~10-minute watch, #1814),
+// stepEnd (when its current step ends), nextTurn (at its next turn; it does not wake it), chatOpen (when this
+// chat is opened again), reopen (the board reopens the session and sends), none (cannot receive yet). `record`
+// is the docs/validation note that showed the route live, or null.
+export type RouteLine = 'now' | 'afterWait' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none'
+export const ROUTE_LINES: readonly RouteLine[] = ['now', 'afterWait', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
 export type RowState = 'idle' | 'working' | 'ended'
 export type RouteKind = 'live' | 'mailbox' | 'turn'
 export const SURFACE_IDS = {
-  claude: 'Claude Code', codexProxy: 'Codex local proxy', codexSession: 'Codex owned session', codexDaemon: 'Codex daemon',
+  claude: 'Claude Code', codexProxy: 'Codex local proxy', codexSession: 'Codex owned session', codexDaemon: 'Codex daemon', codexApp: 'Codex desktop app',
   antigravityStream: 'Antigravity owned CLI stream', antigravityTui: 'agy TUI', antigravityIde: 'IDE',
   cursor: 'IDE (Composer)', cli: 'CLI', web: 'Web', tui: 'TUI', unknown: 'unknown',
 } as const
@@ -75,13 +82,18 @@ export const SURFACE_IDS = {
 export const MCP_SURFACE = 'mcp'
 // A note covers only the surfaces on which its route was recorded. One route can be recorded by a different
 // note on each surface it covers: `surfaceRecords` names a surface's own note, and `record` covers the rest.
-export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[]; surfaceRecords?: Readonly<Record<string, string>> }
+// Likewise a surface can have its own line (`surfaceLines`), when two receivers of one agent and kind reach a session
+// differently: the Codex daemon starts a turn after a wait, the Codex desktop app receiver reopens the conversation (#557, #1814).
+export type Route = { line: RouteLine; record: string | null; surfaces: readonly string[]; surfaceRecords?: Readonly<Record<string, string>>; surfaceLines?: Readonly<Record<string, RouteLine>> }
 // A note names a file: text on one line that is not only spaces, the same test the matrix applies.
 export const isNote = (value: unknown): value is string => typeof value === 'string' && value.trim() !== '' && !/[\r\n]/.test(value)
 // The note that covers a route on one surface. Only the route's own keys count, so a surface named like a
 // property every object inherits reads the route's note.
 export const routeRecord = (route: Route, surface: string): string | null =>
   route.surfaceRecords !== undefined && Object.hasOwn(route.surfaceRecords, surface) ? route.surfaceRecords[surface] ?? null : route.record
+// The line of a route on one surface, read the same way: only the route's own keys count.
+export const routeLine = (route: Route, surface: string): RouteLine =>
+  route.surfaceLines !== undefined && Object.hasOwn(route.surfaceLines, surface) ? route.surfaceLines[surface] ?? route.line : route.line
 // `sidecar`: an entry that holds only while the Antigravity sidecar polls the board (#1396); `sidecarRoutes` drops it otherwise.
 export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route>; sidecar?: true }
 export const sidecarRoutes = (routes: readonly ReceiverRoutes[], isOn: boolean): readonly ReceiverRoutes[] => isOn ? routes : routes.filter(one => one.sidecar !== true)
@@ -101,7 +113,7 @@ const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteK
 export const isRecordedRoute = (one: Connection, stateOfSession: (agent: string, session: string) => RowState | undefined, routes: readonly ReceiverRoutes[]): boolean => {
   const state = stateOfSession(one.agent, one.session)
   const route = state === undefined ? undefined : routeOf(routes, one.agent, routeKind(one.scope), state, one.surface)
-  return route !== undefined && route.line !== 'none' && isNote(routeRecord(route, one.surface)) && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface)
+  return route !== undefined && routeLine(route, one.surface) !== 'none' && isNote(routeRecord(route, one.surface)) && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface)
 }
 
 export const sendDecision = (
@@ -120,27 +132,30 @@ export const sendDecision = (
   if (state === undefined) return { canSend: false, line: 'none', reason: 'STATE_UNKNOWN' }
   const route = routeOf(routes, target.agent, routeKind(target.scope), state, target.surface)
   if (route === undefined) return { canSend: false, line: 'none', reason: 'NO_RECORD' }
+  const line = routeLine(route, target.surface)
   // Background resume cannot run while a turn is already active in that conversation.
-  if (route.line === 'reopen' && state === 'working') return { canSend: false, line: 'none', reason: 'TURN_RUNNING' }
+  if (line === 'reopen' && state === 'working') return { canSend: false, line: 'none', reason: 'TURN_RUNNING' }
   const record = routeRecord(route, target.surface)
-  if (route.line === 'none' || !isNote(record)) return { canSend: false, line: route.line, reason: 'NO_RECORD' }
-  if (target.surface === SURFACE_IDS.unknown || !Object.values(SURFACE_IDS).some(surface => surface === target.surface) || !Array.isArray(route.surfaces) || !route.surfaces.includes(target.surface)) return { canSend: false, line: route.line, reason: 'SURFACE_UNKNOWN' }
-  return { canSend: true, line: route.line, target, state }
+  if (line === 'none' || !isNote(record)) return { canSend: false, line, reason: 'NO_RECORD' }
+  if (target.surface === SURFACE_IDS.unknown || !Object.values(SURFACE_IDS).some(surface => surface === target.surface) || !Array.isArray(route.surfaces) || !route.surfaces.includes(target.surface)) return { canSend: false, line, reason: 'SURFACE_UNKNOWN' }
+  return { canSend: true, line, target, state }
 }
 // A well-formed route: a known line; a record that is a note (`isNote`) or null; surfaces that are notes, at least
 // one when there is a record; and a surface's own notes, if any, in a plain object whose keys are surfaces the
-// route covers and whose values are notes. The board's routes file and the matrix's receiver records
+// route covers and whose values are notes; and a surface's own lines, if any, the same way with known lines for values. The board's routes file and the matrix's receiver records
 // (scripts/messaging-matrix.mjs) are checked by this one function, so the two cannot accept different routes.
 // A plain object: what routeRecord reads a surface's note from (a Map or a class instance would pass `typeof` and be ignored).
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   value !== null && typeof value === 'object' && [Object.prototype, null].includes(Object.getPrototypeOf(value))
 export const isRoute = (value: unknown): value is Route => {
   if (value === null || typeof value !== 'object') return false
-  const { line, record, surfaces, surfaceRecords } = value as Record<string, unknown>
+  const { line, record, surfaces, surfaceRecords, surfaceLines } = value as Record<string, unknown>
   return ROUTE_LINES.includes(line as RouteLine) && (record === null || isNote(record))
     && Array.isArray(surfaces) && surfaces.every(isNote) && (record === null || surfaces.length > 0)
     && (surfaceRecords === undefined || isPlainObject(surfaceRecords)
       && Object.entries(surfaceRecords).every(([name, note]) => surfaces.includes(name) && isNote(note)))
+    && (surfaceLines === undefined || isPlainObject(surfaceLines)
+      && Object.entries(surfaceLines).every(([name, own]) => surfaces.includes(name) && ROUTE_LINES.includes(own as RouteLine)))
 }
 // Whether a list read from outside (the tests' stand-in file) holds well-formed receiver routes: every entry
 // names an agent (a note) and a kind, and every state has a route `isRoute` takes. Anything else is refused
@@ -155,10 +170,11 @@ export const isReceiverRoutes = (value: unknown): value is ReceiverRoutes[] => A
 export const routeKind = (scope: Connection['scope']): RouteKind => scope === 'mailbox' ? 'mailbox' : scope === 'session' ? 'live' : 'turn'
 export const isMailboxTarget = (id: string): boolean => /^mailbox_[0-9a-f]{24}$/.test(id)
 const isHookDelivered = (one: Message): boolean => one.status === 'accepted' && isMailboxTarget(one.target) && !one.awaitsAck
-// A hook can stop waiting after the board has claimed a message for it, and then nobody accepts it. A
-// claim a hook named is handed out again once the lease has passed, a few times at most, with the same
-// ACK code and a line saying it may be a repeat (#990). A claim with no name (board_inbox, a live
-// receiver) is handed over once.
+// A hook can stop waiting after the board has claimed a message for it, and then nobody accepts it. A claim a hook
+// named and nobody accepted in its lease reads Unsure with HOLDER_LOST (below) and is never handed out again (#1843).
+// DeepSeek's plugin holds a claim while its session works and delivers it at the next idle, so until it can give a held
+// claim back (#1870) its claims are still handed out again once the lease has passed, a few times at most, with the same
+// ACK code and a line saying it may be a repeat (#990). A claim with no name (board_inbox, a live receiver) is handed over once.
 export const MAILBOX_LEASE_MS = 30_000
 export const MAILBOX_REDELIVERIES = 3
 // The error a started wake carries once 30 minutes passed with no receipt: the card says "sent, not confirmed".
@@ -168,11 +184,29 @@ export const UNCONFIRMED = 'UNCONFIRMED'
 // no repeat count and no repeat line, or sooner to a new take from the same mailbox; a marked one is never handed out
 // again. Every other hook keeps the rule above.
 const isAtMostOnce = (one: Pick<Message, 'to' | 'ref'>): boolean => one.ref !== undefined && one.to.startsWith('opencode:')
+// A message its host accepted, now or before a later receipt, reached it: nothing hands it out or queues it again, whatever
+// receipt comes after, and dismissing it keeps the mark (#1407).
+export const isAcceptedOnce = (one: Pick<Message, 'status' | 'hasAccepted'>): boolean => one.status === 'accepted' || one.status === 'acknowledged' || one.hasAccepted === true
+// The error the board writes at its start on a message a hook was handed before it: nothing handed out before a board start is
+// handed out after it (#1407). Only the board writes it; a receiver cannot send it.
+export const BOARD_RESTARTED = 'BOARD_RESTARTED'
+// The error the board writes on a hook's named claim nobody accepted in its lease: its holder may have been killed before or
+// after its output reached the host, and the board cannot tell which, so the claim loses its name and is never handed out
+// again (#1843). It holds its session as BOARD_RESTARTED does, until a dismiss or the open limit. Only the board writes it.
+export const HOLDER_LOST = 'HOLDER_LOST'
+// The error the board writes on an answer that a step end of a later turn than its own refused (#319): the conversation
+// moved on from the question it answers. Only the board writes it.
+export const MOVED_ON = 'MOVED_ON'
+const isLeaseKept = (one: Pick<Message, 'to'>): boolean => one.to.startsWith('deepseek:')
+// A named claim whose lease is over and that no rule hands out again: not OpenCode's (#724), not DeepSeek's, not one its host
+// accepted (#1407). An error a receipt wrote does not change it: a later receipt with no error would clear that error.
+export const isLeaseOver = (one: Message, now: number): boolean => one.status === 'uncertain' && one.ref !== undefined && isMailboxTarget(one.target)
+  && !isAtMostOnce(one) && !isLeaseKept(one) && !isAcceptedOnce(one) && now - one.claimed >= MAILBOX_LEASE_MS
 const isLeasePassed = (one: Message, now: number): boolean => one.status === 'uncertain' && one.error === '' && one.ref !== undefined && isMailboxTarget(one.target) && now - one.claimed >= MAILBOX_LEASE_MS
-const isLapsed = (one: Message, now: number): boolean => isLeasePassed(one, now) && (isAtMostOnce(one) ? one.attempted === undefined : (one.redelivered ?? 0) < MAILBOX_REDELIVERIES)
+const isLapsed = (one: Message, now: number): boolean => isLeasePassed(one, now) && !isAcceptedOnce(one) && (isAtMostOnce(one) ? one.attempted === undefined : isLeaseKept(one) && (one.redelivered ?? 0) < MAILBOX_REDELIVERIES)
 // An OpenCode claim nobody marked: its plugin lost the answer to the take, or gave up before the attempt. The plugin's next take
 // from the same mailbox gets it at once instead of waiting out the lease; the old ref then answers CLAIM_LOST to an attempt.
-const isUnmarked = (one: Message): boolean => isAtMostOnce(one) && one.status === 'uncertain' && one.error === '' && one.attempted === undefined && isMailboxTarget(one.target)
+const isUnmarked = (one: Message): boolean => isAtMostOnce(one) && one.status === 'uncertain' && one.error === '' && one.attempted === undefined && !isAcceptedOnce(one) && isMailboxTarget(one.target)
 // What the pruning does to an OpenCode claim: the lapsed one returns to queued; a started wake, and one the host took with
 // a 204 answer that the model never acknowledged, become "sent, not confirmed" at the open limit and keep their text. Undefined
 // for any other message.
@@ -191,6 +225,11 @@ const settleWake = (one: Message, now: number): Message | undefined => {
 
 export const FINISHED_KEEP_MS = 24 * 60 * 60 * 1000
 export const OPEN_LIMIT_MS = 30 * 60 * 1000
+// The receivers that may say `held`, which keeps the message's clock instead of starting a fresh claim's 30 minutes (#1578):
+// the Codex desktop app refuses a second writer for as long as it is open, so each refusal is the same wait, counted by the
+// board from the first one, whatever its receiver remembers (#557). Any other give-back is `unsent` and starts no clock.
+const HELD_CLOCK_SURFACES: readonly string[] = [SURFACE_IDS.codexApp]
+export const isHeldTooLong = (one: Pick<Message, 'heldSince'>, now: number): boolean => one.heldSince !== undefined && now - one.heldSince >= OPEN_LIMIT_MS
 export const HOP_LIMIT = 2
 export const PEER_PAIR_BUDGET = 6
 export const TARGET_OPEN_CAP = 3
@@ -259,9 +298,18 @@ const settled = (one: Message): Message => isFinished(one) && (one.text !== '' |
 export const pruneMessages = (state: MessageState, now: number): MessageState => {
   // A claim an OpenCode plugin made is never expired while it is unsent (it returns to queued) or a wake that was started or
   // accepted (it reads "sent, not confirmed" and keeps its text); every other message follows the open limit.
-  const kept = state.messages.filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(one => {
+  // A queued message that carries an acceptance mark, as an earlier board saved a hand-back of an accepted message, is never
+  // handed out (#1407): it reads Unsure with no claim time, so it ages and expires as one does.
+  // A hook's named claim past its lease loses its name, and reads HOLDER_LOST unless a receipt wrote an error; its times stay,
+  // so the open limit still counts from its claim (#1843).
+  const kept = state.messages.filter(one => !isFinished(one) || now - one.updated <= FINISHED_KEEP_MS).map(saved => {
+    const marked = saved.status === 'queued' && saved.hasAccepted === true ? { ...saved, status: 'uncertain' as const, error: '', claimed: 0 } : saved
+    const { ref: _ref, ...unnamed } = marked
+    const one = isLeaseOver(marked, now) ? { ...unnamed, error: unnamed.error || HOLDER_LOST } : marked
     const wake = settleWake(one, now)
     if (wake !== undefined) return wake
+    // A reply the Codex desktop app held for the whole open limit is refused as not sent, with no receiver to ask (#557).
+    if (one.status === 'queued' && isHeldTooLong(one, now)) return settled({ ...one, status: 'rejected' as const, error: 'APP_STILL_OPEN', updated: now })
     return settled((one.status === 'uncertain' || one.status === 'accepted' && (one.error !== '' || isMailboxTarget(one.target))) && !isFinished(one) && now - one.updated > OPEN_LIMIT_MS
       ? { ...one, status: 'uncertain' as const, error: 'EXPIRED', updated: now, ...(one.status === 'accepted' ? { hasAccepted: true } : {}) } : one)
   })
@@ -271,7 +319,8 @@ export const pruneMessages = (state: MessageState, now: number): MessageState =>
   // hop count from.
   const latest = new Map<string, Message>()
   for (const one of kept) if (one.claimed > 0 && one.claimed >= (latest.get(one.to)?.claimed ?? 0)) latest.set(one.to, one)
-  const isInDoubt = (one: Message): boolean => one.status === 'uncertain' && one.claimed > 0
+  // A message a board start made Unsure may have no claim time; its ACK code says it was handed out (#1407).
+  const isInDoubt = (one: Message): boolean => one.status === 'uncertain' && (one.claimed > 0 || one.nonce !== '')
   const finished = kept.filter(isFinished)
   const spare = finished.filter(one => !isInDoubt(one) && latest.get(one.to) !== one).sort((a, b) => a.updated - b.updated)
   const dropped = new Set(spare.slice(0, Math.max(0, finished.length - FINISHED_KEEP_COUNT)))
@@ -321,6 +370,15 @@ export const messageText = (value: unknown, max = 8000): string => {
   return value
 }
 export const isAnswersId = (value: unknown): value is string => typeof value === 'string' && value.length >= 1 && value.length <= 200 && !/[\r\n\0]/.test(value)
+// A turn id a hook names (Codex's `turn_id`), kept as it came.
+export const isHostTurn = isAnswersId
+// The board's open answer to a question, for one answer per question (#1843, B3.2): the last one that still holds its session.
+// One a hook put into a turn holds nothing, but its answer is still on its way until the session reports after it; a session
+// that never reports holds it until the open limit or a dismiss. `reportedAt` is the session's last report, -1 for none.
+export const openAnswer = (state: MessageState, to: string, answers: string, reportedAt: number): Message | undefined => {
+  const open = state.messages.filter(one => one.from === 'board' && one.to === to && one.answers === answers && isHolding(one) && (!isHookDelivered(one) || reportedAt <= one.updated))
+  return open[open.length - 1]
+}
 export const messageId = (value: unknown): string => {
   if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value)) throw new Error('INVALID_ID')
   return value
@@ -334,8 +392,10 @@ export const dismissMessage = (state: MessageState, id: string, now: number): Me
   const one = state.messages.find(message => message.id === key)
   if (!one) throw new Error('NOT_FOUND')
   if (isFinished(one)) throw new Error('MESSAGE_FINISHED')
+  // A message its host accepted keeps the mark, so a question it answers still counts as answered (#1407).
+  const isAccepted = isAcceptedOnce(one)
   return { ...state, messages: state.messages.map(message => message === one ? settled({
-    ...one, status: one.status === 'queued' ? 'rejected' : 'uncertain', error: 'DISMISSED', updated: now,
+    ...one, status: one.status === 'queued' && !isAccepted ? 'rejected' : 'uncertain', error: 'DISMISSED', updated: now, ...(isAccepted ? { hasAccepted: true } : {}),
   }) : message) }
 }
 
@@ -374,10 +434,11 @@ export const queueMessage = (state: MessageState, input: Record<string, unknown>
   if (open.filter(one => one.from === from).length >= PAIR_OPEN_CAP) throw new Error('PAIR_BUSY')
   // Finished messages the count cannot drop still fill the file, so the file has a ceiling of its own.
   if (state.messages.filter(isOpen).length >= OPEN_CAP || state.messages.length >= OPEN_CAP + FINISHED_KEEP_COUNT) throw new Error('MESSAGE_LIMIT')
-  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
+  const message: Message = { ...request, ...(answers === undefined ? {} : { answers }), ...(answers === undefined || target.hostTurn === undefined ? {} : { boundTurn: target.hostTurn }), ...(line === undefined ? {} : { line }), ...(surface === undefined ? {} : { surface }), ...(framingNonce === undefined ? {} : { framingNonce }), hash: textHash(request.text), origin, to, hops, claimed: 0, nonce: '', status: 'queued', updated: now, reply: '', error: '' }
   return { state: { ...state, messages: [...state.messages, message] }, message }
 }
-export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string, marksStart = false): { state: MessageState; messages: Message[] } => {
+// `stepEndTurn`: the turn a step-end take ends (Codex's Stop hook, #319).
+export const claimMessages = (state: MessageState, target: Connection, now: number, nonce: string, ref?: string, marksStart = false, stepEndTurn?: string): { state: MessageState; messages: Message[] } => {
   if (target.contested || target.expires <= now) return { state, messages: [] }
   const to = address(target.agent, target.session)
   // A message the board checked a route for goes only to a claimant on that same surface; on any other it stays queued.
@@ -390,17 +451,24 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   // only when every one is this binding's and can be taken again, and only on a surface that message allows. A wake
   // that reads "sent, not confirmed" or a confirmed turn-ended uncertain delivery no longer holds the session (`isHolding`).
   const held = state.messages.filter(one => one.to === to && ['uncertain', 'accepted'].includes(one.status) && isHolding(one) && !isHookDelivered(one))
-  const canTake = (one: Message): boolean => one.status === 'queued' && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
-  const pick = held.length === 0 ? state.messages.find(canTake) : held.every(isRetaken) ? held.find(canReach) : undefined
+  const canTake = (one: Message): boolean => one.status === 'queued' && !isAcceptedOnce(one) && !isHeldTooLong(one, now) && canReach(one) && (isOwn(one) || !isMailboxTarget(target.id) && isMailboxTarget(one.target) && one.to === to)
+  // At a step end, an answer queued during an earlier turn than the one ending is refused, not handed over: the conversation
+  // moved on from its question (#319, question 3). A turn start still hands it over, and a message that answers nothing
+  // is never refused for its turn.
+  const moved = held.length === 0 && stepEndTurn !== undefined
+    ? state.messages.filter(one => canTake(one) && one.answers !== undefined && one.boundTurn !== undefined && one.boundTurn !== stepEndTurn) : []
+  const current = moved.length === 0 ? state
+    : { ...state, messages: state.messages.map(one => moved.includes(one) ? settled({ ...one, status: 'rejected' as const, error: MOVED_ON, updated: now }) : one) }
+  const pick = held.length === 0 ? current.messages.find(canTake) : held.every(isRetaken) ? held.find(canReach) : undefined
   const messages = pick === undefined ? [] : [pick]
-  if (messages.length === 0) return { state, messages }
+  if (messages.length === 0) return { state: current, messages }
   // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.
   const claimed = messages.map(({ ref: previous, ...one }) => ({
     ...one, target: target.id, turn: target.turn, status: 'uncertain' as const, claimed: now, nonce: one.nonce || nonce, updated: now,
     ...(one.status === 'uncertain' && !isAtMostOnce({ to: one.to, ref: previous }) ? { redelivered: (one.redelivered ?? 0) + 1 } : {}), ...(ref === undefined ? {} : { ref }),
     ...(marksStart ? { awaitsStart: true as const } : {}),
   }))
-  return { state: { ...state, messages: state.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }
+  return { state: { ...current, messages: current.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }
 }
 export const messageReceipt = (state: MessageState, target: Connection, input: Record<string, unknown>, now: number): MessageState => {
   if (target.contested) throw new Error('CONTESTED')
@@ -417,21 +485,30 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   // unsent: the connection that holds a claim says it never asked for any of it to be sent, so the message goes back to the
   // queue with its text and the next claim gets its own 30 minutes (#1578). Only a claim nothing else was said of (no accept,
   // no error) and only from the connection the board handed it to; a receiver that cannot tell whether it was sent says uncertain.
-  if (input.status === 'unsent' || input.status === 'starting') {
+  if (input.status === 'unsent' || input.status === 'starting' || input.status === 'held') {
     if (one.status !== 'uncertain' || one.error !== '' || one.hasAccepted === true || one.target !== target.id || isMailboxTarget(one.target) || input.reply !== undefined || input.error !== undefined) throw new Error('INVALID_RECEIPT')
+    // held: an unsent the Codex desktop app's receiver says when Codex refused the writer, and the only receipt that starts the
+    // message's clock; later ones keep the first time, and a plain unsent neither starts nor clears it (#557).
+    if (input.status === 'held' && !HELD_CLOCK_SURFACES.includes(target.surface)) throw new Error('INVALID_RECEIPT')
     const { awaitsStart: _awaitsStart, ...rest } = one
     // starting: the receiver is about to ask its host for the message, so from now on a connection that ends leaves it in doubt.
-    // Said twice it changes nothing. It changes nothing else either: the claim still waits for its accept.
-    if (input.status === 'starting') return one.awaitsStart === true ? { ...state, messages: state.messages.map(message => message === one ? rest : message) } : state
-    return { ...state, messages: state.messages.map(message => message === one ? { ...rest, status: 'queued' as const, claimed: 0, updated: now } : message) }
+    // Said twice it changes nothing. It changes nothing else either: the claim still waits for its accept. A reply the Codex
+    // desktop app has held for the open limit is not begun: its receiver runs nothing when this is refused (#557).
+    if (input.status === 'starting') {
+      if (isHeldTooLong(one, now)) throw new Error('APP_STILL_OPEN')
+      return one.awaitsStart === true ? { ...state, messages: state.messages.map(message => message === one ? rest : message) } : state
+    }
+    const heldSince = input.status === 'held' ? { heldSince: one.heldSince ?? now } : {}
+    return { ...state, messages: state.messages.map(message => message === one ? { ...rest, status: 'queued' as const, claimed: 0, updated: now, ...heldSince } : message) }
   }
   if (!['uncertain', 'accepted', 'acknowledged', 'rejected'].includes(String(input.status))) throw new Error('INVALID_RECEIPT')
   const status = input.status as Message['status']
   const reply = input.reply === undefined ? '' : input.reply
   const error = input.error === undefined ? '' : messageId(input.error)
-  // These are the board's own states: EXPIRED and DISMISSED it writes at the limit or for the person, and "sent, not
-  // confirmed" only for an OpenCode wake it started; a receiver cannot claim them (#1366 review).
-  if (error === 'EXPIRED' || error === 'DISMISSED' || error === UNCONFIRMED) throw new Error('INVALID_RECEIPT')
+  // These are the board's own states: EXPIRED and DISMISSED it writes at the limit or for the person, "sent, not
+  // confirmed" only for an OpenCode wake it started, BOARD_RESTARTED at its start and HOLDER_LOST at a lease's end; a
+  // receiver cannot claim them (#1366 review, #1843), nor MOVED_ON, which a step-end take writes (#319).
+  if (error === 'EXPIRED' || error === 'DISMISSED' || error === UNCONFIRMED || error === BOARD_RESTARTED || error === HOLDER_LOST || error === MOVED_ON) throw new Error('INVALID_RECEIPT')
   if (status === 'acknowledged' && (typeof reply !== 'string' || reply.length > ACK_MAX || /[\r\n]/.test(reply) || reply !== `ACK ${one.nonce}` && !reply.startsWith(`ACK ${one.nonce} `))) throw new Error('ACK_REQUIRED')
   if (typeof reply !== 'string' || reply && messageText(reply) !== reply) throw new Error('INVALID_TEXT')
   if (one.status === 'acknowledged' || one.status === 'rejected') {
@@ -444,7 +521,9 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   // it must not hold the session's next message for another 30 minutes (#1366 review). Its day-long retention does not restart.
   if (one.status === 'uncertain' && one.error === UNCONFIRMED && status === 'accepted' && one.to.startsWith('opencode:')) return one.hasAccepted === true ? state : { ...state, messages: state.messages.map(message => message === one ? { ...one, hasAccepted: true } : message) }
   const { awaitsStart: _awaitsStart, ...rest } = one
-  return { ...state, messages: state.messages.map(message => message === one ? settled({ ...rest, status, reply, error, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
+  // An uncertain receipt with no error says nothing new of a message a board start or a lease's end made Unsure (#1407, #1843).
+  const kept = status === 'uncertain' && error === '' && one.status === 'uncertain' && (one.error === BOARD_RESTARTED || one.error === HOLDER_LOST) ? one.error : error
+  return { ...state, messages: state.messages.map(message => message === one ? settled({ ...rest, status, reply, error: kept, updated: now, ...(one.status === 'accepted' && status === 'uncertain' ? { hasAccepted: true } : {}) }) : message) }
 }
 // A wake the plugin started (marked by an attempt) whose reply may still be on its way, accepted by the host or not: a
 // disconnection does not change it, so it reads "sent, not confirmed" at the open limit, counted from its attempt or its
@@ -468,11 +547,32 @@ export const disconnectMessages = (state: MessageState, target: string, now: num
     })
   }),
 })
+// At a board start, nothing a hook was handed before it is handed out after it (#1407): a claim a hook named, and a message a
+// hook handed back with its ACK code, read Unsure with an error only the board writes, text and all. A named claim also loses
+// its name, with or without an error: only a named claim lapses or is handed back, so no receipt its session sends later, one
+// that clears an error included, makes it a claim to hand out again. A claim keeps its times, so its age limit is not extended;
+// a handed-back message, which had no claim time, is stamped with the start, so its text is kept for the open limit.
+// OpenCode's messages keep their own rules (#724, #1366), and the start's disconnect settles a live receiver's (#318, #557,
+// #1507, #1578). A second start finds nothing to change.
+export const restartMessages = (state: MessageState, now: number): MessageState => {
+  const isHook = (one: Message): boolean => isMailboxTarget(one.target) && !one.to.startsWith('opencode:')
+  const isNamed = (one: Message): boolean => isHook(one) && one.status === 'uncertain' && one.ref !== undefined
+  const isHandedBack = (one: Message): boolean => isHook(one) && one.status === 'queued' && one.nonce !== '' && one.error === ''
+  if (!state.messages.some(one => isNamed(one) || isHandedBack(one))) return state
+  return { ...state, messages: state.messages.map(one => {
+    if (isHandedBack(one)) return { ...one, status: 'uncertain' as const, error: BOARD_RESTARTED, claimed: 0, updated: now }
+    if (!isNamed(one)) return one
+    const { ref: _ref, ...rest } = one
+    return one.error === '' ? { ...rest, error: BOARD_RESTARTED } : rest
+  }) }
+}
 // The next automatic receiver of the same session takes over what an earlier one left queued: a message for a
 // connection that is gone (`isLive` false), on this connection's surface or on none. The takeover clears the leave stamp.
 export const rebindMessages = (state: MessageState, target: Connection, isLive: (id: string) => boolean): MessageState => {
   const to = address(target.agent, target.session)
   const isLeft = (one: Message): boolean => one.status === 'queued' && one.to === to && !isMailboxTarget(one.target) && !isLive(one.target)
     && (one.surface === undefined || one.surface === target.surface)
-  return state.messages.some(isLeft) ? { ...state, messages: state.messages.map(one => { if (!isLeft(one)) return one; const { leftAt: _leftAt, ...rest } = one; return { ...rest, target: target.id, turn: target.turn } }) } : state
+  // The app's clock goes with the app: a receiver of another surface that takes the message over starts none (#557, #1578).
+  const isClockKept = HELD_CLOCK_SURFACES.includes(target.surface)
+  return state.messages.some(isLeft) ? { ...state, messages: state.messages.map(one => { if (!isLeft(one)) return one; const { leftAt: _leftAt, heldSince, ...rest } = one; return { ...rest, ...(isClockKept && heldSince !== undefined ? { heldSince } : {}), target: target.id, turn: target.turn } }) } : state
 }

@@ -101,6 +101,7 @@ export type WaitingItem = {
   text: string
   note: string
   when: string
+  steps?: readonly ViewStep[]
   // What kind of answer it wants, and what the pane can offer for it (see ask.ts).
   kind: AskKind
   options: string[]
@@ -290,7 +291,7 @@ export type View = {
   groups: RowGroup[]
   recent: DoneItem[]
   recentAsking?: TaskRow[]
-  finished?: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null }>
+  finished?: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null; sessionId?: string }>
   unreadable?: string[]
   health?: string[]
 }
@@ -948,7 +949,7 @@ export const buildView = (
   const due: Array<TaskRow & { days: number }> = []
   const active: Array<TaskRow & { rank: number; order: number }> = []
   const recent: Array<DoneItem & { at: number }> = []
-  const finished: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null }> = []
+  const finished: Array<DoneItem & { at: number; agent: string; isOwn?: true; dir: string | null; sessionId?: string }> = []
   const idle: TaskRow[] = []
   const stopped: Array<{ row: TaskRow; updated: number }> = []
   const completed: Array<{ row: TaskRow; updated: number; recent: DoneItem & { at: number } | null }> = []
@@ -1142,6 +1143,7 @@ export const buildView = (
         return value
       }
 
+      const taskSteps = task.steps.some(step => step.status === 'waiting') ? rowSteps(task, s, isRepliedTask) : undefined
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting') return
         if (isFrozen && savedAt(index) !== undefined) return
@@ -1155,6 +1157,7 @@ export const buildView = (
           when,
           ...(lastActive === undefined ? {} : { at: lastActive }),
           dir: task.auto?.dir ?? null,
+          ...(taskSteps !== undefined && taskSteps.length > 0 ? { steps: taskSteps } : {}),
           ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: optionsGiven(validOptions(step.options)) }),
           ...(step.native === undefined ? {} : { native: step.native }),
           where: isManual ? 'manual' : 'other',
@@ -1207,6 +1210,7 @@ export const buildView = (
             at: seen,
             agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
             ...(isManual ? { isOwn: true as const } : {}),
+            ...(task.auto === null ? {} : { sessionId: task.auto.resume ?? task.auto.session }),
             dir: task.auto?.dir ?? null,
             questions: isInactive ? unresolved : [],
           })

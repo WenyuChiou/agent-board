@@ -67,7 +67,9 @@ import type { QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } 
 import { sha256 } from '../hooks/sha256'
 import { currentTidyCandidate, previewTidy, tidySelector, type TidyCandidate, type TidyPreview, type TidySelector } from '../hooks/tidy'
 import { codexSignal, isStrongRun, runLookupId } from '../hooks/runs'
-import { findSessionFile, readSessionMeta } from './codex-history'
+import { findSessionFile, readSessionFolder, readSessionMeta } from './codex-history'
+import { CODEX_APP_ORIGINATOR } from './codex-app-receiver'
+import type { CodexAppSession } from './codex-app-receiver'
 import { runMcp } from './board-mcp'
 import { createSettingsAgents } from './settings-agents'
 
@@ -84,10 +86,10 @@ const BOOL_FLAGS = new Set([
   '--all', '--allow-resume', '--antigravity-sidecar', '--agent-status', '--apply', '--awaits-ack', '--chat', '--check-conflicts', '--codex-doctor',
   '--codex-event', '--codex-remove', '--codex-report', '--codex-send', '--codex-setup', '--codex-trust',
   '--no-codex-send',
-  '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--html', '--json', '--mcp',
+  '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--hooks-approved', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
   '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
-  '--stop', '--stopped', '--tidy', '--unsent', '--version', '-v', '--watch',
+  '--stop', '--stopped', '--tidy', '--unsent', '--update', '--version', '-v', '--watch',
 ])
 const VALUE_FLAGS = new Set([
   '--agent', '--codex-bin', '--codex-dir', '--cwd', '--data-dir', '--deepseek-dir', '--event',
@@ -96,7 +98,7 @@ const VALUE_FLAGS = new Set([
   '--messages-dir', '--nonce', '--older', '--openclaw-dir', '--opencode-dir', '--port',
   '--progress-file', '--project', '--ready-file', '--recovery-owner-created',
   '--recovery-owner-pid', '--recovery-owner-token', '--recovery-previous-token', '--ref', '--removing',
-  '--session', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
+  '--session', '--setup-version', '--stale-ms', '--state', '--summary-b64', '--surface', '--theme',
 ])
 const unknownFlag = (argv: readonly string[]): string | undefined => {
   for (let i = 0; i < argv.length; i += 1) {
@@ -1996,24 +1998,36 @@ const updateRoutes = async (): Promise<boolean> => {
   return isChanged
 }
 
+// The id of an answer whose press got no reply, by its line, session and question, with its words: the same answer pressed
+// again goes under that id, and the board answers it with the message it stored instead of a second one (#1843, B3.1).
+const answerAttempts = new Map<string, { id: string; text: string }>()
 // An answer key's answer, sent by the running page as its own button sends it: the page checks
 // the line, the question and the session again, and answers with what came of it.
 const sendAnswer = async (action: Send): Promise<{ note: string; tone: 'done' | 'alert' }> => {
   const running = await runningAddress()
-  if (running === null) return { note: s.messagesFailed, tone: 'alert' }
+  // No page to send through, or no answer from it after its one try: the board cannot be reached (owner, #1843 B4 answer 3).
+  if (running === null) return { note: s.statusUnreachable, tone: 'alert' }
   const { route } = action
+  const slot = JSON.stringify([action.key, route.session, route.asked])
+  const kept = answerAttempts.get(slot)
+  const id = kept !== undefined && kept.text === action.text ? kept.id : `AB-${randomUUID()}`
   const body = route.mode === 'connected' && route.delivery !== undefined
-    ? { key: action.key, type: 'message', id: `AB-${randomUUID()}`, text: action.text, connection: route.delivery.id, turn: route.delivery.turn, session: route.session, asked: route.asked, fp: route.fp }
+    ? { key: action.key, type: 'message', id, text: action.text, connection: route.delivery.id, turn: route.delivery.turn, session: route.session, asked: route.asked, fp: route.fp }
     : { key: action.key, type: 'send', text: action.text, session: route.session, asked: route.asked, fp: route.fp }
+  answerAttempts.set(slot, { id, text: action.text })
   try {
     // A closed session is started to take it, and answers only once it is done.
     const res = await fetch(`http://127.0.0.1:${running.port}/api/act`, { method: 'POST', headers: { 'x-board-token': tokenOf(running.url), 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(route.mode === 'send' ? 300_000 : 5000) })
     const data = (await res.json().catch(() => null)) as { note?: unknown } | null
+    // A body cut off on its way is no answer: the board may have stored the message, so the same key keeps its id (#1843).
+    if (data === null && res.ok) return { note: s.messagesFailed, tone: 'alert' }
+    // The board answered: whatever it said, the next press is a new answer.
+    answerAttempts.delete(slot)
     const note = typeof data?.note === 'string' && data.note !== '' ? data.note : res.ok ? s.messagesQueued : s.messagesFailed
     // What was sent leads the note, so a key pressed by mistake shows at once.
     return res.ok ? { note: s.boardAnswered(action.text, note), tone: 'done' } : { note, tone: 'alert' }
   } catch {
-    return { note: s.messagesFailed, tone: 'alert' }
+    return { note: s.statusUnreachable, tone: 'alert' }
   }
 }
 
@@ -2221,6 +2235,44 @@ const codexReceiverExecutable = (): string | null => {
   if (given !== undefined) return explicitCodexExecutable(given)
   return process.env.AGENT_BOARD_TEST_PID === undefined ? resolveCodexExecutable() : null
 }
+// The Codex desktop app conversations (#557): Codex rows the board has not read as ended whose history file names the
+// desktop app as where they began (`originator`, read by readSessionMeta), each with the folder it runs in (the row's own,
+// else the same record's `cwd`, read by readSessionFolder; nothing else of the file). Each conversation's answer is kept
+// once known; one whose file is not found or not readable is looked up again a minute later. A test run looks only in a
+// Codex home it names, never in the real ~/.codex.
+const appThreads = new Map<string, { isApp: boolean; dir: string | null; at: number }>()
+const APP_LOOKUP_AGAIN_MS = 60_000
+const appCodexHome = (): string | null => {
+  const given = flag('--codex-dir') ?? process.env.CODEX_HOME
+  if (given) return resolve(given)
+  return process.env.AGENT_BOARD_TEST_PID === undefined ? join(homedir(), '.codex') : null
+}
+const codexAppThread = (home: string, id: string, now: number): { isApp: boolean; dir: string | null } => {
+  const known = appThreads.get(id)
+  if (known !== undefined && (known.at < 0 || now - known.at < APP_LOOKUP_AGAIN_MS)) return known
+  const file = findSessionFile(home, id)
+  const meta = file === null ? null : readSessionMeta(file, id)
+  const isApp = meta?.originator === CODEX_APP_ORIGINATOR
+  // A file read whole settles the answer for good (at -1); a missing or unreadable one is asked again later.
+  const found = { isApp, dir: isApp && file !== null ? readSessionFolder(file, id) : null, at: meta === null ? now : -1 }
+  appThreads.set(id, found)
+  return found
+}
+const codexAppSessions = (path: string): (() => CodexAppSession[]) | undefined => {
+  const home = appCodexHome()
+  if (home === null) return undefined
+  return () => {
+    const now = Date.now()
+    return parseProgress(readFileSync(path, 'utf8')).flatMap(project => project.tasks.flatMap(task => {
+      const auto = task.auto
+      if (auto?.agent !== 'codex' || auto.state === 'ended') return []
+      const id = auto.resume ?? auto.session
+      const found = codexAppThread(home, id, now)
+      const dir = auto.dir ?? found.dir
+      return found.isApp && dir ? [{ id, dir }] : []
+    }))
+  }
+}
 // The detached Windows child reports startup failures through a private file too; redirecting
 // its standard handles would make Start-Process inherit the caller's extra pipes again.
 const serveChildError = (message: string): void => {
@@ -2288,6 +2340,9 @@ const serveChild = (): void => {
         // The daemon's own unload delay and a margin, which the receiver knows, unless a test process started this page and
         // names a shorter wait for its stand-in daemon (`testUnloadMs`).
         unloadMs: testUnloadMs(process.env, process.ppid),
+        appSessions: codexAppSessions(path),
+        // Only a home `--codex-dir` names is handed on: without it the run keeps the CODEX_HOME of this environment, or none.
+        ...(flag('--codex-dir') ? { appHome: resolve(flag('--codex-dir') as string) } : {}),
       },
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests

@@ -10,7 +10,7 @@ import { homedir } from 'node:os'
 import { basename, delimiter, isAbsolute, join } from 'node:path'
 import type { Strings } from '../hooks/i18n'
 import { ZH_TW } from '../hooks/i18n'
-import { ACK_MAX, address, deliveryText } from '../hooks/messaging'
+import { ACK_MAX, address, deliveryText, routeLine, routeRecord } from '../hooks/messaging'
 import type { Message, ReceiverRoutes, Route, RouteKind, RowState } from '../hooks/messaging'
 import { RECEIVER_ROUTES } from '../hooks/receiver-routes'
 import type { SendPlan } from '../hooks/serve'
@@ -160,26 +160,37 @@ export type ProcessResult = {
   spawnErrorMessage: string | null
   stdout: string
   stderr: string
+  // The kept output is its last part only: whether anything but blanks was ever printed, and whether the error output
+  // was longer than the part kept, so a check that needs all of it can tell (#557).
+  hasStdout: boolean
+  isStderrCut: boolean
+  // Read before the output had closed: the program exited and a program it started still held its output, so the run was
+  // read two seconds after the exit (below), and more may have come after it (#557).
+  isOutputOpen: boolean
 }
 
 export const runBackgroundProcess = (
   program: Program,
-  options: { cwd?: string | null; stdin?: string | null; maxWaitMs?: number; killWaitMs?: number } = {},
+  options: { cwd?: string | null; stdin?: string | null; maxWaitMs?: number; killWaitMs?: number; env?: NodeJS.ProcessEnv; spawnProcess?: typeof spawn } = {},
 ): Promise<ProcessResult> =>
   new Promise(resolve => {
     const maxWaitMs = options.maxWaitMs ?? MAX_RESUME_WAIT
     const killWaitMs = options.killWaitMs ?? KILL_RESUME_WAIT
+    const spawnProcess = options.spawnProcess ?? spawn
     let out = ''
     let err = ''
+    let hasStdout = false
+    let isStderrCut = false
+    let isOutputOpen = false
     let timer: ReturnType<typeof setTimeout> | undefined
     let isTimedOut = false
     let isDone = false
     let isStarted = false
-    const finish = (partial: Omit<ProcessResult, 'stdout' | 'stderr'>): void => {
+    const finish = (partial: Omit<ProcessResult, 'stdout' | 'stderr' | 'hasStdout' | 'isStderrCut' | 'isOutputOpen'>): void => {
       if (isDone) return
       isDone = true
       if (timer !== undefined) clearTimeout(timer)
-      resolve({ ...partial, stdout: out, stderr: err })
+      resolve({ ...partial, stdout: out, stderr: err, hasStdout, isStderrCut, isOutputOpen })
     }
     // The current folder is never searched for a program a shell or script starts by name.
     const spawnOptions = {
@@ -187,11 +198,11 @@ export const runBackgroundProcess = (
       detached: !isWindows,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, NoDefaultCurrentDirectoryInExePath: '1' },
+      env: { ...(options.env ?? process.env), NoDefaultCurrentDirectoryInExePath: '1' },
     }
     let child: ChildProcess
     try {
-      child = program.isShell ? spawn(program.command, { ...spawnOptions, shell: true }) : spawn(program.command, program.args, spawnOptions)
+      child = program.isShell ? spawnProcess(program.command, { ...spawnOptions, shell: true }) : spawnProcess(program.command, program.args, spawnOptions)
       isStarted = child.pid !== undefined
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | null)?.code ?? null
@@ -204,13 +215,20 @@ export const runBackgroundProcess = (
       timer = setTimeout(() => finish({ started: isStarted, exitCode: null, timedOut: true, spawnErrorCode: null, spawnErrorMessage: null }), killWaitMs)
     }, maxWaitMs)
     child.stdout?.on('data', (chunk: Buffer) => {
-      out = (out + chunk.toString('utf8')).slice(-8000)
+      const text = chunk.toString('utf8')
+      if (text.trim() !== '') hasStdout = true
+      out = (out + text).slice(-8000)
     })
     child.stderr?.on('data', (chunk: Buffer) => {
-      err = (err + chunk.toString('utf8')).slice(-2000)
+      const all = err + chunk.toString('utf8')
+      if (all.length > 2000) isStderrCut = true
+      err = all.slice(-2000)
+    })
+    child.on('spawn', () => {
+      isStarted = true
     })
     child.on('error', (error: NodeJS.ErrnoException) => {
-      finish({ started: false, exitCode: null, timedOut: false, spawnErrorCode: error.code ?? null, spawnErrorMessage: error.message })
+      finish({ started: isStarted, exitCode: null, timedOut: isTimedOut, spawnErrorCode: error.code ?? null, spawnErrorMessage: error.message })
     })
     const settle = (code: number | null): void => {
       if (isTimedOut) {
@@ -222,7 +240,10 @@ export const runBackgroundProcess = (
     child.on('close', settle)
     // A child started by the agent (e.g. an MCP server) can hold stdio open after the agent exits.
     child.on('exit', code => {
-      setTimeout(() => settle(code), 2000)
+      setTimeout(() => {
+        if (!isDone) isOutputOpen = true
+        settle(code)
+      }, 2000)
     })
     child.stdin?.on('error', () => undefined)
     child.stdin?.end(options.stdin ?? '')
@@ -302,7 +323,10 @@ export const checkLiveResumeRecord = (
   const matching = routes.filter(one => one.agent === normalized && (kind === undefined || one.kind === kind))
   for (const entry of matching) {
     const route = entry.routes[state]
-    if (route.line !== 'reopen' || typeof route.record !== 'string' || route.record === '') continue
+    // A surface asked about is read with its own line and note, as the send gate reads them (#557).
+    const line = surface === undefined ? route.line : routeLine(route, surface)
+    const record = surface === undefined ? route.record : routeRecord(route, surface)
+    if (line !== 'reopen' || typeof record !== 'string' || record === '') continue
     if (surface === undefined ? route.surfaces.length > 0 : route.surfaces.includes(surface)) return { ok: true, route }
   }
   return { ok: false, error: 'NO_RECORDED_ROUTE' }

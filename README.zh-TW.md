@@ -32,10 +32,12 @@ npx @wenyuchiou/agent-board@next
 
 ## 你會得到什麼
 
-- **問題排最前面。** agent 在等你回答的問題會排到最上面；它給的選項讀得出來，就每個選項一顆按鈕，否則自己輸入回答。
-- **每個 agent 留在原本的地方。** agent 繼續在自己的終端機裡跑，看板讀的是它們 hooks 的回報。
+- **問題排最前面。** 不管是哪個 agent 問的，在等你回答的問題都會排到最上面；它給的選項讀得出來，就每個選項一顆按鈕，否則自己輸入回答。
+- **每個 agent 留在原本的地方。** agent 繼續在自己的終端機和 Codex、Antigravity 桌面 app 裡跑，登入和計費都不變；看板讀的是它們 hooks 的回報，關掉看板也不會停掉任何 session。
 - **在本機、純文字。** 一個你可以自己看、自己改的 Markdown 檔，只在 127.0.0.1 的網頁，看板本身不呼叫模型。
 - **一個指令裝、一個指令移除。** `setup` 寫入前先列出要改什麼；`remove` 拿掉 setup 寫的東西，不動你自己的設定。
+
+[T3 Code](https://github.com/pingdotgg/t3code) 這類工具把每個 agent session 放在工具自己裡面跑，所以只看得到在那裡跑的 session。Agent Board 顯示的是你已經在各家自己的終端機或桌面 app 裡跑著的 session，工作不用搬到新工具。
 
 <img alt="看板網頁：「需要你」放著 Claude Code 的問題，附答案按鈕；「進行中」列出 Codex、Antigravity 和 OpenCode 的工作和步驟。合成資料。" src="docs/images/page-zh-TW-dark.png" width="860">
 
@@ -58,7 +60,7 @@ npx @wenyuchiou/agent-board@next
 | | Agent | 開看板 | 你的回答怎麼送到 |
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board`（看板網頁） | 尚未支援 |
-| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁 | 尚未支援 |
+| <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁 | Codex app 完全結束後（只關視窗不算），在背景執行；回覆最多等 30 分鐘。實際跑過 |
 | <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 在 Antigravity 的 Automations 頁面開著它的 sidecar 時，看板會替它開始新的一輪；沒開時，卡片有「排入」時可排給它。桌面 app：排入實際跑過，開始新的一輪還沒跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板網頁 | 尚未測試 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁 | 它空下來就送出。沒有單獨跑過；它的外掛把它回報成終端機，所以跟終端機一樣處理 |
@@ -130,4 +132,4 @@ npx @wenyuchiou/agent-board@next remove --apply
 
 [MIT](LICENSE)。agent 的圖示來自 [Simple Icons](https://simpleicons.org)（CC0）和 [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT），這些圖示屬於各自的擁有者；沒有圖示的 agent 以名字的第一個字母表示。
 
-<p align="center"><a href="CHANGELOG.md"><img alt="原始碼版本 0.25.0" src="https://img.shields.io/badge/source-0.25.0-blue"></a><br><sub>最新穩定版本 0.25.0 · <a href="CHANGELOG.md">更新紀錄</a></sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="原始碼版本 0.25.1" src="https://img.shields.io/badge/source-0.25.1-blue"></a><br><sub>最新穩定版本 0.25.1 · <a href="CHANGELOG.md">更新紀錄</a></sub></p>

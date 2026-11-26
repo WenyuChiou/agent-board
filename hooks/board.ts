@@ -3,6 +3,8 @@ import type { Strings } from './i18n'
 import { boardCounts } from './board-status'
 import type { QueuedMessaging } from './board-status'
 import { lastQuestionInProse, normalizeReply } from './digest'
+import { latestMessage, messageStatus } from './message-status'
+import type { StatusTone } from './message-status'
 import { withoutStamp } from './done-stamp'
 import { inboxOrder, isBoardTurn, isTranscriptPath, readTurn, transcriptTail, turnOrder } from './inbox'
 import { localDay, parseJournal, progressReport } from './journal'
@@ -257,6 +259,16 @@ const boardNeeds = (view: View, row: TaskRow, isShelved = false): ReturnType<typ
 // it is not worded a second time; a blocked step has no other line.
 const needsWords = (needs: { kind: 'stuck' | 'question'; reason: string }, s: Strings): string => (needs.kind === 'question' ? s.pgNeeds : s.pgNeedsWhy(needs.reason))
 
+// The status of the last message the board sent to a row's session, or of the answer to a question (#1843 B4), in the
+// page's words: the message the page's card shows. Null with none.
+const TONE_INK: Readonly<Record<StatusTone, Ink>> = { wait: 'quiet', done: 'done', alert: 'alert' }
+type Messaged = { agent: string; nativeSession?: string; at?: number; questionId?: string }
+const messageLine = (view: View, item: Messaged, s: Strings, o: BoardOptions): string | null => {
+  const one = latestMessage(o.messaging?.messages ?? [], item.agent, item.nativeSession, item.questionId)
+  const status = one === undefined ? null : messageStatus(one, view.now, s, item.at)
+  return status === null ? null : `    ${paint(o)(TONE_INK[status.tone], fit(status.line, o.width - 6, isWideLang(s)))}`
+}
+
 const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelved = false): string[] => {
   const c = paint(o)
   const isWide = isWideLang(s)
@@ -269,6 +281,8 @@ const rowLines = (view: View, row: TaskRow, s: Strings, o: BoardOptions, isShelv
   const bar = rowBar(row, o, isWide)
   const lead = bar.width === 0 ? '' : `${bar.text} `
   const lines = [`  ${c('bold', cut(row.title, o.width - 4))}`, `    ${lead}${c('quiet', cut(`${count}${status}${who}${row.when ? ` · ${row.when}` : ''}`, o.width - 6 - (bar.width === 0 ? 0 : bar.width + 1)))}`]
+  const message = messageLine(view, row, s, o)
+  if (message !== null) lines.push(message)
   if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
   if (row.context) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
   for (const step of row.steps) {
@@ -307,8 +321,9 @@ const blockedRows = (view: View): TaskRow[] => liveRows(view).filter(row => rowN
 // What waits on the person: the questions of the work on the board, then those in turns no
 // session has taken in yet. Questions marked answered are not in `view.waiting`. `named` says
 // how a project is told (the chat shows the home folder's name as `~`).
-const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: (project: string) => string = project => project, label: (agent: string) => string = agent => agent): Array<{ where: string; text: string; task: string; mayBeClosed?: true }> => [
+const asksOf = (view: View, pending: readonly PendingTurn[], s: Strings, named: (project: string) => string = project => project, label: (agent: string) => string = agent => agent): Array<{ where: string; text: string; task: string; mayBeClosed?: true; source?: WaitingItem }> => [
   ...view.waiting.map(item => ({
+    source: item,
     where: [named(item.project), label(item.agent)].filter(part => part !== '').join(' · '),
     text: `${s.chip(s.ask[item.kind])}${item.text}${item.note ? ` — ${item.note}` : ''}`,
     task: item.task,
@@ -336,7 +351,12 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     if (items.length === 0) continue
     const isOpen = o.isIdleOpen || o.isQuestionsOpen
     lines.push(`${title} (${items.length})${isOpen ? '' : ' · --all'}`)
-    if (isOpen) for (const item of items) lines.push(`  ${cut(`${questionHead(item.project, item.task)} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
+    if (isOpen) for (const item of items) {
+      lines.push(`  ${cut(`${questionHead(item.project, item.task)} · ${item.when}`, o.width - 4)}`, `    ${cut(`${item.text}${item.note ? ` — ${item.note}` : ''}`, o.width - 6)}`)
+      // A kept question shows only the answer sent to it, as the page's card does: its session has moved on.
+      const message = messageLine(view, { ...item, nativeSession: undefined }, s, o)
+      if (message !== null) lines.push(message)
+    }
   }
   // Questions marked answered in a pane are left out, and counted so they are not lost.
   const hidden = view.hidden.length === 0 ? [] : [c('quiet', s.hiddenCount(view.hidden.length))]
@@ -346,6 +366,8 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push(c('waiting', `● ${s.sectionWaiting}`, true))
     for (const ask of asks) {
       lines.push(`  ${c('project', cut(ask.where + (ask.task ? ` › ${ask.task}` : ''), o.width - 4))}`, `    ${cut(ask.text, o.width - 6)}`)
+      const message = ask.source === undefined ? null : messageLine(view, ask.source, s, o)
+      if (message !== null) lines.push(message)
       // A Codex card with no process to check, quiet past two minutes (#1092): it may be closed, never closed.
       if (ask.mayBeClosed === true) lines.push(`    ${c('quiet', cut(s.windowMayBeClosed, o.width - 6))}`)
     }
@@ -1036,6 +1058,8 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       lines.push(`${mark} ${titled(2, `${s.chip(s.ask[ask.kind])}${ask.text}`, [name, ask.when === s.questionAgeUnknown ? '' : ask.when].filter(part => part !== '').join(' · '), isHere)}`)
       if (result?.key === item.key) resultLines('    ')
       lines.push(`    ${c('project', cut(ask.project + (ask.task ? ` › ${ask.task}` : ''), o.width - 6))}`)
+      const message = messageLine(view, item.key.startsWith('older:') ? { ...ask, nativeSession: undefined } : ask, s, o)
+      if (message !== null) lines.push(message)
       if (ask.task && ask.context && (titleCounts.get(ask.task) ?? 0) > 1) lines.push(`    ${c('quiet', cut(ask.context, o.width - 6))}`)
       // A Codex card with no process to check, quiet past two minutes (#1092): `a` archives it.
       if (ask.mayBeClosed === true) lines.push(`    ${c('quiet', cut(s.windowMayBeClosed, o.width - 6))}`)
@@ -1087,6 +1111,8 @@ export const boardLayout = (view: View, pending: readonly PendingTurn[], state: 
       const status = cut(`${lead}${needs !== null ? needsWords(needs, s) : step === undefined ? row.status : `${MARK[step.status] ?? '○'} ${step.text}`}`, o.width - 6 - reserve - barRoom)
       const quiet = status.startsWith(lead) ? lead : ''
       lines.push(`    ${bar.width === 0 ? '' : `${bar.text} `}${c('quiet', quiet)}${c(needs === null ? toneInk(row.tone, step !== undefined) : 'waiting', status.slice(quiet.length))}${badge === '' ? '' : `  ${c('alert', badge)}`}`)
+      const message = messageLine(view, row, s, o)
+      if (message !== null) lines.push(message)
       if (row.runs) lines.push(`    ${c('quiet', cut(row.runs, o.width - 6))}`)
       if (!isOpen && row.context && (titleCounts.get(row.title) ?? 0) > 1) lines.push(`    ${c('quiet', cut(row.context, o.width - 6))}`)
       if (isOpen) rowDetails(row)

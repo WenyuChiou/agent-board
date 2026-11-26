@@ -1096,6 +1096,350 @@ test('a replayed hook event never claims a mailbox message', async () => mailbox
   assert.equal(f.state().messages[0].status, 'queued')
 }))
 
+// #319: Codex's Stop hook hands one queued message over at a step end, as `decision: block` with the delivery text in `reason`,
+// only when no hook has continued the turn yet (`stop_hook_active` false), and reads the ACK line of the reply at the next Stop.
+// The session's turn has started, then one board message is queued for its mailbox.
+// Codex in a terminal: the first record of its history names the codex-tui originator, as a real session's does. Only
+// such a Stop hands a message over.
+const terminalTranscript = f => {
+  const history = join(f.home, 'codex-history')
+  mkdirSync(history, { recursive: true })
+  const transcript = join(history, `rollout-2026-11-26T00-00-00-${session}.jsonl`)
+  writeFileSync(transcript, JSON.stringify({ type: 'session_meta', payload: { id: session, originator: 'codex-tui' } }) + '\n')
+  return transcript
+}
+const stopFixture = fn => mailboxFixture(async f => {
+  const transcript = terminalTranscript(f)
+  const started = f.call('codex', 'UserPromptSubmit', { transcript_path: transcript })
+  assert.equal(started.status, 0, started.stderr)
+  f.seed()
+  await fn({ ...f, transcript })
+})
+const stepEnd = (f, extra = {}, flags = [], env = {}) => f.call('codex', 'Stop', { stop_hook_active: false, ...(f.transcript === undefined ? {} : { transcript_path: f.transcript }), ...extra }, flags, env)
+const handedOver = result => { try { const out = JSON.parse(result.stdout); return out?.decision === 'block' && typeof out.reason === 'string' ? out.reason : null } catch { return null } }
+// A hook may find the store busy and defer, once (#902); the next step end then hands the message over.
+const stepEndOrDeferred = (f, extra, flags, env) => hookOrDeferred(() => stepEnd(f, extra, flags, env), result => handedOver(result) !== null)
+const stopMessage = (f, id = 'hook-mailbox-message') => f.state().messages.find(one => one.id === id)
+const queueStop = async (f, id, from = 'board', extra = {}) => {
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  const state = f.state()
+  const box = state.mailboxes.find(one => one.session === session)
+  f.save(join(f.directory, 'messages.json'), JSON.stringify({ ...queueMessage(state, { id, target: box.id, turn: 'session', text: `Synthetic ${id}`, ...extra }, from, box, Date.now()).state, version: 2 }))
+}
+// Where the hook keeps a hand-over's id and ACK code until the next Stop: the board's folder, else beside the message store.
+const stopClaimFiles = f => [join(f.root, 'codex-acks'), `${f.directory}-acks`].flatMap(dir => existsSync(dir) ? readdirSync(dir).filter(name => name.endsWith('.json')).map(name => join(dir, name)) : [])
+// A reply's first line, as Codex passes the turn's last message to the next Stop hook.
+const stopReply = (f, reply) => f.call('codex', 'Stop', { stop_hook_active: true, last_assistant_message: reply })
+
+test('a Codex Stop payload without stop_hook_active === false prints nothing and leaves the message queued', async () => stopFixture(async f => {
+  for (const extra of [{}, { stop_hook_active: 'false' }, { stop_hook_active: 0 }, { stop_hook_active: null }]) {
+    const result = f.call('codex', 'Stop', { transcript_path: f.transcript, ...extra })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, '', JSON.stringify(extra))
+    assert.equal(stopMessage(f).status, 'queued', JSON.stringify(extra))
+  }
+  // The control: the same Stop with the field false hands it over.
+  assert.ok(handedOver(await stepEndOrDeferred(f))?.includes('Synthetic mailbox payload'))
+}))
+
+test('a Codex Stop that a hook already continued reads the ACK and hands nothing over', async () => stopFixture(async f => {
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+  const { nonce } = stopMessage(f)
+  await queueStop(f, 'hook-mailbox-second')
+  const result = stopReply(f, `ACK ${nonce}`)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '')
+  assert.equal(stopMessage(f).status, 'acknowledged')
+  assert.equal(stopMessage(f, 'hook-mailbox-second').status, 'queued')
+}))
+
+test('a Stop hook claims one mailbox message within budget and prints decision block with the delivery prompt', async () => stopFixture(async f => {
+  let took = Infinity
+  const result = await hookOrDeferred(() => {
+    const at = Date.now()
+    const one = stepEnd(f)
+    took = Date.now() - at
+    return one
+  }, one => handedOver(one) !== null)
+  const reason = handedOver(result)
+  assert.ok(reason?.includes('Synthetic mailbox payload'), result.stdout + result.stderr)
+  assert.ok(took < 10_000, `Codex gives a Stop hook 10 s; this one took ${took} ms`)
+  assert.equal(stopMessage(f).status, 'accepted')
+}))
+
+test('a Codex Stop hand-over prints one JSON object with only decision and reason', async () => stopFixture(async f => {
+  const result = await stepEndOrDeferred(f)
+  const lines = result.stdout.split(/\r?\n/).filter(line => line !== '')
+  assert.equal(lines.length, 1, result.stdout)
+  const output = JSON.parse(lines[0])
+  assert.deepEqual(Object.keys(output).sort(), ['decision', 'reason'])
+  assert.equal(output.decision, 'block')
+  const { nonce } = stopMessage(f)
+  assert.match(nonce, /^[0-9a-f]{6}$/)
+  assert.ok(output.reason.includes(`<<<AB-${nonce}`) && output.reason.includes(`AB-${nonce}>>>`), output.reason)
+  assert.ok(output.reason.includes(`ACK ${nonce}`), output.reason)
+}))
+
+test('PermissionRequest output stays empty when a mailbox message is queued', async () => stopFixture(async f => {
+  const result = f.call('codex', 'PermissionRequest', { stop_hook_active: false })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.stdout, '')
+  assert.equal(stopMessage(f).status, 'queued')
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+}))
+
+test('a Codex Stop hands over one message and leaves the next queued', async () => stopFixture(async f => {
+  await queueStop(f, 'hook-mailbox-peer', 'claude:synthetic-peer')
+  const reason = handedOver(await stepEndOrDeferred(f))
+  assert.ok(reason?.includes('Synthetic mailbox payload'), reason)
+  assert.ok(!reason.includes('Synthetic hook-mailbox-peer'), reason)
+  assert.equal(stopMessage(f).status, 'accepted')
+  assert.equal(stopMessage(f, 'hook-mailbox-peer').status, 'queued')
+}))
+
+test('a Codex Stop with too little time left claims nothing and prints nothing', async () => stopFixture(async f => {
+  // About a second, less the script's start: under the 1.3 s a hand-over needs.
+  const result = stepEnd(f, {}, ['--hook-deadline', String(Date.now() + 1250)])
+  assert.ok(!result.stdout.includes('"decision"'), result.stdout)
+  assert.equal(stopMessage(f).status, 'queued')
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+}))
+
+test('a Codex Stop that ends before its claim leaves the message queued for the next step end', async () => stopFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  const claim = claimMessageStore(f.directory)
+  const nonce = 'b'.repeat(32)
+  const pending = join(f.directory, `.message-pending-${process.pid}-${nonce}.json`)
+  f.save(pending, JSON.stringify({ version: 1, pid: process.pid, nonce }) + '\n')
+  try {
+    const result = stepEnd(f)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(result.stdout, '')
+    assert.equal(stopMessage(f).status, 'queued')
+  } finally {
+    claim.release()
+    unlinkSync(pending)
+  }
+  assert.ok(handedOver(await stepEndOrDeferred(f))?.includes('Synthetic mailbox payload'))
+  assert.equal(stopMessage(f).status, 'accepted')
+}))
+
+test('a Stop hook killed after persisting its claim leaves the message uncertain without replay', async () => stopFixture(async f => {
+  // Codex never reads the hand-over: the hook's stdout is closed before it writes.
+  const closedStop = () => new Promise(done => {
+    const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'codex', '--codex-event'], { cwd: f.home, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+    child.stdout.destroy()
+    let stderr = ''
+    child.stderr.on('data', chunk => { stderr += chunk })
+    child.once('close', status => done({ status, stderr }))
+    child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'Stop', turn_id: 'mailbox-turn', stop_hook_active: false, transcript_path: f.transcript }))
+  })
+  await closedStop()
+  if (stopMessage(f).status === 'queued') await closedStop()
+  assert.equal(stopMessage(f).status, 'uncertain')
+  // Neither the next step end nor the next turn start hands it over again.
+  const next = stepEnd(f)
+  assert.equal(handedOver(next), null, next.stdout)
+  const start = f.call('codex', 'UserPromptSubmit')
+  assert.ok(!start.stdout.includes('Synthetic mailbox payload'), start.stdout)
+  assert.equal(stopMessage(f).status, 'uncertain')
+}))
+
+test('the Stop after a hand-over records the ACK its first line carries', async () => stopFixture(async f => {
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+  const { nonce } = stopMessage(f)
+  assert.equal(stopClaimFiles(f).length, 1)
+  const result = stopReply(f, `ACK ${nonce}\nSynthetic answer to the board message.`)
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual([stopMessage(f).status, stopMessage(f).reply], ['acknowledged', `ACK ${nonce}`])
+  assert.deepEqual(stopClaimFiles(f), [])
+}))
+
+test('Stop reads only a first-line ACK nonce from last_assistant_message and retains no assistant text', async () => stopFixture(async f => {
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+  const { nonce } = stopMessage(f)
+  const result = stopReply(f, `ACK ${nonce} SyntheticPrivateWord on the first line\nSyntheticPrivateWord again, on the second line.`)
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual([stopMessage(f).status, stopMessage(f).reply], ['acknowledged', `ACK ${nonce}`])
+  // Not in the store, the claims, progress.md, the session record, the journal or pending/.
+  const kept = readdirSync(f.home, { recursive: true }).map(name => join(f.home, String(name))).filter(file => statSync(file).isFile() && statSync(file).size < 4_000_000)
+  for (const file of kept) assert.ok(!readFileSync(file, 'utf8').includes('SyntheticPrivateWord'), file)
+}))
+
+test('a reply without the ACK line leaves a handed-over message accepted', async () => stopFixture(async f => {
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+  assert.equal(stopClaimFiles(f).length, 1)
+  const result = stopReply(f, 'Synthetic answer with no acknowledgement line.')
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(stopMessage(f).status, 'accepted')
+  // The claim is spent: a later reply that carries the line no longer counts.
+  assert.deepEqual(stopClaimFiles(f), [])
+  stopReply(f, `ACK ${stopMessage(f).nonce}`)
+  assert.equal(stopMessage(f).status, 'accepted')
+}))
+
+test('an ACK that is not the reply\'s first line is not read', async () => stopFixture(async f => {
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+  const { nonce } = stopMessage(f)
+  const result = stopReply(f, `Synthetic answer first.\nACK ${nonce}`)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(stopMessage(f).status, 'accepted')
+}))
+
+test('an ACK the board could not take is read again at the next Stop', async () => stopFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+  const { nonce } = stopMessage(f)
+  // The store is busy when the reply with the ACK line ends its step.
+  const claim = claimMessageStore(f.directory)
+  const pendingNonce = 'd'.repeat(32)
+  const pending = join(f.directory, `.message-pending-${process.pid}-${pendingNonce}.json`)
+  f.save(pending, JSON.stringify({ version: 1, pid: process.pid, nonce: pendingNonce }) + '\n')
+  try {
+    const busy = stopReply(f, `ACK ${nonce}`)
+    assert.equal(busy.status, 0, busy.stderr)
+    assert.equal(stopMessage(f).status, 'accepted')
+    assert.equal(stopClaimFiles(f).length, 1)
+  } finally {
+    claim.release()
+    unlinkSync(pending)
+  }
+  // The next Stop records the ACK it kept, though its own reply carries none.
+  const next = stopReply(f, 'Synthetic answer with no acknowledgement line.')
+  assert.equal(next.status, 0, next.stderr)
+  assert.deepEqual([stopMessage(f).status, stopMessage(f).reply], ['acknowledged', `ACK ${nonce}`])
+  assert.deepEqual(stopClaimFiles(f), [])
+}))
+
+test('a message that answers no question is handed over at a later turn\'s step end', async () => mailboxFixture(async f => {
+  const { claimMessageStore } = await importTs('../scripts/message-store-claim.ts')
+  // The first turn starts with the mailbox open, and the message is queued while it runs.
+  f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, messages: [] }))
+  await hookOrDeferred(() => f.call('codex', 'UserPromptSubmit', { turn_id: 'first-turn' }), () => f.state().mailboxes?.some(one => one.session === session))
+  await queueStop(f, 'hook-mailbox-message')
+  // The next turn's start finds the store busy, so the message is still queued when that turn ends.
+  const claim = claimMessageStore(f.directory)
+  const nonce = 'c'.repeat(32)
+  const pending = join(f.directory, `.message-pending-${process.pid}-${nonce}.json`)
+  f.save(pending, JSON.stringify({ version: 1, pid: process.pid, nonce }) + '\n')
+  try {
+    const later = f.call('codex', 'UserPromptSubmit', { turn_id: 'later-turn' })
+    assert.equal(later.status, 0, later.stderr)
+    assert.equal(stopMessage(f).status, 'queued')
+  } finally {
+    claim.release()
+    unlinkSync(pending)
+  }
+  const result = await stepEndOrDeferred({ ...f, transcript: terminalTranscript(f) }, { turn_id: 'later-turn' })
+  assert.ok(handedOver(result)?.includes('Synthetic hook-mailbox-message'), result.stdout + result.stderr)
+  assert.equal(stopMessage(f).status, 'accepted')
+}))
+
+test('a Codex Stop takes nothing that was stored for the session\'s daemon connection', async () => stopFixture(async f => {
+  const { queueMessage } = await importTs('../hooks/messaging.ts')
+  const state = f.state()
+  const live = { id: 'live-codex-daemon', agent: 'codex', session, surface: 'CLI', turn: 'session', scope: 'session', expires: Date.now() + 600_000, origin: 'local' }
+  // From another sender: the board keeps one open message per sender and session.
+  const { messages } = queueMessage({ ...state, connections: [live] }, { id: 'daemon-message', target: live.id, turn: 'session', text: 'Synthetic daemon payload' }, 'claude:synthetic-peer', live, Date.now()).state
+  f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, messages, mailboxes: state.mailboxes }))
+  const reason = handedOver(await stepEndOrDeferred(f))
+  // It hands over the mailbox's message, never the daemon's.
+  assert.ok(reason?.includes('Synthetic mailbox payload'), reason)
+  assert.ok(!reason.includes('Synthetic daemon payload'), reason)
+  const daemon = stopMessage(f, 'daemon-message')
+  assert.deepEqual([daemon.claimed, daemon.target], [0, live.id])
+  assert.ok(!['accepted', 'acknowledged'].includes(daemon.status), daemon.status)
+}))
+
+test('a Codex Stop outside the terminal takes no message stored for the CLI', async () => mailboxFixture(async f => {
+  const { queueMessage, SURFACE_IDS } = await importTs('../hooks/messaging.ts')
+  const { enrollMailbox } = await importTs('../hooks/hook-messages.ts')
+  const history = join(f.home, 'codex-history')
+  mkdirSync(history, { recursive: true })
+  const transcript = join(history, `rollout-2026-11-26T00-00-00-${session}.jsonl`)
+  writeFileSync(transcript, JSON.stringify({ type: 'session_meta', payload: { id: session, originator: 'codex-tui' } }) + '\n')
+  const started = f.call('codex', 'UserPromptSubmit', { transcript_path: transcript })
+  assert.equal(started.status, 0, started.stderr)
+  const now = Date.now()
+  const state = enrollMailbox({ messages: [] }, 'codex', session, SURFACE_IDS.cli, now, 43_200_000)
+  const box = state.mailboxes[0]
+  const queued = queueMessage(state, { id: 'hook-mailbox-message', target: box.id, turn: 'session', text: 'Synthetic mailbox payload' }, 'board', box, now, 'local', undefined, undefined, SURFACE_IDS.cli).state
+  f.save(join(f.directory, 'messages.json'), JSON.stringify({ version: 2, ...queued }))
+  // The desktop app's mark, then the Windows background service's.
+  for (const env of [{ CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'Codex Desktop' }, { CODEX_DAEMON_SHUTDOWN_SOCKET: '1' }]) {
+    const result = stepEnd(f, { transcript_path: transcript }, [], env)
+    assert.equal(handedOver(result), null, `${JSON.stringify(env)}: ${result.stdout}`)
+    assert.equal(stopMessage(f).status, 'queued', JSON.stringify(env))
+  }
+  // The terminal's own Stop hands it over.
+  assert.ok(handedOver(await stepEndOrDeferred(f, { transcript_path: transcript }))?.includes('Synthetic mailbox payload'))
+}))
+
+test('a Codex Stop outside the terminal takes no message that names no surface either', async () => stopFixture(async f => {
+  // A peer's message names no surface, as the board's own does here.
+  await queueStop(f, 'hook-mailbox-peer', 'claude:synthetic-peer')
+  assert.deepEqual([stopMessage(f).surface, stopMessage(f, 'hook-mailbox-peer').surface], [undefined, undefined])
+  // The desktop app's mark, the Windows background service's, and a Stop with no transcript to tell.
+  for (const [where, payload, env] of [['app', f, { CODEX_INTERNAL_ORIGINATOR_OVERRIDE: 'Codex Desktop' }], ['service', f, { CODEX_DAEMON_SHUTDOWN_SOCKET: '1' }], ['no transcript', { ...f, transcript: undefined }, {}]]) {
+    const result = stepEnd(payload, {}, [], env)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(handedOver(result), null, `${where}: ${result.stdout}`)
+    assert.deepEqual([stopMessage(f).status, stopMessage(f, 'hook-mailbox-peer').status], ['queued', 'queued'], where)
+  }
+  // The terminal's Stop hands one over.
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+}))
+
+test('a Codex Stop against an older board claims nothing', async () => stopFixture(async f => {
+  const { createServer } = await import('node:http')
+  const calls = []
+  const message = { ...stopMessage(f), nonce: 'abcdef', status: 'uncertain' }
+  // A board started before step-end takes refuses their fields, as it refuses any field it does not know.
+  const server = createServer(async (req, res) => {
+    let body = ''
+    for await (const chunk of req) body += chunk
+    const parsed = JSON.parse(body)
+    calls.push([req.url, parsed])
+    res.setHeader('content-type', 'application/json')
+    const isNew = 'hostTurn' in parsed || 'stepEnd' in parsed
+    res.statusCode = isNew ? 400 : 200
+    res.end(JSON.stringify(isNew ? { error: 'UNKNOWN_FIELD' } : req.url.endsWith('mailbox-turn') ? { message } : { ok: true }))
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  try {
+    writeFileSync(join(f.directory, 'server.lock'), String(process.pid))
+    writeFileSync(join(f.directory, 'server.owner'), JSON.stringify({ pid: process.pid, url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token` }))
+    // The board answers in this process, so the hook runs as a child that does not block it.
+    const result = await new Promise(done => {
+      const child = spawn(process.execPath, [f.script, '--home', f.home, '--data-dir', f.root, '--progress-file', f.progress, '--agent', 'codex', '--codex-event'], { cwd: f.home, env: f.env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
+      let stdout = '', stderr = ''
+      child.stdout.on('data', chunk => { stdout += chunk })
+      child.stderr.on('data', chunk => { stderr += chunk })
+      child.once('close', status => done({ status, stdout, stderr }))
+      child.stdin.end(JSON.stringify({ session_id: session, hook_event_name: 'Stop', turn_id: 'mailbox-turn', stop_hook_active: false, transcript_path: f.transcript }))
+    })
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(handedOver(result), null, result.stdout)
+    // It asked for a step-end take once and, refused, took nothing: no take without the step-end mark.
+    const takes = calls.filter(([url]) => url.endsWith('/mailbox-turn'))
+    assert.ok(takes.length >= 1, 'the Stop hook asks the board for a step-end take')
+    assert.ok(takes.every(([, body]) => body.stepEnd === true), JSON.stringify(takes))
+    assert.ok(!calls.some(([url]) => url.endsWith('/mailbox-accept')))
+  } finally { await new Promise(done => server.close(done)) }
+}))
+
+test('a Codex Stop whose progress write is queued hands nothing over', async () => stopFixture(async f => {
+  const lock = `${f.progress}.agent-board-lock`
+  f.save(lock, 'held by another process')
+  try {
+    const result = stepEnd(f)
+    assert.equal(result.status, 0, result.stderr)
+    assert.equal(handedOver(result), null, result.stdout)
+    assert.equal(stopMessage(f).status, 'queued')
+  } finally { unlinkSync(lock) }
+  assert.ok(handedOver(await stepEndOrDeferred(f)))
+}))
+
 test('a live hub takes hook mailbox calls over loopback and the hook does not write the store itself', async () => mailboxFixture(async f => {
   const { createServer } = await import('node:http')
   f.seed()
@@ -7459,6 +7803,78 @@ test('Hermes setup adopts an entry that already runs this release\'s command whe
   assert.deepEqual(JSON.parse(f.install('--agent', 'hermes', '--apply', '--json').stdout).changes, [], 'a third apply reports no changes')
 }))
 
+// Hermes saves config.yaml with PyYAML, which writes the items of a list at the left edge, right under their key.
+const leftEdgeLists1588 = 'model:\n  default: synthetic-model\ntoolsets:\n- hermes-cli\n- synthetic-tools\nplatform_toolsets:\n  cli:\n  - hermes-cli\n'
+
+test('Hermes setup installs, updates and removes its hooks in a config.yaml whose lists sit at the left edge under their key, as Hermes saves it (#1588)', () => fixture(f => {
+  const config = hermesConfig(f)
+  f.save(config, leftEdgeLists1588)
+  const installed = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.equal(installed.status, 0, `${installed.stdout}\n${installed.stderr}`)
+  assert.deepEqual(JSON.parse(installed.stdout).conflicts, [], 'no whole-file refusal')
+  const text = readFileSync(config, 'utf8')
+  assert.ok(text.startsWith(leftEdgeLists1588), `the person's settings stay as they were\n${text}`)
+  assert.deepEqual(Object.keys(hermesHooksOf(text)).sort(), [...hermesEvents].sort(), 'every hook of the board is added')
+  const again = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.equal(again.status, 0, again.stderr)
+  assert.deepEqual(JSON.parse(again.stdout).conflicts, [], 'an update does not skip the file')
+  assert.equal(readFileSync(config, 'utf8'), text, 'an update has nothing to change')
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(config, 'utf8'), leftEdgeLists1588, 'removal leaves only the person’s settings')
+}))
+
+test('Hermes setup still leaves a config.yaml alone whose hooks key holds a list at the left edge (#1588)', () => fixture(f => {
+  const config = hermesConfig(f)
+  const listed = 'model:\n  default: synthetic-model\nhooks:\n- synthetic-hook\n'
+  f.save(config, listed)
+  const result = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.ok(result.stdout.trimStart().startsWith('{'), `setup prints a JSON plan\n${result.stdout}\n${result.stderr}`)
+  const plan = JSON.parse(result.stdout)
+  assert.ok(plan.conflicts.some(conflict => conflict.endsWith('config.yaml')), `the file is refused: ${JSON.stringify(plan.conflicts)}`)
+  assert.equal(readFileSync(config, 'utf8'), listed, 'nothing is written')
+}))
+
+// A shape the line editor cannot follow is refused whole, with nothing written, rather than turned into a file Hermes
+// reads differently: setup would otherwise add a second hooks key, or hooks after the document's end.
+const refusedWhole1588 = (f, texts) => {
+  const config = hermesConfig(f)
+  for (const text of texts) {
+    f.save(config, text)
+    const result = f.install('--agent', 'hermes', '--apply', '--json')
+    assert.ok(result.stdout.trimStart().startsWith('{'), `setup prints a JSON plan\n${result.stdout}\n${result.stderr}`)
+    const plan = JSON.parse(result.stdout)
+    assert.ok(plan.conflicts.some(conflict => conflict.endsWith('config.yaml')), `the file is refused: ${JSON.stringify(plan.conflicts)}\n${text}`)
+    assert.equal(readFileSync(config, 'utf8'), text, `nothing is written\n${text}`)
+  }
+}
+
+test('Hermes setup leaves alone a config.yaml whose hooks key is written with escapes, instead of adding a second hooks key (#1588)', () => fixture(f => {
+  const personal = '"ho\\x6fks":\n  pre_llm_call:\n  - command: echo-personal\n'
+  refusedWhole1588(f, [personal, `${personal}toolsets:\n- hermes-cli\n`])
+}))
+
+// PyYAML writes a key that is not ASCII double-quoted with escapes (`café` becomes `"caf\xE9"`): such a key is not the
+// hooks key, so the file is still one setup updates.
+test('Hermes setup installs and removes its hooks in a config.yaml where PyYAML wrote a key that is not ASCII with escapes (#1588)', () => fixture(f => {
+  const config = hermesConfig(f)
+  const escaped = '"caf\\xE9": synthetic-value\n"t\\u00E9st":\n- synthetic-item\ntoolsets:\n- hermes-cli\n'
+  f.save(config, escaped)
+  const installed = f.install('--agent', 'hermes', '--apply', '--json')
+  assert.equal(installed.status, 0, `${installed.stdout}\n${installed.stderr}`)
+  assert.deepEqual(JSON.parse(installed.stdout).conflicts, [], 'no whole-file refusal')
+  const text = readFileSync(config, 'utf8')
+  assert.ok(text.startsWith(escaped), `the person's settings stay as they were\n${text}`)
+  assert.deepEqual(Object.keys(hermesHooksOf(text)).sort(), [...hermesEvents].sort(), 'every hook of the board is added')
+  const removed = remove774(f, 'hermes')
+  assert.equal(removed.status, 0, removed.stderr)
+  assert.equal(readFileSync(config, 'utf8'), escaped, 'removal leaves only the person’s settings')
+}))
+
+test('Hermes setup leaves alone a config.yaml with a document end marker or a second document, instead of adding hooks after it (#1588)', () => fixture(f => {
+  refusedWhole1588(f, ['toolsets:\n  - hermes-cli\n...\n', 'toolsets:\n- hermes-cli\n...\n', 'toolsets:\n  - hermes-cli\n---\nother: 1\n'])
+}))
+
 test('Hermes refresh and removal recognize a recorded Unicode path after YAML escaping', () => fixture(f => {
   const data = join(f.home, 'caf\u00e9-\u{1f600}')
   const install = () => f.install('--agent', 'hermes', '--data-dir', data, '--apply')
@@ -7914,6 +8330,40 @@ test('a Codex report after an approval keeps the approval closed, not waiting', 
   assert.ok(reported.includes(approval.replace('[?]', '[x]')))
   assert.ok(!/- \[\?\]/.test(reported))
   assert.ok(!reported.includes('native=codex'))
+}))
+
+test('the SessionEnd of the board\'s own background turn keeps a Codex conversation waiting on its question, and any other SessionEnd ends it', () => fixture(f => {
+  // Live run (#557): a `codex exec` run the board started for a Codex app conversation ended with SessionEnd, the row read as
+  // ended, and the board could not send that conversation its next message.
+  assert.equal(f.install('--apply').status, 0)
+  const stateOf = () => / state=(\w+)/.exec(readFileSync(f.progress, 'utf8').split('\n').find(line => line.startsWith('<!-- auto ')) ?? '')?.[1]
+  assert.equal(f.event('SessionStart', 'turn-1').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Synthetic step done.\n\nRed or purple?' }).status, 0)
+  assert.equal(stateOf(), 'waiting')
+  assert.equal(f.event('SessionEnd', 'turn-1', { turn_id: undefined }, { AGENT_BOARD_BACKGROUND_TURN: '1' }).status, 0)
+  assert.equal(stateOf(), 'waiting')
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Red or purple\?\n/)
+  assert.equal(f.event('SessionEnd', 'turn-1', { turn_id: undefined }, { AGENT_BOARD_BACKGROUND_TURN: '0' }).status, 0)
+  assert.equal(stateOf(), 'ended')
+}))
+
+test('a queued SessionEnd keeps the board\'s background-turn mark when it is replayed', () => fixture(f => {
+  assert.equal(f.install('--apply').status, 0)
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  assert.equal(f.event('Stop', 'turn-1', { last_assistant_message: 'Synthetic step done.\n\nRed or purple?' }).status, 0)
+  const raw = { version: 1, kind: 'raw', at: Date.now(), argv: ['--codex-event', '--agent', 'codex', '--hook-event', 'SessionEnd', '--progress-file', f.progress], env: { AGENT_BOARD_BACKGROUND_TURN: '1' }, payload: { session_id: session, hook_event_name: 'SessionEnd' } }
+  f.save(join(f.root, 'pending', 'background.raw.json'), JSON.stringify(raw))
+  // Another conversation's event runs the replay, so this row shows only what the replayed event did.
+  assert.equal(f.event('UserPromptSubmit', 'other-turn', { session_id: 'other-codex-session-557' }).status, 0)
+  assert.deepEqual(pendingFiles(f), [])
+  // Applied, not dropped: an older board refused the mark as an unknown variable and left the row as it was.
+  assert.doesNotMatch(hookLog(f), /PENDING_DROPPED/)
+  assert.equal(sessionRecord(f, session).state, 'waiting')
+  f.save(join(f.root, 'pending', 'unmarked.raw.json'), JSON.stringify({ ...raw, at: Date.now(), env: {} }))
+  assert.equal(f.event('UserPromptSubmit', 'other-turn-2', { session_id: 'other-codex-session-557' }).status, 0)
+  assert.deepEqual(pendingFiles(f), [])
+  assert.equal(sessionRecord(f, session).state, 'ended')
 }))
 
 test('a native Codex chat reply keeps the durable question open until the next work report', () => fixture(f => {
@@ -13164,11 +13614,13 @@ require('node:module').syncBuiltinESMExports()
   return { pidFile, attemptsFile, preload, lease, hooks, conversationId, payload, record }
 }
 
+// A message may be a function, so a failed wait can say what it saw when it gave up (#1781).
 const waitForAutomaticRecovery = async (condition, message, limit = 10000) => {
   const until = Date.now() + limit
   while (!condition() && Date.now() < until) await new Promise(done => setTimeout(done, 25))
-  assert.ok(condition(), message)
+  if (!condition()) assert.fail(typeof message === 'function' ? message() : message)
 }
+const recoverySeen = (f, recovery) => () => `pid file ${existsSync(recovery.pidFile) ? 'written' : 'missing'}, queued ${JSON.stringify(pendingFiles(f))}, hook log ends ${JSON.stringify(hookLog(f).split(/\r?\n/).filter(Boolean).slice(-3))}`
 
 test('automatic hook recovery applies a queued Antigravity Stop after the lock is released', { timeout: 30000 }, () => fixture(async f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
@@ -13187,7 +13639,7 @@ test('automatic hook recovery applies a queued Antigravity Stop after the lock i
   try {
     const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
     assert.equal(stopped.status, 0, hookFailure(stopped))
-    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the installed Stop hook must queue once and launch its owned recovery helper')
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, () => 'the installed Stop hook must queue once and launch its owned recovery helper: ' + recoverySeen(f, recovery)())
     recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
     assert.ok(isReporterAlive(recoveryPid), 'the tracked automatic recovery helper must be live before the lock is released')
     const [queuedName] = pendingFiles(f)
@@ -13219,7 +13671,7 @@ test('automatic hook recovery gives up within its deadline while the lock is hel
   try {
     const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
     assert.equal(stopped.status, 0, hookFailure(stopped))
-    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, 'the installed Stop hook must launch recovery for its queued metadata')
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile) && pendingFiles(f).length === 1, () => 'the installed Stop hook must launch recovery for its queued metadata: ' + recoverySeen(f, recovery)())
     recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
     await waitForAutomaticRecovery(() => !isReporterAlive(recoveryPid), 'the bounded automatic helper must exit while the synthetic lock remains held')
     // The helper has one 8 s deadline from the job's creation, gives each attempt up to 2 s and starts none with
@@ -13237,6 +13689,85 @@ test('automatic hook recovery gives up within its deadline while the lock is hel
     assert.deepEqual(JSON.parse(manual.stdout), { recoveryVersion: 1, processed: 1, pending: 0 })
     assert.deepEqual(pendingFiles(f), [])
     assert.equal(JSON.parse(readFileSync(recovery.record, 'utf8')).state, 'waiting')
+  } finally {
+    rmSync(locked.marker, { force: true })
+    if (Number.isInteger(recoveryPid) && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
+  }
+}))
+
+// The board script queues its own copy of an event when the lock is busy. If the worker then stops it at the deadline, that
+// copy is the event's, and the worker must not save a second, raw one: recovery would hold two copies of one Stop (#1781).
+test('a Stop hook whose board script is stopped after it queued the event keeps that one queued copy and starts recovery (#1781)', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const started = await fireCommand(f, recovery.hooks.PreInvocation[0].command, recovery.payload)
+  assert.equal(started.status, 0, hookFailure(started))
+  const locked = lockedProgress(f)
+  // Once its queued copy is in place, the board script waits well past the worker's deadline, so the worker stops it.
+  const stall = join(f.home, 'stall-after-queue.cjs')
+  f.save(stall, `const fs = require('node:fs')
+const path = require('node:path')
+const rename = fs.renameSync
+fs.renameSync = (from, to) => {
+  const result = rename(from, to)
+  const name = String(to)
+  if (process.argv.includes('--hook-recovery-parent') && path.basename(path.dirname(name)) === 'pending' && name.endsWith('.json') && !name.endsWith('.raw.json')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10000)
+  return result
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const env = { ...f.env, NODE_OPTIONS: `${locked.env.NODE_OPTIONS} --require ${JSON.stringify(recovery.preload)} --require ${JSON.stringify(stall)}` }
+  let recoveryPid
+  try {
+    const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
+    assert.equal(stopped.status, 0, hookFailure(stopped))
+    const queued = pendingFiles(f)
+    assert.equal(queued.length, 1, `queued: ${JSON.stringify(queued)}`)
+    assert.doesNotMatch(queued[0], /\.raw\.json$/, 'the copy kept is the one the board script queued')
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile), recoverySeen(f, recovery))
+    recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    unlinkSync(locked.marker)
+    await waitForAutomaticRecovery(() => pendingFiles(f).length === 0 && JSON.parse(readFileSync(recovery.record, 'utf8')).state === 'waiting', () => 'recovery must apply the one queued Stop once the lock is released: ' + recoverySeen(f, recovery)())
+  } finally {
+    rmSync(locked.marker, { force: true })
+    if (Number.isInteger(recoveryPid) && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
+  }
+}))
+
+// The same copy when the board script queued it and then failed before the deadline: the worker logs the failure and
+// starts recovery, and saves no second copy (#1781).
+test('a Stop hook whose board script failed after it queued the event keeps that one queued copy and logs the failure (#1781)', { timeout: 30000 }, () => fixture(async f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const recovery = automaticRecoveryFixture(f)
+  const started = await fireCommand(f, recovery.hooks.PreInvocation[0].command, recovery.payload)
+  assert.equal(started.status, 0, hookFailure(started))
+  const locked = lockedProgress(f)
+  // Once its queued copy is in place, the board script ends with an error, well before the worker's deadline.
+  const broken = join(f.home, 'fail-after-queue.cjs')
+  f.save(broken, `const fs = require('node:fs')
+const path = require('node:path')
+const rename = fs.renameSync
+fs.renameSync = (from, to) => {
+  const result = rename(from, to)
+  const name = String(to)
+  if (process.argv.includes('--hook-recovery-parent') && path.basename(path.dirname(name)) === 'pending' && name.endsWith('.json') && !name.endsWith('.raw.json')) process.exit(1)
+  return result
+}
+require('node:module').syncBuiltinESMExports()
+`)
+  const env = { ...f.env, NODE_OPTIONS: `${locked.env.NODE_OPTIONS} --require ${JSON.stringify(recovery.preload)} --require ${JSON.stringify(broken)}` }
+  let recoveryPid
+  try {
+    const stopped = await fireCommand({ ...f, env }, recovery.hooks.Stop[0].command, recovery.payload)
+    assert.equal(stopped.status, 0, hookFailure(stopped))
+    const queued = pendingFiles(f)
+    assert.equal(queued.length, 1, `queued: ${JSON.stringify(queued)}, hook log: ${JSON.stringify(hookLog(f))}`)
+    assert.doesNotMatch(queued[0], /\.raw\.json$/, 'the copy kept is the one the board script queued')
+    assert.match(hookLog(f), /antigravity REPORTER_FAILED\r?\n[^\n]* antigravity REPORTER_QUEUED\r?\n$/, 'the failure and the queued event are logged as on any queued failure')
+    await waitForAutomaticRecovery(() => existsSync(recovery.pidFile), recoverySeen(f, recovery))
+    recoveryPid = Number(readFileSync(recovery.pidFile, 'utf8'))
+    unlinkSync(locked.marker)
+    await waitForAutomaticRecovery(() => pendingFiles(f).length === 0 && JSON.parse(readFileSync(recovery.record, 'utf8')).state === 'waiting', () => 'recovery must apply the one queued Stop once the lock is released: ' + recoverySeen(f, recovery)())
   } finally {
     rmSync(locked.marker, { force: true })
     if (Number.isInteger(recoveryPid) && isReporterAlive(recoveryPid)) await stopReporter(recoveryPid)
@@ -15619,6 +16150,7 @@ test('asking Antigravity row and working twin with the same title show start tim
   const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), serveModel(view, [], STRINGS.en, new Set(), false, undefined, false, {
     now: view.now, repoOf: () => null, unreadable: [], versions: { board: 'synthetic', package: null },
   }))
+  for (const btn of dom.buttons(dom.node('board')).filter(b => String(b.className ?? '').split(' ').includes('q-toggle'))) btn.click()
   const visible = dom.visible()
   assert.ok(visible.includes(rAsk.context), visible)
   assert.ok(visible.includes(rWork.context), visible)
@@ -15694,6 +16226,7 @@ test('upgrading a pre-#1401 Antigravity record preserves its legacy start time, 
   })
   assert.equal(model.view?.needs.cards.length, 2)
   const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), model)
+  for (const btn of dom.buttons(dom.node('board')).filter(b => String(b.className ?? '').split(' ').includes('q-toggle'))) btn.click()
   const visible = dom.visible()
   assert.ok(visible.includes(rOne.context), visible)
   assert.ok(visible.includes(rTwo.context), visible)
@@ -15790,6 +16323,7 @@ test('two asking Antigravity sessions with question notes keep start times visib
   })
   assert.equal(model.view?.needs.cards.length, 2)
   const dom = await pageDom(servePage(STRINGS.en, 'synthetic-nonce'), model)
+  for (const btn of dom.buttons(dom.node('board')).filter(b => String(b.className ?? '').split(' ').includes('q-toggle'))) btn.click()
   const visible = dom.visible()
   assert.ok(visible.includes('should I proceed?'), visible)
   assert.ok(visible.includes(rOne.context), visible)
