@@ -1981,6 +1981,11 @@ const PAGE_SCRIPT = String.raw`
     var slot = resultSlots[key];
     if (slot) { slot.node.textContent = ''; slot.node.className = 'press-result'; }
   }
+  // The board drew this message's stored receipt on the card: a line the press would write over it says less.
+  function isReceiptShown(key, id) {
+    var one = key && pg.sources[key];
+    return !!(one && one.receipt && one.receipt.id === id);
+  }
   function clearEnqueueResult(key, receipt) {
     var result = key && results[key];
     if (!result || !receipt || result.messageId !== receipt.id) return;
@@ -2039,7 +2044,7 @@ const PAGE_SCRIPT = String.raw`
     var body = { key: key, type: 'message', id: attempt.id, text: text, connection: delivery.id, turn: delivery.turn, session: session, asked: asked || '', fp: fp };
     // A press made again while its send still tries joins that send: one send per message on this page (#1843, B3.1).
     if (!attempt.sending) attempt.sending = sendTries(attempt, body, function () {
-      if (attempt.isStopped) return;
+      if (attempt.isStopped || isReceiptShown(key, attempt.id)) return;
       say(w('statusRetrying'), 'wait', key);
       if (results[key]) results[key].messageId = attempt.id;
     });
@@ -2070,6 +2075,9 @@ const PAGE_SCRIPT = String.raw`
       busyOff(go, data.ok || isUnreachable);
       return data.ok;
     }, function () {
+      // No answer in 30 s, but a read of the board drew this message's receipt: the board has it and answers, so the
+      // press went in and the page stays online.
+      if (isReceiptShown(key, attempt.id)) { busyOff(go, false); return true; }
       // No answer in 30 s: the board cannot be reached, the words stay in the box, and the board may still have stored
       // the message, so its receipt replaces this line once the board answers again (owner, #1843 B4).
       say(w('statusUnreachable'), 'alert', key, undefined, true);

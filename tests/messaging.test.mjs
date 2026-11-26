@@ -8288,10 +8288,39 @@ test('a press reads Sending until the board answers, and says it is trying again
   assert.deepEqual(await page.runTimers('retrySend'), [2000])
   assert.equal(slotText(), EN.statusRetrying)
   assert.deepEqual(page.requests.map(one => one.body.id), [page.requests[0].body.id, page.requests[0].body.id])
+  // Trying again is not offline: the page still takes presses.
+  assert.notEqual(page.node('offline').textContent, EN.serveOffline)
   // The second try's answer arrives: the line is the board's, no longer Sending.
   held[1]()
   await page.flush()
   assert.ok(![EN.statusSending, EN.statusRetrying].includes(slotText()), slotText())
+  assert.equal(stored().length, 1)
+})
+
+test('a press whose stored receipt a board read already drew says neither trying again nor cannot reach the board', async () => {
+  const connection = claudeLive()
+  // The board stores the first try, but no answer of any try reaches the page; the page's next read of the board brings
+  // the message it stored.
+  const { post, stored } = await storingPost(connection, () => {
+    const open = new Promise(() => {})
+    open.isHeld = true
+    return open
+  })
+  const { page, press, modelOf } = await retryPage(post, connection)
+  await press('Continue')
+  await page.redraw(modelOf(stored()))
+  assert.ok(page.text().includes(EN.statusQueued(EN.statusWhenNow)), page.text())
+  // 2 s: the page tries again under the same id, and writes nothing over the receipt it shows.
+  assert.deepEqual(await page.runTimers('retrySend'), [2000])
+  assert.equal(page.requests[1].body.id, page.requests[0].body.id)
+  assert.ok(!page.text().includes(EN.statusRetrying), page.text())
+  // 30 s with no answer: the board has the message and its read answered, so the page neither says it cannot reach the
+  // board nor goes offline.
+  for (let i = 0; i < 14; i++) await page.runTimers('retrySend')
+  assert.equal(page.requests.length, 15)
+  assert.ok(!page.text().includes(EN.statusUnreachable), page.text())
+  assert.notEqual(page.node('offline').textContent, EN.serveOffline)
+  assert.ok(page.text().includes(EN.statusQueued(EN.statusWhenNow)), page.text())
   assert.equal(stored().length, 1)
 })
 
