@@ -1,6 +1,6 @@
 # The board page, redesign 1: order and layout first
 
-Written by the PM on 2026-11-24, at the owner's ask: 「另外UI應該要先行優化 你可以先做這部分優化的設計」. A design for the owner's review, **not in force**. The mockup, on synthetic data, is `docs/dev/ui-mockup-0.26.0.html`: its 提案 switch (bottom right) shows the 沒事, 過時 and 深色 states, and it was checked at 1280, 1440 (detail rail) and 375 px.
+Written by the PM on 2026-11-24, at the owner's ask: 「另外UI應該要先行優化 你可以先做這部分優化的設計」. Approved by the owner on 2026-11-24 (「照這版」, with plan #1837) and in force. The mockup, on synthetic data, is `docs/dev/ui-mockup-0.26.0.html`: its 提案 switch (bottom right) shows the 沒事, 過時 and 深色 states, and it was checked at 1280, 1440 (detail rail) and 375 px.
 
 The work order is the owner's: order and layout first, then the card, then the wording. The page code is `hooks/serve.ts` (CSS around `:1059-1350`, the page script after `:2000`). It needs no hook change, so this lane can start at once and run beside the delivery work.
 
@@ -111,7 +111,7 @@ The plan (plan-0.26.0.md, section D) holds them:
 
 ## Redesign 2: the item and the words
 
-> **Status: design proposal only — not in force until the owner approves. Zero code or string-table changes in this PR.**
+> **Status: in force as merged (owner, 2026-11-26, 「全照建議」).** Issue N15 builds its item controls; L10 carries 送出, 收回 and 不確定.
 
 Redesign 1 settled the page skeleton (208 px sidebar, one `<= 760 px` work column, `320 px` detail rail at `>= 1440 px` within `#1849`'s `<= 340 px` cap, search/filters, and flush sidebar footer). Redesign 2 specifies **Agent Board's visual identity, the compact interactive pulse and freshness pill bar (`#1023`), the item and its icon/button micro-controls, all board states, keyboard triage, phone sheet, and the 16-string cut list** across all three languages (`zh-TW`, `en`, `zh-CN`), directly addressing `#209` comments `7148340095` ("in the UI, order and layout first, then the card, then wording") and `7154088026`, plus `#1023`'s first line.
 
