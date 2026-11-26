@@ -1034,7 +1034,10 @@ export const startCodexReceiver = ({
               else holds.set(thread, { kind: 'unreadable', until: null })
               return false
             }
-            if (holdOf(thread) === null && !await decide() && await giveBack() !== 'held') return undefined
+            // A claim whose read finds no window, or cannot be read, on a thread whose 10-minute wait is already over goes on with no
+            // check: the hold the read just set makes `isReady` read that wait. Given back, it would go only with a later claim that
+            // lands inside the thread's 10-tick hold, and could wait with no end.
+            if (holdOf(thread) === null && !await decide() && !(await isReady(thread) && !isDone()) && await giveBack() !== 'held') return undefined
             for (;;) {
               for (;;) {
                 if (isDone()) return undefined
@@ -1057,6 +1060,8 @@ export const startCodexReceiver = ({
                     if ((closes.get(thread) ?? 0) === closed && listing.set.has(thread)) break
                   }
                   if (ids !== null) { ids = null; holdNone(thread) }
+                  // As at the claim: a read that finds no window, or cannot be read, with the 10-minute wait over goes with no check.
+                  else if (holdOf(thread) !== null && await isReady(thread) && !isDone()) break
                   if (await giveBack() !== 'held') return undefined
                 }
                 if (!isDone() && isShort() && await giveBack() !== 'held') return undefined
