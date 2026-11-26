@@ -1,4 +1,4 @@
-import { clipped, plain, redact } from './board'
+import { boardItems, clipped, plain, redact } from './board'
 import type { PendingTurn } from './board'
 import { stampOf, withoutStamp } from './done-stamp'
 import type { Lang, Strings } from './i18n'
@@ -300,7 +300,8 @@ export const boardDocument = (
   const source = (ref: Ref): Source => sources.get(ref.sourceKey ?? ref.key) ?? sources.get(ref.key.replace(/^stuck:/, '')) ?? {}
   const age = (ref: Ref): string => clean(source(ref).when || s.pgUnknownAge)
   const original = new Map([...view.due, ...view.groups.flatMap(one => one.rows), ...view.idle, ...view.stopped].map(row => [`row:${row.key}`, row]))
-  const asked = new Map([...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].map(item => [item.key, item]))
+  // A question card's session, keyed as the page keys its cards (`ask:<key>@<hideKey>`, and the older ones' own keys).
+  const asked = new Map(boardItems(view, pending, true, true).flatMap(item => item.type === 'ask' ? [[item.key, item.ask] as const] : []))
   const messageOf = (agent: string, session: string | undefined, reportedAt: number | undefined, answers?: string): { message?: BoardMessage } => {
     const one = latestMessage(messaging?.messages ?? [], agent, session, answers)
     const status = one === undefined ? null : messageStatus(one, now, s, reportedAt)
@@ -342,7 +343,6 @@ export const boardDocument = (
     const isStuck = ref.kind === 'stuck'
     const note = isStuck ? one.stuck?.reason : one.note || one.context
     const item = asked.get(ref.sourceKey ?? ref.key) ?? asked.get(one.key ?? '')
-    const questionId = one.questionId ?? item?.questionId
 
     return {
       kind: clean(ref.kind),
@@ -355,8 +355,9 @@ export const boardDocument = (
       askedAt: iso(one.at ?? ref.at),
       age: age(ref),
       mayBeClosed: !isStuck && one.mayBeClosed === true,
-      // A question's card shows the answer sent to it, as the page does.
-      ...(isStuck || questionId === undefined ? {} : messageOf(item?.agent ?? one.agent ?? ref.agent, item?.nativeSession, item?.at, questionId)),
+      // A question's card shows what the page's does: the answer sent to it, or the last message to its session that
+      // answers no question; a kept question with no session, the answer sent to it.
+      ...(isStuck ? {} : messageOf(item?.agent ?? one.agent ?? ref.agent, item?.nativeSession, item?.at ?? one.at, one.questionId ?? item?.questionId)),
     }
   }
   const needs = needsRefs.filter(ref => !handled.has(ref.key)).map(asNeed)
