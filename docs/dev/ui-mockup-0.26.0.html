@@ -549,14 +549,45 @@ function toast(text, undo){
   if (undo) $('#toast-u').onclick = () => { undo(); $('#toast').classList.remove('on'); render(); };
   clearTimeout(tt); tt = setTimeout(() => $('#toast').classList.remove('on'), 8000);
 }
-function answer(id, v){
+async function copyText(text){
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try { await navigator.clipboard.writeText(text); return true; } catch(e) { return false; }
+  }
+  try {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.setAttribute('readonly', '');
+    area.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    return !!ok;
+  } catch(e) { return false; }
+}
+function focusRow(id){
+  if (!id) return;
+  const sel = `#content .it[data-id="${CSS.escape(id)}"] > .it-r, #content .it[data-id="${CSS.escape(id)}"] > .row`;
+  const target = document.querySelector(sel);
+  if (target) target.focus({ preventScroll: true });
+}
+function nextFocusIdAfterRemoval(id){
+  const rows = Array.from(document.querySelectorAll('#content .it-r, #content .row'));
+  const idx = rows.findIndex(r => r.dataset.id === id);
+  if (idx < 0) return null;
+  return (rows[idx + 1] && rows[idx + 1].dataset.id) || (rows[idx - 1] && rows[idx - 1].dataset.id) || null;
+}
+async function answer(id, v){
   const it = D.find(x => x.id === id); if (!it || !v) return;
+  const hadFocus = document.activeElement && document.activeElement.closest && document.activeElement.closest('#content');
   if (it.pasteTip) {
-    try { navigator.clipboard && navigator.clipboard.writeText(v); } catch(e){}
+    const ok = await copyText(v);
+    if (!ok) { toast('複製失敗，請手動複製'); return; }
     S.open = S.open === id ? null : S.open; S.sel = S.sel === id ? null : S.sel; S.sheet = null;
-    toast(`已複製「${v}」`); render(); return;
+    toast(`已複製「${v}」`); render(); if (hadFocus) focusRow(id); return;
   }
   S.status[id] = 'sending'; S.open = S.open === id ? null : S.open; S.sel = S.sel === id ? null : S.sel; S.sheet = null; render();
+  if (hadFocus) focusRow(id);
   setTimeout(() => { S.status[id] = 'sent'; render(); }, 700);
   setTimeout(() => { S.status[id] = 'got'; render(); }, 1700);
   setTimeout(() => {
@@ -566,11 +597,19 @@ function answer(id, v){
     render(); setTimeout(() => { it.flash = false; }, 1500);
   }, 3000);
 }
-function openItem(id){
-  if (phone.matches) { S.sheet = id; }
-  else if (wide.matches) { S.sel = S.sel === id ? null : id; S.open = null; }
+function openItem(id, restoreFocus){
+  const active = document.activeElement;
+  const shouldRestore = restoreFocus || (active && active.closest && !!active.closest('#content .it-r, #content .row'));
+  if (phone.matches) {
+    S.sheet = id; render();
+    const first = $('#sheet button, #sheet textarea');
+    if (first) first.focus({ preventScroll: true });
+    return;
+  }
+  if (wide.matches) { S.sel = S.sel === id ? null : id; S.open = null; }
   else { S.open = S.open === id ? null : id; }
   render();
+  if (shouldRestore) focusRow(id);
 }
 function setQ(v){ S.q = v.trim(); $('#q').value = v; $('#mq').value = v; render(); }
 function setDemo(m){
@@ -598,15 +637,26 @@ document.addEventListener('click', e => {
   switch (act) {
     case 'open': openItem(id); break;
     case 'ans': e.stopPropagation(); answer(id, v); break;
-    case 'copy-ans': e.stopPropagation(); try { navigator.clipboard && navigator.clipboard.writeText(v); } catch(err){} toast(`已複製「${v}」`); break;
-    case 'copy-cmd': e.stopPropagation(); try { navigator.clipboard && navigator.clipboard.writeText(v); } catch(err){} toast('已複製指令'); break;
+    case 'copy-ans': e.stopPropagation(); copyText(v).then(ok => toast(ok ? `已複製「${v}」` : '複製失敗，請手動複製')); break;
+    case 'copy-cmd': e.stopPropagation(); copyText(v).then(ok => toast(ok ? '已複製指令' : '複製失敗，請手動複製')); break;
     case 'reply': e.stopPropagation(); if (!phone.matches && !wide.matches) S.open = id; else openItem(id); render();
       setTimeout(() => { const t = document.querySelector(`#rt-${phone.matches?'sheet':wide.matches?'rail':'inline'}-${id}`); t && t.focus(); }, 30); break;
     case 'send': { const t = $(`#rt-${el.dataset.where}-${id}`); if (t && t.value.trim()) answer(id, t.value.trim()); else t && t.focus(); break; }
-    case 'check': e.stopPropagation(); it.kind = 'done'; it.prev = 'mine'; it.age = 0; S.sheet = null; S.sel = null; render();
+    case 'check': {
+      e.stopPropagation();
+      const nextId = nextFocusIdAfterRemoval(id);
+      const fromContent = document.activeElement && document.activeElement.closest && document.activeElement.closest('#content');
+      it.kind = 'done'; it.prev = 'mine'; it.age = 0; S.sheet = null; S.sel = null; render();
+      if (fromContent && nextId) focusRow(nextId);
       toast('已完成', () => { it.kind = 'mine'; }); break;
-    case 'archive': case 'hide': it.gone = act; S.open = S.sel = S.sheet = null; render();
+    }
+    case 'archive': case 'hide': {
+      const nextId = nextFocusIdAfterRemoval(id);
+      const fromContent = document.activeElement && document.activeElement.closest && document.activeElement.closest('#content');
+      it.gone = act; S.open = S.sel = S.sheet = null; render();
+      if (fromContent && nextId) focusRow(nextId);
       toast(act === 'archive' ? '已封存' : '已隱藏', () => { delete it.gone; }); break;
+    }
     case 'archive-stops': { const st = of('stop'); st.forEach(x => x.gone = 'archive'); render();
       toast(`已封存 ${st.length} 項`, () => st.forEach(x => delete x.gone)); break; }
     case 'fold': S[k] = !S[k]; render(); break;
@@ -616,7 +666,7 @@ document.addEventListener('click', e => {
     case 'proj': S.proj.has(v) ? S.proj.delete(v) : S.proj.add(v); render(); break;
     case 'menu': e.stopPropagation(); S.menu = S.menu === k ? null : k; render(); break;
     case 'clear': S.ai.clear(); S.proj.clear(); S.surf.clear(); if (S.demo==='notfound') S.demo='normal'; setQ(''); break;
-    case 'close': S.sel = null; S.sheet = null; render(); break;
+    case 'close': { const prev = S.sheet || S.sel; S.sel = null; S.sheet = null; render(); if (prev) focusRow(prev); break; }
     case 'demo-normal': setDemo('normal'); break;
   }
 });
@@ -638,7 +688,10 @@ document.addEventListener('keydown', e => {
       return;
     }
     if (S.menu) { S.menu = null; render(); return; }
-    S.sheet = null; S.sel = null; S.open = null; render(); return;
+    const prev = S.sheet || S.sel || S.open;
+    S.sheet = null; S.sel = null; S.open = null; render();
+    if (prev) focusRow(prev);
+    return;
   }
   if (typing) return;
   const rows = Array.from(document.querySelectorAll('#content .it-r, #content .row'));
@@ -655,10 +708,12 @@ document.addEventListener('keydown', e => {
     const id = active.dataset.id;
     const it = D.find(x => x.id === id);
     if (e.key === ' ' && it && it.kind === 'mine') {
+      const nextId = nextFocusIdAfterRemoval(id);
       it.kind = 'done'; it.prev = 'mine'; it.age = 0; S.sheet = null; S.sel = null; render();
+      focusRow(nextId);
       toast('已完成', () => { it.kind = 'mine'; });
     } else {
-      openItem(id);
+      openItem(id, true);
     }
   }
 });
