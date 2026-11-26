@@ -422,3 +422,21 @@ Server.prototype.listen = function (...args) { if (args[1] === '192.168.42.2') a
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a queued answer on a folded waiting-on-others item leaves unanswered Needs you counts at 1', () => {
+  const waitSource = `${block(first, 'Waiting for reviewer reply', 'abcdef01')}\n${block(second, 'Keep the draft?', 'abcdef02')}`
+  const waitView = buildView(parseProgress(waitSource), [], null, now, 0, {}, EN)
+  const messaging = shown(stored())
+
+  assert.deepEqual(boardCounts(waitView, [], EN, now, messaging), { needs: 1, queued: 1, working: 0 })
+  assert.equal(boardStatus(waitSource, now, EN, undefined, '', '', [], messaging), `${EN.boardStatusLine(1, 0)} · ${EN.boardQueuedCount(1)}`)
+
+  const terminal = boardText(waitView, [], EN, { width: 100, isColor: false, messaging }).split('\n')[0]
+  assert.match(terminal, new RegExp(`● 1 ${EN.countWaiting}`))
+  assert.ok(terminal.includes(`◌ ${EN.boardQueuedCount(1)}`), terminal)
+
+  const model = serveModel(waitView, [], EN, new Set(), false, messaging, false, group, recorded)
+  assert.equal(model.view.needs.n, 1)
+  assert.equal(model.view.needs.waitingOthers.length, 1)
+  assert.ok(model.view.needs.handled.includes(model.view.needs.waitingOthers[0].key))
+})
