@@ -6271,6 +6271,33 @@ test('the Codex desktop app\'s exec-server and an MCP server are not counted as 
   assert.deepEqual(terminalClients([{ pid: 40, started: at, name: 'codex', argv: '/usr/bin/codex exec-server' }], 'linux'), { clients: [], isUnsure: false })
 })
 
+test('a one-shot Codex run (codex exec) and Codex\'s other commands are not counted as a terminal window, while a prompt or a resumed session still is (#1652)', async () => {
+  const { terminalClients } = await import('../scripts/codex-receiver.mjs')
+  const at = 1_700_000_000_000
+  const none = { clients: [], isUnsure: false }
+  // Another tool's one-shot run, an account command or a setup tool: the word right after the program is Codex's command.
+  for (const argv of [
+    '"C:\\bin\\codex.exe" exec --sandbox read-only -m synthetic-model "Synthetic task"',
+    'codex.exe e "Synthetic task"',
+    '"C:\\bin\\codex.exe" review',
+    'C:\\bin\\codex.exe login',
+    '"C:\\bin\\codex.exe" apply',
+  ]) assert.deepEqual(terminalClients([{ pid: 50, started: at, name: 'codex.exe', argv }], 'win32'), none, argv)
+  assert.deepEqual(terminalClients([{ pid: 51, started: at, name: 'codex', argv: '/usr/bin/codex exec --json Synthetic' }], 'linux'), none)
+  assert.deepEqual(terminalClients([{ pid: 52, started: at, name: 'codex', argv: '/opt/homebrew/bin/codex exec Synthetic' }], 'darwin'), none)
+  // A person's window: no command, a prompt (quoted, or one whose first word is no command), or a resumed or forked session.
+  for (const argv of [
+    'codex',
+    '"C:\\bin\\codex.exe"',
+    '"C:\\bin\\codex.exe" "exec the synthetic plan"',
+    'codex.exe fix the exec step',
+    '"C:\\bin\\codex.exe" resume 00000000-0000-0000-0000-000000000000',
+    '"C:\\bin\\codex.exe" fork --last',
+  ]) assert.deepEqual(terminalClients([{ pid: 53, started: at, name: 'codex.exe', argv }], 'win32'), { clients: [`53:${at}`], isUnsure: false }, argv)
+  // A window beside a one-shot run is still found.
+  assert.deepEqual(terminalClients([{ pid: 54, started: at, name: 'codex.exe', argv: 'codex.exe exec "Synthetic task"' }, { pid: 55, started: at, name: 'codex.exe', argv: 'codex' }], 'win32'), { clients: [`55:${at}`], isUnsure: false })
+})
+
 test('a process list that could not be read keeps only its own message on the 10-minute wait, and the next message reads the list again', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person')
   writeFileSync(person, '')
