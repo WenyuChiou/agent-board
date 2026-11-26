@@ -3,19 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" id="theme-color" content="#f1f2ee">
+<meta name="theme-color" id="theme-color" content="#F3F5F7">
 <title>Agent Board · Redesign 2 提案（合成資料）</title>
-<link id="fav" rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cstyle%3E.b%7Bfill%3Argb(31%2C35%2C36)%7D.d%7Bfill%3Argb(179%2C106%2C0)%7D%40media%20(prefers-color-scheme%3Adark)%7B.b%7Bfill%3Argb(230%2C228%2C220)%7D.d%7Bfill%3Argb(248%2C181%2C0)%7D%7D%3C%2Fstyle%3E%3Cpath%20class%3D%22b%22%20d%3D%22M31.04%208H20A%2012%2012%200%200%200%208%2020V44A%2012%2012%200%200%200%2020%2056H44A%2012%2012%200%200%200%2056%2044V32.96A%201%201%200%200%200%2054.35%2032.2A%2016%2016%200%200%201%2031.8%209.65A%201%201%200%200%200%2031.04%208Z%22%2F%3E%3Ccircle%20class%3D%22d%22%20cx%3D%2244%22%20cy%3D%2220%22%20r%3D%2212%22%2F%3E%3C%2Fsvg%3E">
+<link id="fav" rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2064%2064%22%3E%3Cstyle%3E.b%7Bfill%3Argb(23%2C32%2C38)%7D.d%7Bfill%3Argb(200%2C125%2C0)%7D%40media%20(prefers-color-scheme%3Adark)%7B.b%7Bfill%3Argb(230%2C228%2C220)%7D.d%7Bfill%3Argb(248%2C181%2C0)%7D%7D%3C%2Fstyle%3E%3Cpath%20class%3D%22b%22%20d%3D%22M31.04%208H20A%2012%2012%200%200%200%208%2020V44A%2012%2012%200%200%200%2020%2056H44A%2012%2012%200%200%200%2056%2044V32.96A%201%201%200%200%200%2054.35%2032.2A%2016%2016%200%200%201%2031.8%209.65A%201%201%200%200%200%2031.04%208Z%22%2F%3E%3Ccircle%20class%3D%22d%22%20cx%3D%2244%22%20cy%3D%2220%22%20r%3D%2212%22%2F%3E%3C%2Fsvg%3E">
 <style>
 :root{
-  --accent:#165E83; --done:#007B43; --waiting-text:#715C1F; --waiting-fill:#8A6700; --brand:#B36A00;
-  --running:#745399; --alert:#B7282E; --project:#005243;
-  --ground:#f1f2ee; --surface:#ffffff; --inset:#fbfaf5; --ink:#1f2324; --muted:#595857;
-  --line:#e3e4de; --line-strong:#cbcec6; --on-fill:#ffffff;
-  --hover:color-mix(in oklab,var(--ink) 4%,var(--surface));
-  --sel:color-mix(in oklab,var(--accent) 7%,var(--surface));
-  --paste-bg:color-mix(in oklab,var(--waiting-fill) 11%,var(--surface));
-  --paste-line:color-mix(in oklab,var(--waiting-fill) 32%,var(--line));
+  --accent:#185A7D; --done:#0D7444; --waiting-text:#8A5200; --waiting-fill:#F4B41A; --waiting-on:#231800; --waiting-edge:#D4960A; --brand:#C87D00;
+  --running:#6E4F94; --alert:#B4272D; --project:#005243;
+  --ground:#F3F5F7; --surface:#FCFDFE; --inset:#EAEFF2; --ink:#172026; --muted:#525B63;
+  --line:#E0E6EB; --line-strong:#C8D2DA; --on-fill:#FCFDFE;
+  --hover:color-mix(in oklab,var(--ink) 4.5%,var(--surface));
+  --sel:color-mix(in oklab,var(--accent) 9%,var(--surface));
+  --paste-bg:#FEF5DC; --paste-line:#E9C46A;
+  --tile-bg:#EEF2F5; --tile-line:#D4DDE4;
+  --surf-cli-bg:#ECEFF2; --surf-cli-line:#CFD7DE; --surf-cli-ink:#434B52;
+  --surf-app-bg:#E7F2F8; --surf-app-line:#B8D4E3; --surf-app-ink:#185A7D;
   --font-sans:"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei",-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
   --font-mono:ui-monospace,"Cascadia Mono",Consolas,monospace;
   --t-meta:12px; --t-sec:13px; --t-body:14px; --t-view:18px;
@@ -25,12 +27,15 @@
   color-scheme:light;
 }
 [data-theme=dark]{
-  --accent:#00A3AF; --done:#3FAE6A; --waiting-text:#F8B500; --waiting-fill:#F8B500; --brand:#F8B500;
+  --accent:#00A3AF; --done:#3FAE6A; --waiting-text:#F8B500; --waiting-fill:#F8B500; --waiting-on:#141617; --waiting-edge:#E0A300; --brand:#F8B500;
   --running:#B39AD6; --alert:#E0696F; --project:#5FB3A0;
   --ground:#141617; --surface:#1e2022; --inset:#191b1c; --ink:#e6e4dc; --muted:#a3a29b;
   --line:#2d3032; --line-strong:#3d4143; --on-fill:#141617;
   --paste-bg:color-mix(in oklab,var(--waiting-fill) 14%,var(--surface));
   --paste-line:color-mix(in oklab,var(--waiting-fill) 38%,var(--line));
+  --tile-bg:#26292C; --tile-line:#363A3E;
+  --surf-cli-bg:#25282B; --surf-cli-line:#3D4145; --surf-cli-ink:#C9C7BE;
+  --surf-app-bg:#182930; --surf-app-line:#2B4C59; --surf-app-ink:#5EC2CC;
   color-scheme:dark;
 }
 *,*::before,*::after{box-sizing:border-box}
@@ -41,7 +46,7 @@ button{font:inherit;color:inherit;cursor:pointer;touch-action:manipulation}
 :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
 .i{width:16px;height:16px;flex:none;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .n{color:var(--muted);font-size:var(--t-meta);font-variant-numeric:tabular-nums;font-weight:500}
-.badge{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--waiting-fill);color:var(--on-fill);font-size:var(--t-meta);font-weight:650;line-height:18px;text-align:center;font-variant-numeric:tabular-nums;flex:none}
+.badge{min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--waiting-fill);color:var(--waiting-on);font-size:var(--t-meta);font-weight:650;line-height:18px;text-align:center;font-variant-numeric:tabular-nums;flex:none}
 
 /* Corner Light brand mark & icon (hooks/page-look.ts) */
 .ab-logo{overflow:visible;display:block}
@@ -108,8 +113,14 @@ details[open] > summary .i{transform:rotate(90deg)}
 .ai-row.is-off{color:var(--muted)}
 .ai-row.is-off .mk,.m-ai .chip.is-off .mk{opacity:.65}
 .ai-row .nm{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ai-row .sp{flex:1;min-width:4px}
+.ai-row .mk{width:22px;height:22px}
+.ai-row .mk svg{width:14px;height:14px}
 .surfs{display:inline-flex;align-items:center;gap:3px;flex:none}
-.surf-pill{display:inline-flex;align-items:center;font:500 11px/15px var(--font-mono);padding:0 4px;border:1px solid var(--line-strong);border-radius:4px;color:var(--muted);background:var(--inset);white-space:nowrap;flex:none}
+.surf-pill{display:inline-flex;align-items:center;gap:3px;height:18px;padding:0 5px;border-radius:4px;font:600 10.5px/1 var(--font-mono);letter-spacing:.02em;white-space:nowrap;flex:none}
+.surf-pill.is-cli{background:var(--surf-cli-bg);border:1px solid var(--surf-cli-line);color:var(--surf-cli-ink)}
+.surf-pill.is-app{background:var(--surf-app-bg);border:1px solid var(--surf-app-line);color:var(--surf-app-ink)}
+.si{width:10px;height:10px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none}
 .st{width:8px;height:8px;border-radius:50%;flex:none;margin-right:4px}
 .st.run{background:var(--done)}
 .st.open{border:1.5px solid var(--done);background:transparent}
@@ -122,8 +133,8 @@ details[open] > summary .i{transform:rotate(90deg)}
 .ib-sm .i{width:13px;height:13px}
 .ib-sm:active{transform:scale(0.97)}
 
-/* AI mark: monochrome official SVGs inside ink-tinted tile so gold stays the one loud colour */
-.mk{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:5px;flex:none;background:color-mix(in oklab,var(--ink) 8%,var(--surface));color:var(--ink)}
+/* AI mark: monochrome official SVGs inside tinted tile so gold stays the one loud colour */
+.mk{display:inline-grid;place-items:center;width:20px;height:20px;border-radius:5px;flex:none;background:var(--tile-bg);border:1px solid var(--tile-line);color:var(--ink)}
 .mk svg{width:13px;height:13px;display:block}
 .mk.sm{width:16px;height:16px;border-radius:4px}
 .mk.sm svg{width:11px;height:11px}
@@ -154,8 +165,8 @@ details[open] > summary .i{transform:rotate(90deg)}
 .p-pill .i{width:12px;height:12px}
 .p-pill:active,.sync-btn:active{transform:scale(0.97)}
 .p-pill.on{border-color:var(--accent);color:var(--accent);background:var(--sel)}
-.p-pill.need{border-color:var(--paste-line);background:var(--paste-bg);color:var(--waiting-text)}
-.dot-need{width:7px;height:7px;border-radius:50%;background:var(--waiting-fill);flex:none}
+.p-pill.need{border-color:var(--waiting-edge);background:var(--waiting-fill);color:var(--waiting-on)}
+.dot-need{width:7px;height:7px;border-radius:50%;background:var(--waiting-on);flex:none}
 .sync-btn{display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 9px;border:1px solid var(--line-strong);border-radius:999px;background:var(--surface);color:var(--muted);font-size:var(--t-meta);font-weight:500;font-variant-numeric:tabular-nums;white-space:nowrap;transition:border-color 140ms var(--ease-out),background-color 140ms var(--ease-out),color 140ms var(--ease-out),transform 120ms var(--ease-out)}
 .sync-btn .i{width:13px;height:13px}
 .sync-btn.is-stale{border-color:var(--paste-line);background:var(--paste-bg);color:var(--waiting-text);font-weight:600}
@@ -168,10 +179,10 @@ details[open] > summary .i{transform:rotate(90deg)}
 .sec-h{display:flex;align-items:center;gap:8px;margin:0 0 6px;padding:0 2px;font-size:14px;font-weight:650;color:var(--muted)}
 .needs-wrap{display:flex;flex-direction:column}
 .sheet-tab{align-self:flex-start}
-.flag{display:inline-flex;align-items:center;gap:6px;min-height:32px;margin:0;padding:0 16px 0 12px;background:var(--waiting-fill);color:var(--on-fill);font-size:18px;font-weight:650;line-height:1.3;font-variant-numeric:tabular-nums;clip-path:polygon(0 0,100% 0,calc(100% - 8px) 50%,100% 100%,0 100%);border-radius:var(--r-s) 0 0 0}
+.flag{display:inline-flex;align-items:center;gap:6px;min-height:32px;margin:0;padding:0 16px 0 12px;background:var(--waiting-fill);color:var(--waiting-on);box-shadow:inset 0 -1px 0 var(--waiting-edge);font-size:18px;font-weight:650;line-height:1.3;font-variant-numeric:tabular-nums;clip-path:polygon(0 0,100% 0,calc(100% - 8px) 50%,100% 100%,0 100%);border-radius:var(--r-s) 0 0 0}
 h2.flag{font-size:14px}
 .flag b{font-weight:700}
-.flag.calm{background:var(--surface);color:var(--muted);border:1px solid var(--line-strong);border-bottom:0;clip-path:none;border-radius:var(--r-s) var(--r-s) 0 0;padding:0 12px}
+.flag.calm{background:var(--surface);color:var(--muted);border:1px solid var(--line-strong);border-bottom:0;box-shadow:none;clip-path:none;border-radius:var(--r-s) var(--r-s) 0 0;padding:0 12px}
 .list{background:var(--surface);border:1px solid var(--line);border-radius:var(--r-m);overflow:visible}
 .needs-sheet{border:1px solid var(--line-strong);border-radius:0 var(--r-m) var(--r-m) var(--r-m);box-shadow:0 1px 3px rgb(0 0 0 / .04)}
 .it:first-child > .it-r,.it:first-child > .row,.it:first-child > .fold,.it:first-child > .empty{border-top-left-radius:var(--r-m);border-top-right-radius:var(--r-m)}
@@ -269,11 +280,11 @@ h2.flag{font-size:14px}
 /* detail rail, wide screens only (320px) */
 .rail{display:none}
 .app.has-rail .rail{display:block;position:sticky;top:0;height:100vh;overflow:auto;overscroll-behavior:contain;background:var(--surface);border-left:1px solid var(--line)}
-.r-head{display:flex;align-items:center;gap:6px;padding:12px 10px 10px 16px;font-size:var(--t-meta);color:var(--muted);border-bottom:1px solid var(--line)}
-.r-head .r-ai{color:var(--ink);font-weight:600;white-space:nowrap}
+.r-head{display:flex;align-items:center;gap:5px;padding:12px 10px 10px 14px;font-size:var(--t-meta);color:var(--muted);border-bottom:1px solid var(--line)}
 .r-head .sp{flex:1;min-width:4px}
 .r-head .r-meta{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}
-.r-tools{display:inline-flex;align-items:center;gap:2px;flex:none}
+.r-tools{display:inline-flex;align-items:center;gap:1px;flex:none}
+.r-tools .ib{width:26px;height:26px}
 .r-body{padding:16px}
 .r-body h2{margin:0 0 10px;font-size:14px;font-weight:650;line-height:1.4;text-wrap:pretty}
 .r-body .d{padding:0}
@@ -302,7 +313,8 @@ h2.flag{font-size:14px}
   .ib:hover{color:var(--ink)}
   .ib-sm:hover,.pill-act:hover,.clear-btn:hover{background:var(--hover);border-color:var(--accent);color:var(--accent)}
   .chip:hover,.p-pill:hover,.sync-btn:hover{border-color:var(--muted);color:var(--ink)}
-  .p-pill.need:hover,.sync-btn.is-stale:hover{border-color:var(--waiting-fill);color:var(--waiting-text)}
+  .p-pill.need:hover{border-color:var(--waiting-on);color:var(--waiting-on);filter:brightness(1.04)}
+  .sync-btn.is-stale:hover{border-color:var(--waiting-fill);color:var(--waiting-text)}
   .btn:hover{border-color:var(--accent);color:var(--accent)}
   .btn.pri:hover{filter:brightness(1.08);color:var(--on-fill);border-color:var(--accent)}
   .btn.ghost:hover{color:var(--accent);border-color:transparent}
@@ -325,14 +337,21 @@ h2.flag{font-size:14px}
   .m-top .search input{font-size:16px}
   .m-top .sync-btn{min-height:36px;height:36px;padding:0 8px;justify-content:center}
   .m-top .ib{width:44px;height:44px}
-  .m-ai{display:flex;gap:6px;overflow-x:auto;padding:2px 12px 10px;scrollbar-width:none}
+  .m-ai{display:flex;gap:3px;overflow-x:auto;padding:2px 10px 10px;scrollbar-width:none}
   .m-ai::-webkit-scrollbar{display:none}
   .m-ai.more-right{-webkit-mask-image:linear-gradient(to right,var(--ink) calc(100% - 28px),transparent);mask-image:linear-gradient(to right,var(--ink) calc(100% - 28px),transparent)}
   .m-ai.more-left{-webkit-mask-image:linear-gradient(to left,var(--ink) calc(100% - 28px),transparent);mask-image:linear-gradient(to left,var(--ink) calc(100% - 28px),transparent)}
   .m-ai.more-left.more-right{-webkit-mask-image:linear-gradient(to right,transparent,var(--ink) 28px,var(--ink) calc(100% - 28px),transparent);mask-image:linear-gradient(to right,transparent,var(--ink) 28px,var(--ink) calc(100% - 28px),transparent)}
-  .m-ai .chip{height:34px;flex:none;gap:6px;padding:0 10px 0 6px}
-  .m-ai .chip.all{padding:0 12px}
+  .m-ai .chip{height:30px;flex:none;gap:3px;padding:0 5px}
+  .m-ai .chip.all{padding:0 7px;font-size:var(--t-meta)}
   .m-ai .chip.is-off{color:var(--muted)}
+  .m-ai .mk{width:18px;height:18px;border-radius:4px}
+  .m-ai .mk svg{width:11px;height:11px}
+  .m-ai .surfs{gap:2px}
+  .m-ai .surf-pill{height:15px;padding:0 3px;border-radius:3px;font-size:9.5px}
+  .m-ai .surf-pill span{display:none}
+  .m-ai .surf-pill .si{width:9px;height:9px}
+  .m-ai .badge{min-width:15px;height:15px;font-size:10.5px;line-height:15px;padding:0 3px}
   .m-tabs{display:flex;gap:4px;position:sticky;top:58px;z-index:9;margin:0 12px 12px;padding:3px;border-radius:var(--r-m);background:color-mix(in oklab,var(--ink) 6%,var(--ground))}
   .m-tabs button{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;height:36px;border:0;border-radius:8px;background:none;font-size:var(--t-sec);color:var(--muted);white-space:nowrap;transition:background-color 140ms var(--ease-out),color 140ms var(--ease-out),transform 120ms var(--ease-out)}
   .m-tabs button:active{transform:scale(0.97)}
@@ -415,7 +434,7 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const BOARD_PATH = 'M31.04 8H20A 12 12 0 0 0 8 20V44A 12 12 0 0 0 20 56H44A 12 12 0 0 0 56 44V32.96A 1 1 0 0 0 54.35 32.2A 16 16 0 0 1 31.8 9.65A 1 1 0 0 0 31.04 8Z';
 const favURI = lit => 'data:image/svg+xml,' + encodeURIComponent(
-  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><style>.b{fill:rgb(31,35,36)}.d{fill:${lit?'rgb(179,106,0)':'rgb(31,35,36)'}}@media (prefers-color-scheme:dark){.b{fill:rgb(230,228,220)}.d{fill:${lit?'rgb(248,181,0)':'rgb(230,228,220)'}}}</style><path class="b" d="${BOARD_PATH}"/><circle class="d" cx="44" cy="20" r="12"/></svg>`
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><style>.b{fill:rgb(23,32,38)}.d{fill:${lit?'rgb(200,125,0)':'rgb(23,32,38)'}}@media (prefers-color-scheme:dark){.b{fill:rgb(230,228,220)}.d{fill:${lit?'rgb(248,181,0)':'rgb(230,228,220)'}}}</style><path class="b" d="${BOARD_PATH}"/><circle class="d" cx="44" cy="20" r="12"/></svg>`
 );
 const FAV_CALM = favURI(false), FAV_LIT = favURI(true);
 
@@ -439,6 +458,8 @@ const I = {
   catAi:'<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.8" y="2.8" width="10.4" height="10.4" rx="2.4"/><circle cx="6.3" cy="8" r="1" fill="currentColor" stroke="none"/><circle cx="9.7" cy="8" r="1" fill="currentColor" stroke="none"/></svg>',
   catProj:'<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 4.5A 1.5 1.5 0 0 1 3.5 3h2.8l1.4 1.5h4.8A 1.5 1.5 0 0 1 14 6v5.5a 1.5 1.5 0 0 1-1.5 1.5h-9A 1.5 1.5 0 0 1 2 11.5Z"/></svg>',
   catSurf:'<svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.8"/><path d="m5 6.5 2 1.5-2 1.5M8.5 9.5h2.5"/></svg>',
+  surfCli:'<svg class="si" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 5 3.5 3-3.5 3M8 11h4.5"/></svg>',
+  surfApp:'<svg class="si" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="2"/><path d="M2.2 6h11.6"/></svg>',
 };
 
 /* Official AGENT_ICONS paths (hooks/agent-icons.ts), spaced for 8-hex privacy guard */
@@ -511,9 +532,11 @@ function aiSvg(key){
   const g = AI[key];
   return `<svg viewBox="${esc(g.vb)}" fill="currentColor"${g.eo?' fill-rule="evenodd"':''} aria-hidden="true"><path d="${esc(g.d)}"/></svg>`;
 }
+const aiIcon = (key, sm=false) => `<span class="mk${sm?' sm':''}" aria-hidden="true">${aiSvg(key)}</span>`;
 const mk = (it, sm=false, decorative=false) => `<span class="mk${sm?' sm':''}"${decorative ? ' aria-hidden="true"' : ` role="img" aria-label="${esc(AI[it.ai].n)}"`}>${aiSvg(it.ai)}</span>`;
-const mkKey = key => `<span class="mk sm" aria-hidden="true">${aiSvg(key)}</span>`;
-const surfPill = s => `<span class="surf-pill" translate="no">${esc(s)}</span>`;
+const mkKey = key => aiIcon(key, true);
+const surfPill = s => `<span class="surf-pill is-${s==='App'?'app':'cli'}" translate="no">${s==='App'?I.surfApp:I.surfCli}<span>${esc(s)}</span></span>`;
+const surfMicro = s => surfPill(s);
 
 const prog = it => { const t = it.steps.length, d = it.steps.filter(s => s[0]==='x').length;
   return `<span class="prog"><span class="bar"><i style="width:${Math.round(d/t*100)}%"></i></span>${d}/${t}</span>`; };
@@ -530,7 +553,7 @@ function detailHTML(it, where){
   const eid = esc(it.id), ew = esc(where);
   let h = '<div class="d">';
   if (where === 'inline' && it.kind !== 'ask' && it.kind !== 'mine') {
-    h += `<div class="d-head">${surfPill(it.surf)}<span>${esc(AI[it.ai].n)} · ${esc(it.proj)}</span></div>`;
+    h += `<div class="d-head">${mk(it,true)}${surfPill(it.surf)}<span>${esc(it.proj)}</span></div>`;
   }
   if (it.task && it.task !== it.title) h += `<p class="d-task">${esc(it.task)}</p>`;
   if (it.ctx) h += `<p class="d-ctx">${esc(it.ctx)}</p>`;
@@ -626,7 +649,7 @@ function menuHTML(k, name){
   const opts = k === 'ai' ? visibleAIs().map(a => [a, AI[a].n]) :
                k === 'proj' ? projs.map(p => [p,p]) : [['CLI','CLI'],['App','App']];
   const set = S[k], field = k === 'ai' ? 'ai' : k === 'proj' ? 'proj' : 'surf', ek = esc(k);
-  return `<div class="menu" role="group" aria-label="${esc(name)}">${opts.map(([v,l]) => `<label><input type="checkbox" name="f-${ek}" data-act="opt" data-k="${ek}" data-v="${esc(v)}" ${set.has(v)?'checked':''}>${esc(l)}<span class="n">${live().filter(x => x[field]===v).length}</span></label>`).join('')}</div>`;
+  return `<div class="menu" role="group" aria-label="${esc(name)}">${opts.map(([v,l]) => `<label><input type="checkbox" name="f-${ek}" data-act="opt" data-k="${ek}" data-v="${esc(v)}" ${set.has(v)?'checked':''}>${k==='ai'?mkKey(v):''}${esc(l)}<span class="n">${live().filter(x => x[field]===v).length}</span></label>`).join('')}</div>`;
 }
 function chip(k, name, icon){
   const set = S[k], on = set.size > 0;
@@ -654,6 +677,10 @@ function syncAiFade(){
 if (mAiEl) mAiEl.addEventListener('scroll', syncAiFade, { passive: true });
 window.addEventListener('resize', syncAiFade);
 
+function setThemeMeta(){
+  const tc = $('#theme-color');
+  if (tc) tc.setAttribute('content', document.documentElement.dataset.theme === 'dark' ? '#141617' : '#F3F5F7');
+}
 function render(){
   const views = [['needs','需要你'],['run','進行中'],['all','全部']];
   const cnt = {
@@ -670,8 +697,7 @@ function render(){
   }
   const fav = $('#fav'), nextFav = cnt.needs > 0 ? FAV_LIT : FAV_CALM;
   if (fav && fav.getAttribute('href') !== nextFav) fav.setAttribute('href', nextFav);
-  const tc = $('#theme-color');
-  if (tc) tc.setAttribute('content', document.documentElement.dataset.theme === 'dark' ? '#141617' : '#f1f2ee');
+  setThemeMeta();
 
   const ais = visibleAIs();
   $('#nav').innerHTML = views.map(([v,l]) => `<button class="nb" data-act="view" data-v="${esc(v)}" aria-current="${S.view===v}"><span>${esc(l)}</span>${v==='needs' && cnt.needs ? `<span class="badge">${cnt.needs}</span>` : v==='run' ? `<span class="n">${cnt.run}</span>` : ''}</button>`).join('');
@@ -679,14 +705,16 @@ function render(){
     const off = !AI[a].conn;
     const n = needsCount(x => x.ai === a), running = live().some(x => x.ai === a && x.kind === 'run');
     const surfs = [...new Set(live().filter(x => x.ai === a).map(x => x.surf))].sort();
+    const surfsLabel = surfs.length ? surfs.join(' · ') : '無工作階段';
     /* Finding 5 + Principle 2: 4-shape presence & zero AI names in tooltips */
     const needTip = `${n} 件需要你${running ? ' · 另有進行中任務' : ''}`;
     const rowTip = n ? needTip : off ? AI[a].tip : running ? '進行中' : '開著 · 無待辦';
+    const rowAria = `${AI[a].n} · ${surfsLabel} · ${rowTip}`;
     const state = n ? `<span class="badge" data-tip="${esc(needTip)}">${n}</span>`
       : off ? '<span class="st off" aria-hidden="true"></span>'
       : running ? '<span class="st run" aria-hidden="true"></span>'
       : '<span class="st open" aria-hidden="true"></span>';
-    return `<button class="ai-row${off?' is-off':''}" data-act="ai" data-v="${esc(a)}" aria-pressed="${S.ai.has(a)}" data-tip="${esc(rowTip)}">${mkKey(a)}<span class="nm" translate="no">${esc(AI[a].n)}</span><span class="surfs">${surfs.map(surfPill).join('')}</span>${state}</button>`;
+    return `<button class="ai-row${off?' is-off':''}" data-act="ai" data-v="${esc(a)}" aria-pressed="${S.ai.has(a)}" aria-label="${esc(rowAria)}" data-tip="${esc(rowTip)}">${aiIcon(a)}<span class="surfs">${surfs.map(surfPill).join('')}</span><span class="sp"></span>${state}</button>`;
   }).join('');
   const projs = [...new Set(live().map(x => x.proj))];
   $('#proj-list').innerHTML = projs.map(p => `<button class="ai-row" data-act="proj" data-v="${esc(p)}" aria-pressed="${S.proj.has(p)}"><span class="nm" translate="no">${esc(p)}</span><span class="n">${live().filter(x => x.proj===p && !['done','stop'].includes(x.kind)).length}</span></button>`).join('');
@@ -713,8 +741,12 @@ function render(){
     mSync.innerHTML = stale ? `${I.warn}<span>2m</span>` : I.sync;
   }
   $('#m-ai').innerHTML = `<button class="chip all${S.ai.size?'':' on'}" data-act="ai-all" aria-pressed="${!S.ai.size}">全部</button>` + ais.map(a => {
-    const n = needsCount(x => x.ai === a), off = !AI[a].conn;
-    return `<button class="chip${S.ai.has(a)?' on':''}${off?' is-off':''}" data-act="ai" data-v="${esc(a)}" aria-pressed="${S.ai.has(a)}"${off ? ` data-tip="${esc(AI[a].tip)}"` : ''}>${mkKey(a)}<span translate="no">${esc(AI[a].n)}</span>${n ? `<span class="badge">${n}</span>` : ''}</button>`;
+    const n = needsCount(x => x.ai === a), off = !AI[a].conn, running = live().some(x => x.ai === a && x.kind === 'run');
+    const surfs = [...new Set(live().filter(x => x.ai === a).map(x => x.surf))].sort();
+    const surfsLabel = surfs.length ? surfs.join(' · ') : '無工作階段';
+    const tip = n ? `${n} 件需要你${running ? ' · 另有進行中任務' : ''}` : off ? AI[a].tip : running ? '進行中' : '開著 · 無待辦';
+    const aria = `${AI[a].n} · ${surfsLabel} · ${tip}`;
+    return `<button class="chip${S.ai.has(a)?' on':''}${off?' is-off':''}" data-act="ai" data-v="${esc(a)}" aria-pressed="${S.ai.has(a)}" aria-label="${esc(aria)}"${off ? ` data-tip="${esc(AI[a].tip)}"` : ''}>${aiIcon(a)}<span class="surfs">${surfs.map(surfMicro).join('')}</span>${n ? `<span class="badge">${n}</span>` : ''}</button>`;
   }).join('');
   syncAiFade();
   $('#m-tabs').innerHTML = views.map(([v,l]) => `<button role="tab" data-act="view" data-v="${esc(v)}" aria-selected="${S.view===v}">${esc(l)}${v==='needs' && cnt.needs ? `<span class="badge">${cnt.needs}</span>` : v==='run' ? `<span class="n">${cnt.run}</span>` : ''}</button>`).join('');
@@ -731,7 +763,7 @@ function render(){
       : selIt.kind === 'mine'
         ? `<div class="acts" style="margin:0 0 6px"><button class="btn pri" data-act="check" data-id="${sid}">完成</button></div>`
         : '';
-    $('#rail').innerHTML = `<div class="r-head">${mk(selIt,false,true)}<span class="r-ai" translate="no">${esc(AI[selIt.ai].n)}</span>${surfPill(selIt.surf)}<span class="sp"></span><span class="r-meta">${esc(selIt.proj)} · ${age(selIt.age)}</span><span class="r-tools"><button class="ib" data-act="archive" data-id="${sid}" aria-label="封存" data-tip="封存">${I.archive}</button><button class="ib" data-act="hide" data-id="${sid}" aria-label="隱藏" data-tip="隱藏">${I.hide}</button><button class="ib" data-act="close" aria-label="關閉" data-tip="關閉">${I.x}</button></span></div>
+    $('#rail').innerHTML = `<div class="r-head">${mk(selIt)}${surfPill(selIt.surf)}<span class="sp"></span><span class="r-meta">${esc(selIt.proj)} · ${age(selIt.age)}</span><span class="r-tools"><button class="ib" data-act="archive" data-id="${sid}" aria-label="封存" data-tip="封存">${I.archive}</button><button class="ib" data-act="hide" data-id="${sid}" aria-label="隱藏" data-tip="隱藏">${I.hide}</button><button class="ib" data-act="close" aria-label="關閉" data-tip="關閉">${I.x}</button></span></div>
       <div class="r-body"><h2>${esc(selIt.title)}</h2>${railActs}${detailHTML(selIt,'rail')}</div>`;
   } else { $('#app').classList.remove('has-rail'); $('#rail').innerHTML = ''; }
 
@@ -741,7 +773,7 @@ function render(){
   sheetEl.inert = !sheetOpen;
   sheetEl.setAttribute('aria-hidden', String(!sheetOpen));
   if (sheetOpen) {
-    sheetEl.innerHTML = `<div class="grab"></div><div class="r-head">${mk(shIt,false,true)}<span class="r-ai" translate="no">${esc(AI[shIt.ai].n)}</span>${surfPill(shIt.surf)}<span class="r-meta">${esc(shIt.proj)} · ${age(shIt.age)}</span><span class="sp"></span><button class="ib" data-act="close" aria-label="關閉">${I.x}</button></div><h2>${esc(shIt.title)}</h2>${detailHTML(shIt,'sheet')}`;
+    sheetEl.innerHTML = `<div class="grab"></div><div class="r-head">${mk(shIt)}${surfPill(shIt.surf)}<span class="r-meta">${esc(shIt.proj)} · ${age(shIt.age)}</span><span class="sp"></span><button class="ib" data-act="close" aria-label="關閉">${I.x}</button></div><h2>${esc(shIt.title)}</h2>${detailHTML(shIt,'sheet')}`;
     sheetEl.classList.add('on'); $('#scrim').classList.add('on');
   } else { sheetEl.classList.remove('on'); $('#scrim').classList.remove('on'); }
   document.querySelectorAll('#demo [data-demo]').forEach(b => b.setAttribute('aria-pressed', b.dataset.demo === S.demo || (b.dataset.demo==='dark' && document.documentElement.dataset.theme==='dark')));
