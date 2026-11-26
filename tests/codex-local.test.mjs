@@ -11290,8 +11290,8 @@ test('generated Codex and Antigravity hook commands reach Node without a PowerSh
   assert.equal(antigravity.status, 0, antigravity.stderr)
   const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
   assert.deepEqual(Object.keys(hooks), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
-  for (const group of Object.values(hooks)) {
-    assert.equal(group.length, 1)
+  for (const [event, group] of Object.entries(hooks)) {
+    assert.equal(group.length, event === 'Stop' ? 2 : 1)
     for (const { command } of group) {
       if (process.platform === 'win32' && expected === undefined) assert.match(command, /^powershell\.exe /i)
       else {
@@ -11323,8 +11323,8 @@ test('Windows setup rewrites the PowerShell wrapper hook from an older install a
   const file = join(home, '.gemini', 'config', 'hooks.json')
   const config = JSON.parse(readFileSync(file, 'utf8'))
   assert.deepEqual(Object.keys(config['agent-board-local']), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
-  for (const group of Object.values(config['agent-board-local'])) {
-    assert.equal(group.length, 1)
+  for (const [event, group] of Object.entries(config['agent-board-local'])) {
+    assert.equal(group.length, event === 'Stop' ? 2 : 1)
     for (const { command } of group) assert.match(command, /^powershell\.exe /i)
   }
   const foreign = { Stop: [{ command: 'user-command' }] }
@@ -11344,10 +11344,12 @@ test('Windows setup rewrites the PowerShell wrapper hook from an older install a
   assert.deepEqual(Object.keys(updated).sort(), ['agent-board-local', 'custom'])
   const hooks = updated['agent-board-local']
   assert.deepEqual(Object.keys(hooks), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
-  for (const group of Object.values(hooks)) {
-    assert.equal(group.length, 1)
-    assert.ok(group[0].command.startsWith(`${expected} --input-type=commonjs -e eval(`))
-    assert.doesNotMatch(group[0].command, /powershell/i)
+  for (const [event, group] of Object.entries(hooks)) {
+    assert.equal(group.length, event === 'Stop' ? 2 : 1)
+    for (const { command } of group) {
+      assert.ok(command.startsWith(`${expected} --input-type=commonjs -e eval(`))
+      assert.doesNotMatch(command, /powershell/i)
+    }
   }
   assert.deepEqual(updated.custom, foreign)
   const before = readFileSync(file)
