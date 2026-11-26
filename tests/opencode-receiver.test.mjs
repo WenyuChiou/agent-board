@@ -1168,13 +1168,18 @@ test('R17 an end that fails once is tried again at the next tick and reported on
   assert.equal((existsSync(log) ? readFileSync(log, 'utf8') : '').split('MAILBOX_FAILED').length - 1, 1)
 }, { watch: false }))
 
-test('the card says sent, not confirmed in all three languages, and the page asks for it', async () => {
+test('the card says sent, not confirmed in all three languages, and the board words it so', async () => {
   const { STRINGS } = await importTs('../hooks/strings.ts')
-  const texts = Object.values(STRINGS).map(one => one.messagesSentUnconfirmed)
+  const texts = Object.values(STRINGS).map(one => one.statusUnsure(one.statusWhyUnconfirmed))
   for (const text of texts) assert.ok(typeof text === 'string' && text.length > 8)
   assert.equal(new Set(texts).size, 3)
-  const page = readFileSync(new URL('../hooks/serve.ts', import.meta.url), 'utf8')
-  assert.ok(page.includes("'messagesSentUnconfirmed'") && page.includes("receipt.error === 'UNCONFIRMED'"))
+  // The board words every card's status line (hooks/message-status.ts) and sends it with the receipt; the page draws it.
+  const { rowReceipt } = await importTs('../hooks/serve.ts')
+  for (const s of Object.values(STRINGS)) {
+    const sent = { id: 'AB-OC-1', to: 'opencode:ses_synthetic', target: 'synthetic-connection', turn: 'session', from: 'board', text: 'Blue', origin: 'local', status: 'uncertain', reply: '', error: 'UNCONFIRMED', hops: 0, updated: 1, claimed: 1 }
+    const { receipt } = rowReceipt('opencode', 'ses_synthetic', [sent], 2, s)
+    assert.deepEqual([receipt?.shown?.state, receipt?.shown?.line], ['unsure', s.statusUnsure(s.statusWhyUnconfirmed)])
+  }
 })
 
 test('the agent_board_ack tool takes no summary as well as one', () => fixture(async f => {

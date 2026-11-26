@@ -392,7 +392,7 @@ test('a Codex card says a message sent while the person starts a turn may join t
   assert.ok(ZH_CN.serveLineSoon('Codex').endsWith('如果它发出的同时你在 Codex 里开始了一轮，它可能会并进你这一轮。'))
 })
 
-test('card wording explains turn runs/ran in background and to open the AI window in EN, ZH_TW, and ZH_CN', async () => {
+test('a background-turn card says before sending to open the AI window, then shows the board\'s status line, in EN, ZH_TW, and ZH_CN', async () => {
   for (const s of [EN, ZH_TW, ZH_CN]) {
     const lineText = routeText('reopen', true, 'cursor', s)
     assert.equal(lineText, s.serveLineReopen('Cursor'))
@@ -407,17 +407,18 @@ test('card wording explains turn runs/ran in background and to open the AI windo
     const preDom = await pageDom(servePage(s, 'synthetic-nonce'), preModel, async () => ({ ok: true, json: async () => ({ ok: true }) }))
     assert.ok(preDom.text().includes(s.serveLineReopen('Cursor')))
 
-    // Running receipt: card explains the turn is running in the background and to open the AI window.
+    // Taken: the card reads Delivered, in the board's words.
     const runningMessages = [{ id: 'm-1', target: 'conn-cursor', turn: 'session', from: 'board', to: 'cursor:conv-1234', text: 'Continue', hash: '0'.repeat(64), origin: 'local', status: 'accepted', updated: now, reply: '', error: '', hops: 0, claimed: now - 10, line: 'reopen' }]
     const runningModel = serveModel(view, [], s, new Set(), false, { connections, mailboxes: [], messages: runningMessages }, false, group, RECORDED_REOPEN_ROUTES)
     const runningDom = await pageDom(servePage(s, 'synthetic-nonce'), runningModel, async () => ({ ok: true, json: async () => ({ ok: true }) }))
-    assert.ok(runningDom.text().includes(s.serveReopenRunning('Cursor')))
+    assert.equal(runningModel.asks[0].receipt.shown.state, 'delivered')
+    assert.ok(runningDom.text().includes(runningModel.asks[0].receipt.shown.line), runningDom.text())
 
-    // Finished receipt: card explains the turn ran in the background, shows the reply, and tells to open the AI window.
+    // Finished: the card reads Read, with the reply.
     const doneMessages = [{ id: 'm-1', target: 'conn-cursor', turn: 'session', from: 'board', to: 'cursor:conv-1234', text: '', hash: '0'.repeat(64), origin: 'local', status: 'acknowledged', updated: now, reply: 'Done in background.', error: '', hops: 0, claimed: now - 10, line: 'reopen' }]
     const doneModel = serveModel(view, [], s, new Set(), false, { connections, mailboxes: [], messages: doneMessages }, false, group, RECORDED_REOPEN_ROUTES)
     const doneDom = await pageDom(servePage(s, 'synthetic-nonce'), doneModel, async () => ({ ok: true, json: async () => ({ ok: true }) }))
-    assert.ok(doneDom.text().includes(s.serveReopenDone('Cursor')))
-    assert.ok(doneDom.text().includes('Done in background.'))
+    assert.equal(doneModel.asks[0].receipt.shown.line, s.statusRead('Done in background.'))
+    assert.ok(doneDom.text().includes(s.statusRead('Done in background.')), doneDom.text())
   }
 })
