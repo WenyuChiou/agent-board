@@ -6089,6 +6089,26 @@ test('a Codex terminal thread that just finished a turn starts a board message a
 test('a thread seen for the first time starts a board message at the next tick when a Codex window is open', () => codexFixture(async (board, dir) =>
   codexAtOnce(board, dir)))
 
+test('a process list that takes several seconds to read still gives the short route, not the 10-minute wait (#1652)', () => codexFixture(async (board, dir) => {
+  // The live run of 2026-11-26 timed the Windows list at 1.6 to 5.7 s on a busy computer: a read that slow is still an answer.
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  const errors = []
+  const slowWindow = async () => { await pause(4500); return [codexClientRow()] }
+  const stepped = codexStepped(board, daemon, { clients: slowWindow, onError: error => errors.push(error?.message) })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle(2)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexStarts(daemon) === 1)
+    // Started with the receiver's clock where it was: no wait of the long route was kept, and the list was not read as unknown.
+    assert.equal(stepped.now(), 0)
+    assert.deepEqual(errors.filter(one => one === 'CLIENTS_UNKNOWN'), [])
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+  } finally { await stepped.receiver.close() }
+}))
+
 test('the folder\'s unload delay does not hold a board message on the short route', () => codexFixture(async (board, dir) => {
   // The folder keeps threads 300 s (a 305 s wait on the old route): the message is started at once all the same.
   await codexAtOnce(board, dir, { daemonConfig: { unloadSecs: 300 } })
