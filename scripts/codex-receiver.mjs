@@ -408,13 +408,15 @@ export const startCodexReceiver = ({
   // when there is none yet. last: when the last look was answered. marker: the thread's `updatedAt` at that look. epoch: counts
   // the breaks, so a look asked before one cannot start a stretch after it. sampling: the look in flight. delay: the longest
   // unload delay the daemon's config gave for the thread's folder at any look, or null while none could be read. The daemon fixes
-  // a thread's delay when it loads it, so a config that was changed to a shorter one since does not shorten the wait.
+  // a thread's delay when it loads it, so a config that was changed to a shorter one since does not shorten the wait. noneEpoch:
+  // the epoch a find of no window started, so a later find in the same stretch does not start it again.
   const quiet = new Map()
   let hasConfigFailed = false, hasClientsFailed = false
   // A thread kept off the short wait (#1652). none: a claim found no Codex window, so for HOLD_TICKS ticks it is not claimed on the
   // short wait; unreadable: the process list could not be read. Either way the message waits as it did before the process check
-  // and goes with no check once that wait is over: a thread nobody holds is unloaded long before, so one still listed is held by a
-  // client the list does not show as a window, and a message never waits with no end. An unreadable hold ends when its message
+  // and goes with no check once that wait is over; for none the wait counts from the find (holdNone): a thread nobody holds is
+  // unloaded long before, so one still listed is held by a client the list does not show as a window, and a message never waits
+  // with no end. An unreadable hold ends when its message
   // goes, and the next message reads the list again, so one failed read is not kept for the thread. A readable list that finds a
   // window ends either.
   const holds = new Map()
@@ -426,9 +428,16 @@ export const startCodexReceiver = ({
     if (hold.until !== null && Date.now() >= hold.until) { holds.delete(thread); return null }
     return hold
   }
-  const holdNone = thread => holds.set(thread, { kind: 'none', until: Date.now() + HOLD_TICKS * tickMs })
+  // No window found: the 10-minute wait starts again, since the stretch may have begun while a window was open, and a thread whose
+  // window just closed is still listed for its unload delay. Only the first such find in a stretch starts it again: a later one,
+  // after the hold ended and the list was read again, does not, so the message never waits with no end.
+  const holdNone = thread => {
+    holds.set(thread, { kind: 'none', until: Date.now() + HOLD_TICKS * tickMs })
+    const q = quietOf(thread)
+    if (q.noneEpoch !== q.epoch) { restart(thread); q.noneEpoch = q.epoch }
+  }
   const quietOf = thread => {
-    if (!quiet.has(thread)) quiet.set(thread, { since: null, last: null, marker: undefined, epoch: 0, sampling: null, delay: null, isIdle: false })
+    if (!quiet.has(thread)) quiet.set(thread, { since: null, last: null, marker: undefined, epoch: 0, sampling: null, delay: null, isIdle: false, noneEpoch: null })
     return quiet.get(thread)
   }
   // Something happened that the stretch cannot span: it starts again at a later look.
