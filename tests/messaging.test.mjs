@@ -6271,22 +6271,30 @@ test('the Codex desktop app\'s exec-server and an MCP server are not counted as 
   assert.deepEqual(terminalClients([{ pid: 40, started: at, name: 'codex', argv: '/usr/bin/codex exec-server' }], 'linux'), { clients: [], isUnsure: false })
 })
 
-test('a process list that could not be read once does not keep the thread on the 10-minute wait', () => codexFixture(async (board, dir) => {
+test('a process list that could not be read keeps only its own message on the 10-minute wait, and the next message reads the list again', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person')
   writeFileSync(person, '')
   const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
   let calls = 0
   const stepped = codexStepped(board, daemon, { clients: async () => { calls += 1; if (calls === 1) throw new Error('SYNTHETIC_PROCESS_LIST_FAILURE'); return [codexClientRow()] }, onError: () => {} })
   try {
-    assert.equal(await codexSend(board, await codexConnection(board)), 200)
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
     await stepped.settle()
-    // The first claim cannot read the list and goes back; a later claim reads it again, finds the window and starts the turn
-    // long before the 10-minute wait would end.
+    // The first claim cannot read the list: that message goes back and waits as it did before the list was read.
     let at = null
-    await stepped.advance(300_000, { step: 5000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    await stepped.advance(700_000, { step: 5000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
     assert.equal(codexStarts(daemon), 1)
+    assert.ok(at >= 600_000, `the first message started at ${Math.round(at / 1000)} s by the receiver's clock`)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    // The next message reads the list again, finds the window and starts on the short wait.
+    const sent = stepped.now()
+    assert.equal(await codexSend(board, connection, 'AB-CX-002'), 200)
+    let next = null
+    await stepped.advance(sent + 300_000, { step: 5000, done: () => { if (codexStarts(daemon) > 1) next ??= stepped.now(); return next !== null } })
+    assert.equal(codexStarts(daemon), 2)
     assert.ok(calls >= 2, `the list was read ${calls} times`)
-    assert.ok(at !== null && at < 300_000, `started at ${at === null ? 'never' : Math.round(at / 1000) + ' s'} by the receiver's clock`)
+    assert.ok(next !== null && next - sent < 300_000, `the next message started ${next === null ? 'never' : Math.round((next - sent) / 1000) + ' s after it was sent'} by the receiver's clock`)
   } finally { await stepped.receiver.close() }
 }))
 
