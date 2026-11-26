@@ -850,11 +850,12 @@ test('B6 an ack on a marked message that was not accepted yet acknowledges it', 
   assert.deepEqual([acked.messages[0].status, acked.messages[0].reply], ['acknowledged', `ACK ${nonce} done`])
 })
 
-test('B8 the claims of the other hook receivers behave as before: handed out again with a repeat count and line, expired at 30 minutes, an unknown release is still ok', async () => {
+test("B8 a DeepSeek hook's claims behave as before: handed out again with a repeat count and line, expired at 30 minutes, and another hook's unknown release is still ok", async () => {
   const b = await mailbox()
-  let state = b.seed('codex', 's1')
-  state = b.take(state, 'codex', 's1', refOf(1), T0).state
-  const again = b.take(b.prune(state, T0 + 31 * SEC), 'codex', 's1', refOf(2), T0 + 31 * SEC)
+  // DeepSeek's claims keep the lease rule for now (#1843 answer 3, #1870); every other hook's claim reads HOLDER_LOST after it.
+  let state = b.seed('deepseek', 's1')
+  state = b.take(state, 'deepseek', 's1', refOf(1), T0).state
+  const again = b.take(b.prune(state, T0 + 31 * SEC), 'deepseek', 's1', refOf(2), T0 + 31 * SEC)
   assert.equal(again.message.redelivered, 1)
   assert.ok(b.messaging.deliveryText(again.message, b.STRINGS.en).includes(b.STRINGS.en.messagesDeliveryRepeat))
   const expired = b.prune(again.state, T0 + 31 * SEC + 31 * MIN)

@@ -158,13 +158,14 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
   ], async hub => {
     const [, receiver] = hub.actors
     await nativeDelivery(hub, hub.actors[0], receiver)
-    const surfaces = { terminal: await terminal.screen(hub.world), print: await print(hub.world) }
+    // The terminal reads the page's store: the hub's page was started on its own folder.
+    const store = ['--messages-dir', hub.messages]
+    const surfaces = { terminal: await terminal.screen(hub.world, store), print: await print(hub.world, store) }
     for (const [surface, output] of Object.entries(surfaces)) {
       assert.ok(output.includes(receiver.title), `${surface}: receiver card missing`)
       noMachineIds(output, hub.world)
-      await knownFailure(232, () => {
-        assert.match(output, /Replied|message (?:arrived|answered)|ACK AB-synthetic-message/i, `${surface}: receiver card has no receipt: ${output}`)
-      })
+      // The receiver's row carries its message's status line, in the words the page uses (#232, #1843 B4).
+      assert.match(output, /^\s*(?:Delivered · |Read(?: · |$)|Answered · )/m, `${surface}: receiver card has no receipt: ${output}`)
     }
   }))
 

@@ -1,5 +1,5 @@
 import { attemptMailboxMessage, releaseMailboxMessage } from './hook-messages.ts'
-import { address, BOARD_RESTARTED, claimMessages, disconnectMessages, dismissMessage, FINISHED_KEEP_MS, isEndedUncertain, isMailboxTarget, isOpen, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, MCP_SURFACE, messageReceipt, OPEN_LIMIT_MS, pruneMessages, queueMessage, rebindMessages, restartMessages, textHash, UNCONFIRMED } from './messaging.ts'
+import { address, BOARD_RESTARTED, claimMessages, disconnectMessages, dismissMessage, FINISHED_KEEP_MS, HOLDER_LOST, isEndedUncertain, isMailboxTarget, isOpen, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, MCP_SURFACE, messageReceipt, OPEN_LIMIT_MS, pruneMessages, queueMessage, rebindMessages, restartMessages, textHash, UNCONFIRMED } from './messaging.ts'
 import type { Connection, Message, MessageState } from './messaging.ts'
 import { sha256 } from './sha256.ts'
 
@@ -15,9 +15,10 @@ export const DELIVERY_STATES = [
   'queued', 'queuedForHook', 'queuedForWake',
   // Handed to a live receiver with no receipt yet; handed to an unnamed pull of its mailbox (board_inbox).
   'claimed', 'pulled',
-  // Handed to a hook under a name; handed out again once the lease passes, MAILBOX_REDELIVERIES times at most (#990).
+  // Handed to a hook under a name. Only DeepSeek's is handed out again once the lease passes, MAILBOX_REDELIVERIES times at
+  // most (#990, #1843 answer 3); any other reads HOLDER_LOST once a write after the lease prunes the store.
   'leased',
-  // The same after its last repeat: never handed out again.
+  // DeepSeek's after its last repeat: never handed out again.
   'leaseSpent',
   // An OpenCode claim its plugin has not marked as a wake, and one it marked as started (never handed out again, #724).
   'wakeClaimed', 'wakeStarted',
@@ -39,6 +40,8 @@ export const DELIVERY_STATES = [
   'disconnected',
   // Handed to a hook before a board start, which made it Unsure: never handed out again (#1407).
   'restarted',
+  // Handed to a hook that accepted nothing in its lease, which made it Unsure: never handed out again (#1843).
+  'holderLost',
   // An OpenCode wake with no receipt 30 minutes on: "sent, not confirmed" (#1366).
   'unconfirmed',
   'acknowledged', 'rejected',
@@ -109,6 +112,7 @@ export const stateOf = (one: Message): DeliveryState => {
   if (one.error === UNCONFIRMED) return 'unconfirmed'
   if (one.error === 'DISCONNECTED') return 'disconnected'
   if (one.error === BOARD_RESTARTED) return 'restarted'
+  if (one.error === HOLDER_LOST) return 'holderLost'
   if (isEndedUncertain(one)) return 'turnEnded'
   if (one.error !== '') return 'inDoubt'
   if (!isMailbox) return 'claimed'
@@ -125,8 +129,8 @@ type Via = 'live' | 'mailbox'
 export const sampleBinding = (agent: string, via: Via): Connection => via === 'live'
   ? { id: 'c1', agent, session: 's1', surface: 'CLI', turn: 't1', scope: 'session', expires: FAR }
   : { id: `mailbox_${sha256(address(agent, 's1')).slice(0, 24)}`, agent, session: 's1', surface: 'CLI', turn: 'session', scope: 'mailbox', expires: FAR }
-type Sample = Partial<Message> & { agent?: 'opencode'; via: Via }
-type Shape = Partial<Message> & { agent?: 'opencode'; via?: Via }
+type Sample = Partial<Message> & { agent?: 'opencode' | 'deepseek'; via: Via }
+type Shape = Partial<Message> & { agent?: 'opencode' | 'deepseek'; via?: Via }
 const REF = '0123456789ab'
 const out = { claimed: SAMPLE_NOW, nonce: 'a1b2c3' } as const
 const wake = { agent: 'opencode', via: 'mailbox', ref: REF, attempted: SAMPLE_NOW, ...out } as const
@@ -137,7 +141,7 @@ const SAMPLES: Record<DeliveryState, Sample> = {
   claimed: { via: 'live', status: 'uncertain', ...out },
   pulled: { via: 'mailbox', status: 'uncertain', ...out },
   leased: { via: 'mailbox', status: 'uncertain', ref: REF, ...out },
-  leaseSpent: { via: 'mailbox', status: 'uncertain', ref: REF, redelivered: MAILBOX_REDELIVERIES, ...out },
+  leaseSpent: { agent: 'deepseek', via: 'mailbox', status: 'uncertain', ref: REF, redelivered: MAILBOX_REDELIVERIES, ...out },
   wakeClaimed: { agent: 'opencode', via: 'mailbox', status: 'uncertain', ref: REF, ...out },
   wakeStarted: { ...wake, status: 'uncertain' },
   accepted: { via: 'live', status: 'accepted', ...out },
@@ -150,6 +154,7 @@ const SAMPLES: Record<DeliveryState, Sample> = {
   inDoubt: { via: 'live', status: 'uncertain', error: 'TIMEOUT', ...out },
   disconnected: { via: 'live', status: 'uncertain', error: 'DISCONNECTED', ...out },
   restarted: { via: 'mailbox', status: 'uncertain', error: BOARD_RESTARTED, ...out },
+  holderLost: { via: 'mailbox', status: 'uncertain', error: HOLDER_LOST, ...out },
   unconfirmed: { ...wake, status: 'uncertain', error: UNCONFIRMED },
   acknowledged: { via: 'live', status: 'acknowledged', reply: 'ACK a1b2c3', text: '', ...out },
   rejected: { via: 'live', status: 'rejected', text: '', ...out },
@@ -176,7 +181,7 @@ const OWN_SHAPES: Partial<Record<DeliveryState, Record<string, Shape>>> = {
   handed: { onPull: { ref: undefined }, onWake: wake },
   handedLost: { onPull: { ref: undefined }, onWake: wake },
   acceptedAwaitsAck: { onPull: { ref: undefined } },
-  leased: { lastRepeat: { redelivered: MAILBOX_REDELIVERIES - 1 } },
+  leased: { onDeepSeek: { agent: 'deepseek' }, lastRepeat: { agent: 'deepseek', redelivered: MAILBOX_REDELIVERIES - 1 } },
   inDoubt: { otherError: { error: 'CONNECTION_LOST' } },
   acceptedLost: { awaitsAck: { ...ON_HOOK, awaitsAck: true }, onWake: { ...wake, awaitsAck: true }, otherError: { error: 'RECEIVER_ERROR' } },
   rejected: { stopped: { error: 'STOPPED' } },
@@ -343,13 +348,16 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
       'acceptedBefore+onWake': { on: { openLimit: 'wakeExpired', dayLimit: 'wakeExpired' } },
     } },
   leased: { holdsSend: true, holdsStart: true, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
-    claim: 'leased', claimLate: 'sent:leased', pull: 'leased', accept: 'handed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'leased',
+    claim: 'leased', claimLate: 'leased', pull: 'leased', accept: 'handed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'leased',
     attempt: 'INVALID_MAILBOX_CALL', release: 'queuedForHook', releaseUnsent: 'queuedForHook', dismiss: 'dismissed', disconnect: 'disconnected', leave: 'disconnected', rebind: 'leased', openLimit: 'expired', dayLimit: 'expired', restart: 'restarted' },
     shapes: {
-      acceptedBefore: { card: 'messagesAcceptedUnconfirmed', on: { claimLate: 'leased', release: 'leased', releaseUnsent: 'leased' } },
-      otherSurface: { on: { claimLate: 'leased' } },
+      acceptedBefore: { card: 'messagesAcceptedUnconfirmed', on: { release: 'leased', releaseUnsent: 'leased' } },
+      // DeepSeek's claim is handed out again after the lease, up to its last repeat (#1843 answer 3, #1870).
+      onDeepSeek: { on: { claimLate: 'sent:leased' } },
       lastRepeat: { on: { claimLate: 'sent:leaseSpent' } },
+      'acceptedBefore+onDeepSeek': { on: { claimLate: 'leased' } },
       'acceptedBefore+lastRepeat': { on: { claimLate: 'leased' } },
+      'otherSurface+onDeepSeek': { on: { claimLate: 'leased' } },
       'otherSurface+lastRepeat': { on: { claimLate: 'leased' } },
     } },
   leaseSpent: { holdsSend: true, holdsStart: true, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
@@ -446,6 +454,12 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
   restarted: { holdsSend: true, holdsStart: true, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
     claim: 'restarted', claimLate: 'restarted', pull: 'restarted', accept: 'handed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'restarted',
     attempt: 'INVALID_MAILBOX_CALL', release: 'restarted', releaseUnsent: 'restarted', dismiss: 'dismissed', disconnect: 'restarted', leave: 'restarted', rebind: 'restarted', openLimit: 'expired', dayLimit: 'expired', restart: 'restarted' },
+    shapes: {
+      acceptedBefore: { card: 'messagesAcceptedUnconfirmed' },
+    } },
+  holderLost: { holdsSend: true, holdsStart: true, card: 'messagesUncertain', claudeCard: 'claudeUnconfirmed', on: {
+    claim: 'holderLost', claimLate: 'holderLost', pull: 'holderLost', accept: 'handed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'holderLost',
+    attempt: 'INVALID_MAILBOX_CALL', release: 'holderLost', releaseUnsent: 'holderLost', dismiss: 'dismissed', disconnect: 'holderLost', leave: 'holderLost', rebind: 'holderLost', openLimit: 'expired', dayLimit: 'expired', restart: 'holderLost' },
     shapes: {
       acceptedBefore: { card: 'messagesAcceptedUnconfirmed' },
     } },
