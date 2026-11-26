@@ -632,3 +632,50 @@ test('no text inside an item is over 14 px', () => {
     assert.equal(resolveFontPx(rule?.declarations.find(d => d.property === 'font-size')?.value), 18, `${viewSel} view title is 18 px`)
   }
 })
+
+test('waiting-on-others task folds under Needs you without duplicating in Other work', async () => {
+  const now = Date.now()
+  const updated = new Date(now - 5 * 60_000).toISOString()
+  const md = [
+    '## wait-only-repo',
+    `<!-- auto session=ww112233 agent=codex state=waiting updated=${updated} -->`,
+    '### Review downstream feedback',
+    '- [?] Waiting for reviewer reply',
+    '<!-- /auto session=ww112233 -->',
+    '',
+  ].join('\n')
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const othersSection = dom => dom.node('board').childNodes.find(node => node.getAttribute?.('data-sec') === 'others')
+
+  const enView = buildView(parseProgress(md), ['wait-only-repo'], null, now, 0, {}, STRINGS.en, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const enModel = serveModel(enView, [], STRINGS.en, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const enDom = await pageDom(servePage(STRINGS.en, 'n'), enModel)
+  const needsNodes = walk(enDom.node('needs'))
+  const waitToggle = needsNodes.find(node => node.tag === 'button' && node.textContent === 'Waiting on others 1')
+  assert.ok(waitToggle, 'EN toggle Waiting on others 1 renders under #needs')
+  assert.equal(waitToggle.getAttribute('aria-expanded'), 'false')
+  const waitWrap = waitToggle.parentNode.parentNode
+  const waitFold = waitWrap.childNodes.find(node => String(node.className ?? '').split(' ').includes('fold'))
+  assert.ok(waitFold, 'wait-only fold wrapper exists')
+  assert.equal(waitFold.inert, true, 'wait-only fold starts inert')
+  const others = othersSection(enDom)
+  assert.ok(!others || !others.visibleText.includes('Review downstream feedback'), 'wait-only task does not render a duplicate row in Other work')
+  assert.ok(enDom.node('side-projects').textContent.includes('wait-only-repo'), 'solo wait-only project stays in sidebar')
+
+  waitToggle.click()
+  assert.equal(waitToggle.getAttribute('aria-expanded'), 'true')
+  assert.equal(waitFold.inert, false)
+  const waitCard = walk(waitFold).find(node => node.tag === 'article' && String(node.className ?? '').split(' ').includes('card'))
+  assert.ok(waitCard, 'waitingOthers card renders inside expanded fold')
+  assert.ok(waitCard.textContent.includes('Waiting for reviewer reply'))
+  const writeOwn = walk(waitCard).find(node => node.tag === 'button' && node.textContent === STRINGS.en.pgWriteOwn)
+  assert.ok(writeOwn, 'Write your own control renders on waitingOthers card')
+  writeOwn.click()
+  assert.ok(walk(waitCard).some(node => node.tag === 'textarea'), 'clicking Write your own reveals composer textarea')
+
+  const twView = buildView(parseProgress(md), ['wait-only-repo'], null, now, 0, {}, STRINGS['zh-TW'], [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const twModel = serveModel(twView, [], STRINGS['zh-TW'], new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const twDom = await pageDom(servePage(STRINGS['zh-TW'], 'n'), twModel)
+  const twToggle = walk(twDom.node('needs')).find(node => node.tag === 'button' && node.textContent === '等別人 1')
+  assert.ok(twToggle, 'zh-TW toggle 等別人 1 renders under #needs')
+})

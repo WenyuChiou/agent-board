@@ -332,7 +332,7 @@ export type ServeTurn = { key: string; project: string; agent: string; text: str
 export type GroupOptions = { now: number; repoOf: RepoOf; versions: { board: string; package: string | null }; unreadable: readonly string[]; olderScript?: { update: 'setup' | 'plugin'; command?: string; lanCommand?: string } }
 type ServeDone = { project: string; title: string; line?: string; when: string; questions?: string[]; key?: string; agent?: string; isOwn?: true; surface?: string; dir?: string | null; at?: number; canArchive?: boolean; fp?: string }
 type PageRef = { key: string; kind: 'question' | 'stuck' | 'task'; agent: string; project: string; repo: string; at: number; sourceKey?: string }
-type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[] }
+type PageBucket = { counts: Bucket['counts']; cards: PageRef[]; open: PageRef[]; stopped: PageRef[]; done: PageRef[]; older: PageRef[]; olderLabel: string; waitingOthers: PageRef[]; waitingOthersLabel: string }
 type PageView = {
   now: number
   n: number
@@ -342,7 +342,7 @@ type PageView = {
   agents: Array<PageBucket & { agent: string; name: string; icon: string; last: number; isUnreadable: boolean }>
   // handled: the cards whose answer is on its way (sent, or queued for the session's next turn). They stay on the
   // sheet with their line and leave the count, on the page and on every other surface (#1296).
-  needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[]; handled: string[] }
+  needs: { n: number; questions: number; stuck: number; cards: PageRef[]; older: PageRef[]; olderLabel: string; waitingOthers: PageRef[]; waitingOthersLabel: string; handled: string[] }
   working: PageRef[]
   // Rows whose derived state is 'unsure' (#1317). They stay on their shelf in
   // the lists above; this only names them, and no count reads it.
@@ -830,7 +830,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     at: one.at,
     ...('shelf' in one && one.source.key !== one.key ? { sourceKey: one.source.key } : {}),
   })
-  const bucket = (one: Bucket): PageBucket => ({ counts: one.counts, cards: one.cards.map(ref), open: one.open.map(ref), stopped: one.stopped.map(ref), done: one.done.map(ref), older: one.older.map(ref) })
+  const bucket = (one: Bucket): PageBucket => ({ counts: one.counts, cards: one.cards.map(ref), open: one.open.map(ref), stopped: one.stopped.map(ref), done: one.done.map(ref), older: one.older.map(ref), olderLabel: one.olderLabel, waitingOthers: one.waitingOthers.map(ref), waitingOthersLabel: one.waitingOthersLabel })
   model.view = {
     now: group.now,
     n: grouped.needs.n,
@@ -838,7 +838,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
     stuck: grouped.needs.stuck,
     versions: group.versions,
     agents: grouped.agents.map(one => ({ ...bucket(one), agent: one.agent, name: one.name, icon: one.icon, last: one.last, isUnreadable: one.isUnreadable })),
-    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), handled: handledKeys(model, grouped.needs.cards.map(ref), held, failed) },
+    needs: { ...grouped.needs, cards: grouped.needs.cards.map(ref), older: grouped.needs.older.map(ref), waitingOthers: grouped.needs.waitingOthers.map(ref), handled: handledKeys(model, [...grouped.needs.cards.map(ref), ...grouped.needs.waitingOthers.map(ref)], held, failed) },
     working: grouped.working.map(ref),
     unsure: grouped.unsure.map(ref),
     quiet: grouped.quiet,
@@ -1067,7 +1067,7 @@ const PAGE_WORDS = [
   'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent', 'settingsApprovals', 'approvalSwitchFailed',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
   'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen', 'sideClose', 'pgDetailRail',
-  'pgSearchPlaceholder', 'pgSearchLabel', 'pgFilterBar', 'pgFilterAgent', 'pgFilterProject', 'pgFilterInterface', 'pgInterfaceCli', 'pgInterfaceApp', 'pgFilterClear', 'pgSearchEmpty',
+  'pgSearchPlaceholder', 'pgSearchLabel', 'pgFilterBar', 'pgFilterAgent', 'pgFilterProject', 'pgFilterInterface', 'pgInterfaceCli', 'pgInterfaceApp', 'pgFilterClear', 'pgSearchEmpty', 'groupWaitOthersCount',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
 export const pageWords = (s: Strings): Record<string, string> => ({
@@ -2273,7 +2273,7 @@ const PAGE_SCRIPT = String.raw`
     }
     return node;
   }
-  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
+  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, hasWaitingOthers: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
   var cardState = {};
   var cardParts = {};
   var cardChoices = Object.create(null);
@@ -3491,7 +3491,7 @@ const PAGE_SCRIPT = String.raw`
   // What the filter shows: rows, cards and shelves of that agent only; the rest closes up. Counts, empty
   // lines and headings follow what is left, so every number on the page agrees with what is shown.
   function layout() {
-    var count = { cards: 0, shown: 0, older: 0, working: 0, others: 0, stopped: 0, done: 0 };
+    var count = { cards: 0, shown: 0, older: 0, waitingOthers: 0, working: 0, others: 0, stopped: 0, done: 0 };
     var projects = [];
     var byProject = Object.create(null);
     var allProjects = Object.create(null);
@@ -3506,7 +3506,7 @@ const PAGE_SCRIPT = String.raw`
       reveal(one.block, one.show);
       if (one.project) allProjects[one.project] = true;
       // the sidebar lists every project with something open, and counts it for the agent that is pressed
-      if (one.project && !one.sent && (one.list === 'cards' || one.list === 'working' || one.list === 'others')) {
+      if (one.project && !one.sent && (one.list === 'cards' || one.list === 'working' || one.list === 'others' || (one.list === 'waitingOthers' && one.soloWait))) {
         var held = byProject['p:' + one.project];
         if (!held) { held = byProject['p:' + one.project] = { name: one.project, n: 0 }; projects.push(held); }
         if (matchesAgent(one.id)) held.n += 1;
@@ -3544,6 +3544,8 @@ const PAGE_SCRIPT = String.raw`
     reveal(pg.nodes.workingEmpty, count.working === 0 && !isFiltered);
     // The line counts every older question the filters allow, drawn or not.
     if (pg.olderRefs) count.older = pg.olderRefs.filter(function (ref) { return matches(agentOf(ref), projectOf(ref), interfaceOf(ref), searchHaystack(ref), tokens); }).length;
+    if (pg.nodes.waitingOthersToggle) setText(pg.nodes.waitingOthersToggle, w('groupWaitOthersCount', count.waitingOthers));
+    reveal(pg.nodes.waitingOthersBlock, count.waitingOthers > 0);
     if (pg.nodes.olderLine) setText(pg.nodes.olderLine, plural('pgOlder', count.older));
     reveal(pg.nodes.olderBlock, count.older > 0);
     Object.keys(pg.nodes.counts).forEach(function (name) { setText(pg.nodes.counts[name], name === 'done' ? w('pgDoneWeek', count.done) : count[name]); });
@@ -3790,6 +3792,39 @@ const PAGE_SCRIPT = String.raw`
     pg.nodes.needsEmpty = fx(add(el('div', 'empty'), pg.nodes.needsText, pg.nodes.needsSub));
     add(sheet, list, pg.nodes.needsEmpty);
     var foot = el('div', 'sheet-foot');
+    var soloWaitKeys = Object.create(null);
+    ((view.all && view.all.open) || []).forEach(function (ref) {
+      if (ref.key.indexOf('waiting:') === 0 && ref.sourceKey) soloWaitKeys[ref.sourceKey] = true;
+    });
+    if ((view.needs.waitingOthers || []).length) {
+      var waitingList = el('ul', 'cards');
+      settle('waitingOthers', view.needs.waitingOthers).forEach(function (ref) {
+        var li = el('li');
+        li.setAttribute('data-k', ref.key);
+        var block = el('div', 'fx');
+        add(block, add(el('div', 'fx-in'), buildCard(ref)));
+        add(li, block);
+        add(waitingList, li);
+        pg.cardNodes[ref.key] = li;
+        var one = entry(li, block, ref, 'waitingOthers');
+        one.soloWait = soloWaitKeys[ref.key] === true;
+      });
+      var waitMore = el('div', pg.hasWaitingOthers ? 'open' : '');
+      var waitFold = el('div', 'fold');
+      waitFold.inert = !pg.hasWaitingOthers;
+      var waitToggle = navButton(w('groupWaitOthersCount', view.needs.waitingOthers.length), function () {
+        pg.hasWaitingOthers = !hasClass(waitMore, 'open');
+        toggleClass(waitMore, 'open', pg.hasWaitingOthers);
+        waitFold.inert = !pg.hasWaitingOthers;
+        waitToggle.setAttribute('aria-expanded', String(pg.hasWaitingOthers));
+      });
+      waitToggle.className = 'link';
+      waitToggle.setAttribute('aria-expanded', String(pg.hasWaitingOthers));
+      pg.nodes.waitingOthersToggle = waitToggle;
+      add(waitMore, add(el('div', 'older-line'), waitToggle), add(waitFold, add(el('div', 'fold-in'), waitingList)));
+      pg.nodes.waitingOthersBlock = fx(waitMore);
+      add(foot, pg.nodes.waitingOthersBlock);
+    }
     var older = view.needs.older;
     pg.olderRefs = older;
     if (older.length) {
@@ -3854,7 +3889,13 @@ const PAGE_SCRIPT = String.raw`
     return sec;
   }
   function othersSection(view, workingKeys) {
-    var refs = settle('others', view.all.open.filter(function (ref) { return !workingKeys[ref.key]; }).sort(byTime));
+    var waitingSourceKeys = Object.create(null);
+    (view.needs.waitingOthers || []).forEach(function (ref) {
+      waitingSourceKeys[ref.sourceKey || ref.key] = true;
+    });
+    var refs = settle('others', view.all.open.filter(function (ref) {
+      return !workingKeys[ref.key] && !(ref.key.indexOf('waiting:') === 0 && ref.sourceKey && waitingSourceKeys[ref.sourceKey]);
+    }).sort(byTime));
     var order = [];
     var by = {};
     refs.forEach(function (ref) {
@@ -4199,7 +4240,7 @@ const PAGE_SCRIPT = String.raw`
     else {
       var titleCounts = Object.create(null);
       var seenKeys = Object.create(null);
-      view.needs.cards.concat(view.working, view.all.open, view.all.stopped, view.all.done).forEach(function (ref) {
+      view.needs.cards.concat(view.needs.waitingOthers || [], view.working, view.all.open, view.all.stopped, view.all.done).forEach(function (ref) {
         var one = source(ref);
         var id = one.session ? 's:' + one.session : String(ref.sourceKey || ref.key).replace(/^(?:stuck:|row:|ask:)+/, '').replace(/@[^@]*$/, '').replace(/::\d+$/, '');
         if (seenKeys[id]) return;
