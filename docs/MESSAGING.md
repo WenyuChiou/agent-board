@@ -349,6 +349,26 @@ An ordinary disconnect does not undo acceptance. When an accepted message expire
 stored receipt keeps that evidence, including after restart. Its retained question stays
 out of Needs you; the receipt still distinguishes delivery from a confirmed model reply.
 
+### The status line
+
+The terminal board (`--watch`), `--print` and `--json` give the last message the board sent to a
+session one status line, read from its stored receipt alone (`hooks/message-status.ts`, #1843). Every
+agent gets the same words. The page still shows its own receipt words until it moves to these.
+
+| Line | When |
+| --- | --- |
+| Sending | The page's own line while a send has no answer yet; never read from a store |
+| Queued · when | Stored and not handed out, with when it goes in: now, when its step ends, at its next turn (a mailbox with no route says this too), when its wait ends, when its chat next opens, or once the app quits. A route other than now adds the message's age. A claim handed out less than 20 seconds ago also reads Queued · now |
+| Delivered · age | `accepted`, with no error since |
+| Read · reply | `acknowledged`, with the reply the session gave (a version 1 store's `ACK <id>` is left out) |
+| Answered · on the board | An answer to a question, handed over (`accepted`, `acknowledged`, or accepted before), whose session reported after its last receipt |
+| Unsure · why · check its window | A message on a route that goes in now, or a claim, with no event for 20 seconds; any `uncertain` receipt; and a message that was accepted once whose holder went away (`delivered, reply not confirmed`) |
+| Not delivered · why | `rejected` (refused, stopped, the app stayed open, taken back); a queued mailbox message whose session now reads another surface; one given up at the open limit before anything took it |
+
+The 20 seconds count from the receipt's last change, so the line reads the same with or without a live
+connection, and reading it changes nothing in the store. A route that waits on a step, a turn or the
+app has no such clock. A message taken back after it was handed out shows no line.
+
 ### Message ids
 
 - The client mints every message id: `AB-` followed by a random UUID, as the board page
