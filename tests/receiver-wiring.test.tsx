@@ -186,6 +186,16 @@ test('after a /clear the session goes on receiving, and after an exit it does no
   expect(sent.length - count).toBe(0)
 })
 
+test('a print-mode session does not register with the board', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { sent } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: null, isInteractive: false })
+  await clock.advance(6100)
+  expect(sent.length).toBe(0)
+})
+
 test('a plain -p session without desktop surface keeps isRun true, writes no block, and never registers', async ($, on) => {
   const shared: Record<string, unknown> = { autoConnectOff: true }
   const world: World = { files: new Map(), mtime: 1, hasTasks: false, surfaces: ['terminal'], shared }
@@ -225,8 +235,8 @@ test('a Code tab desktop session starts the receiver as Claude Desktop Code and 
   await $.session.start({ cwd: '/w/api-gateway', surface: 'desktop', isInteractive: false })
   await clock.advance(2100)
   expect(sent.find(one => one.action === 'register')?.body.surface).toBe('Claude Desktop Code')
-  expect((shared[`mirror:${SESSION}`] as ProgressMirror).isRun).toBeUndefined()
   await $.turn.start({ text: 'Check the code', turnId: 't1' })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).isRun).toBeUndefined()
   await $.tool.call({ tool: 'Edit', file_path: '/w/api-gateway/a', old_string: '1', new_string: '2' })
   await $.turn.complete({ answer: 'Done editing. Ship now?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
   await clock.advance(2100)
@@ -267,10 +277,11 @@ test('late desktop surface attachment before a turn promotes the session, clears
   const { sent } = hub(on, world)
   await $.session.start({ cwd: '/w/api-gateway', surface: null, isInteractive: false })
   await clock.advance(2100)
-  expect((shared[`mirror:${SESSION}`] as ProgressMirror).isRun).toBe(true)
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror | undefined)?.isRun).not.toBe(false)
   expect(sent.length).toBe(0)
   world.surfaces = ['desktop']
   await clock.advance(5100)
+  expect(shared[`mirror:${SESSION}`]).toBeDefined()
   expect((shared[`mirror:${SESSION}`] as ProgressMirror).isRun).toBeUndefined()
   expect(sent.find(one => one.action === 'register')?.body.surface).toBe('Claude Desktop Code')
 })

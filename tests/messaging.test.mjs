@@ -10105,8 +10105,9 @@ test('sendDecision and the board refuse Claude Desktop Code with Copy until a li
   const desktopConn = (await board.call('/api/messages/register', { agent: 'claude', session: desktopSession, turn: 'session', scope: 'session', surface: SURFACE_IDS.claudeDesktop })).body
   const cliConn = (await board.call('/api/messages/register', { agent: 'claude', session: cliSession, turn: 'session', scope: 'session', surface: SURFACE_IDS.claude })).body
   const asks = (await board.call('/api/board')).body.model.asks
-  const desktopAsk = asks.find(one => one.session === desktopSession)
-  const cliAsk = asks.find(one => one.session === cliSession)
+  const desktopAsk = asks.find(one => one.task === 'Code tab card')
+  const cliAsk = asks.find(one => one.task === 'CLI card')
+  assert.ok(desktopAsk && cliAsk)
   assert.equal(desktopAsk.canSend, false)
   assert.equal(desktopAsk.send, 'none')
   assert.equal(desktopAsk.surface, SURFACE_IDS.claudeDesktop)

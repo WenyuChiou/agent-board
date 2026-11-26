@@ -2402,7 +2402,7 @@ const PAGE_SCRIPT = String.raw`
     if (one.delivery && one.delivery.isAfterAppQuit) return 'app';
     var surface = String(one.surface || '');
     if (surface === 'IDE (Composer)') return '';
-    if (surface === 'Codex desktop app' || surface === 'IDE' || surface === 'Web') return 'app';
+    if (surface === 'Codex desktop app' || surface === 'Claude Desktop Code' || surface === 'IDE' || surface === 'Web') return 'app';
     if (surface && surface !== 'unknown') return 'cli';
     var id = agentOf(ref);
     if (one.isOwn || ref.isOwn || !id || id === '?' || id === 'cursor') return '';

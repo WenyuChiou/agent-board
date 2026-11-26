@@ -64,7 +64,7 @@ export const ROUTE_LINES: readonly RouteLine[] = ['now', 'afterWait', 'stepEnd',
 export type RowState = 'idle' | 'working' | 'ended'
 export type RouteKind = 'live' | 'mailbox' | 'turn'
 export const SURFACE_IDS = {
-  claude: 'Claude Code', codexProxy: 'Codex local proxy', codexSession: 'Codex owned session', codexDaemon: 'Codex daemon', codexApp: 'Codex desktop app',
+  claude: 'Claude Code', claudeDesktop: 'Claude Desktop Code', codexProxy: 'Codex local proxy', codexSession: 'Codex owned session', codexDaemon: 'Codex daemon', codexApp: 'Codex desktop app',
   antigravityStream: 'Antigravity owned CLI stream', antigravityTui: 'agy TUI', antigravityIde: 'IDE',
   cursor: 'IDE (Composer)', cli: 'CLI', web: 'Web', tui: 'TUI', unknown: 'unknown',
 } as const

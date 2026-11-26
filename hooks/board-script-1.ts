@@ -8561,6 +8561,7 @@ export const LINES = [
 "var ROUTE_LINES = [\"now\", \"afterWait\", \"stepEnd\", \"nextTurn\", \"chatOpen\", \"reopen\", \"none\"];",
 "var SURFACE_IDS = {",
 "  claude: \"Claude Code\",",
+"  claudeDesktop: \"Claude Desktop Code\",",
 "  codexProxy: \"Codex local proxy\",",
 "  codexSession: \"Codex owned session\",",
 "  codexDaemon: \"Codex daemon\",",
