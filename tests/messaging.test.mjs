@@ -1336,12 +1336,14 @@ test('a DeepSeek mailbox card is a plain Send with no Copy, and an answer handed
   const queued = queueMessage(seed, { id: 'deepseek-accepted', target: mailbox.id, turn: 'session', text: 'Blue' }, 'board', mailbox, now).state
   const taken = takeMailboxMessage(queued, 'deepseek', 'mailbox-session', 'Web', now + 1, 43_200_000, 'abcdef')
   const accepted = acceptMailboxMessage(taken.state, 'deepseek', 'mailbox-session', 'deepseek-accepted', 'abcdef', now + 2)
-  await page.redraw(model(accepted.messages))
-  assert.ok(!page.text().includes(EN.messagesHandedNextTurn))
-  assert.ok(page.text().includes(EN.messagesHandedNow), page.text())
+  const handed = model(accepted.messages)
+  await page.redraw(handed)
+  assert.equal(handed.asks[0].receipt.shown.state, 'delivered')
+  assert.ok(page.text().includes(handed.asks[0].receipt.shown.line), page.text())
+  assert.ok(!page.text().includes(EN.statusWhenNextTurn), page.text())
 })
 
-test('a handed-over DeepSeek message is worded for the route it went out on, also after its mailbox has expired (#1351)', async () => {
+test('a handed-over DeepSeek message reads Delivered and names no next turn, also after its mailbox has expired (#1351)', async () => {
   const { servePage } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
   const now = Date.now(), seed = enrollMailbox({ messages: [] }, 'deepseek', 'mailbox-session', 'Web', now, 43_200_000), mailbox = seed.mailboxes[0]
@@ -1359,8 +1361,9 @@ test('a handed-over DeepSeek message is worded for the route it went out on, als
   const model = serveModel(view, [], EN, new Set(), false, { connections: [], mailboxes: [], messages: accepted.messages }, false, group)
   assert.equal(model.asks[0].receipt.line, 'now')
   const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
-  assert.ok(page.text().includes(EN.messagesHandedNow), page.text())
-  assert.ok(!page.text().includes(EN.messagesHandedNextTurn), page.text())
+  assert.equal(model.asks[0].receipt.shown.state, 'delivered', JSON.stringify(model.asks[0].receipt))
+  assert.ok(page.text().includes(model.asks[0].receipt.shown.line), page.text())
+  assert.ok(!page.text().includes(EN.statusWhenNextTurn), page.text())
 })
 
 test('a question the board has no receiver for still says on its card why it is only copied (#1351)', async () => {
@@ -1440,7 +1443,8 @@ test('the page offers Queue for next turn beside Copy, prefers a live poller, an
   assert.equal(received.asks[0].isSending, false)
   assert.equal(received.asks[0].receipt.isMailbox, true)
   await page.redraw(received)
-  assert.ok(page.text().includes(EN.messagesHandedNextTurn))
+  assert.equal(received.asks[0].receipt.shown.state, 'delivered')
+  assert.ok(page.text().includes(received.asks[0].receipt.shown.line), page.text())
 })
 
 // A question the agent moved on from, kept on the Older shelf under the session that asked it (synthetic data).
@@ -1457,7 +1461,7 @@ const answeredBy = (state, id, question, now) => {
   return acceptMailboxMessage(mailboxTake(queued, now).state, 'codex', 'mailbox-session', id, 'abcdef', now + 2)
 }
 
-test('an answered question kept on the Older shelf still says its answer was handed to the session at its turn start', async () => {
+test('an answered question kept on the Older shelf still says its answer was delivered to the session', async () => {
   const { servePage } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
   const now = Date.now()
@@ -1465,8 +1469,9 @@ test('an answered question kept on the Older shelf still says its answer was han
   const model = keptModel(accepted.messages, now)
   assert.equal(model.older[0].receipt.status, 'accepted')
   assert.equal(model.older[0].receipt.isMailbox, true)
+  assert.equal(model.older[0].receipt.shown.state, 'delivered')
   const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
-  assert.ok(page.text().includes(EN.messagesHandedNextTurn))
+  assert.ok(page.text().includes(model.older[0].receipt.shown.line), page.text())
 })
 
 test('a question kept on the Older shelf shows no delivery line when nothing was sent to its session from the board', async () => {
@@ -1475,7 +1480,7 @@ test('a question kept on the Older shelf shows no delivery line when nothing was
   const model = keptModel([], Date.now())
   assert.equal(model.older[0].receipt, undefined)
   const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
-  assert.ok(!page.text().includes(EN.messagesHandedNextTurn))
+  assert.ok(!page.text().includes(EN.statusDelivered('')), page.text())
 })
 
 test('of two answered questions from one session, each kept card shows the receipt of its own answer and no card borrows the other\'s', () => {
@@ -5175,7 +5180,7 @@ test('an overlapping poll leaves the page waiting for a reply at the deadline de
     await new Promise(done => setImmediate(done))
     assert.equal(store.snapshot(Date.now()).messages.find(one => one.id === 'AB-overlap').status, 'acknowledged')
     assert.equal(message.status, 'acknowledged', `deadline page: ${page.text()}`)
-    assert.ok(page.text().includes('Replied'), page.text())
+    assert.ok(page.text().includes(EN.statusRead('received')), page.text())
     assert.equal(message.reply, 'received')
     assert.deepEqual(errors, [])
   } finally {
@@ -7541,7 +7546,7 @@ test('a page that stops, is replaced, or exits idle while a Codex delivery turn 
       const view = buildView(parseProgress(content), [], null, Date.now(), 0, {}, EN)
       const model = serveModel(view, [], EN, new Set(), false, { ...stored, enabled: true, mailboxes: stored.mailboxes ?? [], connections: [] }, false, { now: Date.now(), repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
       const page = await pageDom(servePage(EN, 'synthetic'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
-      assert.ok(page.text().includes(EN.messagesAcceptedUnconfirmed), page.text())
+      assert.ok(page.text().includes(EN.statusUnsure(EN.statusWhyDelivered)), page.text())
     } finally {
       delete process.env.AGENT_BOARD_CODEX_BIN; delete process.env.CODEX_MOCK_CONFIG; codexShortWait(false)
       await board?.close().catch(() => undefined)
@@ -7595,7 +7600,7 @@ test('a page that stops, is replaced, or reaches idle while a Codex delivery is 
     assert.equal((await board.call('/api/close', {})).status, 409)
     assert.equal((await board.call('/api/close', { moved: true })).status, 409)
 
-    // 4. Turn settles acknowledged: card shows Replied and the page can stop cleanly.
+    // 4. Turn settles acknowledged: card shows Read and the page can stop cleanly.
     const proxy = Number(readFileSync(pidFile, 'utf8'))
     writeFileSync(ackFlag, '')
     await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
@@ -7604,7 +7609,10 @@ test('a page that stops, is replaced, or reaches idle while a Codex delivery is 
     const view = buildView(parseProgress(content), [], null, Date.now(), 0, {}, EN)
     const model = serveModel(view, [], EN, new Set(), false, { ...snap, enabled: true }, false, { now: Date.now(), repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] })
     const page = await pageDom(servePage(EN, 'synthetic'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
-    assert.ok(page.text().includes(EN.messagesAcknowledged), page.text())
+    // The board words the settled line (hooks/message-status.ts): Read, and the page draws it.
+    const shown = []
+    JSON.stringify(model, (key, value) => { if (key === 'shown' && value?.line) shown.push(value); return value })
+    assert.ok(shown.some(one => one.state === 'read' && page.text().includes(one.line)), JSON.stringify(shown) + '\n' + page.text())
     assert.equal((await board.call('/api/close', {})).status, 200)
     await board.exited
     board = undefined
@@ -7860,18 +7868,18 @@ test('1139 accepted timeout records keep their acceptance and the page does not 
   const claimed = claimMessages(queued, connection, now + 1, 'abcdef').state
   const accepted = messageReceipt(claimed, connection, { id, nonce: 'abcdef', status: 'accepted' }, now + 2)
   await page.redraw(model(accepted.messages))
-  assert.ok(page.text().includes(EN.messagesAccepted), page.text())
+  assert.ok(page.text().includes(EN.statusDelivered('')), page.text())
   assert.ok(!page.cards().flatMap(one => page.buttons(one)).some(one => one.textContent === EN.serveRetry))
   const uncertain = messageReceipt(accepted, connection, { id, nonce: 'abcdef', status: 'uncertain', error: 'ACK_TIMEOUT' }, now + 3)
   assert.equal(uncertain.messages[0].hasAccepted, true)
   assert.equal(parseMessageStore(JSON.stringify({ version: 2, ...uncertain }), now + 4).messages[0].hasAccepted, true)
   await page.redraw(model(uncertain.messages))
-  assert.ok(page.text().includes(EN.messagesAcceptedUnconfirmed), page.text())
-  assert.ok(!page.text().includes(EN.messagesTimeout), page.text())
+  assert.ok(page.text().includes(EN.statusUnsure(EN.statusWhyDelivered)), page.text())
+  assert.ok(!page.text().includes(EN.statusUnsure(EN.statusWhyTimedOut)), page.text())
   assert.ok(!page.cards().flatMap(one => page.buttons(one)).some(one => one.textContent === EN.serveRetry))
   const unknown = { ...uncertain.messages[0], hasAccepted: undefined }
   await page.redraw(model([unknown]))
-  assert.ok(page.text().includes(EN.messagesTimeout), page.text())
+  assert.ok(page.text().includes(EN.statusUnsure(EN.statusWhyTimedOut)), page.text())
   assert.ok(page.cards().flatMap(one => page.buttons(one)).some(one => one.textContent === EN.serveRetry))
   const rejected = messageReceipt(claimed, connection, { id, nonce: 'abcdef', status: 'rejected' }, now + 3)
   await page.redraw(model(rejected.messages))
@@ -7965,7 +7973,7 @@ test('1486 a Codex card clears sending and accepts another message after a deliv
     assert.equal(rowModel.groups[0].rows[0].isSending, false, `${error}: row.isSending`)
 
     await rowPage.redraw(rowModel)
-    assert.ok(rowPage.text().includes(EN.messagesAcceptedUnconfirmed), rowPage.text())
+    assert.ok(rowPage.text().includes(EN.statusUnsure(EN.statusWhyDelivered)), rowPage.text())
     assert.ok(!rowPage.text().includes(EN.serveSendBusy('Codex')), `${error} row card must not show serveSendBusy`)
     const rowCard = rowPage.cards().find(one => rowPage.inputs(one).length)
     const rowSend = rowPage.buttons(rowCard).find(one => one.textContent === EN.serveSend('Codex'))
@@ -8004,7 +8012,7 @@ test('1486 a Codex card clears sending and accepts another message after a deliv
     assert.equal(askModel.view.needs.n, 1, `${error}: needs.n must stay 1`)
 
     await askPage.redraw(askModel)
-    assert.ok(askPage.text().includes(EN.messagesAcceptedUnconfirmed), askPage.text())
+    assert.ok(askPage.text().includes(EN.statusUnsure(EN.statusWhyDelivered)), askPage.text())
     assert.ok(!askPage.text().includes(EN.serveSendBusy('Codex')), `${error} ask card must not show serveSendBusy`)
     askPage.cards().flatMap(card => askPage.buttons(card)).find(one => one.textContent === EN.pgWriteOwn)?.click()
     const askCard = askPage.cards().find(one => askPage.inputs(one).length)
@@ -8048,7 +8056,7 @@ test('1486 OWNER_TIMEOUT preserves retry attempt id and keeps blocking duplicate
   const rowModel = modelOf(rowView, timedOut.messages)
   assert.equal(rowModel.groups[0].rows[0].isSending, true)
   await rowPage.redraw(rowModel)
-  assert.ok(rowPage.text().includes(EN.messagesTimeout), rowPage.text())
+  assert.ok(rowPage.text().includes(EN.statusUnsure(EN.statusWhyTimedOut)), rowPage.text())
   const rowCard = rowPage.cards().find(one => rowPage.inputs(one).length)
   assert.equal(rowPage.buttons(rowCard).find(one => one.textContent === EN.serveSend('Codex')).disabled, true)
   const retryButton = rowPage.cards().flatMap(one => rowPage.buttons(one)).find(one => one.textContent === EN.serveRetry)
@@ -8112,7 +8120,7 @@ test('1486 a Claude row allocates a fresh id after ACK_MISSING and stays blocked
   const afterAckMissing = modelOf(missingAck.messages)
   assert.equal(afterAckMissing.groups[0].rows[0].isSending, false)
   await page.redraw(afterAckMissing)
-  assert.ok(page.text().includes(EN.claudeUnconfirmed), page.text())
+  assert.ok(page.text().includes(EN.statusUnsure(EN.statusWhyDelivered)), page.text())
   const rowCard = page.cards().find(one => page.inputs(one).length)
   const sendButton = page.buttons(rowCard).find(one => one.textContent === EN.serveSend('Claude'))
   assert.equal(sendButton.disabled, false)
@@ -9374,13 +9382,16 @@ test('shape 26: receipts keep the sent line, older receipts are neutral, and cal
     model = (await w.call('/api/board')).body.model
   } finally { Date.now = realNow; shapeFile = originalFile }
   assert.equal(model.asks[0].receipt.line, 'now')
+  // Its mailbox has since gone (DISCONNECTED): handed over, so never Queued or Not delivered, and with its holder gone
+  // it reads Unsure, as the terminal board says (owner, #1843 answer 4).
+  assert.equal(model.asks[0].receipt.shown.line, EN.statusUnsure(EN.statusWhyDelivered), JSON.stringify(model.asks[0].receipt))
   const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
-  assert.ok(page.text().includes(EN.messagesHandedNow))
+  assert.ok(page.text().includes(model.asks[0].receipt.shown.line), page.text())
   delete model.asks[0].receipt.line
   model.asks[0].line = 'nextTurn'
   const older = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
-  assert.ok(older.text().includes(EN.messagesHandedNow))
-  assert.ok(!older.text().includes(EN.messagesHandedNextTurn))
+  assert.ok(older.text().includes(model.asks[0].receipt.shown.line), older.text())
+  assert.ok(!older.text().includes(EN.statusWhenNextTurn), older.text())
 })
 test('shape 27: a Codex live connection takes the mailbox\'s place only on its recorded idle route, with the shipped table (#318)', async () => {
   const w = await shapeCase({ agent: 'codex', kind: 'mailbox', surface: SURFACE_IDS.cli })
@@ -9573,9 +9584,11 @@ test('next-turn route explains in plain words in EN, ZH_TW, and ZH_CN, and in-fl
     await page.flush()
     assert.ok(page.text().includes(s.serveQueuedNextTurn('Codex')), page.text())
     const queued = queueMessage(seed, { id: 'next-turn-1', target: mailbox.id, turn: 'session', text: 'Answer for next turn' }, 'board', mailbox, now, 'local', undefined, 'nextTurn').state
+    // The stored receipt, in the board's words (hooks/message-status.ts): queued for its next turn, never a reply.
     await page.redraw(makeModel(queued.messages))
-    assert.ok(page.text().includes(s.serveQueuedNextTurn('Codex')), page.text())
+    assert.ok(page.text().includes(s.statusQueued(s.statusWhenNextTurn)), page.text())
     assert.ok(!page.text().includes(s.serveSending('Codex')), page.text())
+    assert.ok(!page.text().includes(s.statusRead('')), page.text())
   }
 })
 
@@ -9680,7 +9693,8 @@ test('a queued Codex CLI message stops waiting forever and offers Copy when a la
       await page.flush()
       await page.redraw(m2)
       const text = page.text()
-      assert.ok(text.includes(s.messagesSurfaceLost), text)
+      assert.ok(m2.asks[0].receipt.shown.line.includes(s.statusWhySurfaceLost), m2.asks[0].receipt.shown.line)
+      assert.ok(text.includes(m2.asks[0].receipt.shown.line), text)
       assert.ok(!text.includes(s.serveQueuedNextTurn('Codex')), text)
       const buttons = page.cards().flatMap(card => page.buttons(card)).map(btn => btn.textContent)
       assert.ok(buttons.includes(s.serveCopyMessage), buttons.join())

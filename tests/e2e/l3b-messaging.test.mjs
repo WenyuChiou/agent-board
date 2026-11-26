@@ -54,9 +54,10 @@ test('messages: a Codex session with no poller takes a page message on its next 
     snapshot = (await server.get('/api/board')).json()
     assert.equal(snapshot.messaging.messages[0].status, 'accepted')
     await page.redraw(snapshot.model)
-    assert.ok(page.text().includes('Handed to the session at its turn start. No reply is confirmed.'))
-    assert.ok(!page.text().includes('Delivered'))
-    assert.ok(!page.text().includes('Waiting for a reply'))
+    // Taken at its turn start: Delivered, in the board's words, and nothing more than that.
+    assert.equal(snapshot.model.asks[0]?.receipt?.shown?.state, 'delivered')
+    assert.ok(page.text().includes(snapshot.model.asks[0].receipt.shown.line), page.text())
+    assert.ok(!page.text().includes('Read · ') && !page.text().includes('Answered · '), page.text())
     const again = await hook('UserPromptSubmit')
     assert.equal(again.status, 0, again.stderr)
     assert.ok(!again.stdout.includes('Synthetic next-turn mailbox message'))
@@ -106,7 +107,7 @@ describe('L3b messages between sessions and agents', { timeout: 90000, concurren
     await nativeDelivery(hub, sender, receiver)
     const card = (await hub.card(sender)).textContent
     await knownFailure('hold:sender-receipt', () => {
-      assert.ok(card.includes('Replied'), 'Sender card has no outgoing receipt: ' + card)
+      assert.ok(/Read(?: · |$)/m.test(card), 'Sender card has no outgoing receipt: ' + card)
     })
   }))
 

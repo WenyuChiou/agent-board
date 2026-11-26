@@ -41,7 +41,7 @@ const withQuestion = async (name, run) => browserFixture(name, async fixture => 
       await card.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Use the synthetic blue plan.')
       await card.getByRole('button', { name: 'Send to Codex', exact: true }).click()
       // The durable paragraph distinguishes the receipt from the duplicate local status under test.
-      await card.locator('p[role="status"]').filter({ hasText: /^Queued$/ }).waitFor()
+      await card.locator('p[role="status"]').filter({ hasText: /^Queued · / }).waitFor()
     }
     await run({ ...fixture, card, send, deliveries, receive: () => { canReceive = true }, update: () => writeProgress(progress, block('Updated synthetic receipt context.')) })
     assert.deepEqual(errors, [])
@@ -53,11 +53,11 @@ const withQuestion = async (name, run) => browserFixture(name, async fixture => 
 test('a durable replied receipt supersedes a local queued hint without another action', { concurrency: false, timeout: 120_000 }, async () => {
   await withQuestion('receipt-replaces-hint', async ({ card, send, receive, deliveries }) => {
     await send()
-    const queuedLines = await card.getByText('Queued', { exact: true }).count()
+    const queuedLines = await card.getByText(/^Queued( · .*)?$/).count()
     receive()
-    await card.getByText('Replied · Synthetic reply.', { exact: true }).waitFor()
+    await card.getByText('Read · Synthetic reply.', { exact: true }).waitFor()
     assert.equal(deliveries.length, 1)
-    assert.equal(await card.getByText('Queued', { exact: true }).count(), 0, 'the earlier local enqueue result outlived its durable reply')
+    assert.equal(await card.getByText(/^Queued( · .*)?$/).count(), 0, 'the earlier local enqueue result outlived its durable reply')
     assert.equal(queuedLines, 1, 'the queued receipt and local enqueue result were shown twice')
   })
 })
@@ -66,7 +66,7 @@ test('an earlier receipt preserves a new send error on the same card', { concurr
   await withQuestion('receipt-preserves-error', async ({ page, card, send, receive, deliveries, update }) => {
     await send()
     receive()
-    await card.getByText('Replied · Synthetic reply.', { exact: true }).waitFor()
+    await card.getByText('Read · Synthetic reply.', { exact: true }).waitFor()
     await page.reload()
     await card.getByRole('button', { name: 'Write your own', exact: true }).click()
     await card.getByRole('button', { name: 'Send to Codex', exact: true }).click()
@@ -75,7 +75,7 @@ test('an earlier receipt preserves a new send error on the same card', { concurr
     // The context appears in both its one-line and full copies; either visible copy proves the redraw.
     await card.getByText('Updated synthetic receipt context.', { exact: true }).first().waitFor()
     assert.equal(await card.getByRole('alert').innerText(), 'Type something first.')
-    assert.equal(await card.getByText('Replied · Synthetic reply.', { exact: true }).count(), 1)
+    assert.equal(await card.getByText('Read · Synthetic reply.', { exact: true }).count(), 1)
     assert.equal(deliveries.length, 1)
   })
 })
@@ -105,13 +105,13 @@ test('a delayed enqueue response cannot restore Queued after its receipt is alre
       await send()
       phase('durable queued visible')
       receive()
-      await card.getByText('Replied · Synthetic reply.', { exact: true }).waitFor()
+      await card.getByText('Read · Synthetic reply.', { exact: true }).waitFor()
       phase('durable reply visible before POST return')
       releaseResponse()
       await page.waitForFunction(() => document.querySelector('textarea[aria-label="Your answer…"]')?.value === '', undefined, { timeout: 15_000 })
       phase('successful send completed in the page')
       assert.equal(deliveries.length, 1)
-      assert.equal(await card.getByText('Queued', { exact: true }).count(), 0, 'a late enqueue response restored feedback superseded by its visible receipt')
+      assert.equal(await card.getByText(/^Queued( · .*)?$/).count(), 0, 'a late enqueue response restored feedback superseded by its visible receipt')
       phase('no stale enqueue feedback')
     } finally {
       releaseResponse()
@@ -240,7 +240,7 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
       assert.ok(taken.message?.id)
       await postMsg('mailbox-accept', { agent: 'codex', session: sessionDone, id: taken.message.id, nonce: taken.message.nonce })
       const doneReceipt = doneCard.locator('p.receipt.t-done')
-      await doneReceipt.filter({ hasText: 'Handed to the session at its turn start. No reply is confirmed.' }).waitFor()
+      await doneReceipt.filter({ hasText: /^Delivered · / }).waitFor()
 
       // Card 3 settles in failed/rejected state.
       await failCard.locator('button.q-toggle').click()
@@ -248,7 +248,7 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
       await failCard.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Trigger failure.')
       await failCard.getByRole('button', { name: 'Send to Codex', exact: true }).click()
       const failReceipt = failCard.locator('p.receipt.t-alert')
-      await failReceipt.filter({ hasText: 'Rejected / not sent' }).waitFor()
+      await failReceipt.filter({ hasText: /^Not delivered · / }).waitFor()
 
       const report = {}
       for (const theme of ['light', 'dark']) {

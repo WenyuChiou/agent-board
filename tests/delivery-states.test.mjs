@@ -15,7 +15,7 @@ const { FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, MCP_SURFACE, O
 const { releaseMailboxMessage } = await import('../hooks/hook-messages.ts')
 const { restartMessages } = await import('../hooks/messaging.ts')
 const { mailboxAction } = await import('../scripts/board-messaging.ts')
-const { servePage } = await import('../hooks/serve.ts')
+const { rowReceipt, servePage } = await import('../hooks/serve.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
 const { EN } = await import('../hooks/strings-en.ts')
 const { ZH_TW } = await import('../hooks/i18n.ts')
@@ -50,7 +50,7 @@ test('every cell of the delivery table matches what hooks/messaging.ts does toda
   for (const [state, event] of SUSPECT_CELLS) assert.ok(DELIVERY_STATES.includes(state) && DELIVERY_EVENTS.includes(event), `${state} x ${event}`)
 })
 
-// The page's own card selector (receiptLine and claudeReceipt in hooks/serve.ts), run on the receipt the board sends.
+// The page's own card line (receiptLine and claudeReceipt in hooks/serve.ts), run on the receipt the board sends.
 const page = servePage(STRINGS.en, 'synthetic')
 const pageFunction = name => {
   const start = page.indexOf(`\n  function ${name}(`)
@@ -58,40 +58,63 @@ const pageFunction = name => {
   return page.slice(start, page.indexOf('\n  }\n', start) + 4)
 }
 const selector = page.match(/\n {2}var ENDED_UNCERTAIN_ERRORS = .*;\n/)[0]
-  + ['isEndedUncertainReceipt', 'releaseFinishedAttempt', 'receiptFailed', 'claudeReceipt', 'receiptLine'].map(pageFunction).join('\n')
-const node = (tag, cls, text) => ({ tag, cls, text, children: [], setAttribute() {} })
+  + ['isEndedUncertainReceipt', 'releaseFinishedAttempt', 'receiptFailed', 'shownLine', 'claudeReceipt', 'receiptLine'].map(pageFunction).join('\n')
+const node = (tag, cls, text) => {
+  const one = { tag, cls, text, children: [], attributes: {} }
+  one.setAttribute = (name, value) => { one.attributes[name] = value }
+  return one
+}
 const pageScope = {
   el: node, add: (parent, ...kids) => { parent.children.push(...kids.filter(Boolean)); return parent }, w: key => key, button: () => node('button'),
   dismissButton: () => node('button'), copy() {}, clearEnqueueResult() {}, isClaudeAgent: agent => agent === 'claude', agentName: agent => agent, sentLast: {}, messageAttempts: {},
 }
 runInNewContext(selector, pageScope)
-// The key of the card's line: the first part of the receipt element's text, which `w` leaves as the key.
-const lineOf = one => one == null ? null : (one.cls ?? '').split(' ').includes('receipt') ? one.text.split(' · ')[0] : one.children.map(lineOf).find(Boolean) ?? null
-// A message's receipt as rowReceipt in hooks/serve.ts sends it, on the default route.
-const cardOf = (name, shape, agent) => {
+// The card's receipt element, and its line: the element's text.
+const receiptElement = one => one == null ? null : (one.cls ?? '').split(' ').includes('receipt') ? one : one.children.map(receiptElement).find(Boolean) ?? null
+const lineOf = one => receiptElement(one)?.text ?? null
+// A message's receipt as the board sends it (rowReceipt in hooks/serve.ts), on the default route, when its last event happened.
+const receiptOf = (name, shape) => {
   const { message, state } = sampleOf(name, shape)
-  const receipt = {
-    id: message.id, status: message.status, reply: shownMessage(message).reply, error: message.error, text: message.text,
-    ...(message.hasAccepted === true ? { hasAccepted: true } : {}), ...(isMailboxSurfaceLost(message, state.mailboxes) ? { isSurfaceLost: true } : {}),
-    isMailbox: isMailboxTarget(message.target), when: '',
-  }
-  return lineOf(pageScope.receiptLine(receipt, 'k', agent, true, undefined))
+  const one = { ...shownMessage(message), ...(isMailboxSurfaceLost(message, state.mailboxes) ? { isSurfaceLost: true } : {}) }
+  return rowReceipt(message.to.split(':')[0], 's1', [one], SAMPLE_NOW, EN).receipt
 }
+const cardOf = (name, shape, agent) => lineOf(pageScope.receiptLine(receiptOf(name, shape), 'k', agent, true))
 
 test('every card line in the delivery table is the one the page picks (#1543)', () => {
   const wrong = []
   for (const name of DELIVERY_STATES) {
     for (const shape of shapeNames(name)) {
       const row = rowOf(name, shape)
-      for (const [key, agent] of [['card', 'codex'], ['claudeCard', 'claude']]) {
-        const shown = cardOf(name, shape, agent)
-        if (shown !== row[key]) wrong.push(`${label(name, shape)} ${key}: table ${row[key]}, page ${shown}`)
-        if (row[key] === null) continue
-        for (const [lang, table] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) if (table[row[key]] === undefined) wrong.push(`${label(name, shape)}: ${row[key]} is missing from ${lang}`)
+      const shown = receiptOf(name, shape)?.shown
+      if ((shown?.state ?? null) !== row.status) wrong.push(`${label(name, shape)}: table ${row.status}, board ${shown?.state ?? null}`)
+      // The same words on a Claude card and any other.
+      for (const agent of ['codex', 'claude']) {
+        const drawn = cardOf(name, shape, agent)
+        if (drawn !== (shown?.line ?? null)) wrong.push(`${label(name, shape)} ${agent}: the page draws ${drawn}, not ${shown?.line ?? null}`)
       }
     }
   }
   assert.deepEqual(wrong, [], wrong.join('\n'))
+})
+
+test('the page colours the line by its tone and reads only a line that needs the person out at once', () => {
+  const wrong = []
+  const tones = new Set()
+  for (const name of DELIVERY_STATES) {
+    for (const shape of shapeNames(name)) {
+      const shown = receiptOf(name, shape)?.shown
+      if (shown === undefined) continue
+      tones.add(shown.tone)
+      for (const agent of ['codex', 'claude']) {
+        const one = receiptElement(pageScope.receiptLine(receiptOf(name, shape), 'k', agent, true))
+        const where = `${label(name, shape)} ${agent}`
+        if (one?.cls !== `receipt t-${shown.tone}`) wrong.push(`${where}: class ${one?.cls}, tone ${shown.tone}`)
+        if (one?.attributes.role !== (shown.tone === 'alert' ? 'alert' : 'status')) wrong.push(`${where}: role ${one?.attributes.role}, tone ${shown.tone}`)
+      }
+    }
+  }
+  assert.deepEqual(wrong, [], wrong.join('\n'))
+  assert.deepEqual([...tones].sort(), ['alert', 'done', 'wait'])
 })
 
 test('no uncertain receipt sends again a message its host accepted before, in any state of the table (#1553, #1407)', () => {
@@ -197,7 +220,7 @@ test('the page keeps the attempt id of a message that reads HOLDER_LOST', () => 
   const lost = pruned.messages.find(one => one.id === message.id)
   assert.deepEqual([lost.status, lost.error, lost.text], ['uncertain', 'HOLDER_LOST', message.text])
   // The card reads Unsure, and the page keeps the id its press made, so a press again sends that id and not a new message.
-  assert.equal(cardOf('holderLost', undefined, 'codex'), 'messagesUncertain')
+  assert.equal(cardOf('holderLost', undefined, 'codex'), EN.statusUnsure(EN.statusWhyHolderLost))
   pageScope.messageAttempts.k = { id: lost.id, text: lost.text }
   pageScope.releaseFinishedAttempt({ id: lost.id, status: lost.status, error: lost.error, isMailbox: true }, false)
   assert.equal(pageScope.messageAttempts.k?.id, lost.id)
@@ -210,14 +233,16 @@ test('the page keeps the attempt id of a message that reads HOLDER_LOST', () => 
 test('combined flag shapes predict both card and transitions when independent flags interact (#1560)', () => {
   assert.ok('acceptedBefore+onHook' in shapesOf('turnEnded'))
   const hookAfterAccept = rowOf('turnEnded', 'acceptedBefore+onHook')
-  assert.equal(hookAfterAccept.card, 'messagesAcceptedUnconfirmed')
+  assert.equal(hookAfterAccept.status, 'unsure')
   assert.equal(hookAfterAccept.on.accept, 'handed')
   assert.equal(hookAfterAccept.on.unsure, 'leased')
   assert.equal(observe('turnEnded', 'accept', 'acceptedBefore+onHook'), 'handed')
 
   assert.equal(rowOf('leased', 'otherSurface+lastRepeat').on.claimLate, 'leased')
-  assert.equal(rowOf('inDoubt', 'acceptedBefore+otherError').card, 'messagesAcceptedUnconfirmed')
-  assert.equal(rowOf('acceptedLost', 'awaitsAck+otherError').card, 'messagesHandedNow')
+  assert.equal(rowOf('inDoubt', 'acceptedBefore+otherError').status, 'unsure')
+  assert.equal(rowOf('acceptedLost', 'awaitsAck+otherError').status, 'unsure')
+  // Refused after something took it: Unsure, whether it was stopped or refused.
+  assert.equal(rowOf('rejected', 'acceptedBefore+stopped').status, 'unsure')
   assert.equal(rowOf('turnEnded', 'acceptedBefore+onWake').on.openLimit, 'wakeExpired')
   assert.equal('acceptedBefore+onWake' in shapesOf('expired'), false)
 })

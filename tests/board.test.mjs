@@ -5869,7 +5869,12 @@ test('the page keeps actionable progress delays without connection inventory or 
         ['ACK ' + id + 'x', 'ACK ' + id + 'x'],
         ['Review ready.', 'Review ready.'],
       ]) {
-        const receipt = { id, status: 'acknowledged', reply, error: '' }
+        const STRINGS = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }
+        const { rowReceipt } = await sourceBoard()
+        const words = STRINGS[lang]
+        const { receipt } = rowReceipt('codex', 's1', [{ id, to: 'codex:s1', target: 'synthetic-connection', turn: 'turn-1', from: 'board', text: '', origin: 'local', status: 'acknowledged', reply, error: '', hops: 0, updated: 1, claimed: 1 }], 1, words)
+        const read = words.statusRead(expected.replace(/\s+/g, ' ').trim())
+        assert.equal(receipt.shown.line, read)
         await dom.redraw({
           ...model,
           asks: [{ key: 'question', project: 'Synthetic', agent: 'codex', text: 'Review the route?', answers: [], canTick: true, receipt }],
@@ -5877,11 +5882,11 @@ test('the page keeps actionable progress delays without connection inventory or 
         })
         const lines = []
         const collect = node => {
-          if (node.tag === 'p' && node.textContent.startsWith(s.messagesAcknowledged)) lines.push(node.textContent)
+          if (node.tag === 'p' && String(node.className).split(' ').includes('receipt')) lines.push(node.textContent)
           node.childNodes.forEach(collect)
         }
         collect(dom.node('board'))
-        assert.deepEqual(lines, Array(2).fill(s.messagesAcknowledged + (expected ? ' · ' + expected : '')))
+        assert.deepEqual(lines, Array(2).fill(read))
         if (!expected.includes(id)) assert.ok(!dom.node('board').textContent.includes(id), dom.node('board').textContent)
         if (reply.startsWith('ACK ' + id) && !expected.startsWith('ACK ')) assert.ok(!dom.node('board').textContent.includes('ACK'), dom.node('board').textContent)
         assert.equal(receipt.reply, reply)
@@ -12727,9 +12732,9 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   await dom.settle()
   assert.ok(shownWords(card(dom)).includes(EN.pgSentTo(EN.agentNames.codex, 'Yes')), shownWords(card(dom)))
   const replied = redesignModel()
-  replied.asks = [{ ...model.asks[0], receipt: { id: 'm1', status: 'acknowledged', reply: 'ACK m1 Shipped' } }]
+  replied.asks = [{ ...model.asks[0], receipt: { id: 'm1', status: 'acknowledged', reply: 'ACK m1 Shipped', shown: { state: 'read', line: EN.statusRead('Shipped'), tone: 'done' } } }]
   await dom.redraw(replied)
-  assert.ok(shownWords(card(dom)).includes(`${EN.messagesAcknowledged} · Shipped`), shownWords(card(dom)))
+  assert.ok(shownWords(card(dom)).includes(EN.statusRead('Shipped')), shownWords(card(dom)))
   // A message the board refused: the line says so and the card offers Send again and Copy message.
   const refused = await pageDom(html, model, { post: async () => ({ ok: false, json: async () => ({ note: 'Synthetic refusal' }) }) })
   selectAnswer(card(refused), 'No').click()
@@ -12743,10 +12748,10 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   assert.deepEqual(refused.requests.map(request => request.body.text), ['No', 'No'])
   // And a reply that arrives as a rejected receipt waits for the person again, with the same two buttons.
   const rejected = redesignModel()
-  rejected.asks = [{ ...model.asks[0], receipt: { id: 'm2', status: 'rejected', reply: '' } }]
+  rejected.asks = [{ ...model.asks[0], receipt: { id: 'm2', status: 'rejected', reply: '', shown: { state: 'notDelivered', line: EN.statusNotDelivered(EN.statusWhyRefused), tone: 'alert' } } }]
   await refused.redraw(rejected)
   const line = descendants(card(refused)).find(node => node.className === 'receipt t-alert')
-  assert.equal(line.textContent, EN.messagesRejected)
+  assert.equal(line.textContent, EN.statusNotDelivered(EN.statusWhyRefused))
   assert.deepEqual(descendants(line.parentNode).filter(node => node.tag === 'button').map(node => node.textContent), [EN.serveRetry, EN.serveCopyMessage])
 })
 
@@ -12772,44 +12777,51 @@ test('words sent again after a Claude message went nowhere are a new message, no
   assert.equal(new Set(ids).size, 4, ids.join())
 })
 
-test("a Claude card's line and buttons follow its message, and Take back and Dismiss end it", async () => {
+test("a Claude card draws the line the board sends, its buttons follow its message, and Take back and Dismiss end it", async () => {
   const html = await sourcePage()
   const model = redesignModel()
   const ask = { ...model.asks[0], key: 'ask-claude', agent: 'claude', send: 'connected', delivery: { id: 'c1', turn: 'session', agent: 'claude' }, session: 'session1' }
-  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', error: '', text: 'the words', when: '2 min ago', ...receipt } }]; return next }
-  const dom = await pageDom(html, withReceipt({ status: 'accepted' }), { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  // The board words the line (`shown`, from hooks/message-status.ts); the page only draws it and picks the buttons.
+  const withReceipt = (receipt, shown) => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', error: '', text: 'the words', when: '2 min ago', ...receipt, ...(shown === undefined ? {} : { shown }) } }]; return next }
+  const delivered = { state: 'delivered', line: EN.statusDelivered('2 min ago'), tone: 'done' }
+  const noAnswer = { state: 'unsure', line: EN.statusUnsure(EN.statusWhyNoAnswer), tone: 'alert' }
+  const dom = await pageDom(html, withReceipt({ status: 'accepted' }, delivered), { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
   const box = () => dom.node('needs').querySelectorAll('[data-ref-key]')[0]
   const receipt = () => descendants(box()).find(node => (node.className || '').split(' ').includes('receipt'))
   const buttons = () => descendants(receipt().parentNode).filter(node => node.tag === 'button').map(node => node.textContent)
-  assert.equal(receipt().textContent, `${EN.claudeDelivered} · 2 min ago`)
+  assert.equal(receipt().textContent, delivered.line)
   assert.deepEqual(buttons(), [EN.messageDismiss])
-  await dom.redraw(withReceipt({ status: 'queued' }))
-  assert.equal(receipt().textContent, EN.claudeSendWorking)
+  await dom.redraw(withReceipt({ status: 'queued' }, { state: 'queued', line: EN.statusQueued(EN.statusWhenNow), tone: 'wait' }))
+  assert.equal(receipt().textContent, EN.statusQueued(EN.statusWhenNow))
   assert.deepEqual(buttons(), [EN.messageTakeBack])
   descendants(receipt().parentNode).find(node => node.textContent === EN.messageTakeBack && node.tag === 'button').click()
   await dom.settle()
   assert.deepEqual(dom.requests.at(-1).body, { id: 'm1' })
-  await dom.redraw(withReceipt({ status: 'uncertain', error: 'ACK_MISSING' }))
-  assert.equal(receipt().textContent, EN.claudeUnconfirmed)
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'ACK_MISSING' }, noAnswer))
+  assert.equal(receipt().textContent, noAnswer.line)
   assert.deepEqual(buttons(), [EN.serveCopyMessage, EN.messageDismiss])
   // A claim whose delivery never got going is not called delivered.
-  await dom.redraw(withReceipt({ status: 'uncertain' }))
-  assert.equal(receipt().textContent, EN.claudeUnconfirmed)
+  await dom.redraw(withReceipt({ status: 'uncertain' }, noAnswer))
+  assert.equal(receipt().textContent, noAnswer.line)
   // The hub has let go of an expired message: no Dismiss that could only fail. No attempt id stays
   // either, or the same words sent again would answer with this dead message.
-  await dom.redraw(withReceipt({ status: 'uncertain', error: 'EXPIRED' }))
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'EXPIRED' }, { state: 'unsure', line: EN.statusUnsure(EN.statusWhyExpired), tone: 'alert' }))
   assert.deepEqual(buttons(), [EN.serveCopyMessage])
-  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED' }))
-  assert.equal(receipt().textContent, EN.claudeStopped)
+  const stopped = { state: 'notDelivered', line: EN.statusNotDelivered(EN.statusWhyStopped), tone: 'alert' }
+  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED' }, stopped))
+  assert.equal(receipt().textContent, stopped.line)
   assert.ok(buttons().includes(EN.serveCopyMessage))
   // The hub lets go of a finished message's words: with none to copy, no Copy button.
-  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED', text: '' }))
+  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED', text: '' }, stopped))
   assert.ok(!buttons().includes(EN.serveCopyMessage))
-  await dom.redraw(withReceipt({ status: 'acknowledged', reply: 'on it' }))
-  assert.equal(receipt().textContent, EN.claudeReplied('on it'))
-  await dom.redraw(withReceipt({ status: 'acknowledged' }))
-  assert.equal(receipt().textContent, EN.claudeGotIt)
+  await dom.redraw(withReceipt({ status: 'acknowledged', reply: 'on it' }, { state: 'read', line: EN.statusRead('on it'), tone: 'done' }))
+  assert.equal(receipt().textContent, EN.statusRead('on it'))
+  await dom.redraw(withReceipt({ status: 'acknowledged' }, { state: 'read', line: EN.statusRead(''), tone: 'done' }))
+  assert.equal(receipt().textContent, EN.statusRead(''))
   await dom.redraw(withReceipt({ status: 'uncertain', error: 'DISMISSED' }))
+  assert.equal(receipt(), undefined)
+  // With no line from the board the page draws none: it never words a line itself.
+  await dom.redraw(withReceipt({ status: 'accepted' }))
   assert.equal(receipt(), undefined)
 })
 
@@ -12817,19 +12829,20 @@ test('an OpenCode message that reads sent, not confirmed offers Copy, and the pr
   const html = await sourcePage()
   const model = redesignModel()
   const ask = { ...model.asks[0], key: 'ask-opencode', agent: 'opencode', send: 'connected', delivery: { id: 'o1', turn: 'session', agent: 'opencode' }, session: 'session1' }
-  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', text: 'the words to copy', when: '', isMailbox: true, status: 'uncertain', error: 'UNCONFIRMED', ...receipt } }]; return next }
+  const shown = { state: 'unsure', line: EN.statusUnsure(EN.statusWhyUnconfirmed), tone: 'alert' }
+  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', text: 'the words to copy', when: '', isMailbox: true, status: 'uncertain', error: 'UNCONFIRMED', shown, ...receipt } }]; return next }
   const dom = await pageDom(html, withReceipt({}), { copyAllowed: true })
   const box = () => dom.node('needs').querySelectorAll('[data-ref-key]')[0]
   const receipt = () => descendants(box()).find(node => (node.className || '').split(' ').includes('receipt'))
   const buttons = () => descendants(receipt().parentNode).filter(node => node.tag === 'button')
-  assert.equal(receipt().textContent, EN.messagesSentUnconfirmed)
+  assert.equal(receipt().textContent, shown.line)
   assert.deepEqual(buttons().map(node => node.textContent), [EN.serveCopyMessage])
   buttons()[0].click()
   await dom.settle()
   assert.deepEqual(dom.copies, ['the words to copy'], 'the press copied the message the person typed')
   // Its words are gone from the board (kept only a day): the line stays and there is nothing to copy.
   await dom.redraw(withReceipt({ text: '' }))
-  assert.equal(receipt().textContent, EN.messagesSentUnconfirmed)
+  assert.equal(receipt().textContent, shown.line)
   assert.ok(!buttons().some(node => node.textContent === EN.serveCopyMessage))
 })
 
@@ -15572,14 +15585,15 @@ test('busy or connected card shows one honest message status after Send instead 
 
     currentClaude = {
       ...base,
-      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, isSending: true, receipt: { id: lastMsgId, status: 'queued', text: replyText, when: '' } }],
+      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, isSending: true, receipt: { id: lastMsgId, status: 'queued', text: replyText, when: '', shown: { state: 'queued', line: s.statusQueued(s.statusWhenStepEnd), tone: 'wait' } } }],
     }
     await claudeDom.redraw(currentClaude)
     const queuedWords = shownWords(findCard(claudeDom, claudeAsk.key))
-    assert.equal(countMatches(queuedWords, s.claudeSendWorking), 1, `queued receipt: single claudeSendWorking (${queuedWords})`)
+    assert.equal(countMatches(queuedWords, s.statusQueued(s.statusWhenStepEnd)), 1, `queued receipt: one status line (${queuedWords})`)
+    // The press's own Queued note is gone once the board's line is drawn: no second Queued beside it.
+    assert.equal(countMatches(queuedWords.split(s.statusQueued(s.statusWhenStepEnd)).join(''), s.messagesQueued), 0, `queued receipt: no second Queued beside it (${queuedWords})`)
     assert.equal(queuedWords.includes(s.pgSentTo(claudeName, replyText)), false, 'no pgSentTo above queued receipt')
     assert.equal(queuedWords.includes(s.claudeSendNow), false, 'no stale claudeSendNow')
-    assert.equal(queuedWords.includes(s.messagesQueued), false, 'no duplicate messagesQueued alongside receipt')
     assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
 
     // Take back restores the card back to ask mode cleanly.
@@ -15592,23 +15606,23 @@ test('busy or connected card shows one honest message status after Send instead 
     await claudeDom.settle()
     currentClaude = {
       ...base,
-      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, receipt: { id: lastMsgId, status: 'accepted', text: 'Proceed', when: 'just now' } }],
+      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, receipt: { id: lastMsgId, status: 'accepted', text: 'Proceed', when: 'just now', shown: { state: 'delivered', line: s.statusDelivered('just now'), tone: 'done' } } }],
     }
     await claudeDom.redraw(currentClaude)
     const acceptedWords = shownWords(findCard(claudeDom, claudeAsk.key))
-    assert.equal(countMatches(acceptedWords, s.claudeDelivered), 1, `delivered once (${acceptedWords})`)
+    assert.equal(countMatches(acceptedWords, s.statusDelivered('just now')), 1, `delivered once (${acceptedWords})`)
     assert.equal(acceptedWords.includes(s.claudeSendWorking), false, 'route note stays hidden on delivered receipt')
     assert.equal(acceptedWords.includes(s.pgSentTo(claudeName, 'Proceed')), false)
     assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
 
     currentClaude = {
       ...base,
-      asks: [{ ...claudeAsk, line: 'now', lineText: s.claudeSendNow, receipt: { id: lastMsgId, status: 'acknowledged', reply: 'Done', text: 'Proceed', when: '' } }],
+      asks: [{ ...claudeAsk, line: 'now', lineText: s.claudeSendNow, receipt: { id: lastMsgId, status: 'acknowledged', reply: 'Done', text: 'Proceed', when: '', shown: { state: 'read', line: s.statusRead('Done'), tone: 'done' } } }],
     }
     await claudeDom.redraw(currentClaude)
     const repliedWords = shownWords(findCard(claudeDom, claudeAsk.key))
-    assert.equal(countMatches(repliedWords, s.claudeReplied('Done')), 1, `replied once (${repliedWords})`)
-    assert.equal(repliedWords.includes(s.claudeDelivered), false)
+    assert.equal(countMatches(repliedWords, s.statusRead('Done')), 1, `replied once (${repliedWords})`)
+    assert.equal(repliedWords.includes(s.statusDelivered('just now')), false)
     assert.equal(repliedWords.includes(s.claudeSendNow), false)
     assert.equal(repliedWords.includes(s.pgSentTo(claudeName, 'Proceed')), false)
     assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
@@ -15644,11 +15658,11 @@ test('busy or connected card shows one honest message status after Send instead 
 
     currentCodex = {
       ...base,
-      asks: [{ ...codexAsk, receipt: { id: lastMsgId, status: 'queued', line: 'stepEnd', isMailbox: true } }],
+      asks: [{ ...codexAsk, receipt: { id: lastMsgId, status: 'queued', line: 'stepEnd', isMailbox: true, shown: { state: 'queued', line: s.statusQueued(s.statusWhenStepEnd), tone: 'wait' } } }],
     }
     await codexDom.redraw(currentCodex)
     const codexReceiptWords = shownWords(findCard(codexDom, codexAsk.key))
-    assert.equal(countMatches(codexReceiptWords, s.serveLineStepEnd(codexName)), 1, `busy codex queued receipt (${codexReceiptWords})`)
+    assert.equal(countMatches(codexReceiptWords, s.statusQueued(s.statusWhenStepEnd)), 1, `busy codex queued receipt (${codexReceiptWords})`)
     assert.equal(codexReceiptWords.includes(s.pgSentTo(codexName, 'Ship it')), false)
   }
 })
@@ -15684,8 +15698,8 @@ test('a finished message seen only under a held press still frees its id, so the
   assert.notEqual(ids[1], ids[0])
 })
 
-test('serveModel projects a live in-flight receiver claim as queued instead of flickering uncertain (#1335)', async () => {
-  const { serveModel, buildView, parseProgress, CLAIM_HANDOFF_MS } = await sourceBoard()
+test('serveModel reads a receiver claim from its stored receipt alone, live connection or not (#1335)', async () => {
+  const { serveModel, buildView, parseProgress } = await sourceBoard()
   const now = Date.parse('2026-11-14T12:00:00Z')
   const text = [
     '## Work',
@@ -15720,20 +15734,18 @@ test('serveModel projects a live in-flight receiver claim as queued instead of f
   const askMessage = { ...baseMessage, id: 'm2', target: 'conn-2', to: 'codex:thread-2', ...(view.waiting[0]?.questionId ? { answers: view.waiting[0].questionId } : {}) }
   const liveConnection = { id: 'conn-1', agent: 'codex', session: 'thread-1', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
   const askConnection = { id: 'conn-2', agent: 'codex', session: 'thread-2', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
-  for (const probe of [now, now + CLAIM_HANDOFF_MS - 1]) {
-    const inFlight = serveModel(view, [], EN, new Set(), false, { connections: [{ ...liveConnection, expires: probe + 60_000 }, { ...askConnection, expires: probe + 60_000 }], messages: [baseMessage, askMessage] }, false, { now: probe, repoOf: () => null, versions: { board: '1.0.0', package: null } })
-    assert.equal(firstRow(inFlight)?.receipt?.status, 'queued', `at +${probe - now}ms`)
-    assert.equal(inFlight.asks[0]?.receipt?.status, 'queued', `ask at +${probe - now}ms`)
+  // A fresh claim reads Queued for 20 s after its last event (NOW_ROUTE_MS in hooks/message-status.ts), then Unsure, from
+  // its stored receipt alone (#1843 answer 2): no live connection keeps it queued, so a lost /api/messages/poll response
+  // whose receiver keeps renewing the same connection reads Unsure at 20 s, not queued until OPEN_LIMIT_MS.
+  for (const connections of [[liveConnection, askConnection], []]) {
+    for (const [probe, state] of [[now, 'queued'], [now + 16_000, 'queued'], [now + 20_000, 'unsure']]) {
+      const model = serveModel(view, [], EN, new Set(), false, { connections: connections.map(one => ({ ...one, expires: probe + 60_000 })), messages: [baseMessage, askMessage] }, false, { now: probe, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+      const where = `at +${probe - now}ms, ${connections.length} connections`
+      assert.equal(firstRow(model)?.receipt?.status, 'uncertain', where)
+      assert.equal(firstRow(model)?.receipt?.shown?.state, state, where)
+      assert.equal(model.asks[0]?.receipt?.shown?.state, state, `ask ${where}`)
+    }
   }
-
-  // Lost /api/messages/poll response: the receiver retries and keeps renewing the same connection without ever receiving or accepting the claim;
-  // once CLAIM_HANDOFF_MS elapses, the board must surface uncertain rather than keeping queued until OPEN_LIMIT_MS.
-  const later = now + CLAIM_HANDOFF_MS
-  const renewedRowConn = { ...liveConnection, expires: later + 60_000 }
-  const renewedAskConn = { ...askConnection, expires: later + 60_000 }
-  const expiredHandoff = serveModel(view, [], EN, new Set(), false, { connections: [renewedRowConn, renewedAskConn], messages: [baseMessage, askMessage] }, false, { now: later, repoOf: () => null, versions: { board: '1.0.0', package: null } })
-  assert.equal(firstRow(expiredHandoff)?.receipt?.status, 'uncertain', 'lost poll response after handoff window')
-  assert.equal(expiredHandoff.asks[0]?.receipt?.status, 'uncertain', 'lost poll response ask after handoff window')
 
   const cases = [
     { name: 'error', connections: [liveConnection], message: { ...baseMessage, error: 'ACK_MISSING' } },
