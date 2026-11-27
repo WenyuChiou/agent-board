@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
+import { recordSocketState } from './socket-state.mjs'
 
 const execFileAsync = promisify(execFile)
 const repository = fileURLToPath(new URL('../..', import.meta.url))
@@ -289,6 +290,8 @@ export const browserFixture = async (name, run, { hasTouch = false } = {}) => {
     const finish = async action => {
       try { await action() } catch (error) { errors.push(error) }
     }
+    // A socket the runner would not give (#1810): what the system held then, before cleanup frees any of it.
+    if (failure) await finish(() => recordSocketState(failure, evidence))
     if (page) await finish(() => page.screenshot({ path: join(evidence, `${failure ? 'failure' : 'final'}.png`), fullPage: true }))
     if (context) await finish(() => context.tracing.stop({ path: join(evidence, 'trace.zip') }))
     if (context) await finish(() => context.close())
