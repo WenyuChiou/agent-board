@@ -7057,7 +7057,9 @@ test('agent-board stop with a Send to Codex switch stops this file\'s page whate
 test('stop says the board page did not stop and exits 1 when the page refuses to close', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const requests = []
-  const built = String(statSync(board.script).mtimeMs)
+  const rawScript = readFileSync(board.script, 'utf8')
+  const cut = rawScript.indexOf('\n')
+  const built = createHash('sha256').update((rawScript.startsWith('globalThis.AGENT_BOARD = ') ? (cut >= 0 ? rawScript.slice(cut + 1) : '') : rawScript).replace(/\r\n/g, '\n')).digest('hex')
   const fake = createServer((req, res) => {
     requests.push([req.method, req.url, req.headers['x-board-token']])
     if (req.url === '/api/ping') {
@@ -8853,10 +8855,9 @@ const timer = setInterval(() => {
     board,
     ran,
     started: () => until(() => ran().length > 0),
-    // A new copy of the script, as after an update: another build time, so --serve means to replace the page.
+    // A new copy of the script, as after an update: different release bytes, so --serve means to replace the page.
     update: () => {
-      const { atime, mtimeMs } = statSync(script)
-      utimesSync(script, atime, new Date(mtimeMs + 5000))
+      writeFileSync(script, `${readFileSync(script, 'utf8')}\n// synthetic-newer-release\n`)
     },
     serve: () => new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', '--allow-resume'], { env, encoding: 'utf8', timeout: 30_000 }, (error, out) => (error ? fail(error) : done(out)))),
     // Lets the reply go, waits until the page has none in flight, and closes it if it is still there.

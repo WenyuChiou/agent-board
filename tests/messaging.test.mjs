@@ -9401,7 +9401,9 @@ test('a Codex thread that turns busy while the board hears starting gets no turn
 }))
 
 test('a Codex claim whose turn/start had left when its board connection ended stays in doubt and is never offered again (#1507)', () => codexFixture(async (board, dir) => {
-  const daemon = codexDaemon(dir, { startDelay: 4000 })
+  // Without a completed ACK (`endStatus: 'failed'`), a claim whose turn/start left before disconnect stays in doubt
+  // and is never offered again (#1507); a completed ACK is delivered once re-attached (#1796).
+  const daemon = codexDaemon(dir, { startDelay: 4000, endStatus: 'failed' })
   const held = await m5aReceiver(board, daemon, 'forbidden-after-starting')
   try {
     assert.equal(await codexSend(board, await codexConnection(board)), 200)

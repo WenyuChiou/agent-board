@@ -4,12 +4,16 @@ import { appendFileSync, chmodSync, copyFileSync, cpSync, existsSync, linkSync, 
 import { request } from 'node:http'
 import { join, resolve } from 'node:path'
 import { registerHooks } from 'node:module'
-import { after, test } from 'node:test'
+import { after, test as nodeTest } from 'node:test'
 import assert from 'node:assert/strict'
 import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checked, cleanup, fixture, insideHome, questionOf, repeatApply, report, repoRoot, run, setup, setupOrder, snapshot, tempFolder } from './e2e/lib/host-journey.mjs'
 import { spawnIsolated } from './e2e/lib/spawn.mjs'
 import { newestUse, newUses } from '../scripts/setup-discovery.mjs'
 import { EN } from '../hooks/strings-en.ts'
+import { partTest } from '../scripts/ci-impact.mjs'
+
+// Whole, this file weighed 182.9 s and left one Windows board part at 394.8-438.8 s of its 480 s (#1912).
+const test = partTest(nodeTest)
 
 const settingsLoader = registerHooks({
   resolve(specifier, context, nextResolve) {
