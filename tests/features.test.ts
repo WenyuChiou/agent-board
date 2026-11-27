@@ -1286,6 +1286,8 @@ test('an inline "A or B?" choice of amounts offers the amounts, not the question
   expect(askOf('Should I set the retry limit to between three and 5 or 10?', '').options[0]).toBe('Should I set the retry limit to between three and 5')
   expect(askOf('Should I set the maximum retry limit to 3 or 5?', '').options).toEqual(['3', '5'])
   expect(askOf('Should the export keep the minimum of 24 hours or 7 days?', '').options).toEqual(['24 hours', '7 days'])
+  expect(askOf('Should the export keep at least the last 24 hours or 7 days of history?', '').options[0]).toBe('Should the export keep at least the last 24 hours')
+  expect(askOf('Should I set the limit to max 3 or 5?', '').options[0]).toBe('Should I set the limit to max 3')
   expect(askOf('Should I set the retry limit to between few and 5 or 10?', '').options[0]).toBe('Should I set the retry limit to between few and 5')
   expect(askOf('Should the export keep three to 5 days or 10 days?', '').options[0]).toBe('Should the export keep three to 5 days')
   expect(askOf('Should the service wait 1h 30m or 2h?', '').options[0]).toBe('Should the service wait 1h 30m')
