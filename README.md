@@ -37,7 +37,7 @@ npx @wenyuchiou/agent-board@next
 - **Local and plain.** One Markdown file you can read and edit, a page on 127.0.0.1 only, and no model calls by the board.
 - **One command to install, one to remove.** `setup` shows what it will change before it writes; `remove` takes out what setup wrote and leaves your own settings alone.
 
-Tools such as [T3 Code](https://github.com/pingdotgg/t3code) run each agent session inside the tool itself, so they show only the sessions running there. Agent Board shows the sessions you already run in each vendor's own terminal or desktop app, so nothing moves to a new tool.
+[T3 Code](https://github.com/pingdotgg/t3code) runs agents inside its own app: it starts each session there, and it can import past conversations as copies to continue in T3. Agent Board stays with the session that is still open in each vendor's own terminal or desktop app: it shows what that session is waiting on and, where the Supported agents table says so, sends your answer back into it. Use T3 Code to run new sessions in one app, with worktrees and a phone app; use Agent Board for the sessions you keep open in the vendors' own apps.
 
 <img alt="The board's page: Needs you shows a question from Claude Code with answer buttons; Working now lists tasks from Codex, Antigravity and OpenCode with their steps. Synthetic data." src="docs/images/page-en-dark.png" width="860">
 
