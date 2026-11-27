@@ -5812,6 +5812,58 @@ test('a press that finds the board gone keeps the typed reply', async () => {
   } finally { await board.close() }
 })
 
+test('a typed answer stays when the same session and question get a new connection, and never moves to another session', async () => {
+  const board = await page(LIVE_QUESTION)
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const withDelivery = (id, turn, session) => ({
+      ...model,
+      asks: [{ ...model.asks[0], send: 'connected', session: session || model.asks[0].session, delivery: { id, turn, agent: 'grok' } }],
+    })
+    const dom = await pageDom(html, withDelivery('synthetic-connection-1', 'synthetic-turn-1'))
+    dom.boxes()[0].value = 'blue'
+    // The receiver went away and registered again: same session, same question, new connection id and turn.
+    await dom.redraw(withDelivery('synthetic-connection-2', 'synthetic-turn-2'))
+    assert.equal(dom.boxes()[0].value, 'blue', 'the same session and question keep the draft')
+    // The same title under another session starts an empty box, so the text cannot go to that session.
+    await dom.redraw(withDelivery('synthetic-connection-3', 'synthetic-turn-3', 'synthetic-other-session'))
+    assert.equal(dom.boxes()[0].value, '', 'another session never gets the draft')
+  } finally { await board.close() }
+})
+
+test('a send still pending when the receiver reconnects clears only the text it sent, and the next send uses the new connection', async () => {
+  const board = await page(LIVE_QUESTION)
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const withDelivery = (id, turn) => ({
+      ...model,
+      asks: [{ ...model.asks[0], send: 'connected', delivery: { id, turn, agent: 'grok' } }],
+    })
+    let answer
+    const gate = new Promise(resolve => { answer = resolve })
+    const dom = await pageDom(html, withDelivery('synthetic-connection-1', 'synthetic-turn-1'), {
+      post: async () => { await gate; return { ok: true, json: async () => ({ ok: true, note: 'Synthetic queued' }) } },
+    })
+    dom.boxes()[0].value = 'blue'
+    dom.send().click()
+    await dom.flush()
+    await dom.redraw(withDelivery('synthetic-connection-2', 'synthetic-turn-2'))
+    assert.equal(dom.boxes()[0].value, 'blue')
+    dom.boxes()[0].value = 'green'
+    answer()
+    await dom.settle()
+    assert.equal(dom.boxes()[0].value, 'green', 'words typed after the press are not cleared by the earlier send')
+    // The kept words go to the connection drawn now, not the one the box had before.
+    dom.send().click()
+    await dom.settle()
+    assert.equal(dom.requests.at(-1).body.connection, 'synthetic-connection-2')
+    assert.equal(dom.requests.at(-1).body.turn, 'synthetic-turn-2')
+    assert.equal(dom.requests.at(-1).body.text, 'green')
+  } finally { await board.close() }
+})
+
 test('a reachable file error replaces the offline line and restores the previous button states', async () => {
   const board = await page(LIVE_QUESTION)
   try {

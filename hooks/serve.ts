@@ -2089,12 +2089,19 @@ const PAGE_SCRIPT = String.raw`
     }).then(function (ok) { refresh(); return ok; });
   }
   // A draft that was sent is gone from the box on the page now, whatever redraw happened since it was pressed.
-  function clearDraft(draftKey) {
-    pg.drafts[draftKey] = '';
+  // Only text equal to what was sent goes: words typed after the press, or kept across a new connection, stay (#782).
+  function clearDraft(draftKey, sentText) {
     var detailRailEl = document.getElementById('detail-rail');
+    var kept = null;
     [board, detailRailEl].forEach(function (rootEl) {
-      if (rootEl) rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) { if (box.getAttribute('data-key') === draftKey) box.value = ''; });
+      if (rootEl) rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) {
+        if (box.getAttribute('data-key') !== draftKey) return;
+        if (box.value.trim() === sentText) box.value = '';
+        else kept = box.value;
+      });
     });
+    if (kept !== null) pg.drafts[draftKey] = kept;
+    else if (String(pg.drafts[draftKey] || '').trim() === sentText || pg.drafts[draftKey] === undefined) pg.drafts[draftKey] = '';
   }
   function brand(agent) {
     if (!agent) return '';
@@ -2194,7 +2201,9 @@ const PAGE_SCRIPT = String.raw`
     input.setAttribute('aria-label', placeholder);
     // A draft belongs to its session and its question: a redraw that puts another session's
     // line under the same key starts an empty box, so the text is never sent to that session.
-    input.setAttribute('data-key', [key, session || '', asked || '', delivery ? delivery.id + ':' + delivery.turn : ''].join('\u0001'));
+    // The connection id and turn are not part of it: a receiver that goes away and registers again
+    // changes them, and the person's text stays; a send reads the connection that is drawn at that moment (#782).
+    input.setAttribute('data-key', [key, session || '', asked || ''].join('\u0001'));
     var draftKey = input.getAttribute('data-key');
     // The card's route, from its receiver's record, says what the button is called and whether Copy sits beside it:
     // a route that waits for a turn or for the chat to open keeps Copy, one that goes in now, at a step's end,
@@ -2208,7 +2217,7 @@ const PAGE_SCRIPT = String.raw`
         // The same text goes again through the same path; the box keeps it until it was sent.
         var run = function () {
           var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, text, delivery, session, asked, fp, go, line) : act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp, go);
-          return sent.then(function (ok) { if (ok) { clearDraft(draftKey); if (done) done(text); } return ok; });
+          return sent.then(function (ok) { if (ok) { clearDraft(draftKey, text); if (done) done(text); } return ok; });
         };
         sentLast[key] = { text: text, again: run };
         run();
