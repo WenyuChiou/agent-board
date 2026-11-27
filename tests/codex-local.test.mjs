@@ -9161,6 +9161,21 @@ test('Antigravity closing question refuses transcripts outside the hook conversa
     assert.equal(winRes.status, 0, winRes.stderr)
     assert.ok(record(winCaseId).steps.includes('- [?] Windows case question?'))
   }
+
+  // Row 9: trailing USER_INPUT after an earlier question yields no closing question on Stop.
+  const trailingUserId = 'synthetic-trailing-user-1467'
+  const trailingUserTx = join(f.home, '.gemini', 'antigravity', 'brain', trailingUserId, 'transcript.jsonl')
+  f.save(trailingUserTx, `${JSON.stringify(user)}\n${JSON.stringify(model('Earlier turn question?'))}\n${JSON.stringify(user)}\n`)
+  assert.equal(send(trailingUserId, trailingUserTx).status, 0)
+  assert.equal(record(trailingUserId).asked, undefined)
+
+  // Row 10: StopWait never reads closing questions even from its own bound transcript.
+  const stopWaitId = 'synthetic-stopwait-1467'
+  const stopWaitTx = join(f.home, '.gemini', 'antigravity', 'brain', stopWaitId, 'transcript.jsonl')
+  f.save(stopWaitTx, `${JSON.stringify(user)}\n${JSON.stringify(model('Should StopWait ignore this?'))}\n`)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'StopWait'], { conversationId: stopWaitId, transcriptPath: stopWaitTx }).status, 0)
+  assert.equal(existsSync(join(f.root, 'sessions', createHash('sha256').update(`antigravity:${stopWaitId}`).digest('hex') + '.json')), false)
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('Should StopWait ignore this?'))
 }))
 
 test('queued Grok status retains only the closing question and replays it', () => fixture(f => {
