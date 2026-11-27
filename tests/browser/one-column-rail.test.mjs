@@ -169,16 +169,27 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     await writeOwnInRail.focus()
     const beforeRedrawFocus = await writeOwnInRail.evaluate(node => document.activeElement === node)
     assert.equal(beforeRedrawFocus, true)
-    // Advancing progress triggers a live redraw without dropping focus from the focused rail action button.
+    // Advancing progress triggers a live redraw without dropping focus from the focused rail action button, and board triggers keep focus on poll redraw even while the rail is open.
     const movedMd = FIXTURE_MD().replace('- [~] Stream rows to temporary file', '- [~] Stream rows & ping')
     writeProgress(progress, movedMd)
     await page.locator('.r-step').filter({ hasText: 'Stream rows & ping' }).first().waitFor({ state: 'visible', timeout: 15_000 })
     assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), 'Write your own', 'live redraw preserves focus on the active rail button')
+    for (const [label, triggerLoc, updatedLine] of [
+      ['row-btn', rowBtn, '- [~] Stream rows & ping row'],
+      ['card-detail-btn', cardBtn, '- [~] Stream rows & ping card'],
+      ['q-toggle', board.question('Retry upload with backoff').locator('.q-toggle'), '- [~] Stream rows & ping q'],
+    ]) {
+      await triggerLoc.focus()
+      writeProgress(progress, FIXTURE_MD().replace('- [~] Stream rows to temporary file', updatedLine))
+      await page.locator('.r-step').filter({ hasText: updatedLine.replace('- [~] ', '') }).first().waitFor({ state: 'visible', timeout: 15_000 })
+      assert.equal(await triggerLoc.evaluate(node => document.activeElement === node), true, `board ${label} keeps focus across poll while rail is open`)
+    }
+    await page.locator('#detail-close').focus()
     await page.keyboard.press('Escape')
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
     assert.equal(await cardBtn.evaluate(node => document.activeElement === node), true, 'closing rail should restore focus to the card detail button')
 
-    // Manual waiting card ticks real serveAction via its owning row key/tickFp, preserves duplicate-name step focus via data-step-line, and falls back to #detail-close when an action disappears.
+    // Manual waiting card ticks real serveAction via its owning row key/tickFp, preserves duplicate-name step focus via data-step-line, falls back to #detail-close when blank line shifts duplicate steps or an action disappears.
     const manualCard = board.question('Confirm manual checklist?')
     await manualCard.locator('.card-detail-btn').click()
     await page.locator('#detail-rail').waitFor({ state: 'visible' })
@@ -189,6 +200,13 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     writeProgress(progress, FIXTURE_MD().replace('- [~] Stream rows to temporary file', '- [~] Stream rows & ping 2'))
     await page.locator('.r-step').filter({ hasText: 'Stream rows & ping 2' }).first().waitFor({ state: 'visible', timeout: 15_000 })
     assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-step-line')), secondRepeatLine, 'live redraw preserves focus on matching duplicate step by data-step-line')
+    // Inserting a blank line above both duplicate "Repeat check" steps shifts line numbers ambiguously: focus falls back to #detail-close rather than shifting onto the first occurrence.
+    writeProgress(progress, FIXTURE_MD().replace('- [ ] Repeat check\n- [ ] Repeat check', '\n- [ ] Repeat check\n- [ ] Repeat check'))
+    await page.waitForFunction((oldLine) => {
+      const btns = document.querySelectorAll('#detail-rail .steps li button')
+      return btns.length === 4 && btns[2].getAttribute('data-step-line') === oldLine && document.activeElement?.id === 'detail-close'
+    }, secondRepeatLine, { timeout: 15_000 })
+    await manualBtns.nth(1).focus()
     await manualBtns.nth(1).click()
     const tickDeadline = Date.now() + 10_000
     while (Date.now() < tickDeadline && !readFileSync(progress, 'utf8').includes('- [x] Check tag signature')) {
@@ -250,6 +268,29 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     await page.locator('.r-step').filter({ hasText: 'Stream rows & ping 3' }).first().waitFor({ state: 'visible', timeout: 15_000 })
     assert.equal(await askCard.evaluate(node => node.classList.contains('open')), false, 'narrow live redraw after rail close keeps card collapsed')
     assert.equal(await askCard.locator('.card-fold > .fold-in').isVisible(), false, 'narrow live redraw after rail close keeps composer hidden')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    // Entering write mode in card rail, switching selection to a Working row, closing rail, and narrowing keeps the original card collapsed while preserving its draft.
+    await qToggle.click()
+    await page.locator('#detail-rail').waitFor({ state: 'visible' })
+    await page.locator('#detail-rail').getByRole('button', { name: 'Write your own' }).click()
+    await page.locator('#detail-rail textarea[data-key]').fill('Switched rail draft')
+    await rowBtn.click()
+    await page.waitForFunction(() => {
+      const text = document.getElementById('detail-rail')?.textContent || ''
+      return !text.includes('Retry upload with backoff') && text.includes('Build export worker')
+    })
+    await page.keyboard.press('Escape')
+    await page.locator('#detail-rail').waitFor({ state: 'hidden' })
+    await page.setViewportSize({ width: 1300, height: 900 })
+    writeProgress(progress, FIXTURE_MD().replace('- [~] Stream rows to temporary file', '- [~] Stream rows & ping 4'))
+    await page.locator('.r-step').filter({ hasText: 'Stream rows & ping 4' }).first().waitFor({ state: 'visible', timeout: 15_000 })
+    assert.equal(await askCard.evaluate(node => node.classList.contains('open')), false, 'switching rail away from write card then closing keeps card collapsed after narrow redraw')
+    assert.equal(await askCard.locator('.card-fold > .fold-in').isVisible(), false, 'switching rail away from write card hides inline composer after narrow redraw')
+    await askCard.locator('.q-toggle').click()
+    await askCard.getByRole('button', { name: 'Write your own' }).click()
+    assert.equal(await askCard.locator('.composer textarea[data-key]').inputValue(), 'Switched rail draft', 'switching rail away from write card still preserves typed draft')
+    await askCard.getByRole('button', { name: 'Cancel' }).click()
+    await askCard.locator('.q-toggle').click()
     await page.setViewportSize({ width: 1440, height: 900 })
 
     // Shrinking from 1440px to 1300px moves the selected task inline and preserves draft, focus, and caret.
