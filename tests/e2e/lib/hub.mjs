@@ -287,7 +287,7 @@ export const openHub = async (specs, { prepare, traceReceipt = false } = {}) => 
             // dumping the synthetic message's prompt, nonce or connection credentials.
             let durableStatus = 'unavailable'
             try { durableStatus = readStore(hub.messages).find(one => one.id === sent.id)?.status ?? null } catch {}
-            const codes = new Set(['ACK_TIMEOUT', 'DELIVERY_UNCERTAIN', 'CONNECTION_EXPIRED', 'RECEIPT_CONFLICT', 'HOST_NOT_CONNECTED', 'SESSION_BUSY', 'INVALID_TURN_RESPONSE', 'CONNECTOR_NOT_CONNECTED'])
+            const codes = new Set(['ACK_TIMEOUT', 'DELIVERY_UNCERTAIN', 'CONNECTION_EXPIRED', 'RECEIPT_CONFLICT', 'HOST_NOT_CONNECTED', 'SESSION_BUSY', 'INVALID_TURN_RESPONSE', 'CONNECTOR_NOT_CONNECTED', 'MESSAGE_STORE_BUSY'])
             error.receiptDiagnostics = {
               observedStatus: receipt?.status ?? null,
               durableStatus,
