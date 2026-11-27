@@ -2089,12 +2089,19 @@ const PAGE_SCRIPT = String.raw`
     }).then(function (ok) { refresh(); return ok; });
   }
   // A draft that was sent is gone from the box on the page now, whatever redraw happened since it was pressed.
-  function clearDraft(draftKey) {
-    pg.drafts[draftKey] = '';
+  // Only text equal to what was sent goes: words typed after the press, or kept across a new connection, stay (#782).
+  function clearDraft(draftKey, sentText) {
     var detailRailEl = document.getElementById('detail-rail');
+    var kept = null;
     [board, detailRailEl].forEach(function (rootEl) {
-      if (rootEl) rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) { if (box.getAttribute('data-key') === draftKey) box.value = ''; });
+      if (rootEl) rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) {
+        if (box.getAttribute('data-key') !== draftKey) return;
+        if (box.value.trim() === sentText) box.value = '';
+        else kept = box.value;
+      });
     });
+    if (kept !== null) pg.drafts[draftKey] = kept;
+    else if (String(pg.drafts[draftKey] || '').trim() === sentText || pg.drafts[draftKey] === undefined) pg.drafts[draftKey] = '';
   }
   function brand(agent) {
     if (!agent) return '';
@@ -2210,7 +2217,7 @@ const PAGE_SCRIPT = String.raw`
         // The same text goes again through the same path; the box keeps it until it was sent.
         var run = function () {
           var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, text, delivery, session, asked, fp, go, line) : act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp, go);
-          return sent.then(function (ok) { if (ok) { clearDraft(draftKey); if (done) done(text); } return ok; });
+          return sent.then(function (ok) { if (ok) { clearDraft(draftKey, text); if (done) done(text); } return ok; });
         };
         sentLast[key] = { text: text, again: run };
         run();
