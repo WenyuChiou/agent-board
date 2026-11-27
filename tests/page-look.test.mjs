@@ -1093,3 +1093,107 @@ test('narrow cockpit HUD promotes live working steps, toggles idle filters, and 
   await waitDom.redraw(serveModel(waitAfterView, [], s, new Set(), false, undefined, false, { ...group, now: now + 60_000 }))
   assert.ok(hasClass(waitDoneShelf(), 'open'), 'waiting-to-done AI transition auto-opens Done shelf')
 })
+
+test('row summaries clamp cleanly, phantom gaps collapse, and chrome controls render icons with full tooltips', async () => {
+  const s = STRINGS.en
+  const html = servePage(s, 'n')
+  const rules = styleRules(html)
+  const ruleFor = sel => rules.find(r => r.selector === sel)
+
+  assert.equal(ruleFor('.row:not(.open) .r-title')?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap')
+  assert.equal(ruleFor('.row:not(.open) .r-title')?.declarations.find(d => d.property === 'text-overflow')?.value, 'ellipsis')
+  assert.equal(ruleFor('.row.open .r-title')?.declarations.find(d => d.property === 'white-space')?.value, 'normal')
+  assert.equal(ruleFor('.r-meta')?.declarations.find(d => d.property === 'display')?.value, 'flex')
+  assert.equal(ruleFor('.r-meta .r-step')?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap')
+  assert.equal(ruleFor('.r-meta .r-proj')?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap')
+  assert.equal(ruleFor('#board')?.declarations.find(d => d.property === 'gap')?.value, '0')
+  assert.ok(ruleFor('.shell[data-view="all"] #board>:not(.gone)~:not(.gone),.shell[data-view="needs"] #board>[data-sec="needs"]:not(.gone)~[data-sec="needs"]:not(.gone),.shell[data-view="others"] #board>[data-sec="others"]:not(.gone)~[data-sec="others"]:not(.gone)'), 'uses visible-sibling margin scoped to multi-section views')
+  assert.equal(ruleFor('.sec>.fx.gone,.sheet>.fx.gone')?.declarations.find(d => d.property === 'display')?.value, 'none')
+  assert.equal(ruleFor('.side .pfoot .set-row')?.declarations.find(d => d.property === 'margin-left')?.value, 'auto')
+  assert.ok(!ruleFor('.side .pfoot .set-row')?.declarations.some(d => d.property === 'flex-basis'), 'sidebar footer keeps single-row layout')
+
+  assert.match(html, /<button[^>]*class="icon-btn drawer-btn"[^>]*id="drawer-btn"/)
+  assert.match(html, new RegExp(`<button[^>]*id="settings-toggle"[^>]*title="${s.settingsTitle}"`))
+  for (const id of ['copy-icon', 'rail-peek-icon', 'archive-icon']) {
+    assert.match(html, new RegExp(`<template id="${id}"><svg[^>]*>`))
+  }
+
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const freshIso = new Date(now - 2 * 60_000).toISOString()
+  const longTaskTitle = 'Synthetic overlong prompt heading repeated across telemetry slices to verify folded row clipping and expanded full preservation without blowing up narrow right quarter HUD rows'
+  const longCardTask = 'Synthetic waiting card task title intentionally longer than ninety characters so expanded details use clip'
+  const longWorklogStep = 'Step 1 initial ingestion completed in sandbox batch -> Step 2 schema verification passed across all shards -> Step 3 final benchmark synthesis running live across long validation shards after cleanup and verification — transferred -> main-recall-2'
+  const md = [
+    '## synthetic-long-repo',
+    `<!-- auto session=dd100001 agent=claude state=waiting updated=${freshIso} -->`,
+    `### ${longCardTask}`,
+    '- [?] Ship iconified compact card chrome now?',
+    '<!-- options=["Yes","No"] -->',
+    '<!-- /auto session=dd100001 -->',
+    '',
+    `<!-- auto session=dd100002 agent=codex state=working updated=${freshIso} -->`,
+    `### ${longTaskTitle}`,
+    '- [x] Prepare fixtures',
+    `- [~] ${longWorklogStep}`,
+    '- [ ] Finish delivery',
+    '<!-- /auto session=dd100002 -->',
+    '',
+    `<!-- auto session=dd100003 agent=gemini state=done updated=${freshIso} -->`,
+    '### Compact done archive test',
+    '- [x] Verified icon button',
+    '<!-- /auto session=dd100003 -->',
+    '',
+  ].join('\n')
+
+  const view = buildView(parseProgress(md), ['synthetic-long-repo'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const dom = await pageDom(html, serveModel(view, [], s, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }))
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const hasClass = (node, name) => String(node?.className ?? '').split(/\s+/).includes(name)
+
+  // Worklog step summarizes to its latest tail segment in .r-meta while preserving the full text in .title and expanded .whole.
+  const workRow = walk(dom.node('working-now')).find(n => n.tag === 'li' && hasClass(n, 'row'))
+  const stepNode = walk(workRow).find(n => hasClass(n, 'r-step'))
+  assert.ok(stepNode, '.r-step renders in Working now row')
+  assert.ok(Array.from(stepNode.textContent).length <= 72, `compact step <= 72 code points, got ${Array.from(stepNode.textContent).length}: ${stepNode.textContent}`)
+  assert.ok(stepNode.textContent.startsWith('… → '), `worklog chain shows latest tail with prefix: ${stepNode.textContent}`)
+  assert.ok(stepNode.textContent.includes('Step 3 final benchmark synthesis'), stepNode.textContent)
+  assert.ok(stepNode.textContent.endsWith('→ main-recall-2'), `preserves trailing handoff target: ${stepNode.textContent}`)
+  assert.ok((stepNode.getAttribute('title') || '').includes('Step 1 initial ingestion'), 'full step remains on tooltip')
+  const openWholes = walk(workRow).filter(n => hasClass(n, 'whole')).map(n => n.textContent)
+  assert.ok(openWholes.includes(longWorklogStep), 'expanded row preserves verbatim full worklog step')
+
+  // Long waiting-card task title uses <details class="clip"> inside expanded card body.
+  const waitCard = walk(dom.node('needs')).find(n => n.tag === 'article' && n.getAttribute('data-ref-key'))
+  const cTaskClip = walk(waitCard).find(n => hasClass(n, 'c-task') && hasClass(n, 'clip'))
+  assert.ok(cTaskClip, 'overlong ask.task wraps in .c-task.clip')
+  assert.equal(walk(cTaskClip).find(n => hasClass(n, 'whole'))?.textContent, longCardTask)
+
+  // Surface pills on card and row carry tooltip title while label sits inside .surf-lbl.
+  const cardPill = walk(waitCard).find(n => hasClass(n, 'surf-pill'))
+  const rowPill = walk(workRow).find(n => hasClass(n, 'surf-pill'))
+  assert.equal(cardPill?.getAttribute('title'), s.pgInterfaceCli)
+  assert.equal(rowPill?.getAttribute('title'), s.pgInterfaceCli)
+
+  // Copy confirm button keeps className="answer-send", data-copy="1", and exact textContent via .sr-lbl.
+  const copyBtn = walk(waitCard).find(n => n.className === 'answer-send')
+  assert.ok(copyBtn && copyBtn.getAttribute('data-copy') === '1')
+  assert.ok(walk(copyBtn).some(n => hasClass(n, 'sr-lbl')), 'copy button wraps label in .sr-lbl')
+  assert.equal(copyBtn.title, s.pgCopyChoice)
+  assert.equal(copyBtn.textContent, s.pgCopyChoice)
+
+  // Detail rail button wraps label in .sr-lbl and carries tooltip title.
+  const detailBtn = walk(waitCard).find(n => hasClass(n, 'card-detail-btn'))
+  assert.ok(walk(detailBtn).some(n => hasClass(n, 'sr-lbl')), 'detail button wraps label in .sr-lbl')
+  assert.equal(detailBtn?.getAttribute('title'), s.pgDetailRail)
+  assert.equal(detailBtn?.textContent, s.pgDetailRail)
+
+  // Done shelf archive button uses icon-first .done-archive-btn + .sr-lbl inside [data-card-key="recent"].
+  const doneSec = walk(dom.node('board')).find(n => n.getAttribute?.('data-sec') === 'done')
+  const archiveBtn = walk(doneSec).find(n => hasClass(n, 'done-archive-btn'))
+  assert.ok(archiveBtn, 'Done shelf renders compact icon-first .done-archive-btn')
+  assert.ok(walk(archiveBtn).some(n => hasClass(n, 'sr-lbl')), 'archive button wraps label in .sr-lbl')
+  assert.equal(archiveBtn.getAttribute('title'), s.archiveNow)
+  assert.equal(archiveBtn.textContent, s.archiveNow)
+  assert.equal(archiveBtn.parentNode?.getAttribute('data-card-key'), 'recent')
+})
+
