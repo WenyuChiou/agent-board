@@ -5812,6 +5812,58 @@ test('a press that finds the board gone keeps the typed reply', async () => {
   } finally { await board.close() }
 })
 
+test('a typed answer stays when the same session and question get a new connection, and never moves to another session', async () => {
+  const board = await page(LIVE_QUESTION)
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const withDelivery = (id, turn, session) => ({
+      ...model,
+      asks: [{ ...model.asks[0], send: 'connected', session: session || model.asks[0].session, delivery: { id, turn, agent: 'grok' } }],
+    })
+    const dom = await pageDom(html, withDelivery('synthetic-connection-1', 'synthetic-turn-1'))
+    dom.boxes()[0].value = 'blue'
+    // The receiver went away and registered again: same session, same question, new connection id and turn.
+    await dom.redraw(withDelivery('synthetic-connection-2', 'synthetic-turn-2'))
+    assert.equal(dom.boxes()[0].value, 'blue', 'the same session and question keep the draft')
+    // The same title under another session starts an empty box, so the text cannot go to that session.
+    await dom.redraw(withDelivery('synthetic-connection-3', 'synthetic-turn-3', 'synthetic-other-session'))
+    assert.equal(dom.boxes()[0].value, '', 'another session never gets the draft')
+  } finally { await board.close() }
+})
+
+test('a send still pending when the receiver reconnects clears only the text it sent, and the next send uses the new connection', async () => {
+  const board = await page(LIVE_QUESTION)
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const withDelivery = (id, turn) => ({
+      ...model,
+      asks: [{ ...model.asks[0], send: 'connected', delivery: { id, turn, agent: 'grok' } }],
+    })
+    let answer
+    const gate = new Promise(resolve => { answer = resolve })
+    const dom = await pageDom(html, withDelivery('synthetic-connection-1', 'synthetic-turn-1'), {
+      post: async () => { await gate; return { ok: true, json: async () => ({ ok: true, note: 'Synthetic queued' }) } },
+    })
+    dom.boxes()[0].value = 'blue'
+    dom.send().click()
+    await dom.flush()
+    await dom.redraw(withDelivery('synthetic-connection-2', 'synthetic-turn-2'))
+    assert.equal(dom.boxes()[0].value, 'blue')
+    dom.boxes()[0].value = 'green'
+    answer()
+    await dom.settle()
+    assert.equal(dom.boxes()[0].value, 'green', 'words typed after the press are not cleared by the earlier send')
+    // The kept words go to the connection drawn now, not the one the box had before.
+    dom.send().click()
+    await dom.settle()
+    assert.equal(dom.requests.at(-1).body.connection, 'synthetic-connection-2')
+    assert.equal(dom.requests.at(-1).body.turn, 'synthetic-turn-2')
+    assert.equal(dom.requests.at(-1).body.text, 'green')
+  } finally { await board.close() }
+})
+
 test('a reachable file error replaces the offline line and restores the previous button states', async () => {
   const board = await page(LIVE_QUESTION)
   try {
@@ -11818,7 +11870,8 @@ test('the page names each agent by its brand name on questions, older questions,
       assert.equal(markTitleOf('ask'), name)
       assert.equal(markTitleOf('retained'), name)
       assert.equal(markTitleOf('reminder'), name)
-      assert.equal(pressWalk(cardWithKey(dom, 'hidden')).find(node => node.className === 'c-meta').textContent, `Demo · ${name} › Hidden plan`)
+      assert.equal(pressWalk(cardWithKey(dom, 'hidden')).find(node => node.className?.startsWith('ag '))?.getAttribute('title'), name)
+      assert.equal(pressWalk(cardWithKey(dom, 'hidden')).find(node => node.className === 'c-meta').childNodes.find(node => !String(node.className).includes('ag')).textContent, 'Demo › Hidden plan')
       const chip = dom.node('chips').childNodes.find(node => node.getAttribute('data-agent') === agent)
       assert.ok(chip, `${lang}: ${name}`)
       assert.ok(chip.getAttribute('title').startsWith(name), chip.getAttribute('title'))
@@ -11869,9 +11922,10 @@ test('a Claude Code card says Claude Code, a hand-kept card shows a round check 
     { key: 'hid-own', project: 'Home', agent: '', isOwn: true, task: 'Own task', text: 'Hidden own item' },
   ]
   const hiddenDom = await pageDom(await sourcePage(), hiddenModel)
-  const hiddenLines = pressWalk(hiddenDom.node('board')).filter(node => node.className === 'hid').map(node => node.textContent)
-  assert.ok(hiddenLines.some(line => line.includes('Hidden Claude question?') && line.includes('Claude Code')), JSON.stringify(hiddenLines))
-  assert.ok(hiddenLines.some(line => line.includes('Hidden own item') && !line.includes('Claude Code') && !line.includes('Your own')), JSON.stringify(hiddenLines))
+  const hiddenNodes = pressWalk(hiddenDom.node('board')).filter(node => node.className === 'hid')
+  const hiddenLines = hiddenNodes.map(node => node.textContent)
+  assert.ok(hiddenNodes.some(node => node.textContent.includes('Hidden Claude question?') && pressWalk(node).some(one => String(one.className).includes('ag-claude-code') && one.getAttribute('title') === 'Claude Code')), JSON.stringify(hiddenLines))
+  assert.ok(hiddenNodes.some(node => node.textContent.includes('Hidden own item') && !node.textContent.includes('Claude Code') && !node.textContent.includes('Your own') && pressWalk(node).some(one => String(one.className).includes('ag-own'))), JSON.stringify(hiddenLines))
 })
 
 test('an agent without a brand name keeps its own name', async () => {
@@ -11898,10 +11952,10 @@ test("every card kind on the page carries its agent's mark", async () => {
     const root = cardRoot(cardWithKey(dom, key))
     assert.equal(pressWalk(root).filter(node => node.className === 'ag ag-codex').length, 1, key)
   }
-  // A line on the hidden shelf has no mark; it names its agent in words.
+  // A line on the hidden shelf carries its agent's mark and keeps its visible meta vendor-free.
   const hidden = cardWithKey(dom, 'hidden')
-  assert.equal(pressWalk(hidden).filter(node => node.className?.startsWith('ag')).length, 0)
-  assert.ok(pressWalk(hidden).find(node => node.className === 'c-meta').textContent.includes('Codex'))
+  assert.equal(pressWalk(hidden).filter(node => String(node.className).startsWith('ag ag-codex')).length, 1)
+  assert.equal(pressWalk(hidden).find(node => node.className === 'c-meta').textContent.trim(), 'Demo › Hidden plan')
 })
 
 test('a question card puts choices before its copy button and the hide button last', async () => {
@@ -12366,10 +12420,10 @@ test("the agent row shows each agent's counts and filters the page to that agent
   try {
     const dom = await pageDom(html, model)
     assert.deepEqual(dom.node('chips').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['codex', 'gemini', 'cursor', 'claude'])
-    // Each icon names its agent, its state and how many questions wait; the badge carries the number.
-    assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label'), `${EN.agentNames.codex} · ${EN.pgTipWorking}: ${EN.pgTipNeedsOne}`)
+    // Each icon names its agent, its interface(s), its state and how many questions wait; the badge carries the number.
+    assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label'), `${EN.agentNames.codex} · ${EN.pgInterfaceCli} · ${EN.pgTipWorking}: ${EN.pgTipNeedsOne}`)
     // Gemini wrote its waiting block 3 minutes ago, so it is open (not heard from: the reply test).
-    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgStateOpen}: ${EN.pgTipNeedsOne}`)
+    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgInterfaceCli} · ${EN.pgStateOpen}: ${EN.pgTipNeedsOne}`)
     assert.equal(badgeOf(rowAgent(dom, 'codex')).textContent, '1')
     assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
     // Pressing Codex leaves its cards and rows and takes the other agents' away; the sidebar copy agrees.
@@ -12483,7 +12537,7 @@ test('an agent not heard from for 30 minutes keeps its icon colours, and its sta
     const dom = await pageDom(html, model, { width: 1280 })
     for (const node of [rowAgent(dom, 'gemini'), sideAgent(dom, 'gemini')]) {
       assert.equal(node.getAttribute('data-presence'), 'notseen')
-      assert.equal(node.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
+      assert.equal(node.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgInterfaceCli} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
       assert.ok(shownWords(node).includes(EN.pgNotSeen), shownWords(node))
     }
     assert.equal(badgeOf(rowAgent(dom, 'gemini')).textContent, '1')
@@ -12506,7 +12560,7 @@ test('the agent list says closed for an agent whose sessions ended, with no ques
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   const gemini = sideAgent(dom, 'gemini')
   assert.equal(gemini.getAttribute('data-presence'), 'offline')
-  assert.equal(gemini.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgOffline}: ${EN.pgChipEmpty}`)
+  assert.equal(gemini.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgInterfaceCli} · ${EN.pgOffline}: ${EN.pgChipEmpty}`)
   assert.ok(shownWords(gemini).includes(EN.pgOffline))
 })
 
@@ -12516,7 +12570,7 @@ test('a reply button on an unconnected question says it copies and the card then
   const { board, model, html } = await groupedPage(groupedSource().replace(geminiBlock(3), geminiBlock(45)))
   try {
     const dom = await pageDom(html, model, { copyAllowed: true })
-    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
+    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgInterfaceCli} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
     const card = key => dom.node('needs').querySelectorAll('[data-ref-key]').find(one => shownWords(one).includes(key))
     // A question the board cannot send to has one Copy button for its choices.
     const labels = dom.buttons().map(button => button.getAttribute('aria-label'))
@@ -12903,7 +12957,7 @@ test('an agent with no open session shows as offline and its answers copy', asyn
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   for (const node of [rowAgent(dom, 'gemini'), sideAgent(dom, 'gemini')]) {
     assert.equal(node.getAttribute('data-presence'), 'offline')
-    assert.ok(node.getAttribute('aria-label').startsWith(`${EN.agentNames.gemini} · ${EN.pgOffline}:`), node.getAttribute('aria-label'))
+    assert.ok(node.getAttribute('aria-label').startsWith(`${EN.agentNames.gemini} · ${EN.pgInterfaceCli} · ${EN.pgOffline}:`), node.getAttribute('aria-label'))
   }
   // Codex has a task open in its window, so it carries no such word.
   assert.equal(rowAgent(dom, 'codex').getAttribute('data-presence'), 'open')
@@ -13026,7 +13080,7 @@ test('an agent with a recently finished task and no closed session shows as open
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   const node = rowAgent(dom, 'codex')
   assert.equal(node.getAttribute('data-presence'), 'open')
-  assert.equal(node.getAttribute('aria-label'), `Codex · ${EN.pgStateOpen}: No work yet`)
+  assert.equal(node.getAttribute('aria-label'), `Codex · ${EN.pgInterfaceCli} · ${EN.pgStateOpen}: No work yet`)
 })
 
 test('no own tasks chip is shown when hand-kept to-dos exist, and AI-authored hand-kept questions count under that AI', async () => {
@@ -13626,7 +13680,7 @@ test('stale saved agent filter clears cleanly and LAN models preserve interface 
     mailboxes: [],
     messages: [],
   }
-  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, messaging, false, { now, repoOf: () => null, versions: { board: '1.2.3', package: null } })
+  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, runtime.handledOnly(messaging), false, { now, repoOf: () => null, versions: { board: '1.2.3', package: null } })
   assert.equal(lanModel.asks[0].surface, 'Codex desktop app')
   assert.equal(lanModel.groups[0].rows[0].surface, 'Codex desktop app')
   const dom = await pageDom(await sourcePage(), lanModel, { width: 1280, storage: new Map([['agent-board.filter', 'gemini']]) })
@@ -13674,7 +13728,7 @@ test('completed Codex desktop task keeps App classification in Done shelf', asyn
   }
   const opts = { now, repoOf: () => null, versions: { board: '1.2.3', package: null } }
   const model = runtime.serveModel(view, [], EN, new Set(), false, messaging, false, opts)
-  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, messaging, false, opts)
+  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, runtime.handledOnly(messaging), false, opts)
   for (const m of [model, lanModel]) {
     assert.equal(m.finished.length, 1)
     assert.equal(m.finished[0].surface, 'Codex desktop app')
