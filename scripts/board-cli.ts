@@ -75,7 +75,7 @@ import { runMcp } from './board-mcp'
 import { createSettingsAgents } from './settings-agents'
 
 // The line `/progress connect` puts above the bundle sets it.
-const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
+const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string; codexRoot?: string } }).AGENT_BOARD ?? {}
 
 const args = process.argv.slice(2)
 const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'].includes(arg))
@@ -152,7 +152,9 @@ const savedLanguage = (): SettingsLang | null => {
   } catch { return null }
 }
 const langFlag = flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang'))
-const wordsNow = () => STRINGS[boardLanguage(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))]
+const defaultLang = () => boardLanguage(null, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))
+const currentLang = () => boardLanguage(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))
+const wordsNow = () => STRINGS[currentLang()]
 let s = wordsNow()
 
 // Files changed since the board last read progress.md in full. A read refused because another
@@ -2089,9 +2091,9 @@ const runFolder = (name: string): string => {
 
 // Where a running page leaves its address, so the next `--serve` opens that page instead of a
 // second one. Not beside progress.md: the address holds the page's token, and that folder is
-// often a git repository that syncs itself. One file per progress.md. `built` is when this
-// script was written: a page started by an older copy (before an update) is closed and
-// started again.
+// often a git repository that syncs itself. One file per progress.md. `built` is the SHA-256
+// fingerprint of this script's release body (skipping the per-copy `globalThis.AGENT_BOARD`
+// prelude and normalizing CRLF to LF), so two copies of the same release reuse the page (#1831).
 // Worked out only when serving, so a plain print makes no folder.
 let served: string | undefined
 // The same progress.md named two ways (C:/x and C:\x) is one board, with one page.
@@ -2102,17 +2104,26 @@ const serveFile = (): string => {
   return (served = join(runFolder(name), name))
 }
 const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? (args.includes('--mcp') ? defaultMessagesDirectory(path, homedir(), process.env, process.platform) : serveFile().replace(/\.json$/, '-messages')))
+const settingsDataDir = (): string => {
+  const home = resolve(flag('--home') ?? homedir())
+  return resolve(flag('--data-dir') ?? BAKED.codexRoot ?? join(home, '.agent-board'))
+}
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
-const built = (() => {
-  if (args.includes('--status')) return ''
+let builtValue: string | undefined
+const built = (): string => {
+  if (builtValue !== undefined) return builtValue
+  if (args.includes('--status')) return (builtValue = '')
   try {
-    return String(statSync(script).mtimeMs)
+    const text = readFileSync(script, 'utf8')
+    const cut = text.indexOf('\n')
+    const body = text.startsWith('globalThis.AGENT_BOARD = ') ? (cut >= 0 ? text.slice(cut + 1) : '') : text
+    return (builtValue = createHash('sha256').update(body.replace(/\r\n/g, '\n')).digest('hex'))
   } catch {
-    return ''
+    return (builtValue = '')
   }
-})()
+}
 
 type Running = { pid: number; port: number; url: string; path: string; built: string }
 
@@ -2353,7 +2364,7 @@ const serveChild = (): void => {
       },
       get s() { return s },
       port: requestedPort,
-      ping: { path, built, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: isCodexSendOn(), noCodexSend: args.includes('--no-codex-send'), messagesDirectory: messagesDirectory() },
+      ping: { path, built: built(), get lang() { return defaultLang() }, dataDirectory: settingsDataDir(), idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: isCodexSendOn(), noCodexSend: args.includes('--no-codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       // An open board request is answered when progress.md or the hooks' inbox changes (#359).
@@ -2394,7 +2405,7 @@ const serveChild = (): void => {
         // more; so it does not start at all. Nor when the file is there already: another
         // `--serve` started a page at the same moment and wrote first, and that one is the page.
         try {
-          const text = JSON.stringify({ pid: process.pid, port, url, path, built })
+          const text = JSON.stringify({ pid: process.pid, port, url, path, built: built() })
           if (process.platform === 'win32') writePrivateRuntimeFile(file, text)
           else writeFileSync(file, text, { mode: 0o600, flag: 'wx' })
         } catch (error) {
@@ -2522,7 +2533,7 @@ const runningPage = async (isStarting = false, isReplacing = false, replaced?: {
   const requestedStale = staleTimeoutMs()
   // Send to Codex (#318): a plain command keeps a page whether its receiver is on or off, so `/agent-board` never ends a page the
   // person turned it off for; `--codex-send` asks for a page with it on, `--no-codex-send` for one with it off.
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built && (isStopping || (answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built() && (isStopping || ((!args.includes('--port') || parseServePort(flag('--port')) === running.port) && (answer.lang === undefined || answer.lang === defaultLang()) && (answer.dataDirectory === undefined || (typeof answer.dataDirectory === 'string' && board(answer.dataDirectory) === board(settingsDataDir()))) && answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   if (await stays(running, serveFile(), isReplacing && replacementMove(running))) return { page: running, isKept: true }
   if (replaced !== undefined && answer !== null && answer !== 'silent' && answer.noCodexSend === true) replaced.isCodexSendOff = true
   return null
@@ -2645,6 +2656,13 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
     }
     throw runtimeFolderFailure()
   }
+  if (args.includes('--port')) {
+    const requestedPort = parseServePort(flag('--port'))
+    if (requestedPort === null) {
+      if (failure !== undefined) failure.invalidPort = flag('--port') ?? ''
+      return null
+    }
+  }
   const old = readRunning(oldServeFile)
   if (old !== null && (await stays(old, oldServeFile, replacementMove(old)))) {
     await refreshServerPackage(old.url)
@@ -2660,13 +2678,6 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   if (found !== null) {
     await refreshServerPackage(found.page.url)
     return { url: found.page.url, port: found.page.port, isKept: found.isKept, isNew: false, idleMs: found.idleMs }
-  }
-  if (args.includes('--port')) {
-    const requestedPort = parseServePort(flag('--port'))
-    if (requestedPort === null) {
-      if (failure !== undefined) failure.invalidPort = flag('--port') ?? ''
-      return null
-    }
   }
   const rest = ['--lang', '--port', '--idle-minutes', '--stale-ms'].flatMap(name => {
     const value = flag(name)

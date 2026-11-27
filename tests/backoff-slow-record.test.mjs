@@ -86,7 +86,9 @@ test('launcher waits for a slow 0-byte address record after claim backoff and re
     const stagedPath = join(recordDir, `staged-${recordName}`)
     const messagesDir = recordPath.replace(/\.json$/, '-messages')
     mkdirSync(messagesDir, { mode: 0o700, recursive: true })
-    const built = String(statSync(boardScript).mtimeMs)
+    const rawScript = readFileSync(boardScript, 'utf8')
+    const cut = rawScript.indexOf('\n')
+    const built = createHash('sha256').update((rawScript.startsWith('globalThis.AGENT_BOARD = ') ? (cut >= 0 ? rawScript.slice(cut + 1) : '') : rawScript).replace(/\r\n/g, '\n')).digest('hex')
 
     const nonce = randomBytes(16).toString('hex')
     const claimName = `.message-claim-${process.pid}-${nonce}.json`
