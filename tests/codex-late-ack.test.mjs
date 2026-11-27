@@ -76,7 +76,11 @@ const withHub = async (opts, fn) => {
       req.on('end', () => {
         try {
           const body = JSON.parse(raw || '{}')
-          const override = action === 'receipt' ? opts.onReceipt?.(body) : null
+          const override = action === 'receipt'
+            ? opts.onReceipt?.(body, {
+                registerHolderSync: () => messaging.act('register', { agent: 'codex', session: THREAD_ID, surface: tsMod.SURFACE_IDS.cli, turn: 'session', scope: 'session' }, Date.now()),
+              })
+            : null
           if (override) {
             res.writeHead(override.status, { 'content-type': 'application/json' })
             return res.end(JSON.stringify(override.body))
@@ -167,31 +171,38 @@ test('a late Codex ACK after the board connection disconnects mid-turn acknowled
   assert.equal(f.starts(d), 1)
 }))
 
-test('a late Codex ACK after acceptance is refused as CONTESTED while turn/start is in flight still acknowledges once uncontested (#1796)', { timeout: 30_000 }, () => withHub({}, async f => {
-  const ackFlag = join(f.dir, 'ack-contested')
-  const d = f.daemon('contested-ack', { startDelay: 800, ackFlag })
-  const errors = []
-  f.start(d, { pollMs: 2500, onError: error => errors.push(error.message) })
-  const conn = await f.connectionOf()
-  assert.equal((await f.send(conn, 'AB-CX-1796-2')).status, 200)
-  await waitFor(() => f.starts(d) === 1, 10_000, 'turn/start called')
+test('a late Codex ACK after acceptance is refused as CONTESTED while turn/start is in flight still acknowledges once uncontested (#1796)', { timeout: 30_000 }, async () => {
+  let holder = null
+  await withHub({
+    onReceipt: (body, helpers) => {
+      if (body.status === 'accepted' && !holder) holder = helpers.registerHolderSync()
+      return null
+    },
+  }, async f => {
+    const ackFlag = join(f.dir, 'ack-contested')
+    const d = f.daemon('contested-ack', { ackFlag })
+    const errors = []
+    f.start(d, { onError: error => errors.push(error.message) })
+    const conn = await f.connectionOf()
+    assert.equal((await f.send(conn, 'AB-CX-1796-2')).status, 200)
 
-  const holder = await f.registerHolder()
-  await waitFor(() => errors.includes('CONTESTED'), 10_000, 'CONTESTED refusal on accepted')
-  await waitFor(() => f.messageOf('AB-CX-1796-2')?.error === 'DISCONNECTED', 10_000, 'DISCONNECTED status after drop')
+    await waitFor(() => errors.includes('CONTESTED'), 10_000, 'CONTESTED refusal on accepted')
+    await waitFor(() => f.messageOf('AB-CX-1796-2')?.error === 'DISCONNECTED', 10_000, 'DISCONNECTED status after drop')
 
-  writeFileSync(ackFlag, '')
-  await waitFor(() => !existsSync(ackFlag), 10_000, 'daemon consumed ackFlag')
-  await f.disconnectHolder(holder)
+    writeFileSync(ackFlag, '')
+    await waitFor(() => !existsSync(ackFlag), 10_000, 'daemon consumed ackFlag')
+    assert.ok(holder)
+    await f.disconnectHolder(holder)
 
-  const settled = await waitFor(() => {
-    const one = f.messageOf('AB-CX-1796-2')
-    return one?.status === 'acknowledged' ? one : null
-  }, 10_000, 'acknowledged after contested drop')
-  assert.equal(settled.error, '')
-  assert.equal(tsMod.messageStatus(settled, Date.now(), tsMod.EN).state, 'read')
-  assert.equal(f.starts(d), 1)
-}))
+    const settled = await waitFor(() => {
+      const one = f.messageOf('AB-CX-1796-2')
+      return one?.status === 'acknowledged' ? one : null
+    }, 10_000, 'acknowledged after contested drop')
+    assert.equal(settled.error, '')
+    assert.equal(tsMod.messageStatus(settled, Date.now(), tsMod.EN).state, 'read')
+    assert.equal(f.starts(d), 1)
+  })
+})
 
 test('a Codex ACK receipt meeting a busy message store (503) retries via owed receipt to acknowledged, while a failed turn after disconnect is never acknowledged (#1796)', { timeout: 45_000 }, async () => {
   let ackAttempts = 0
