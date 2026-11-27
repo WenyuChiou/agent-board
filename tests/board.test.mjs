@@ -6751,13 +6751,13 @@ require('node:module').syncBuiltinESMExports()
     const out = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve'], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(new Error(`${error.message}\n${stdout}\n${stderr}`)) : done(stdout))))
     url = board.urlOf(out)
     assert.ok(url, out)
+    const origin = new URL(url).origin
     for (let tries = 0; !existsSync(opened) && tries < 50; tries++) await delay(100)
-    // The board opens its own page, with its one-time approval key after the # (D3, #1318), which it
-    // never prints: the address before the key is the one served, and nothing gains backticks.
+    // The board opens a one-use link with its one-time approval key after the # (D3, #1318), which it
+    // never prints: the origin matches the server, the path is /open/<code>, and nothing gains backticks.
     const recorded = readFileSync(opened, 'utf8').split(/\r?\n/).filter(Boolean)
     assert.equal(recorded.length, 1, `one launch: ${JSON.stringify(recorded)}`)
-    assert.ok(recorded[0].startsWith(`${url}#k=`), `the address must not gain backticks: ${recorded[0]}`)
-    assert.match(recorded[0].slice(`${url}#k=`.length), /^[\w-]{32}$/, 'the key is the only addition')
+    assert.match(recorded[0], new RegExp(`^${origin.replace(/\./g, '\\.')}/open/[\\w-]+#k=[\\w-]{32}$`), `the one-use address must not gain backticks: ${recorded[0]}`)
   } finally {
     await board.end(url ? [url] : [])
   }
