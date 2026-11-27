@@ -28,7 +28,7 @@ import { boardLanguage, isLanguageOverridden, type SettingsLang } from '../hooks
 import { settingsPanel } from '../hooks/page-settings'
 import { qrModules, qrText } from '../hooks/qr'
 import { STALE_MS } from '../hooks/parse'
-import { DOING_QUIET_MS, WORKING_MS } from '../hooks/grouping'
+import { DOING_QUIET_MS, groupBoard, WORKING_MS } from '../hooks/grouping'
 import { confirmMatches, confirmTask } from '../hooks/blocks'
 import { applyCompletionOverlay, completionKey, completionOfBlock, completionOverlay, isCompletionOverlay } from '../hooks/mirror'
 import { RELEASED } from '../hooks/released'
@@ -709,16 +709,46 @@ test('an ended session offers the command that reopens it where it ran', () => {
   expect(row?.pr).toBe('PR #3 · CI 通過')
 })
 
-test('the status line says where things stand, and nothing when nothing does', () => {
+test('the status line leads with cross-session waiting alerts and active step text, without prefix or box bar', () => {
   const projects = parseProgress('## 求職\n### Google 暑期實習\n> 截止 10-18\n- [?] 推薦信\n')
   const line = statusLine(buildView(projects, [], { ...working(), pr: PR }, NOW))
-  // Two steps or more: the bar takes the place of the status words, and the title stays (#1085).
-  expect(line).toBe('進度 · 重做進度面板 ━╸ 1/2 · 1 件等你 · 1 件快到期 · PR #12 · CI 失敗 2 · 要求修改')
+  // Waiting & due alerts lead before the current session's step count + next step text.
+  expect(line).toBe('● 1 件等你 · 1 件快到期 · 1/2 · 寫 Mod · PR #12 · CI 失敗 2 · 要求修改')
   expect(statusLine(buildView([], [], null, NOW))).toBe(undefined)
-  // One step keeps its words: there is no bar to draw.
+  // One open step shows progress count + step text without duplicating statusPrefix.
   let one = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
   one = applyTaskCreate(one, { subject: '讀 API' }, '1', NOW)
-  expect(statusLine(buildView([], [], { ...one, title: '只有一步', state: 'working' }, NOW))).toBe('進度 · 只有一步 0/1 · Claude 正在做')
+  expect(statusLine(buildView([], [], { ...one, title: '只有一步', state: 'working' }, NOW))).toBe('0/1 · 讀 API')
+
+  // Multi-step cockpit regression: 6/8 done + active 7th step + 2 cross-session waiting questions.
+  let eight = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
+  for (let i = 1; i <= 8; i += 1) {
+    eight = applyTaskCreate(eight, { subject: i === 7 ? '跑 hybrid rerank 基準' : `步驟 ${i}`, activeForm: i === 7 ? '跑 hybrid rerank 基準' : '' }, String(i), NOW)
+    if (i <= 6) eight = applyTaskUpdate(eight, { taskId: String(i), status: 'completed' }, NOW)
+    else if (i === 7) eight = applyTaskUpdate(eight, { taskId: '7', status: 'in_progress' }, NOW)
+  }
+  const waitingTwo = parseProgress('## repo-a\n<!-- auto session=aa110011 agent=codex state=waiting updated=2026-10-16T11:55:00Z -->\n### Task A\n- [?] First question?\n<!-- /auto session=aa110011 -->\n\n## repo-b\n<!-- auto session=bb220022 agent=gemini state=waiting updated=2026-10-16T11:55:00Z -->\n### Task B\n- [?] Second question?\n<!-- /auto session=bb220022 -->\n')
+  for (const s of Object.values(STRINGS)) {
+    const hud = statusLine(buildView(waitingTwo, [], { ...eight, title: '檢索四種做法評測', state: 'working' }, NOW, 0, {}, s), s)
+    expect(hud).toBe(`● ${s.statusWaiting(2)} · 6/8 · 跑 hybrid rerank 基準`)
+    expect(hud).not.toContain(s.statusPrefix)
+    expect(hud).not.toMatch(/[━─╸]/)
+  }
+
+  // Unfolded active step wins even when earlier steps stay pending and foldSteps hides step 8.
+  let late = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
+  for (let i = 1; i <= 8; i += 1) {
+    late = applyTaskCreate(late, { subject: i === 8 ? '跑最後驗證' : `步驟 ${i}`, activeForm: i === 8 ? '跑最後驗證' : '' }, String(i), NOW)
+  }
+  late = applyTaskUpdate(late, { taskId: '8', status: 'in_progress' }, NOW)
+  expect(statusLine(buildView([], [], { ...late, title: '長清單測試', state: 'working' }, NOW))).toBe('0/8 · 跑最後驗證')
+
+  // Blocked single-step task puts localized blocker status ahead of step text so clipping never hides the block.
+  let blocked = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
+  blocked = applyTaskCreate(blocked, { subject: 'Verify the production deployment' }, '1', NOW)
+  blocked = applyTaskUpdate(blocked, { taskId: '1', status: 'in_progress' }, NOW)
+  blocked = { ...blocked, state: 'working', tasks: [{ ...blocked.tasks[0]!, blocked: 'Deployment approval failed' }] }
+  expect(statusLine(buildView([], [], blocked, NOW, 0, {}, STRINGS.en), STRINGS.en)).toBe('0/1 · stuck: Deployment appro…')
 })
 
 test('two 和色 sets: the light one under a light theme, the dark one otherwise', () => {
@@ -5744,4 +5774,47 @@ test('the pane and progress.md offer the same choices', () => {
     expect(paneView.waiting[0]!.options, `${one.name} pane`).toEqual(one.expected)
     expect(fromFile.waiting[0]!.options, `${one.name} progress.md`).toEqual(one.expected)
   }
+})
+
+// #1866: who wrote a hand-kept task. `### title <!-- session=<id> -->` names the block that wrote it.
+const WRITER_NOW = Date.parse('2026-11-26T12:00:00Z')
+const writerBoard = (file: string) => {
+  const view = buildView(parseProgress(file), [], null, WRITER_NOW, 0, {}, STRINGS.en)
+  return groupBoard(serveModel(view, [], STRINGS.en), WRITER_NOW, () => null, STRINGS.en)
+}
+const WRITER_BLOCK = [
+  '## demo',
+  '<!-- auto session=ab12cd34 agent=codex state=working updated=2026-11-26T11:55:00Z -->',
+  '### Port the parser',
+  '- [~] Port it',
+  '<!-- /auto session=ab12cd34 -->',
+  '',
+]
+
+test('a hand-kept task whose trailer names a session shows under that AI, with its mark on the second line', () => {
+  const file = [...WRITER_BLOCK, '## Home', '### Check the synthetic mail <!-- session=ab12cd34 -->', '- [?] Reply to the synthetic mail', ''].join('\n')
+  const result = writerBoard(file)
+  const codex = result.agents.find(group => group.agent === 'codex')
+  expect(codex?.cards.map(card => [card.agent, card.isOwn, card.task])).toEqual([['codex', true, 'Check the synthetic mail']])
+  expect(result.needs.n).toBe(1)
+  expect(result.all.counts.needs).toBe(1)
+})
+
+test('a hand-kept task whose trailer is wrong or names no block still shows in needs you and the full list, under no AI', () => {
+  for (const trailer of ['<!-- session=zz99zz99 -->', '<!-- session= -->', '<!-- session=ab12 cd34 -->', '<!-- session=../x -->', '']) {
+    const file = [...WRITER_BLOCK, '## Home', `### Check the synthetic mail ${trailer}`.trimEnd(), '- [?] Reply to the synthetic mail', ''].join('\n')
+    const result = writerBoard(file)
+    expect(result.needs.n).toBe(1)
+    expect(result.all.counts.needs).toBe(1)
+    const card = result.all.cards.find(one => one.task.startsWith('Check the synthetic mail'))
+    expect(card?.agent).toBe('')
+    expect(card?.isOwn).toBe(true)
+    expect(result.agents.find(group => group.agent === 'codex')?.cards.some(one => one.isOwn)).toBe(false)
+  }
+})
+
+test('a trailer on a task inside an agent block is not a writer', () => {
+  const file = ['## demo', '<!-- auto session=ab12cd34 agent=codex state=working updated=2026-11-26T11:55:00Z -->', '### Port the parser <!-- session=ab12cd34 -->', '- [~] Port it', '<!-- /auto session=ab12cd34 -->', ''].join('\n')
+  const tasks = parseProgress(file).flatMap(project => project.tasks)
+  expect(tasks.map(task => [task.title, task.writer])).toEqual([['Port the parser', undefined]])
 })

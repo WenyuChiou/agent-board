@@ -12,7 +12,7 @@ import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
 import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isMaybeClosed, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, validOptions } from './parse'
-import { cellsOf, plainBar } from './progress-bar'
+import { cellsOf } from './progress-bar'
 import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
 import { inboxQuestionOrigin, observeQuestions, partsKey2, partsKey3, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceOptions, sourceSnapshot } from './questions'
@@ -59,6 +59,8 @@ export type CurrentView = {
   done: number
   total: number
   steps: ViewStep[]
+  // The active or next open step before foldSteps shortens long lists.
+  currentStep?: string
   // One cell per step, unfolded, for the progress bar (#1085).
   cells: Cell[]
   // The runs this session started for itself, as one line; absent when it started none (#399).
@@ -489,6 +491,10 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     }
   })
 
+  const active =
+    steps.find(one => one.isCurrent)?.text ??
+    steps.find(one => one.status !== 'done' && one.status !== 'cancelled')?.text
+
   return {
     state: mirror.state,
     project: mirror.project,
@@ -500,6 +506,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     done,
     total: mirror.tasks.filter(task => !task.handoffTo).length,
     steps: foldSteps(steps, 6, s),
+    ...(active === undefined ? {} : { currentStep: active }),
     cells: cellsOf(withCurrent(steps)),
   }
 }
@@ -999,6 +1006,19 @@ export const buildView = (
       twins.set(twin, (twins.get(twin) ?? 0) + 1)
     }
   }
+  // The AI that wrote a hand-kept task: its `<!-- session=<id> -->` trailer, matched to the block with
+  // that session (or its full resume id). A trailer that matches no block names no one, and so does a
+  // task with none: both stay '' and show only in Needs you and the full list (#1866). A Claude block
+  // gives 'claude', not '', because '' on a hand-kept task means no writer.
+  const writerAgents = new Map<string, string>()
+  for (const project of projects) {
+    for (const task of project.tasks) {
+      if (task.auto === null) continue
+      for (const id of [task.auto.session, task.auto.resume]) if (id !== null && id !== '' && !writerAgents.has(id)) writerAgents.set(id, task.auto.agent)
+    }
+  }
+  const agentOf = (task: ProgressTask): string =>
+    task.auto === null ? (task.writer === undefined ? '' : writerAgents.get(task.writer) ?? '') : task.auto.agent === 'claude' ? '' : task.auto.agent
 
   for (const project of folded.projects) {
     const name = project.name || s.uncategorized
@@ -1161,7 +1181,7 @@ export const buildView = (
           ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: optionsGiven(validOptions(step.options)) }),
           ...(step.native === undefined ? {} : { native: step.native }),
           where: isManual ? 'manual' : 'other',
-          agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+          agent: agentOf(task),
           // Another agent's block id is a hash of its session; its own id is what its session
           // list shows.
           session: task.auto === null ? '' : task.auto.agent !== 'claude' && task.auto.resume !== null ? sessionName(task.auto.resume) : task.auto.session,
@@ -1208,7 +1228,7 @@ export const buildView = (
             title,
             when: clock.isFuture ? when : relativeTime(seen, now, s),
             at: seen,
-            agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+            agent: agentOf(task),
             ...(isManual ? { isOwn: true as const } : {}),
             ...(task.auto === null ? {} : { sessionId: task.auto.resume ?? task.auto.session }),
             dir: task.auto?.dir ?? null,
@@ -1299,7 +1319,7 @@ export const buildView = (
             : null,
         due: null,
         pr: autoPr(task.auto, s),
-        agent: task.auto === null || task.auto.agent === 'claude' ? '' : task.auto.agent,
+        agent: agentOf(task),
         ...(task.auto?.state === 'ended' ? { isRecordedEnded: true as const } : {}),
         // The process check proved the session's process gone (#1092, #1595): it is closed, as one whose block says ended.
         ...(livenessOf(task.auto, gone) === 'dead' ? { isProcessGone: true as const } : {}),
@@ -1630,29 +1650,38 @@ const clip = (text: string, room: number): string => {
   return chars.length > room ? `${chars.slice(0, room - 1).join('')}…` : text
 }
 
-// The session's task on the line under the prompt. With two steps or more the bar takes the place
-// of the clipped status words (#1085): `建立兩個內容為 hi… ━━━━╸── 5/7`. One step keeps the words.
+// The session's active step on the line under the prompt: step count + live current step (instead of the static
+// task title or proportional-font box-drawing bars), so what is running right now stays readable in narrow strips.
 const currentPart = (current: CurrentView): string => {
-  const bar = plainBar(current.cells ?? [])
-  return bar === ''
-    ? `${clip(current.title, 14)} ${current.done}/${current.total} · ${clip(current.status, 18)}`
-    : `${clip(current.title, 14)} ${bar} ${current.done}/${current.total}`
+  if (current.tone === 'alert') {
+    return current.total > 0
+      ? `${current.done}/${current.total} · ${clip(current.status, 24)}`
+      : clip(current.status, 24)
+  }
+  const step =
+    current.currentStep ??
+    current.steps.find(one => one.isCurrent)?.text ??
+    current.steps.find(one => one.status !== 'done' && one.status !== 'cancelled')?.text ??
+    ''
+  const focus = step !== '' && step !== current.title ? step : (current.title || current.status)
+  if (current.total > 0) return `${current.done}/${current.total} · ${clip(focus, 20)}`
+  return [clip(current.title, 16), clip(current.status, 18)].filter(Boolean).join(' · ')
 }
 
-// One line under the prompt for when the pane is not on screen: this session's task, what
-// waits on you, what is due soon, and the pull request.
+// One compact HUD line under the prompt: cross-session needs-you / due / queued alerts come first so
+// waiting sessions are never truncated behind this session's current step and PR status.
 export const statusLine = (view: View, s: Strings = ZH_TW): string | undefined => {
   const current = view.current
   const urgent = view.overview.due
   const parts = [
-    current === null || current.state === 'done' ? '' : currentPart(current),
-    view.overview.waiting > 0 ? s.statusWaiting(view.overview.waiting) : '',
-    (view.overview.queued ?? 0) > 0 ? s.boardQueuedCount(view.overview.queued ?? 0) : '',
+    view.overview.waiting > 0 ? `● ${s.statusWaiting(view.overview.waiting)}` : '',
     urgent > 0 ? s.statusDue(urgent) : '',
+    (view.overview.queued ?? 0) > 0 ? s.boardQueuedCount(view.overview.queued ?? 0) : '',
+    current === null || current.state === 'done' ? '' : currentPart(current),
     view.pr === null ? '' : view.pr.text,
   ].filter(part => part !== '')
 
-  return parts.length === 0 ? undefined : `${s.statusPrefix} · ${parts.join(' · ')}`
+  return parts.length === 0 ? undefined : parts.join(' · ')
 }
 
 // The board's view, built once for the same inputs (#373). After each change of the file the pane,

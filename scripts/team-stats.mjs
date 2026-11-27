@@ -1,13 +1,15 @@
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { authorKey, reviewOf, stripComments } from './pr-check.mjs'
+import { authorKey, reviewOf, roundsOf, stripComments, verdictsOf } from './pr-check.mjs'
 import { safeLine } from './preflight.mjs'
 import { fetchMilestoneRaw, summarizeMilestoneWork } from './review-queue.mjs'
 
 const usage = 'Usage: node scripts/team-stats.mjs [--week] [--date YYYY-MM-DD] [--repo owner/name] [--help]'
 const day = 24 * 60 * 60 * 1000
 const maxBuffer = 64 * 1024 * 1024
-const byTime = (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id - b.id
+// GitHub's REST reviews carry submitted_at where comments carry created_at.
+const timeOf = item => Date.parse(item.created_at ?? item.submitted_at)
+const byTime = (a, b) => timeOf(a) - timeOf(b) || a.id - b.id
 const isOpen = item => item.state === 'open'
 const inWindow = (value, start, end) => value && Date.parse(value) >= start && Date.parse(value) < end
 const weekStart = date => Date.parse(date) - 6 * day
@@ -76,15 +78,18 @@ export const scorecard = ({ issues, pullRequests }, date) => {
   const end = endOfDate(date)
   const agents = new Map()
   const total = emptyStats()
+  const noVerdict = []
   const statsOf = agent => {
     if (!agents.has(agent)) agents.set(agent, emptyStats())
     return agents.get(agent)
   }
   for (const pr of pullRequests.filter(pr => inWindow(pr.merged_at, start, end))) {
     const stats = statsOf(authorOf(pr.body))
-    const comments = [...(pr.comments ?? [])].sort(byTime).map(comment => reviewOf(comment.body)).filter(Boolean)
-    const first = comments[0]
-    const rounds = comments.filter(comment => comment.kind === 'REQUEST CHANGES').length + 1
+    const items = [...(pr.comments ?? []), ...(pr.reviews ?? [])].sort(byTime)
+    const verdicts = verdictsOf(items)
+    const first = verdicts[0]
+    const rounds = roundsOf(items, { includeApprovals: true })
+    if (verdicts.length === 0) noVerdict.push(pr.number)
     const fixes = [...stripComments(pr.body ?? '').matchAll(/\b(?:fixes|closes|resolves)\s+#([1-9]\d*)\b/gi)].map(match => match[1])
     for (const row of [stats, total]) {
       row.merged++
@@ -112,16 +117,22 @@ export const scorecard = ({ issues, pullRequests }, date) => {
     '| --- | ---: | ---: | ---: | ---: | ---: |',
     ...[...agents].sort(([a], [b]) => a.localeCompare(b)).map(([agent, stats]) => rowText(agent, stats)),
     rowText('total', total),
+    ...(noVerdict.length ? [`merged with no review verdict: ${noVerdict.sort((a, b) => a - b).map(number => `#${number}`).join(', ')}`] : []),
   ].join('\n')
 }
 
-const fetchList = (repo, endpoint) => {
+const fetchList = (repo, endpoint, run = execFileSync) => {
   const separator = endpoint.includes('?') ? '&' : '?'
-  const output = execFileSync('gh', ['api', '--paginate', '--jq', '.[] | tojson', `repos/${repo}/${endpoint}${separator}per_page=100`], {
+  const output = run('gh', ['api', '--paginate', '--jq', '.[] | tojson', `repos/${repo}/${endpoint}${separator}per_page=100`], {
     encoding: 'utf8', maxBuffer, stdio: ['ignore', 'pipe', 'pipe'],
   })
   return output.split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line))
 }
+
+const authorFields = item => ({
+  ...(item.author ? { user: { login: item.author.login, type: item.author.__typename } } : {}),
+  ...(item.authorAssociation !== undefined ? { author_association: item.authorAssociation } : {}),
+})
 
 export const fromGraphql = nodes => nodes.map(pr => ({
   number: pr.number,
@@ -130,13 +141,14 @@ export const fromGraphql = nodes => nodes.map(pr => ({
   state: pr.state === 'MERGED' ? 'closed' : pr.state.toLowerCase(),
   draft: pr.isDraft,
   head: { sha: pr.headRefOid },
-  comments: pr.comments.nodes.map(comment => ({ body: comment.body, created_at: comment.createdAt, id: comment.databaseId })),
+  comments: pr.comments.nodes.map(comment => ({ body: comment.body, created_at: comment.createdAt, id: comment.databaseId, ...authorFields(comment) })),
+  reviews: (pr.reviews?.nodes ?? []).map(review => ({ body: review.body, state: review.state, commit_id: review.commit?.oid ?? null, created_at: review.submittedAt, ...authorFields(review) })),
 }))
 
-const fetchStats = ({ repo, date, isWeek }) => {
+export const fetchStats = ({ repo, date, isWeek }, run = execFileSync) => {
   const start = new Date(weekStart(date)).toISOString().slice(0, 10)
-  const issues = fetchList(repo, `issues?state=all${isWeek ? `&since=${start}T00:00:00Z` : ''}`)
-  const pullRequests = fetchList(repo, `pulls?state=${isWeek ? 'all' : 'open'}`)
+  const issues = fetchList(repo, `issues?state=all${isWeek ? `&since=${start}T00:00:00Z` : ''}`, run)
+  const pullRequests = fetchList(repo, `pulls?state=${isWeek ? 'all' : 'open'}`, run)
   if (isWeek) {
     const query = `query($search: String!, $endCursor: String) {
   search(query: $search, type: ISSUE, first: 50, after: $endCursor) {
@@ -150,29 +162,37 @@ const fetchStats = ({ repo, date, isWeek }) => {
         headRefOid
         comments(first: 100) {
           totalCount
-          nodes { body createdAt databaseId }
+          nodes { body createdAt databaseId author { login __typename } authorAssociation }
+        }
+        reviews(first: 100) {
+          totalCount
+          nodes { body state submittedAt commit { oid } author { login __typename } authorAssociation }
         }
       }
     }
     pageInfo { hasNextPage endCursor }
   }
 }`
-    const output = execFileSync('gh', ['api', 'graphql', '--paginate', '-f', `query=${query}`, '-f', `search=repo:${repo} is:pr is:merged merged:${start}..${date}`, '--jq', '.data.search.nodes[] | tojson'], {
+    const output = run('gh', ['api', 'graphql', '--paginate', '-f', `query=${query}`, '-f', `search=repo:${repo} is:pr is:merged merged:${start}..${date}`, '--jq', '.data.search.nodes[] | tojson'], {
       encoding: 'utf8', maxBuffer, stdio: ['ignore', 'pipe', 'pipe'],
     })
     const nodes = output.split(/\r?\n/).filter(line => line.trim()).map(line => JSON.parse(line))
     const byNumber = new Map(pullRequests.map(pr => [pr.number, pr]))
     for (const pr of fromGraphql(nodes)) byNumber.set(pr.number, { ...byNumber.get(pr.number), ...pr })
     for (const node of nodes) {
-      if (node.comments.totalCount > 100) byNumber.get(node.number).comments = fetchList(repo, `issues/${node.number}/comments`)
+      if (node.comments.totalCount > 100) byNumber.get(node.number).comments = fetchList(repo, `issues/${node.number}/comments`, run)
+      if ((node.reviews?.totalCount ?? 0) > 100) byNumber.get(node.number).reviews = fetchList(repo, `pulls/${node.number}/reviews`, run)
     }
     for (const pr of byNumber.values()) {
-      if (inWindow(pr.merged_at, weekStart(date), endOfDate(date)) && !Array.isArray(pr.comments)) pr.comments = fetchList(repo, `issues/${pr.number}/comments`)
+      if (inWindow(pr.merged_at, weekStart(date), endOfDate(date)) && !Array.isArray(pr.comments)) {
+        pr.comments = fetchList(repo, `issues/${pr.number}/comments`, run)
+        pr.reviews = fetchList(repo, `pulls/${pr.number}/reviews`, run)
+      }
     }
     return { issues, pullRequests: [...byNumber.values()] }
   }
   for (const pr of pullRequests) {
-    if (!pr.draft) pr.comments = fetchList(repo, `issues/${pr.number}/comments`)
+    if (!pr.draft) pr.comments = fetchList(repo, `issues/${pr.number}/comments`, run)
   }
   // The milestone fragment is a live read, not part of the --date window: a failure leaves the line
   // standing with "uncertain" instead of failing the whole run.

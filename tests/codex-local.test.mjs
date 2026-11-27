@@ -5048,7 +5048,44 @@ test('the PowerShell classifier uses the first Node path when several applicatio
   assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
   const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => ({ body: readFileSync(join(inbox, name), 'utf8') })) : []
   assert.equal(saved.length, 1, classifierDiagnostic(diagnostic))
-  assert.match(classifierDiagnostic(diagnostic), /phase=complete started=1/)
+  assert.match(classifierDiagnostic(diagnostic), / started=1 /)
+  assert.match(classifierDiagnostic(diagnostic), /innerType= innerHresult=0 nativeCode=0 /)
+  assert.deepEqual(JSON.parse(saved[0].body), { session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', board_request: true })
+  assert.ok(!/[^\x20-\x7e]/.test(saved[0].body))
+}))
+
+test('the PowerShell classifier still picks the first Node path when the caller uses up the reporter time (#1746)', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const later = join(f.home, 'later node'), inbox = join(f.root, 'progress-inbox')
+  mkdirSync(later)
+  // A later lookup entry is deliberately not executable: it must never run.
+  writeFileSync(join(later, 'node.exe'), 'synthetic later application must not run')
+  const env = { ...f.env }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = [dirname(process.execPath), later].join(delimiter)
+  const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+  const lookup = spawnSync(powershell, ['-NoProfile', '-Command', '$c = @(Get-Command node -CommandType Application -ErrorAction Stop); $c.Count'], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+  assert.equal(lookup.error, undefined)
+  assert.equal(lookup.status, 0, 'the controlled application lookup must succeed')
+  assert.equal(lookup.stdout.trim(), '2', 'two real node.exe files on PATH, not a mocked lookup')
+  const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
+  const raw = JSON.stringify({ session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', prompt: '/board' })
+  const source = reporterPs1()
+  assert.doesNotMatch(source, /Get-Command node/)
+  const callerLine = "      try { $raw = ConvertFrom-Json -InputObject $Payload } catch { throw 'INCOMPLETE_INPUT' }"
+  assert.equal(source.split(callerLine).length, 2, 'the caller block anchor must be unique')
+  // The caller's block runs after Node starts and inside the 2000 ms window, so 2100 ms there always reaches the timeout.
+  const delayedSource = source.replace(callerLine, `      Start-Sleep -Milliseconds 2100\n${callerLine}`)
+  f.save(file, observeClassifier(delayedSource, diagnostic, { isSelectionOnly: true }))
+  // Only bounds a hung process; the reporter's own 2000 ms deadline is what this test reaches on purpose.
+  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 30000))
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
+  const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => ({ body: readFileSync(join(inbox, name), 'utf8') })) : []
+  assert.equal(saved.length, 1, classifierDiagnostic(diagnostic))
+  assert.match(classifierDiagnostic(diagnostic), / started=1 /)
+  assert.match(classifierDiagnostic(diagnostic), /innerType= innerHresult=0 nativeCode=0 /)
+  assert.match(classifierDiagnostic(diagnostic), /phase=wait /)
   assert.deepEqual(JSON.parse(saved[0].body), { session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', board_request: true })
   assert.ok(!/[^\x20-\x7e]/.test(saved[0].body))
 }))
