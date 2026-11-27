@@ -121,9 +121,9 @@ const NUMBER = /^\d/
 const RANGE_JOIN = /^(?:and|or|to|through|thru|plus|\+|-|–|~)$/i
 // Words that bound the number (`at least 2`, `more than 3`, `between 3`, `up to 2`).
 const QUALIFIER = /^(?:than|least|most|under|over|below|above|about|around|approximately|roughly|nearly|almost|between|from|within)$/i
-// A limit noun bounds the number only right before it (`max 3`); elsewhere it names the subject
-// (`the maximum retry limit`).
 const LIMIT = /^(?:max|min|maximum|minimum)$/i
+// Words that can sit between a bound and its number (`at least the last 24 hours`, `max of 3`).
+const AMOUNT_LEAD = /^(?:the|a|an|last|first|next|past|of|just|only|another)$/i
 const SPELLED = /^(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|hundred|thousand|half|few|a few|several|couple|dozen)$/i
 const UNIT = /^(?:ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|months?|y|yrs?|years?|[kmgt]i?b|bytes?|%)$/i
 const parallelAmounts = (first: string, last: string): [string, string] | null => {
@@ -140,11 +140,16 @@ const parallelAmounts = (first: string, last: string): [string, string] | null =
   const word = (index: number): string => (firstWords[index] ?? '').replace(/,$/, '')
   const amountEndsAt = (index: number): boolean => NUMBER.test(word(index)) || (UNIT.test(word(index)) && NUMBER.test(word(index - 1)))
   const before = word(from - 1)
-  // A bound word anywhere in the lead (`at least the last 24 hours`), a limit noun right before the
-  // number (`max 3`), or a join word other than `to` (`between three and 5`) keeps the words whole.
-  // `to` joins a range only after an amount, spelled or not (`3 to 5`, `three to 5`, `up to 5`);
-  // after a noun it only names the value (`limit to 3`).
-  if (amountEndsAt(from - 1) || LIMIT.test(before) || firstWords.some(one => QUALIFIER.test(one.replace(/,$/, '')))) return null
+  // A bound or limit word leading into the number, directly or across words like `the last`
+  // (`at least the last 24 hours`, `max of 3`), keeps the words whole. The same word earlier in the
+  // lead names the subject (`the export from staging keep`, `the maximum retry limit to 3`).
+  let lead = from - 1
+  while (lead > 0 && AMOUNT_LEAD.test(word(lead))) lead -= 1
+  const bounded = QUALIFIER.test(word(lead)) || LIMIT.test(word(lead))
+  // A join word other than `to` (`between three and 5`) keeps the words whole too. `to` joins a range
+  // only after an amount, spelled or not (`3 to 5`, `three to 5`, `up to 5`); after a noun it only
+  // names the value (`limit to 3`).
+  if (amountEndsAt(from - 1) || bounded) return null
   if (RANGE_JOIN.test(before) && (before.toLowerCase() !== 'to' || amountEndsAt(from - 2) || SPELLED.test(word(from - 2)) || /^(?:up|down|from)$/i.test(word(from - 2)))) return null
   const amount = firstWords.slice(from)
   if (amount.length > lastWords.length) return null
