@@ -599,8 +599,24 @@ export const archivableAsking = (text: string, now: number, keep?: string): Aski
   })
 }
 
+// A block owns only its first heading (or first step when untitled); any later `###`
+// inside the markers is parsed by `parseProgress` as a separate hand-kept task (#1832).
+const hasExtraTask = (visible: readonly (string | null)[], span: BlockSpan): boolean => {
+  let seenOwn = false
+  for (let at = span.start + 1; at < span.end; at += 1) {
+    const line = visible[at] ?? ''
+    if (TASK.test(line)) {
+      if (seenOwn) return true
+      seenOwn = true
+    } else if (STEP.test(line)) {
+      seenOwn = true
+    }
+  }
+  return false
+}
+
 // Closed older blocks sharing `(agent, resume)` that are strictly outranked by `winner` (#1832).
-const outrankedBy = (spans: readonly BlockSpan[], winner: BlockSpan): BlockSpan[] => {
+const outrankedBy = (spans: readonly BlockSpan[], winner: BlockSpan, visible: readonly (string | null)[]): BlockSpan[] => {
   if (winner.resume == null) return []
   const agent = (winner.agent || 'claude').toLowerCase()
   return spans.filter(other =>
@@ -608,7 +624,8 @@ const outrankedBy = (spans: readonly BlockSpan[], winner: BlockSpan): BlockSpan[
     other.isClosed &&
     other.resume === winner.resume &&
     (other.agent || 'claude').toLowerCase() === agent &&
-    (other.updated < winner.updated || (other.updated === winner.updated && other.start < winner.start)),
+    (other.updated < winner.updated || (other.updated === winner.updated && other.start < winner.start)) &&
+    !hasExtraTask(visible, other),
   )
 }
 
@@ -624,7 +641,7 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
   const primary = allSpans.filter(span => span.isClosed && span.session !== keep && (isAgentRun?.(span) === true || isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isAskingArchiveDue(span, now) && mayTake?.(span) === true))))
   const selected = new Set(primary)
   for (const winner of primary) {
-    for (const older of outrankedBy(allSpans, winner)) {
+    for (const older of outrankedBy(allSpans, winner, visible)) {
       if (older.session === keep || selected.has(older)) continue
       if (!isAsking(visible, older) || (isAskingArchiveDue(older, now) && mayTake?.(older) === true)) {
         selected.add(older)
@@ -766,7 +783,7 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
     const visible = sweepTwins && span.resume != null ? readable(lines) : null
     const removed = visible === null
       ? [span]
-      : [span, ...outrankedBy(spans, span).filter(other => !isAsking(visible, other))]
+      : [span, ...outrankedBy(spans, span, visible).filter(other => !isAsking(visible, other))]
     return {
       text: removeSpans(text, removed),
       entries: removed.map(one => [`## ${one.project || s.uncategorized} · ${day}`, ...lines.slice(one.start + 1, one.end)].join('\n')),

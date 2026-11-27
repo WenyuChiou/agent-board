@@ -405,6 +405,24 @@ test('archiving a winning row or tidying removes its hidden older twin copy so i
   assert.ok(singleOnly)
   assert.equal(singleOnly.entries.length, 1)
   assert.equal(parseProgress(singleOnly.text).flatMap(p => p.tasks).length, 1)
+
+  // Older twin holding a separate hand-kept `###` task inside its markers is never swept (#1832).
+  const extraTaskTwinText = endedText.replace(
+    `- [~] Counting lines\n<!-- /auto session=${localId} -->`,
+    `- [~] Counting lines\n### Unrelated hand-kept task\n- [ ] Keep this open work\n<!-- /auto session=${localId} -->`,
+  )
+  const extraTaskView = buildView(parseProgress(extraTaskTwinText), [], null, now, 0, {}, s)
+  const extraTaskArchived = takeTask(extraTaskTwinText, extraTaskView.stopped[0].archive, now, s)
+  assert.ok(extraTaskArchived)
+  assert.equal(extraTaskArchived.entries.length, 1)
+  assert.ok(extraTaskArchived.text.includes('Keep this open work'))
+  assert.ok(parseProgress(extraTaskArchived.text).flatMap(p => p.tasks).some(t => t.title === 'Unrelated hand-kept task'))
+
+  const extraTaskDoneText = extraTaskTwinText.replace(`state=ended updated=${t2}`, `state=done updated=${t2}`).replace('- [ ] Finished turn', '- [x] Finished turn')
+  const extraTaskTidied = takeArchivable(extraTaskDoneText, now, undefined, s, true)
+  assert.equal(extraTaskTidied.entries.length, 1)
+  assert.ok(extraTaskTidied.text.includes('Keep this open work'))
+  assert.ok(parseProgress(extraTaskTidied.text).flatMap(p => p.tasks).some(t => t.title === 'Unrelated hand-kept task'))
 })
 
 test('non-Claude ended row without a target gets send=none and no Copy answer box (#1832)', async () => {
