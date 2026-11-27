@@ -117,6 +117,7 @@ const pairedLast = (first: string, last: string): string => /^[^\s㐀-鿿]+$/.te
 // words and a preposition (`7 days`). A lead with no such number keeps its words, as before.
 const SHARED_PREPOSITION = /^(?:for|in|on|with|to|at|as|from|into|via|of)$/i
 const NUMBER = /^\d/
+const BOUND = /^(?:and|or|plus|\+|-|–|~|than|least|most|under|over|below|above|about|around|approximately|roughly|nearly|almost|max|min|maximum|minimum|between|from|within)$/i
 const UNIT = /^(?:ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|months?|y|yrs?|years?|[kmgt]i?b|bytes?|%)$/i
 const parallelAmounts = (first: string, last: string): [string, string] | null => {
   if (!CLAUSE_OPENING.test(first) || CJK.test(first) || CJK.test(last)) return null
@@ -129,7 +130,11 @@ const parallelAmounts = (first: string, last: string): [string, string] | null =
   // make one compound amount whose start is unclear: the words then stay whole rather than send a
   // shorter amount. A number in the subject (`worker 2 keep 24 hours`) is followed by no unit.
   const unitAt = (index: number): boolean => UNIT.test((firstWords[index] ?? '').replace(/,$/, '')) && NUMBER.test(firstWords[index - 1] ?? '')
-  if (unitAt(from - 1) || (/^(?:and|plus|\+)$/i.test(firstWords[from - 1] ?? '') && unitAt(from - 2))) return null
+  if (unitAt(from - 1)) return null
+  // A range or a bound (`between 3 and 5`, `up to 2 GB`, `at least 2 GB`, `more than 3`) is one amount
+  // too: cutting at its last number would drop the bound, so the words stay whole.
+  const before = (firstWords[from - 1] ?? '').toLowerCase()
+  if (BOUND.test(before) || (before === 'to' && /^(?:up|down|from)$/i.test(firstWords[from - 2] ?? ''))) return null
   const amount = firstWords.slice(from)
   if (amount.length > lastWords.length) return null
   const shared = lastWords.length > amount.length && SHARED_PREPOSITION.test(lastWords[amount.length] ?? '')

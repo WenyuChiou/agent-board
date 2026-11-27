@@ -1278,6 +1278,10 @@ test('an inline "A or B?" choice of amounts offers the amounts, not the question
   // A compound amount has no clear start: its words stay whole rather than lose the earlier units.
   expect(askOf('Should the export keep 1 day 12 hours or 2 days of history?', '').options[0]).toBe('Should the export keep 1 day 12 hours')
   expect(askOf('Should the export keep 1 day and 12 hours or 2 days?', '').options[0]).toBe('Should the export keep 1 day and 12 hours')
+  // A range or a bound keeps its words, so a button never drops the bound.
+  expect(askOf('Should I set the retry limit to between 3 and 5 or 10?', '').options[0]).toBe('Should I set the retry limit to between 3 and 5')
+  expect(askOf('Should the cache hold up to 2 GB or 4 GB?', '').options[0]).toBe('Should the cache hold up to 2 GB')
+  expect(askOf('Should the cache hold at least 2 GB or 4 GB?', '').options[0]).toBe('Should the cache hold at least 2 GB')
   // A number in the subject is not part of the amount.
   expect(askOf('Should worker 2 keep 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days'] })
   // A number inside the subject is not one of the amounts: the words stay whole, as before.
