@@ -980,7 +980,7 @@ test('a claim past its time with no open pull request is listed as expired', () 
     claimIssue(19),
   ]
   const prs = [pull(1, { body: 'Fixes #13\nAuthor: codex, fix/d' })]
-  assert.deepEqual(readClaims(issues, prs, now), [{ number: 10, login: 'alice' }, { number: 15, login: 'bob' }])
+  assert.deepEqual(readClaims(issues, prs, now), [{ number: 10, login: 'alice' }, { number: 15, login: 'bob' }, { number: 18, login: 'alice' }])
   // A draft pull request counts as a linked one.
   assert.deepEqual(readClaims(issues.slice(0, 1), [pull(3, { isDraft: true, body: 'Part of #10' })], now), [])
 })
@@ -1137,30 +1137,54 @@ const milestoneRaw = (issues, commentsByNumber, fields = {}) => ({
 })
 const summarize = (raw, prs = [], prListComplete = true) => summarizeMilestoneWork(raw, { prs, prListComplete, now })
 
-test('the newest open milestone is the latest created that is not Backlog', () => {
+test('the release in work is the open milestone with the lowest version', () => {
   const open = [
     milestone(2, 'Phase 2', '2026-10-20T03:36:25Z'),
     milestone(15, '0.26.0', '2026-11-18T11:41:04Z'),
     milestone(16, 'Backlog', '2026-11-18T11:41:05Z'),
     milestone(18, '0.27.0', '2026-11-25T03:09:16Z'),
   ]
-  assert.equal(pickMilestone(open).number, 18)
-  assert.equal(pickMilestone([...open, milestone(19, 'Backlog', '2026-11-26T00:00:00Z')]).number, 18)
-  assert.equal(pickMilestone(open.map(item => item.number === 18 ? { ...item, state: 'closed' } : item)).number, 15)
+  assert.equal(pickMilestone(open).number, 15)
+  assert.equal(pickMilestone([...open, milestone(19, 'Backlog', '2026-11-26T00:00:00Z')]).number, 15)
+  assert.equal(pickMilestone(open.map(item => item.number === 15 ? { ...item, state: 'closed' } : item)).number, 18)
   assert.equal(pickMilestone([milestone(20, 'backlog ', '2026-11-26T00:00:00Z'), milestone(15, '0.26.0', '2026-11-18T11:41:04Z')]).number, 15)
-  assert.equal(pickMilestone([milestone(21, 'Same day', '2026-11-25T03:09:16Z'), milestone(18, '0.27.0', '2026-11-25T03:09:16Z')]).number, 21)
+  assert.equal(pickMilestone([milestone(21, 'Same day', '2026-11-25T03:09:16Z'), milestone(18, '0.27.0', '2026-11-25T03:09:16Z')]).number, 18)
+  assert.equal(pickMilestone([
+    milestone(18, '0.27.0', '2026-11-25T03:09:16Z'),
+    milestone(19, '0.26.1 DeepSeek', '2026-11-26T00:00:00Z'),
+    milestone(15, '0.26.0', '2026-11-18T11:41:04Z'),
+  ]).number, 15)
+  assert.equal(pickMilestone([
+    milestone(19, '0.26.10', '2026-11-26T00:00:00Z'),
+    milestone(15, '0.26.9', '2026-11-18T11:41:04Z'),
+  ]).number, 15)
   assert.equal(pickMilestone([]), null)
   assert.equal(pickMilestone(), null)
 })
 
-test('a Ready check verdict comes from the first line only', () => {
+test('with no release milestone the newest open milestone that is not Backlog wins', () => {
+  const open = [
+    milestone(2, 'Phase 2', '2026-10-20T03:36:25Z'),
+    milestone(21, 'Same day', '2026-11-25T03:09:16Z'),
+    milestone(22, 'Later day', '2026-11-25T03:09:16Z'),
+  ]
+  assert.equal(pickMilestone(open).number, 22)
+  assert.equal(pickMilestone([...open, milestone(19, 'Backlog', '2026-11-26T00:00:00Z')]).number, 22)
+})
+
+test('a Ready check verdict comes from the first unquoted check line', () => {
   assert.equal(readyCheckOf('Ready check: READY by muse, lane AB03'), 'ready')
   assert.equal(readyCheckOf('Ready check: NOT READY by muse, lane AB03'), 'not ready')
   assert.equal(readyCheckOf('Ready check: needs-owner by codex, lane codex'), 'needs-owner')
   assert.equal(readyCheckOf('  Ready check: READY by muse'), 'ready')
   assert.equal(readyCheckOf('Ready check: READY by muse\n1. Goal clear: yes.\nFirst: #12'), 'ready')
-  assert.equal(readyCheckOf('Quoting an old one:\nReady check: READY by muse'), null)
+  assert.equal(readyCheckOf('Quoting an old one:\nReady check: READY by muse'), 'ready')
+  assert.equal(readyCheckOf('[AB01 PM-main · Claude Opus 5.5] Ready check: READY by muse'), 'ready')
+  assert.equal(readyCheckOf('#1926 Ready check: NOT READY by codex_775'), 'not ready')
+  assert.equal(readyCheckOf('A signature line\n\nReady check: READY by muse'), 'ready')
   assert.equal(readyCheckOf('> Ready check: READY by muse'), null)
+  assert.equal(readyCheckOf('  > Ready check: READY by muse'), null)
+  assert.equal(readyCheckOf('My own check below\n> Ready check: NOT READY by old\nReady check: READY by muse'), 'ready')
   assert.equal(readyCheckOf('Ready check: the goal is clear'), 'unknown')
   assert.equal(readyCheckOf(''), null)
   assert.equal(readyCheckOf(null), null)
@@ -1201,6 +1225,58 @@ test('really free counts ready issues with no assignee, live claim, pull request
   assert.deepEqual(work.unchecked.map(item => item.number), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
 })
 
+test('a claim in the shape pr-check reads holds the issue, and a handover ends it', () => {
+  const issues = [
+    milestoneIssue(1, { labels: [label('ready')] }),
+    milestoneIssue(2, { labels: [label('ready')] }),
+    milestoneIssue(3, { labels: [label('ready')] }),
+    milestoneIssue(4, { labels: [label('ready')] }),
+  ]
+  const comments = {
+    // An "until" time with a T and a Z, posted more than 24 hours ago, still holds the issue.
+    1: [issueComment('Claim: codex, fix/a, until 2026-11-28T12:00Z', '2026-10-19T09:00:00Z', 'bob')],
+    // A handover from the same login ends the claim, so the issue is free again.
+    2: [
+      issueComment('Claim: codex, fix/b, until 2026-10-21 09:00 UTC', '2026-10-19T09:00:00Z', 'bob'),
+      issueComment('Handover: fix/b, done: nothing left', '2026-10-19T10:00:00Z', 'bob'),
+    ],
+    // A claim after the handover holds it again.
+    3: [
+      issueComment('Claim: codex, fix/c, until 2026-10-21 09:00 UTC', '2026-10-19T09:00:00Z', 'bob'),
+      issueComment('Handover: fix/c, done: nothing left', '2026-10-19T10:00:00Z', 'bob'),
+      issueComment('Claim: codex, fix/c, until 2026-10-22 09:00 UTC', '2026-10-19T11:00:00Z', 'bob'),
+    ],
+    // A claim with no readable time holds the issue for two days after its comment.
+    4: [issueComment('Claim: codex, fix/d, until soon', '2026-10-19T09:00:00Z', 'bob')],
+  }
+  const work = summarize(milestoneRaw(issues, comments))
+  assert.equal(work.reallyFree, 1)
+  assert.equal(work.ready, 4)
+})
+
+test('the clock is read after the GitHub reads, so a comment posted during them counts', () => {
+  let clock = Date.parse('2026-10-20T00:00:00Z')
+  const extra = {
+    roadmapComments: [], collaborators: [], claimed: [],
+    milestoneRaw: milestoneRaw(
+      [milestoneIssue(1, { labels: [label('ready')], assignees: [assignee('alice')] })],
+      { 1: [issueComment('Working on this now', '2026-10-20T11:00:00Z', 'alice')] },
+    ),
+    notes: [],
+  }
+  const output = []
+  const status = main(['--json'], {
+    fetch: () => ({ prs: [pull(1)], commentsByNumber: { 1: [ready()] } }),
+    context: () => { clock = Date.parse('2026-10-20T12:00:00Z'); return extra },
+    bundle: noBundle, lanes: () => ({ stale: [], notes: [] }),
+    now: () => new Date(clock), log: text => output.push(text), error: text => assert.fail(text),
+  })
+  assert.equal(status, 0)
+  const queue = JSON.parse(output[0])
+  assert.equal(queue.milestoneWork.reallyFree, 0)
+  assert.deepEqual(queue.milestoneWork.idleAssignees, [])
+})
+
 test('unchecked issues list oldest first with their time in the milestone', () => {
   const issues = [
     milestoneIssue(1, { created_at: '2026-10-19T00:00:00Z' }),
@@ -1216,6 +1292,20 @@ test('unchecked issues list oldest first with their time in the milestone', () =
   // A checked issue is not listed even when its check has no verdict.
   const checked = summarize(milestoneRaw([milestoneIssue(5)], { 5: [issueComment('Ready check: looking into it', '2026-10-19T09:00:00Z')] }))
   assert.deepEqual(checked.unchecked, [])
+  // A check posted in an older shape still counts: a signature line first, the check
+  // on a later line, or an issue number before it. A quoted check alone does not.
+  const shaped = summarize(milestoneRaw([
+    milestoneIssue(6),
+    milestoneIssue(7),
+    milestoneIssue(8),
+    milestoneIssue(9),
+  ], {
+    6: [issueComment('[AB01 PM-main · Claude Opus 5.5]\n\nReady check: READY by pm', '2026-10-19T09:00:00Z')],
+    7: [issueComment('#1926 Ready check: NOT READY by codex_775', '2026-10-19T09:00:00Z')],
+    8: [issueComment('> Ready check: READY by old', '2026-10-19T09:00:00Z')],
+    9: [issueComment('Ready check: READY by muse', '2026-10-19T09:00:00Z')],
+  }))
+  assert.deepEqual(shaped.unchecked.map(item => item.number), [8])
 })
 
 test('expired claims list only when no pull request, takeover or recent work comment stands behind them', () => {

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { authorKey, isLaneReviewer, reviewOf, tierOf } from './pr-check.mjs'
+import { authorKey, claimEnd, isLaneReviewer, reviewOf, tierOf } from './pr-check.mjs'
 import { bundleSources, safeLine } from './preflight.mjs'
 
 const usage = 'Usage: node scripts/review-queue.mjs [--repo owner/name] [--roadmap N] [--json] [--help]'
@@ -13,7 +13,6 @@ const hour = 60 * 60 * 1000
 const day = 24 * hour
 const laneLimitHours = 2
 const awayLimitDays = 14
-const claimSlotDays = 7
 
 export const parseArgs = argv => {
   const options = { repo: 'WenyuChiou/agent-board', roadmap: 209, isJson: false, isHelp: false }
@@ -337,7 +336,7 @@ export const fetchContext = ({ repo, roadmap }, { run = execFileSync } = {}) => 
   return { roadmapComments, collaborators, claimed, milestoneRaw, notes }
 }
 
-// The milestone's raw data for summarizeMilestoneWork: the newest open milestone that is not Backlog,
+// The milestone's raw data for summarizeMilestoneWork: the release milestone in work,
 // its open issues, every issue's comments, the time each unchecked issue entered the milestone, and the
 // state of every issue a NOT READY check names in a First: line. Only the milestones list or the issues
 // list failing throws: a single issue's read failing marks the result uncertain and names the issue.
@@ -439,23 +438,30 @@ export const readAway = (comments, now) => {
   return { active: standing.map(({ login, until }) => ({ login, until })), notes, backs }
 }
 
-// A Claim comment's expiry: a timed claim runs out at its "until" time; one waiting for a slot runs out
-// 7 days after its comment unless renewed the same way (CONTRIBUTING rule 3). Anything else claims nothing.
-const claimUntil = (body, time) => {
-  const timed = (body ?? '').match(/^[ \t]*Claim:[^\r\n]*,[ \t]*until[ \t]+(\d{4}-\d{2}-\d{2})[ \t]+(\d{2}:\d{2})[ \t]*UTC\b/m)
-  if (timed) return utcMs(timed[1], `${timed[2]}:00`)
-  if (/^[ \t]*Claim:[^\r\n]*\bwaiting for a slot\b/im.test(body ?? '')) return time + claimSlotDays * day
-  return NaN
-}
+// A claim's expiry follows pr-check.mjs: its "until" time, with or without UTC, else two
+// days after its comment (seven waiting for a slot). Only a comment starting a "Claim:"
+// line is read, so prose mentioning a date does not take an issue.
+const isClaimComment = body => /^[ \t]*Claim:/im.test(body ?? '')
 
 // The live claim is the Claim comment that runs out last: a renewal is a later Claim comment, so the
-// latest expiry wins even when an older claim runs out later than a newer timed one.
+// latest expiry wins even when an older claim runs out later than a newer timed one. A Handover:
+// comment ends its writer's claim (CONTRIBUTING rule 14), so a claim handed over is live no longer.
 const liveClaimOf = entries => {
-  let live = null
+  const held = new Map()
   for (const { comment, time } of entries) {
-    const until = claimUntil(comment.body ?? '', time)
-    if (Number.isFinite(until) && (!live || until > live.until)) live = { until, time, login: comment.user?.login ?? 'unknown' }
+    const key = (comment.user?.login ?? 'unknown').toLowerCase()
+    if (/^\s*Handover:/i.test(comment.body ?? '')) {
+      held.delete(key)
+      continue
+    }
+    if (!isClaimComment(comment.body)) continue
+    const until = claimEnd(comment)
+    if (!Number.isFinite(until)) continue
+    const prev = held.get(key)
+    if (!prev || until > prev.until) held.set(key, { until, time, login: comment.user?.login ?? 'unknown' })
   }
+  let live = null
+  for (const claim of held.values()) if (!live || claim.until > live.until) live = claim
   return live
 }
 
@@ -480,13 +486,20 @@ export const readClaims = (issues, prs, now) => {
   return expired.sort((a, b) => a.number - b.number)
 }
 
-// A Ready check comment starts with "Ready check:" and names its verdict on that line, so a comment
-// quoting an earlier check does not read as a new one. A check with no verdict reads as 'unknown'
-// and still counts as checked.
+// A Ready check names its verdict on the line that starts the check. Checks already
+// posted do not all start on the comment's first line: a signature line or an issue
+// number can come first, so any line counts that is not a quote, with one leading
+// "[...]" signature or "#N" allowed before it. A line quoting an earlier check does
+// not read as a new one. A check with no verdict reads as 'unknown' and still counts
+// as checked.
 export const readyCheckOf = body => {
-  const first = (body ?? '').trimStart().split(/\r\n|[\n\r\u2028\u2029]/, 1)[0] ?? ''
-  if (!/^[ \t]*Ready check:/i.test(first)) return null
-  return first.match(/^[ \t]*Ready check:[ \t]*(NOT READY|READY|needs-owner)\b/i)?.[1]?.toLowerCase() ?? 'unknown'
+  for (const line of (body ?? '').split(/\r\n|[\n\r\u2028\u2029]/)) {
+    if (/^[ \t]*>/.test(line)) continue
+    const match = line.match(/^[ \t]*(?:\[[^\]\r\n]*\][ \t]*|#\d+[ \t]+)?Ready check:[ \t]*((?:NOT READY|READY|needs-owner)\b)?/i)
+    if (!match) continue
+    return match[1]?.toLowerCase() ?? 'unknown'
+  }
+  return null
 }
 
 // The one thing a NOT READY check names as standing in the way: a line starting "First:" naming an issue.
@@ -496,11 +509,24 @@ const firstOf = body => {
   return number ? Number(number) : null
 }
 
-// The newest open milestone that is not Backlog: the latest created, the higher number breaking a tie.
-// "Backlog" is a milestone title, not a state, so it is excluded by name.
-export const pickMilestone = milestones => [...(milestones ?? [])]
-  .filter(item => item?.state === 'open' && (item.title ?? '').trim().toLowerCase() !== 'backlog')
-  .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0) || b.number - a.number)[0] ?? null
+// A release milestone names its version first: "0.26.0 The mainstream AIs end to end".
+const releaseVersion = item => {
+  const match = (item?.title ?? '').trim().match(/^(\d+)\.(\d+)\.(\d+)\b/)
+  return match ? match.slice(1).map(Number) : null
+}
+const compareVersions = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]
+
+// The release in work: the open release milestone with the lowest version. With no
+// release milestone, the newest open milestone that is not Backlog: the latest
+// created, the higher number breaking a tie. "Backlog" is a milestone title, not a
+// state, so it is excluded by name.
+export const pickMilestone = milestones => {
+  const open = [...(milestones ?? [])].filter(item => item?.state === 'open' && (item.title ?? '').trim().toLowerCase() !== 'backlog')
+  const newest = (a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0) || b.number - a.number
+  const releases = open.filter(item => releaseVersion(item))
+  if (releases.length) return releases.sort((a, b) => compareVersions(releaseVersion(a), releaseVersion(b)) || newest(a, b))[0]
+  return open.sort(newest)[0] ?? null
+}
 
 const labelNames = issue => (issue.labels ?? []).map(label => (typeof label === 'string' ? label : label?.name ?? '').toLowerCase())
 const assigneeLogins = issue => (issue.assignees ?? []).map(assignee => assignee?.login).filter(Boolean)
@@ -737,10 +763,12 @@ export const main = (argv = process.argv.slice(2), { fetch = fetchQueue, context
     const { prs, commentsByNumber, prListComplete } = fetch(options)
     let suggestions
     try { suggestions = reviewers() } catch { suggestions = { map: null, note: reviewerNote } }
-    const current = now()
     // Each extra lookup is optional: a failure leaves its part out and adds one note.
     let extra
     try { extra = context(options) ?? {} } catch { extra = { roadmapComments: null, collaborators: null, claimed: null, notes: ['GitHub lookups for away notices, collaborators and claims failed, so a Back cannot be seen: a waiting or due notice may be stale'] } }
+    // The clock is read after the GitHub reads: a comment posted during them is not newer
+    // than now, so its issue is not counted free and its assignee is not counted idle.
+    const current = now()
     let sources
     try { sources = bundle() } catch { sources = { sources: null, note: bundleNote } }
     const away = extra.roadmapComments ? readAway(extra.roadmapComments, current) : { active: [], notes: [], backs: [] }
