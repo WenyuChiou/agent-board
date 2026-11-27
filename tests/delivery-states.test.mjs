@@ -149,6 +149,95 @@ test('no uncertain receipt sends again a message its host accepted before, in an
   assert.deepEqual(wrong, [], wrong.join('\n'))
 })
 
+test('an uncertain receipt does not make a wake that reads "sent, not confirmed" hold its session again, as a late accept does not (#1553)', () => {
+  const wrong = []
+  for (const shape of shapeNames('unconfirmed')) {
+    const where = label('unconfirmed', shape)
+    const { message, binding, state } = sampleOf('unconfirmed', shape)
+    // The sample frees its session before the receipt, so a hold after it comes from the receipt.
+    assert.equal(stateOf(message), 'unconfirmed', where)
+    for (const event of ['accept', 'unsure', 'timeout']) {
+      const after = applyEvent(state, message, binding, event).state
+      const one = after.messages.find(item => item.id === message.id)
+      if (stateOf(one) !== 'unconfirmed') wrong.push(`${where} x ${event}: reads ${stateOf(one)}`)
+      const at = one.updated + 1000
+      let isBusy = false
+      try {
+        queueMessage(after, { id: 'm2', target: binding.id, turn: binding.turn, text: 'next' }, 'board', binding, at)
+      } catch (error) {
+        if (error.message !== 'PAIR_BUSY') throw error
+        isBusy = true
+      }
+      if (isBusy) wrong.push(`${where} x ${event}: the next message is refused as busy`)
+    }
+  }
+  assert.deepEqual(wrong, [], wrong.join('\n'))
+})
+
+// A wake that reads "sent, not confirmed", then events in order through the binding that holds it (#1553).
+const unconfirmedAfter = (events, shape) => {
+  const { message, binding, state: first } = sampleOf('unconfirmed', shape)
+  assert.equal(stateOf(message), 'unconfirmed')
+  let state = first
+  for (const event of events) state = applyEvent(state, state.messages.find(item => item.id === message.id), binding, event).state
+  return { message, binding, state, one: state.messages.find(item => item.id === message.id) }
+}
+const lateUncertain = { unsure: 'unsure', timeout: 'timeout' }
+
+test('after a late uncertain receipt an unconfirmed wake is not handed out again, its hand-back and attempt change nothing, and the next queued message goes out once (#1553)', () => {
+  for (const event of Object.values(lateUncertain)) {
+    const { message, binding, state, one } = unconfirmedAfter([event])
+    const at = one.updated + 1000
+    const queued = queueMessage(state, { id: 'm2', target: binding.id, turn: binding.turn, text: 'next' }, 'board', binding, at).state
+    const first = claimMessages(queued, binding, at, 'd4e5f6', 'ba9876543210')
+    assert.deepEqual(first.messages.map(item => item.id), ['m2'], event)
+    // m2 may be taken again while nobody marked it (an OpenCode re-take); the unconfirmed wake never is.
+    assert.ok(!claimMessages(first.state, binding, at + 1000, 'a1a1a1', 'cdcdcdcdcdcd').messages.some(item => item.id === message.id), event)
+    for (const next of ['releaseUnsent', 'release']) assert.equal(stateOf(unconfirmedAfter([event, next]).one), 'unconfirmed', `${event} then ${next}`)
+    assert.throws(() => applyEvent(state, one, binding, 'attempt'), { message: 'CLAIM_LOST' }, event)
+    assert.deepEqual(state.messages.find(item => item.id === message.id), message, event)
+  }
+})
+
+test('a late uncertain receipt restarts neither the open limit nor the day an unconfirmed wake keeps its text (#1553)', () => {
+  for (const event of Object.values(lateUncertain)) {
+    const atOpenLimit = unconfirmedAfter([event, 'openLimit']).one
+    assert.equal(stateOf(atOpenLimit), 'unconfirmed', `${event} then openLimit`)
+    assert.ok(atOpenLimit.text.length > 0, `${event} then openLimit keeps the text`)
+    assert.equal(stateOf(unconfirmedAfter([event, 'dayLimit']).one), 'expired', `${event} then dayLimit`)
+    const accepted = unconfirmedAfter([event, 'dayLimit'], 'acceptedBefore')
+    assert.equal(stateOf(accepted.one), 'wakeExpired', `${event} then dayLimit, accepted before`)
+    assert.equal(stateOf(applyEvent(accepted.state, accepted.one, accepted.binding, 'ack').state.messages[0]), 'acknowledged', `${event}, dayLimit, then a late ACK`)
+  }
+})
+
+test('late receipts in either order leave an unconfirmed wake holding nothing, and a later ACK, reject, dismiss or turn-ended receipt still finishes it as before (#1553)', () => {
+  const holdsNothing = ({ one, binding, state }, where) => {
+    assert.equal(stateOf(one), 'unconfirmed', where)
+    assert.doesNotThrow(() => queueMessage(state, { id: 'm2', target: binding.id, turn: binding.turn, text: 'next' }, 'board', binding, one.updated + 1000), where)
+  }
+  for (const order of [['accept', 'unsure'], ['accept', 'timeout'], ['unsure', 'accept'], ['timeout', 'accept']]) {
+    const after = unconfirmedAfter(order)
+    holdsNothing(after, order.join(' then '))
+    assert.equal(after.one.hasAccepted, true, order.join(' then '))
+    assert.equal(after.one.updated, after.message.updated, order.join(' then '))
+  }
+  for (const order of [['timeout', 'unsure'], ['unsure', 'unsure'], ['restart', 'unsure'], ['restart', 'timeout']]) {
+    const after = unconfirmedAfter(order)
+    holdsNothing(after, order.join(' then '))
+    assert.deepEqual(after.one, after.message, order.join(' then '))
+  }
+  for (const shape of [undefined, 'acceptedBefore']) {
+    for (const event of Object.values(lateUncertain)) {
+      const where = `${label('unconfirmed', shape)} x ${event}`
+      assert.equal(stateOf(unconfirmedAfter([event, 'ack'], shape).one), 'acknowledged', `${where} then ack`)
+      assert.equal(stateOf(unconfirmedAfter([event, 'reject'], shape).one), 'rejected', `${where} then reject`)
+      assert.equal(stateOf(unconfirmedAfter([event, 'dismiss'], shape).one), 'dismissed', `${where} then dismiss`)
+    }
+    assert.equal(stateOf(unconfirmedAfter(['fail'], shape).one), 'turnEnded', `${label('unconfirmed', shape)} x fail`)
+  }
+})
+
 test('nothing a hook was handed before a board start goes out after it, whatever receipts its session sends since, in any state of the table (#1407)', () => {
   const wrong = []
   let checked = 0
