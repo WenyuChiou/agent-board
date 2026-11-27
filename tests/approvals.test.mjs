@@ -882,7 +882,7 @@ test('a page paired a moment ago cannot press until the grace window has passed'
 test('a board that opens no window where it runs says it tried nothing, and its one-time key is gone', async () => {
   // Over SSH or a test's board: the command that asked opens the page itself, with no key.
   const board = await startBoard({ open: async () => null })
-  assert.deepEqual((await board.call('/api/open', { asApp: true })).body, { isOpen: false, hasTried: false })
+  assert.deepEqual((await board.call('/api/open', { asApp: true })).body, { isOpen: false, hasTried: false, isRedeemed: false })
   const key = board.lastKey()
   assert.ok(key, 'the board made a key before it knew no window would open')
   const paired = await board.call('/api/approvals/pair', { key }, { origin: board.origin })
@@ -901,7 +901,7 @@ test('a key used though no window opened turns approvals off, so whoever paired 
       return false
     },
   })
-  assert.deepEqual((await board.call('/api/open', { asApp: true })).body, { isOpen: false, hasTried: true })
+  assert.deepEqual((await board.call('/api/open', { asApp: true })).body, { isOpen: false, hasTried: true, isRedeemed: false })
   assert.notEqual(stolen, '', 'the stand-in paired with the key')
   const headers = { origin: board.origin, 'x-board-page': 'p-stolen', 'x-board-visible': '1', 'x-board-approve': stolen }
   await board.call('/api/board', undefined, headers)
@@ -1224,7 +1224,7 @@ test('HTTP calls with the address file\'s token cannot pair, press or learn the 
   })
   // It can see the request and make the board open a window for the person, and nothing more.
   assert.equal(result.hasCommand, true)
-  assert.deepEqual(JSON.parse(result.opened), { isOpen: true, hasTried: true })
+  assert.deepEqual(JSON.parse(result.opened), { isOpen: true, hasTried: true, isRedeemed: false })
   assert.ok(result.pairs.every(status => status === 403), JSON.stringify(result.pairs))
   assert.deepEqual(result.presses, [403, 403, 403])
   assert.equal(waiting.isRunning(), true)
