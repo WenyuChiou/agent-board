@@ -39,6 +39,9 @@ export const QUESTION = /^<!--\s*question=([a-f0-9]{64}:[1-9]\d*)\s*-->\s*$/
 // Any line of this shape is read as the annotation, so a malformed one is dropped and never turns into text.
 export const NATIVE = /^<!--\s*native=(\S*)(?:\s+options=(.*?))?\s*-->\s*$/
 export const OPTIONS = /^<!--\s*options=(.*?)\s*-->\s*$/
+// `### title <!-- session=<id> -->`: the block (its `session=`) of the AI that wrote this hand-kept task (#1866).
+// Only a plain id is kept, the shape `RESUME` takes; any other comment on the line is ordinary text.
+const WRITER = /<!--\s*session=([0-9a-zA-Z][0-9a-zA-Z_-]{5,63})\s*-->\s*$/
 const NATIVE_AGENTS: readonly string[] = ['claude', 'codex']
 
 // One list of choices, kept whole or refused whole (null). A character is a Unicode code point, as
@@ -364,7 +367,8 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
 
     const taskMatch = TASK.exec(line)
     if (taskMatch?.[1] !== undefined) {
-      task = { title: taskMatch[1], line: lineIndex, notes: [], steps: [], auto: pendingAuto, due: null }
+      const writer = pendingAuto === null && openSession === null ? WRITER.exec(raw)?.[1] : undefined
+      task = { title: taskMatch[1], line: lineIndex, notes: [], steps: [], auto: pendingAuto, due: null, ...(writer === undefined ? {} : { writer }) }
       pendingAuto = null
       ensureProject().tasks.push(task)
       return

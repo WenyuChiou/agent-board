@@ -28,7 +28,7 @@ import { boardLanguage, isLanguageOverridden, type SettingsLang } from '../hooks
 import { settingsPanel } from '../hooks/page-settings'
 import { qrModules, qrText } from '../hooks/qr'
 import { STALE_MS } from '../hooks/parse'
-import { DOING_QUIET_MS, WORKING_MS } from '../hooks/grouping'
+import { DOING_QUIET_MS, groupBoard, WORKING_MS } from '../hooks/grouping'
 import { confirmMatches, confirmTask } from '../hooks/blocks'
 import { applyCompletionOverlay, completionKey, completionOfBlock, completionOverlay, isCompletionOverlay } from '../hooks/mirror'
 import { RELEASED } from '../hooks/released'
@@ -5744,4 +5744,47 @@ test('the pane and progress.md offer the same choices', () => {
     expect(paneView.waiting[0]!.options, `${one.name} pane`).toEqual(one.expected)
     expect(fromFile.waiting[0]!.options, `${one.name} progress.md`).toEqual(one.expected)
   }
+})
+
+// #1866: who wrote a hand-kept task. `### title <!-- session=<id> -->` names the block that wrote it.
+const WRITER_NOW = Date.parse('2026-11-26T12:00:00Z')
+const writerBoard = (file: string) => {
+  const view = buildView(parseProgress(file), [], null, WRITER_NOW, 0, {}, STRINGS.en)
+  return groupBoard(serveModel(view, [], STRINGS.en), WRITER_NOW, () => null, STRINGS.en)
+}
+const WRITER_BLOCK = [
+  '## demo',
+  '<!-- auto session=ab12cd34 agent=codex state=working updated=2026-11-26T11:55:00Z -->',
+  '### Port the parser',
+  '- [~] Port it',
+  '<!-- /auto session=ab12cd34 -->',
+  '',
+]
+
+test('a hand-kept task whose trailer names a session shows under that AI, with its mark on the second line', () => {
+  const file = [...WRITER_BLOCK, '## Home', '### Check the synthetic mail <!-- session=ab12cd34 -->', '- [?] Reply to the synthetic mail', ''].join('\n')
+  const result = writerBoard(file)
+  const codex = result.agents.find(group => group.agent === 'codex')
+  expect(codex?.cards.map(card => [card.agent, card.isOwn, card.task])).toEqual([['codex', true, 'Check the synthetic mail']])
+  expect(result.needs.n).toBe(1)
+  expect(result.all.counts.needs).toBe(1)
+})
+
+test('a hand-kept task whose trailer is wrong or names no block still shows in needs you and the full list, under no AI', () => {
+  for (const trailer of ['<!-- session=zz99zz99 -->', '<!-- session= -->', '<!-- session=ab12 cd34 -->', '<!-- session=../x -->', '']) {
+    const file = [...WRITER_BLOCK, '## Home', `### Check the synthetic mail ${trailer}`.trimEnd(), '- [?] Reply to the synthetic mail', ''].join('\n')
+    const result = writerBoard(file)
+    expect(result.needs.n).toBe(1)
+    expect(result.all.counts.needs).toBe(1)
+    const card = result.all.cards.find(one => one.task.startsWith('Check the synthetic mail'))
+    expect(card?.agent).toBe('')
+    expect(card?.isOwn).toBe(true)
+    expect(result.agents.find(group => group.agent === 'codex')?.cards.some(one => one.isOwn)).toBe(false)
+  }
+})
+
+test('a trailer on a task inside an agent block is not a writer', () => {
+  const file = ['## demo', '<!-- auto session=ab12cd34 agent=codex state=working updated=2026-11-26T11:55:00Z -->', '### Port the parser <!-- session=ab12cd34 -->', '- [~] Port it', '<!-- /auto session=ab12cd34 -->', ''].join('\n')
+  const tasks = parseProgress(file).flatMap(project => project.tasks)
+  expect(tasks.map(task => [task.title, task.writer])).toEqual([['Port the parser', undefined]])
 })

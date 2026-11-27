@@ -141,6 +141,8 @@ export type ProgressTask = {
   steps: ProgressStep[]
   auto: ProgressAuto | null
   due: string | null
+  // A hand-kept task's trailer `<!-- session=<id> -->`: the block that wrote it (#1866).
+  writer?: string
 }
 
 export type ProgressProject = { name: string; tasks: ProgressTask[] }
