@@ -9101,6 +9101,66 @@ test('Antigravity closing question refuses transcripts outside the hook conversa
   assert.ok(record(selfId).steps.includes('- [?] Own session question?'))
   assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Own session question\?/)
   assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-OWN-BODY'))
+
+  // Row 1: antigravity-ide/.system_generated/logs/transcript.jsonl is also accepted.
+  const ideId = 'synthetic-ide-1467'
+  const ideTranscript = join(f.home, '.gemini', 'antigravity-ide', 'brain', ideId, '.system_generated', 'logs', 'transcript.jsonl')
+  f.save(ideTranscript, `${JSON.stringify(user)}\n${JSON.stringify(model('IDE folder question?'))}\n`)
+  assert.equal(send(ideId, ideTranscript).status, 0)
+  assert.ok(record(ideId).steps.includes('- [?] IDE folder question?'))
+
+  // Row 3: two concurrent conversations each read only their own transcript question.
+  const convA = 'synthetic-pair-a-1467'
+  const convB = 'synthetic-pair-b-1467'
+  const txA = join(f.home, '.gemini', 'antigravity', 'brain', convA, 'transcript.jsonl')
+  const txB = join(f.home, '.gemini', 'antigravity', 'brain', convB, 'transcript.jsonl')
+  f.save(txA, `${JSON.stringify(user)}\n${JSON.stringify(model('Question for A?'))}\n`)
+  f.save(txB, `${JSON.stringify(user)}\n${JSON.stringify(model('Question for B?'))}\n`)
+  assert.equal(send(convA, txA).status, 0)
+  assert.equal(send(convB, txB).status, 0)
+  assert.ok(record(convA).steps.includes('- [?] Question for A?') && !record(convA).steps.includes('- [?] Question for B?'))
+  assert.ok(record(convB).steps.includes('- [?] Question for B?') && !record(convB).steps.includes('- [?] Question for A?'))
+
+  // Row 5: absent or non-string transcriptPath records waiting with no question and exits 0.
+  assert.equal(send('synthetic-missing-path-1467', undefined).status, 0)
+  assert.equal(record('synthetic-missing-path-1467').asked, undefined)
+  assert.equal(send('synthetic-nonstring-path-1467', 123).status, 0)
+  assert.equal(record('synthetic-nonstring-path-1467').asked, undefined)
+
+  // Row 6: fallback session_id binds to its own brain folder; invalid session_id exits non-zero before any read.
+  const fallbackId = 'synthetic-fallback-id-1467'
+  const fallbackTx = join(f.home, '.gemini', 'antigravity', 'brain', fallbackId, 'transcript.jsonl')
+  f.save(fallbackTx, `${JSON.stringify(user)}\n${JSON.stringify(model('Fallback session question?'))}\n`)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], { session_id: fallbackId, transcriptPath: fallbackTx }).status, 0)
+  assert.ok(record(fallbackId).steps.includes('- [?] Fallback session question?'))
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], { session_id: 'synthetic-fallback-other-1467', transcriptPath: fallbackTx }).status, 0)
+  assert.equal(record('synthetic-fallback-other-1467').asked, undefined)
+  assert.notEqual(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], { session_id: '../bad', transcriptPath: foreign }).status, 0)
+
+  // Row 7: another --home with no brain/<id> under it refuses the transcript even if it exists under another home.
+  const otherHome = mkdtempSync(join(tmpdir(), 'agy-other-home-'))
+  try {
+    const otherRes = spawnSync(process.execPath, [f.script, '--home', otherHome, '--data-dir', f.root, '--progress-file', f.progress, '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+      env: f.env, input: JSON.stringify({ conversationId: 'synthetic-other-home-1467', transcriptPath: fallbackTx }), encoding: 'utf8', windowsHide: true, timeout: 15000,
+    })
+    assert.equal(otherRes.status, 0, otherRes.stderr)
+    assert.equal(record('synthetic-other-home-1467').asked, undefined)
+  } finally {
+    rmSync(otherHome, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+
+  // Row 8 (Windows): differently-cased --home still matches realpathSync.native and extracts own question.
+  if (process.platform === 'win32' && /^[A-Za-z]:/.test(f.home)) {
+    const toggledHome = (f.home[0] === f.home[0].toUpperCase() ? f.home[0].toLowerCase() : f.home[0].toUpperCase()) + f.home.slice(1)
+    const winCaseId = 'synthetic-wincase-1467'
+    const winCaseTx = join(f.home, '.gemini', 'antigravity', 'brain', winCaseId, 'transcript.jsonl')
+    f.save(winCaseTx, `${JSON.stringify(user)}\n${JSON.stringify(model('Windows case question?'))}\n`)
+    const winRes = spawnSync(process.execPath, [f.script, '--home', toggledHome, '--data-dir', f.root, '--progress-file', f.progress, '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+      env: f.env, input: JSON.stringify({ conversationId: winCaseId, transcriptPath: winCaseTx }), encoding: 'utf8', windowsHide: true, timeout: 15000,
+    })
+    assert.equal(winRes.status, 0, winRes.stderr)
+    assert.ok(record(winCaseId).steps.includes('- [?] Windows case question?'))
+  }
 }))
 
 test('queued Grok status retains only the closing question and replays it', () => fixture(f => {
