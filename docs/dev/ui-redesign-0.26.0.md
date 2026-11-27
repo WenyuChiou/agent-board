@@ -1,6 +1,6 @@
 # The board page, redesign 1: order and layout first
 
-Written by the PM on 2026-11-24, at the owner's ask: 「另外UI應該要先行優化 你可以先做這部分優化的設計」. A design for the owner's review, **not in force**. The mockup, on synthetic data, is `docs/dev/ui-mockup-0.26.0.html`: its 提案 switch (bottom right) shows the 沒事, 過時 and 深色 states, and it was checked at 1280, 1440 (detail rail) and 375 px.
+Written by the PM on 2026-11-24, at the owner's ask: 「另外UI應該要先行優化 你可以先做這部分優化的設計」. Approved by the owner with plan #1837 (2026-11-24, US Eastern) and in force. The mockup, on synthetic data, is `docs/dev/ui-mockup-0.26.0.html`: its 提案 switch (bottom right) shows the 沒事, 過時 and 深色 states, and it was checked at 1280, 1440 (detail rail) and 375 px.
 
 The work order is the owner's: order and layout first, then the card, then the wording. The page code is `hooks/serve.ts` (CSS around `:1059-1350`, the page script after `:2000`). It needs no hook change, so this lane can start at once and run beside the delivery work.
 
@@ -18,7 +18,7 @@ The work order is the owner's: order and layout first, then the card, then the w
   - no storage notices;
   - search and filters on a par with T3 Code;
   - the footer flush with the bottom edge.
-- **Kept:** the current palette (the Japanese traditional colours: 藍 `#165E83` accent, gold for "needs you", green for done) and both themes. The gold badge stays the one loud colour on the page.
+- **Kept:** the current palette (the Japanese traditional colours: 藍 `#165E83` accent, gold for "needs you", green for done) and both themes — *superseded for the board page once Redesign 2 was approved (2026-11-26) by Redesign 2 §0's Ai-tinted pale washi + `#185A7D` + `#F4B41A` palette (`hooks/palette.ts` `LIGHT`/`DARK` pane tokens stay `#165E83`; page overrides live in `PAGE_LIGHT`/`PAGE_DARK`)*. The gold badge stays the one loud colour on the page.
 
 ## Layout, desktop (1024 px and wider)
 
@@ -111,9 +111,9 @@ The plan (plan-0.26.0.md, section D) holds them:
 
 ## Redesign 2: the item and the words
 
-> **Status: design proposal only — not in force until the owner approves. Zero code or string-table changes in this PR.**
+> **Status: in force as merged (owner, 2026-11-26, 「全照建議」).** Issue N15 builds its item controls; L10 carries 送出, 收回 and 不確定.
 
-Redesign 1 settled the page skeleton (208 px sidebar, one `<= 760 px` work column, `320 px` detail rail at `>= 1440 px` within `#1849`'s `<= 340 px` cap, search/filters, and flush sidebar footer). Redesign 2 specifies **Agent Board's visual identity, the compact interactive pulse and freshness pill bar (`#1023`), the item and its icon/button micro-controls, all board states, keyboard triage, phone sheet, and the 16-string cut list** across all three languages (`zh-TW`, `en`, `zh-CN`), directly addressing `#209` comments `7148340095` ("in the UI, order and layout first, then the card, then wording") and `7154088026`, plus `#1023`'s first line.
+Redesign 1 settled the page skeleton (208 px sidebar, one `<= 760 px` work column, `320 px` detail rail at `>= 1440 px` within `#1849`'s `<= 340 px` cap, search/filters, and flush sidebar footer). Redesign 2 keeps that layout skeleton from Redesign 1 while **newly introducing** the swallowtail `.flag`, `.pulse-bar`, `.sync-btn`, and `.surf-pill` (`>_ CLI` / `❐ App`) badges (not carried over from Redesign 1), specifying **Agent Board's visual identity, the compact interactive pulse and freshness pill bar (`#1023`), the item and its icon/button micro-controls, all board states, keyboard triage, phone sheet, and the 16-string cut list** across all three languages (`zh-TW`, `en`, `zh-CN`), directly addressing `#209` comments `7148340095` ("in the UI, order and layout first, then the card, then wording") and `7154088026`, plus `#1023`'s first line.
 
 ### 0. Positioning and Agent Board visual identity
 
@@ -126,17 +126,17 @@ Redesign 1 settled the page skeleton (208 px sidebar, one `<= 760 px` work colum
     3. `is-idle` (`Needs you = 0` and `Working = 0`, live): steady `--ink` dot.
     4. `is-offline` (stale / poll failed): dimmed wordmark or hollow stroked board with a muted/hollow dot.
 - **Ai-tinted Washi & Luminous Yamabuki light palette + Inkstone dark palette:**
-  - Replaces the old greenish `#f1f2ee` ground, harsh `#ffffff` surface, and muddy `#8A6700` gold with a crisp pale washi mist palette tinted ~1.5% toward Deep Ai-iro (`#185A7D`) while keeping dark Inkstone (`--ground: #141617` / `--surface: #1e2022` / `--waiting-fill: #F8B500`) cohesive:
-    - **Light surfaces & ink:** ground `#F3F5F7` (Ai-tinted pale washi mist), surface `#FCFDFE` (Crisp Hakuji elevated paper for sidebar, `.needs-sheet`, rail, and sheet), inset `#EAEFF2` (recessed stone for search & `.cmd`), borders `#E0E6EB` (`--line`) / `#C8D2DA` (`--line-strong`), ink `#172026`, muted `#525B63` (`>= 6.0:1`), Ai-iro accent `#185A7D` (`--on-fill: #FCFDFE`), brand `#C87D00`, done `#0D7444` (`#3FAE6A` dark), running `#6E4F94`, alert `#B4272D`, project `#005243`, and AI tile `--tile-bg: #EEF2F5` / `1 px solid #D4DDE4` (`#26292C` / `1 px solid #363A3E` in dark).
+  - Once approved, this Ai-tinted pale washi + `#185A7D` + `#F4B41A` palette supersedes Redesign 1's `#165E83` palette for the board page (while `hooks/palette.ts` `LIGHT`/`DARK` pane tokens stay untouched and page tokens live in `PAGE_LIGHT`/`PAGE_DARK`). It replaces the old greenish `#f1f2ee` ground, harsh `#ffffff` surface, and muddy `#8A6700` gold with a crisp pale washi mist palette tinted ~1.5% toward Deep Ai-iro (`#185A7D`) while keeping dark Inkstone (`--ground: #141617` / `--surface: #1e2022` / `--waiting-fill: #F8B500`) cohesive:
+    - **Light surfaces & ink:** ground `#F3F5F7` (Ai-tinted pale washi mist), surface `#FCFDFE` (Crisp Hakuji elevated paper for sidebar, `.needs-sheet`, rail, and sheet), inset `#EAEFF2` (recessed stone for search & `.cmd`), borders `#E0E6EB` (`--line`) / `#C8D2DA` (`--line-strong`), ink `#172026`, muted `#525B63` (`5.97:1` on inset `#EAEFF2`; `6.33:1` on ground `#F3F5F7`; `6.79:1` on surface `#FCFDFE` — well above `>= 4.5:1`), Ai-iro accent `#185A7D` (`--on-fill: #FCFDFE`), brand `#C87D00`, done `#0D7444` (`#3FAE6A` dark), running `#6E4F94`, alert `#B4272D`, project `#005243`, and AI tile `--tile-bg: #EEF2F5` / `1 px solid #D4DDE4` (`#26292C` / `1 px solid #363A3E` in dark).
     - **Luminous Yamabuki waiting gold:** `--waiting-fill: #F4B41A` paired with deep sumi text `--waiting-on: #231800` (`>= 9.4:1` WCAG AAA) and `#D4960A` (`--waiting-edge`) border accent on `.flag` and `.badge` (`#F8B500` / `#141617` / `#E0A300` in dark), replacing muddy `#8A6700`, while reserving `--waiting-text: #8A5200` on `--paste-bg: #FEF5DC` / `--paste-line: #E9C46A` for overdue ages, `需貼上`, and `[⚠ 2m · 重整]` (`>= 5.8:1`).
     - All text/surface token pairs are verified `>= 4.5:1` WCAG AA across light & dark.
-- **Swallowtail `.flag` + raised Washoku `.needs-sheet`:**
+- **Swallowtail `.flag` + raised Washoku `.needs-sheet` (newly introduced by Redesign 2):**
   - Attaches Agent Board's signature swallowtail `.flag` (`clip-path: polygon(0 0, 100% 0, calc(100% - 8px) 50%, 100% 100%, 0 100%)`, `border-radius: 6px 0 0 0`) to the top-left of the raised `.needs-sheet` (`border: 1px solid var(--line-strong); border-radius: 0 10px 10px 10px`).
   - **Conditional gold:** when `Needs you > 0`, `.flag` is `--waiting-fill` with `--waiting-on` text and `--waiting-edge` bottom accent (`需要你 N`, `tabular-nums`); when `Needs you = 0`, `.flag.calm` recedes to neutral surface/border (`需要你 0`, `clip-path: none; border-radius: 6px 6px 0 0`) so gold appears **only** when something truly needs the person.
   - **Single heading in `需要你` view:** in `需要你` view, `.flag` **is** the `18 px` `<h1>` heading — removing the duplicate `<h1>需要你</h1>` + `<h2 class="sec-h">需要你 N</h2>` double header. Only `進行中` and `全部` render a standalone `18 px` view heading (inside `全部`, `.flag` renders as a `14 px` `<h2>`).
-- **Icon-only AI identity (`AGENT_ICONS`) + distinct `>_ CLI` / `❐ App` surface badges + 4-shape presence:**
+- **Icon-only AI identity (`AGENT_ICONS`) + distinct `>_ CLI` / `❐ App` surface badges (`.surf-pill`, newly introduced by Redesign 2) + 4-shape presence:**
   - Official inline SVGs from `hooks/agent-icons.ts` render monochrome (`currentColor`) inside `.mk` porcelain/inkstone tiles and carry AI identity cleanly without repeating vendor names (`Claude`, `Codex`, `Antigravity`, `DeepSeek`, …) across the workspace:
-    - **Sidebar `#ai-list` rows** show `[22×22 px official monochrome AI SVG tile] + [surface micro-badges] + [gold badge / 4-shape status dot]` with **zero visible AI name text** (full descriptive `aria-label` stays for screen readers, e.g. `Claude · App · 1 件需要你`, while hover `[data-tip]` stays AI-name-free).
+    - **Sidebar `#ai-list` rows** show `[22×22 px official monochrome AI SVG tile] + [surface micro-badges] + [gold badge / 4-shape status dot]` with **zero visible AI name text**. Hover `[data-tip]` stays AI-name-free because tooltips are visible workspace chrome and `#209` `7148340095` forbids repeating AI names during scanning, whereas the `[AI ▾]` filter dropdown keeps vendor names as an explicit selection checklist and screen-reader `aria-label` (e.g. `Claude · App · 1 件需要你`) keeps vendor names for non-visual identification.
     - **Phone `#m-ai` strip (`< 640 px`)** shows `[全部]` + compact icon chips `[20×20 px AI SVG] + [>_ / ❐ icon-only surface pill(s)] + [gold badge]` (keeping `>_ CLI` / `❐ App` icon+text on desktop and phone `.sheet`), allowing all 4–5 AIs to fit comfortably on `375 px` without clipping.
     - **Opened `.rail .r-head`, inline `.d-head`, and phone `.sheet .r-head`** show `[AI SVG tile] + [>_ CLI / ❐ App badge] + [project · age]`, dropping typed vendor names so project names do not truncate on `320 px` rails.
     - **Vendor names remain only inside the `[AI ▾]` filter dropdown checklist** where a person explicitly picks vendors from a menu.
@@ -206,7 +206,7 @@ Related follow-up tightenings (same rule, outside the 16 primary cuts):
 
 ### 6. Icon-only sidebar AI rows, surface badges, and gold badge priority (finding 5)
 
-- Sidebar `#ai-list` rows show `[22×22 px official monochrome AGENT_ICONS SVG tile] + [>_ CLI / ❐ App .surf-pill micro-badges] + [gold badge / 4-shape status dot]` with **zero visible AI name text** and never print status words like `正在做` or `等你回覆`. Full descriptive `aria-label` stays for screen readers (e.g. `Claude · App · 1 件需要你`), while hover `[data-tip]` stays AI-name-free. When an AI has both `CLI` and `App` sessions active, both distinct surface badges (`>_ CLI` recessed stone vs `❐ App` soft Ai-iro tint) render cleanly side-by-side. Vendor names remain **only inside the `[AI ▾]` filter dropdown checklist**.
+- Sidebar `#ai-list` rows show `[22×22 px official monochrome AGENT_ICONS SVG tile] + [>_ CLI / ❐ App .surf-pill micro-badges] + [gold badge / 4-shape status dot]` with **zero visible AI name text** and never print status words like `正在做` or `等你回覆`. Hover `[data-tip]` stays AI-name-free because tooltips are visible workspace chrome and `#209` `7148340095` keeps vendor names out of scanning labels/sentences, while `aria-label` (e.g. `Claude · App · 1 件需要你`) keeps vendor names for screen readers and the `[AI ▾]` filter dropdown keeps vendor names as an explicit selection checklist. When an AI has both `CLI` and `App` sessions active, both distinct surface badges (`>_ CLI` recessed stone vs `❐ App` soft Ai-iro tint) render cleanly side-by-side.
 - Right-hand indicator precedence per AI row (encoding presence by **shape + colour**, with **zero AI names** in tooltips):
   1. **Waiting on the person (`n > 0`):** Luminous Yamabuki gold count pill (`.badge`, `--waiting-fill` / `--waiting-on`, the one loud colour on the page) — **overrides** any concurrent running indicator so a waiting question is never hidden behind "working" (fixes finding 5). Tooltip: `1 件需要你 · 另有進行中任務` (`1 needs you · work also running`) when also working, or `N 件需要你` (`N need you`) — never `Codex · …`.
   2. **Running (`n === 0` and active task):** solid green circle (`.st.run`, `8×8 px`, `--done`), tooltip `進行中` (`Working`).
@@ -218,7 +218,7 @@ Related follow-up tightenings (same rule, outside the 16 primary cuts):
 | State | Visual & copy contract |
 |---|---|
 | **Empty (`需要你` = 0)** | Corner Light shifts to `is-working` or `is-idle` (calm ink tab icon); swallowtail `.flag` recedes to neutral `.flag.calm` (`需要你 0`, zero gold on page); `.needs-sheet` shows `沒有要你回的事` (`14 px` / `600`) while `.sync-btn` (`[↻ 剛剛]`) in `.pulse-bar` / `.m-top` shows freshness. |
-| **Stale (`#1023` / 2 min no update)** | Corner Light enters `is-offline`; `.sync-btn` transforms in-place into high-contrast amber warning pill **`[⚠ 2m · 重整]`** (`>= 4.5:1` in light & dark, spinning & refreshing on click — no full-width prose banner) while `.needs-sheet` and `.list` dim to `opacity: 0.55`. |
+| **Stale (`#1023` / 2 min no update)** | Corner Light enters `is-offline`; `.sync-btn` transforms in-place into high-contrast amber warning pill **`[⚠ 2m · 重整]`** (`>= 4.5:1` in light & dark, tooltip `2 分鐘沒有更新 · 點擊重新整理` and `aria-label="2 分鐘沒更新，點擊重新整理"` — never `連線逾時 2 分鐘`, spinning & refreshing on click, no full-width prose banner) while `.needs-sheet` and `.list` dim to `opacity: 0.55`. |
 | **Large storage (`> 512 KB` / multi-MB)** | Zero banner, zero red alarm, zero Settings storage line (`boardLarge`, `progressLarge`, `storeLarge` all removed; tidying runs on its own and the page speaks only if a write fails). |
 | **Nothing found (search or filter)** | Single line `找不到「{query}」` (or `沒有符合的項目` for chip-only filters) + `[✕ 清除]` reset pill. |
 | **AI not connected** | Sidebar row recedes (`.ai-row.is-off` with `color: var(--muted)` + `.mk { opacity: 0.65 }`, `8×2 px` `.st.off` dash, preserving `>= 4.5:1` text and tooltip contrast) with AI-name-free tooltip (`尚未連上看板 · 回覆需貼上`); its waiting items carry the `需貼上` micro-pill + tooltip. |
@@ -232,15 +232,15 @@ Related follow-up tightenings (same rule, outside the 16 primary cuts):
 - **Folded items:** same 2-line density as desktop (`>_ CLI`/`❐ App` `.surf-pill` + `project · age` on line 2) without folded `.acts` buttons; `進行中` rows drop the progress bar and project column, keeping `1/3` and `age`.
 - **Bottom sheet (`.sheet` + `.scrim`):** slides up with `overscroll-behavior: contain` (`visibility: hidden` + `inert` when closed so offscreen controls leave Tab order); `.sheet .r-head` shows `[AI SVG tile] + [>_ CLI / ❐ App badge] + [project · age]` (no typed vendor name), `16 px` title, context, steps, `.cmd` strip (once, with `44×44 px` `.ib` copy button), **44 px** answer choice buttons (`.sheet .big .btn`, `min-height: 44 px; height: 44 px`), `自己寫` textarea (`16 px` font to avoid mobile zoom) + `送出` (`min-height: 44 px`), and **`44 px` touch buttons keeping icon + short 2-char label** (`封存` / `隱藏`).
 
-### 9. `#1023`'s first line — Compact interactive pulse & freshness pill bar (`.pulse-bar`)
+### 9. `#1023`'s first line — Compact interactive pulse & freshness pill bar (`.pulse-bar`, newly introduced by Redesign 2)
 
 - Replaces all three prose summary lines — top `4 件等你 · 2 進行中 · 本週完成 1`, bottom `進行中 2 · 已停止 2 · 已完成 1 · 看全部 ›`, and phone `#m-glance` — with **one compact, right-aligned cluster of icon+count pill buttons (`.pulse-bar`)** beside the filter chips (`tabular-nums`, `28 px` height, `13 px` SVG icon + count only, `aria-label` + instant `[data-tip]` tooltip):
   - **`[● N]` Needs-you pill (`jump-needs`):** shown outside `需要你` view when `N > 0`; 1 press jumps straight to `需要你`.
   - **`[▸ N]` Working pill (`jump-run`):** switches to `進行中` (`aria-label="進行中 N 項"`).
   - **`[■ N]` Stopped pill (`jump-stop`):** opens `全部` with `已停止` (`#sec-stop`) unfolded and scrolled into view (`aria-label="已停止 N 項"`).
   - **`[✓ N]` Done-this-week pill (`jump-done`):** opens `全部` with `已完成` (`#sec-done`) unfolded and scrolled into view (`aria-label="本週完成 N 項"`).
-  - **`[↻ 剛剛]` Freshness / sync button (`.sync-btn`):** spins and refreshes on click (`aria-label` + `[data-tip]`).
-- **In-place stale / poll-failure state (no prose banner):** when polling fails past budget or the board has had no update for 2 minutes, `.sync-btn` transforms **in-place** into a high-contrast amber warning pill **`[⚠ 2m · 重整]`** (`--waiting-text` >= `4.5:1` in light & dark) while `.needs-sheet` and `.list` dim to `opacity: 0.55` (and Corner Light enters `is-offline`), without inserting a full-width prose banner.
+  - **`[↻ 剛剛]` Freshness / sync button (`.sync-btn`, newly introduced by Redesign 2):** spins and refreshes on click (`aria-label` + `[data-tip]`).
+- **In-place stale / poll-failure state (no prose banner):** when polling fails past budget or the board has had no update for 2 minutes, `.sync-btn` transforms **in-place** into a high-contrast amber warning pill **`[⚠ 2m · 重整]`** (`--waiting-text` >= `4.5:1` in light & dark, `[data-tip="2 分鐘沒有更新 · 點擊重新整理"]` and `aria-label="2 分鐘沒更新，點擊重新整理"`, replacing `"連線逾時 2 分鐘"`) while `.needs-sheet` and `.list` dim to `opacity: 0.55` (and Corner Light enters `is-offline`), without inserting a full-width prose banner.
 
 ### 10. Keyboard triage rules
 
@@ -272,3 +272,41 @@ Related follow-up tightenings (same rule, outside the 16 primary cuts):
   - `web-design-guidelines`: `:focus-visible` outlines, `tabindex="0"` focusable item rows (`role="button"` + `aria-expanded` on button-free `.row` items; `aria-expanded` on `.ib-sm` reply disclosure inside `.it-r` rows to avoid nested `role="button"` or `aria-expanded` on generic `<div>`), `role="group"` filter popovers, `aria-current` / `aria-pressed` filter state, `aria-selected` on phone `role="tab"`, `inert` + `visibility: hidden` offscreen `#sheet`, `aria-live="polite"` toast, `tabular-nums`, `min-w-0` truncation guards, `overscroll-behavior: contain` on the bottom sheet, `16 px` mobile search and textarea inputs, and `prefers-reduced-motion` support.
   - `emil-design-eng`: zero animation on frequent keyboard triage (`j`/`k`/`/`/`Esc`), snappy `140–240 ms` `ease-out` / drawer transitions (`180 ms` exit, `240 ms` enter) and `transform-origin: top left` filter popovers using `transform` and `opacity` only, subtle `scale(0.97)` `:active` press feedback, and `@media (hover: hover) and (pointer: fine)` hover gating.
   - `critique`: Nielsen's 10 heuristics and cognitive-load cap (`<= 3` folded controls per item, `<= 4` visible options at any decision point).
+
+---
+
+## Redesign 3: mainstream AI capability cues for 0.26.0
+
+> **Status: design proposal aligned with 2026-11-26 owner & PM decisions — this section changes no code or string table.** Interactive synthetic prototype in `docs/dev/ui-mockup-0.26.0.html` (`<title>Agent Board · Redesign 3 提案（合成資料）</title>`), preserving Redesign 1's layout skeleton and all Redesign 2 foundations (Corner Light `.ab-logo`/`.ab-icon`, Ai-tinted pale washi + `#185A7D` + Yamabuki `#F4B41A` light / Inkstone dark palettes, swallowtail `.flag`, `.pulse-bar` + in-place `.sync-btn`, icon-only AI tiles + `>_ CLI`/`❐ App` `.surf-pill`, 4-shape presence, `320 px` rail, keyboard triage, and phone `.sheet`).
+
+Redesign 3 aligns the 0.26.0 UI cues with the approved delivery rules in `docs/dev/plan-0.26.0.md` (no emoji, luminous gold kept as the sole loud colour, one send control `送出` with existing `收回`, and sub-agent counts / handoff copy deferred or dropped):
+
+### 3.1 Top 2-line `30s` Claude Approval Row & `native=` `在視窗回答` tag
+
+1. **Claude Code `30s` `Approval Row` (`.it-r.is-approval`, `hooks/approvals.ts:18`; Codex approvals stay in 0.27.0 `#1318`):**
+   - Pinned at the top of `需要你` (`needs`) above standard questions so time-bounded tool approvals never sit below older asks. Uses only the page's own monochrome inline SVG icons (`I.shield`, `I.clock`, `I.checkSm`, `I.xSm`, zero emoji).
+   - **Line 1:** leading `[AI SVG]` (`.mk`) + **`.approval-badge`** (`權限請求` with `I.shield` SVG) + optional **`子代理`** tag (`isSubagent`, `hooks/approvals.ts:55`) + single-line monospace command preview (**`.approval-cmd`**, truncated on folded row and shown in full inside `.cmd` on open).
+   - **Line 2:** `[>_ CLI / ❐ App .surf-pill]` + `project` + optional muted worktree/`#PR` tag when ambiguous + live ticking countdown **`.approval-ttl`** (`I.clock` SVG + `24s` counting down toward `0s`, `tabular-nums`, honoring `prefers-reduced-motion: reduce`), right-aligned with `[允許一次]` (`data-act="allow-once"`) and `[拒絕]` (`data-act="deny"`, toggling `.approval-why` 1-line reason input across folded, `inline`, `320 px` rail, and phone `.sheet`).
+   - **Timeout fallback (`0s`):** when `.approval-ttl` reaches `0s` (or via `提案` toggle **`倒數歸零`**, `data-demo="ttl0"`), `.approval-ttl.is-expired` reads **`已轉回原視窗`** and all allow/deny/generic answer controls are disabled/removed so expired requests cannot fire or resume into `進行中`.
+2. **Native TUI-only question (`native=` / `docs/FORMAT.md:94`):**
+   - Options render as **plain text** (never dashed pseudo-buttons) paired with one quiet **`在視窗回答`** tag (`native-pill`, `I.win` SVG + `在視窗回答`) so the person immediately sees what the host asks without mistaking mirrored options for clickable buttons.
+
+### 3.2 Unified `送出` + existing `收回` (B4), setup-step cue, and `[>]` step presentation
+
+- **Single send button (`送出`) everywhere (`plan-0.26.0.md` §2 & B4):**
+  - Every composer uses one primary button **`送出`** with no AI name (never `排入 … 的下一回合`, `暫存`, or `↵`). When a message will land is carried by B4's status line (`已排入 · 現在` / `已排入 · 步驟結束` / `已排入 · 下一回合`).
+  - Rows under **`已停止`** (`#sec-stop`) and **`已完成`** (`#sec-done`) open cleanly in `inline`, `320 px` rail, and phone `.sheet` with a follow-up composer (`送出` via `data-act="followup"`) to start the next turn (`~3s` -> `進行中`).
+  - A message still waiting on the queue offers one existing action: **`收回`** (`data-act="dismiss-wait"`, `docs/MESSAGING.md:743`), cancelling pre-claim wait and restoring the exact raw draft text back into the composer `<textarea>`.
+- **Where one setup step is missing:** beside `需貼上`, if a single setup step unlocks direct sending (e.g. switching on the sidecar or hook approval), the item offers that one setup step pill rather than multi-sentence instructions.
+- **`[>]` running-step visual cue:** renders the active step's note (`I.stepWait` SVG + step text) and age quietly on line 2 (`進行中` / detail view) without setting new grouping or expiry rules on the design doc.
+
+### 3.3 Multi-worktree muted tag, `不確定` state, and 0.27.0 scope boundaries
+
+- **Disambiguation without coloured dots:** only when **two or more open rows share the same project name**, line 2 displays the worktree folder or `#PR` as quiet **muted text** (`.wt-tag`, zero coloured CI dots so Yamabuki gold stays the sole loud colour on the page).
+- **Session uncertainty (`不確定`, no hollow ring on rows/cards):** hollow green ring remains exclusively `"open, idle"` in the sidebar (§6). When a row/card cannot be vouched for (`mayBeClosed` / stale without live lease), line 2 displays the single muted word **`不確定`**, and the explanation renders only when opened (`inline` / `320 px` rail / phone `.sheet`).
+- **Explicitly excluded from 0.26.0 (deferred/rejected per owner & PM review):** sub-agent counts (`0.27.0`), Codex approvals (`0.27.0`, `#1318`), and one-click Markdown handoff copy (rejected — zero Copy; `#317` agent-to-board handoff in `0.27.0`).
+
+### 3.4 Token, accessibility & verification contract
+
+- **Contrast (`>= 4.5:1` WCAG AA across light & dark):** `.approval-ttl` / `已轉回原視窗`, `.native-pill` (`在視窗回答`), `.wt-tag`, `.unsure-word`, `.wait-hold`, and `.setup-pill` pairs all meet `>= 4.5:1` in both Ai-tinted pale washi light and Inkstone dark themes.
+- **Hygiene & motion:** zero emoji, zero external URLs (`http`/`https`), zero `>= 8`-hex strings (`/[0-9a-f]{8,}/i`), `0 px` horizontal overflow across `375 px`, `1280 px`, and `1440 px` (light & dark), `prefers-reduced-motion: reduce` disables continuous timer/pulse motion while keeping `倒數歸零` verification active, and `npx --yes impeccable --json docs/dev/ui-mockup-0.26.0.html` outputs `[]`.

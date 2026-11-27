@@ -65,12 +65,21 @@ export type Message = {
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
-// now (goes in at once), afterWait (goes in after a wait, such as the Codex daemon's ~10-minute watch, #1814),
+// now (goes in at once), afterWait (goes in after a wait, such as the Codex daemon's, within seconds with a Codex window open and up to 10 minutes without, #1814, #1652),
 // stepEnd (when its current step ends), nextTurn (at its next turn; it does not wake it), chatOpen (when this
 // chat is opened again), reopen (the board reopens the session and sends), none (cannot receive yet). `record`
 // is the docs/validation note that showed the route live, or null.
 export type RouteLine = 'now' | 'afterWait' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none'
 export const ROUTE_LINES: readonly RouteLine[] = ['now', 'afterWait', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
+// The route lines 0.25.1 reads (#1860). Its parser refuses the whole message store on any other `line`, and a typed install of
+// 0.25.1 is 0.26.0's way back (docs/dev/plan-0.26.0.md, release check 8). So the store holds only these in `line`: a newer
+// line is saved as the older line it replaces, with the line itself in `routeLine`, a field 0.25.1 keeps and never reads.
+// Each new line must name its older line here before the board can write it.
+export type StoredRouteLine = 'now' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none'
+export const STORED_LINE_OF: Readonly<Record<RouteLine, StoredRouteLine>> = {
+  // 0.25.1 sent a board message to the Codex daemon with the line `now`.
+  now: 'now', afterWait: 'now', stepEnd: 'stepEnd', nextTurn: 'nextTurn', chatOpen: 'chatOpen', reopen: 'reopen', none: 'none',
+}
 export type RowState = 'idle' | 'working' | 'ended'
 export type RouteKind = 'live' | 'mailbox' | 'turn'
 export const SURFACE_IDS = {

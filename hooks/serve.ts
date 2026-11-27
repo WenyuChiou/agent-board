@@ -42,7 +42,7 @@ type ShownMessage = Omit<Message, 'nonce' | 'hash' | 'wake'> & { isSurfaceLost?:
 // shown: the card's one status line, from hooks/message-status.ts (#1843); none for a message taken back after it was handed out.
 type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean; isSurfaceLost?: true; isAfterAppQuit?: true; wake?: ShownMessage['wake']; shown?: { state: StatusState; line: string; tone: StatusTone } }
 // sidecar: whether the Antigravity sidecar polls the board now (#1396).
-type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly ShownMessage[]; sidecar?: boolean }
+type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; surfaces?: { connections: readonly Connection[]; mailboxes: readonly Connection[] }; messages: readonly ShownMessage[]; sidecar?: boolean }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
   const matches = session === undefined ? [] : connections.filter(one => address(one.agent, one.session) === address(agent || 'claude', session))
@@ -117,8 +117,8 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
   if (!canSend && line === 'nextTurn' && codexCopyHint(agent, state, s)) return s.serveCodexCopyHint
   if (line === 'none' && !canSend && agent === 'codex' && state === 'ended') return codexResumeHint(agent, state, s)
-  // Codex's daemon receiver takes `afterWait` on idle because it watches the thread for about 10 minutes
-  // (or longer if configured) before starting a message (#1578, #1814). Each route line maps cleanly to its own text.
+  // Codex's daemon receiver takes `afterWait` on idle because it starts a message within seconds with a Codex window open,
+  // after a watch of up to about 10 minutes without one, before starting a message (#1578, #1814, #1652). Each route line maps cleanly to its own text.
   // The Antigravity app has no "send only if idle": a wake the board hands out just as the person starts a turn may
   // land in that turn, a window the owner accepted on 2026-11-18 on the condition that the card says so (#1396).
   const idleNow = agent === 'antigravity' ? `${s.serveLineNow(name)} ${s.agyMayJoin}` : s.serveLineNow(name)
@@ -482,11 +482,24 @@ const answerFailed = (messages: readonly ShownMessage[], to: string | undefined,
   const last = messages.filter(one => answersQuestion(one, to, questionId, openInSession)).at(-1)
   return last !== undefined && (isFailedReceipt(last) || isSurfaceLost(last))
 }
-// What the page on the local network is given of the messaging state: enough to tell which answers are queued, and no
-// connection, text or reply (that page shows counts only).
+// What the page on the local network is given of the messaging state: enough to tell which answers are queued and which
+// interface (CLI vs App) each session runs on, and no connection id, turn, owner, folder digest, text or reply.
+const surfaceOnly = (list: readonly Connection[] = []): Connection[] => list.map(one => ({
+  id: '',
+  agent: one.agent,
+  session: one.session,
+  surface: one.surface,
+  turn: '',
+  ...(one.scope === undefined ? {} : { scope: one.scope }),
+  expires: 0,
+  ...(one.contested ? { contested: true } : {}),
+}))
 export const handledOnly = (messaging: Messaging): Messaging => ({
   connections: [],
   mailboxes: [],
+  ...((messaging.connections?.length ?? 0) > 0 || (messaging.mailboxes?.length ?? 0) > 0
+    ? { surfaces: { connections: surfaceOnly(messaging.connections), mailboxes: surfaceOnly(messaging.mailboxes) } }
+    : messaging.surfaces === undefined ? {} : { surfaces: messaging.surfaces }),
   messages: messaging.messages.map(one => {
     const isSurfaceLost = isMailboxSurfaceLost(one, messaging.mailboxes)
     return {
@@ -544,10 +557,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   // A live connection hides its session's mailbox only on a route its record shows for the session's state now (#318).
   const known = sidecarRoutes(routes, messaging?.sidecar === true)
   const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes, live => isRecordedRoute(live, stateOfSession, known))
+  const surfaceConnections = messaging?.surfaces ? messaging.surfaces.connections : (messaging?.connections ?? [])
+  const surfaceMailboxes = messaging?.surfaces ? messaging.surfaces.mailboxes : messaging?.mailboxes
+  const surfaceTargets = messaging?.surfaces ? deliveryTargets(surfaceConnections, surfaceMailboxes, live => isRecordedRoute(live, stateOfSession, known)) : targets
   const surfaceOf = (agent: string, session: string | undefined, target: AgentTarget | null): string | undefined =>
-    reachable(agent, session, target, targets)?.surface
-    ?? liveTarget(agent, session, messaging?.connections ?? [])?.surface
-    ?? (target?.isClosed === true ? undefined : liveTarget(agent, session, messaging?.mailboxes ?? [])?.surface)
+    reachable(agent, session, target, surfaceTargets)?.surface
+    ?? liveTarget(agent, session, surfaceConnections)?.surface
+    ?? (target?.isClosed === true ? undefined : liveTarget(agent, session, surfaceMailboxes ?? [])?.surface)
   const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], stateOfSession, known, group?.now ?? 0)
   const isMessageSurfaceLost = (one: ShownMessage): boolean => isMailboxSurfaceLost(one, messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
@@ -1064,6 +1080,7 @@ const PAGE_WORDS = [
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressTimedOut', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
+  'pgPulse', 'pgPulseNeeds', 'pgPulseWorking', 'pgPulseStopped', 'pgPulseDone', 'pgSyncHint', 'pgStaleShort', 'pgStaleHint', 'justNow', 'minutesAgo',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
   'settingsLanguageChanged', 'settingsLanguageOverridden', 'settingsNotifications', 'settingsOn', 'settingsOff', 'settingsDenied', 'settingsUnavailable', 'settingsChanged', 'settingsLanguage',
   'settingsAgentSetup', 'settingsAgentRemove', 'settingsAgentConfirm', 'settingsAgentCancel', 'settingsAgentsBusy', 'settingsAgentsReadFailed',
@@ -1072,7 +1089,7 @@ const PAGE_WORDS = [
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent', 'settingsApprovals', 'approvalSwitchFailed',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen', 'sideClose', 'pgDetailRail',
+  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnect', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen', 'sideClose', 'pgDetailRail',
   'pgSearchPlaceholder', 'pgSearchLabel', 'pgFilterBar', 'pgFilterAgent', 'pgFilterProject', 'pgFilterInterface', 'pgInterfaceCli', 'pgInterfaceApp', 'pgFilterClear', 'pgSearchEmpty', 'groupWaitOthersCount',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
@@ -1124,8 +1141,11 @@ button:disabled,button[aria-disabled="true"]{color:var(--muted);border-color:var
 ${agentRowCss}
 .link{border:0;background:none;padding:0;min-height:var(--hit);color:var(--ink);font-weight:600;cursor:pointer;text-decoration:underline;text-underline-offset:3px;text-decoration-thickness:1px}
 .link:hover{background:none}
-.page{flex:1;display:flex;flex-direction:column;gap:var(--s6);padding-top:var(--s5);padding-bottom:var(--s6)}
-#board{display:flex;flex-direction:column;gap:var(--s6);min-width:0}
+.page{flex:1;display:flex;flex-direction:column;gap:var(--s4);padding-top:var(--s4);padding-bottom:var(--s5)}
+#board{display:flex;flex-direction:column;gap:0;min-width:0}
+.shell[data-view="all"] #board>:not(.gone)~:not(.gone),.shell[data-view="needs"] #board>[data-sec="needs"]:not(.gone)~[data-sec="needs"]:not(.gone),.shell[data-view="others"] #board>[data-sec="others"]:not(.gone)~[data-sec="others"]:not(.gone){margin-top:var(--s5)}
+.sec>.fx.gone,.sheet>.fx.gone{display:none}
+.sr-lbl,.drawer-btn .drawer-label,#settings-toggle>span,.c-meta .surf-pill .surf-lbl,.r-meta .surf-pill .surf-lbl{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .t-alert{color:var(--alert)}.t-quiet{color:var(--muted)}
 ${sheetCss}
 .sheet-foot{display:grid;gap:var(--s2);padding:0 var(--s4) var(--s3)}
@@ -1149,6 +1169,7 @@ ${sheetCss}
 .card.open .q-toggle .q{white-space:normal;overflow:visible;text-overflow:clip}
 .c-line2{display:flex;align-items:center;gap:var(--s2);min-width:0;font-size:var(--text-xs);line-height:1.4;color:var(--muted)}
 .c-line2 .c-meta{flex:1 1 auto;min-width:0;flex-wrap:nowrap;gap:var(--s2);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.c-line2 .c-meta>span:not(.surf-pill):not(.ag){min-width:0;overflow:hidden;text-overflow:ellipsis}
 .c-line2 .answers{margin-left:auto;flex:none;padding-top:0;gap:var(--s1)}
 .c-line2 .answers button{min-height:28px;padding:0 var(--s2);font-size:var(--text-xs)}
 .c-line2 .answers button.quiet{padding:0 var(--s1)}
@@ -1174,7 +1195,8 @@ button.chk:hover,button.chk:focus-visible{border-color:var(--done);color:var(--d
 .answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);background:color-mix(in srgb,var(--act) 12%,var(--hover))}
 .answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-sm)}
 .c-line2 .answers button.answer-send{flex:0 0 28px;width:28px;min-width:28px;min-height:28px;padding:0}
-.answers button.answer-send[data-copy="1"]{flex:0 0 auto;width:auto;min-width:var(--hit);padding:0 var(--s2);font-size:var(--text-xs)}
+.answers button.answer-send[data-copy="1"]{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);padding:0}
+.c-line2 .answers button.answer-send[data-copy="1"]{flex:0 0 28px;width:28px;min-width:28px;min-height:28px;padding:0}
 .answers button.answer-send:hover:not(:disabled){background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 .answers button.answer-send:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:.35;cursor:default}
 .answers button.answer-send[data-sending="1"]:disabled{opacity:1;cursor:not-allowed}
@@ -1221,14 +1243,26 @@ div.row-btn{cursor:default}
 .row.open .row-btn{background:var(--current);border-radius:var(--radius-m) var(--radius-m) 0 0}
 .r-text{min-width:0;display:flex;flex-direction:column;gap:2px}
 .r-title{font-size:var(--text-sm);line-height:1.3;font-weight:600;overflow-wrap:anywhere}
-.r-meta{font-size:var(--text-xs);line-height:1.4;color:var(--muted);display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
-.r-meta span+span{margin-left:var(--s3)}
+.row:not(.open) .r-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.row.open .r-title{white-space:normal;overflow:visible;text-overflow:clip}
+.r-meta{font-size:var(--text-xs);line-height:1.4;color:var(--muted);display:flex;flex-wrap:wrap;align-items:center;gap:2px var(--s2)}
+.r-meta>span+span{margin-left:0}
+.surf-wrap{display:inline-flex;align-items:center;gap:var(--s1);flex:none}
+.surf-pill{display:inline-flex;align-items:center;gap:var(--s1);padding:0 var(--s1);border:1px solid transparent;border-radius:var(--radius-s);font:600 var(--text-xs)/1.3 var(--font-mono);white-space:nowrap;flex:none}
+.surf-pill svg.si{width:10px;height:10px;flex:none;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.surf-cli{background:var(--surf-cli-bg);border-color:var(--surf-cli-line);color:var(--surf-cli-ink)}
+.surf-app{background:var(--surf-app-bg);border-color:var(--surf-app-line);color:var(--surf-app-ink)}
+.surf-pill.surf-icon{padding:2px var(--s1)}
+.c-meta .surf-pill,.r-meta .surf-pill{padding:2px var(--s1);gap:0;vertical-align:-1px}
 .r-chev{width:16px;height:16px;color:var(--muted);transition:transform var(--dur-base) var(--ease-out)}
 .r-chev::before{content:'';display:block;width:7px;height:7px;margin:4px 0 0 2px;border-top:2px solid currentColor;border-right:2px solid currentColor;transform:rotate(45deg)}
 .row-btn[aria-expanded="true"] .r-chev{transform:rotate(90deg)}
 div.row-btn .r-chev{visibility:hidden}
 .r-meta .st{color:var(--ink)}
 .r-meta .st.t-quiet{color:var(--muted)}
+.r-meta .r-step{color:var(--ink);font-weight:600;min-width:0;max-width:min(40ch,100%);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r-meta .r-proj{white-space:nowrap;max-width:20ch;overflow:hidden;text-overflow:ellipsis}
+.done-acts{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:var(--s2);padding:0 var(--s2) var(--s1)}
 .r-meta .prog{display:inline-flex;align-items:center;gap:var(--s2);vertical-align:-1px}
 .r-meta .prog span{margin-left:0}
 .pbar{display:inline-flex;align-items:center;gap:2px;width:96px;height:8px;flex:none}
@@ -1251,6 +1285,7 @@ div.row-btn .r-chev{visibility:hidden}
 .sw{display:inline-flex;align-items:center;gap:2px;width:36px;height:8px;flex:none}
 @media (max-width:560px){.pbar{width:auto;min-width:72px}.pbar.cont{width:72px}}
 .r-right.t-alert{color:var(--alert)}
+.r-right.t-stale{color:var(--soon);font-weight:600}
 .r-right{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;max-width:9em;overflow:hidden;text-overflow:ellipsis}
 .row-open{background:var(--current);border-radius:0 0 var(--radius-m) var(--radius-m);padding:var(--s1) var(--s2) var(--s3) calc(var(--s2) + 36px);display:grid;gap:var(--s3);min-width:0;opacity:0;transition:opacity var(--dur-base) var(--ease-out)}
 .row.open .row-open{opacity:1}
@@ -1332,17 +1367,22 @@ ${ICON_CSS}
 .v-needs>svg.i{color:var(--waiting-text)}.v-working>svg.i{color:var(--alive)}.v-others>svg.i,.v-done>svg.i{color:var(--muted)}
 .s-project::before{content:"";flex:none;width:18px;height:18px;margin-inline:3px;background:var(--muted);-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M2 4.5h4l1.5 1.5H14v6.5H2z'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='black' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M2 4.5h4l1.5 1.5H14v6.5H2z'/%3E%3C/svg%3E") center/contain no-repeat}
 .s-txt{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.s-agent{gap:var(--s2)}
+.s-agent .s-txt{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .s-n{flex:none;font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums}
 .s-n:empty{display:none}
-.s-n.hot,.side .badge{position:static;flex:none;min-width:22px;height:22px;padding:0 6px;border:0;border-radius:var(--radius-round);background:var(--waiting-fill);color:var(--on-accent);font-size:var(--text-xs);font-weight:600;line-height:22px;text-align:center;font-variant-numeric:tabular-nums}
-.side .badge.bad{background:var(--alert)}
+.s-n.hot,.side .badge{position:static;flex:none;min-width:22px;height:22px;padding:0 6px;border:0;border-radius:var(--radius-round);background:var(--waiting-fill);color:var(--waiting-on);font-size:var(--text-xs);font-weight:600;line-height:22px;text-align:center;font-variant-numeric:tabular-nums}
+.side .badge{margin-left:auto}
+.side .badge.bad{background:var(--alert);color:var(--on-accent)}
 .s-agent[data-presence] .ag::after,.s-agent.working .ag::after{content:"";position:absolute;right:-5px;bottom:-5px;width:9px;height:9px;border:2px solid var(--ground);border-radius:var(--radius-round)}
 .s-agent[data-presence="open"] .ag::after,.s-agent[data-presence="connected"] .ag::after{border-color:var(--alive);background:var(--ground)}
 .s-agent[data-presence="offline"] .ag::after{border-radius:var(--radius-s);background:var(--muted)}
 .s-agent[data-presence="notseen"] .ag::after{background:linear-gradient(var(--muted),var(--muted)) center/6px 2px no-repeat var(--ground)}
 .s-agent.working .ag::after{border-color:var(--ground);border-radius:var(--radius-round);background:var(--alive)}
 .s-agent[aria-pressed="true"].working .ag::after,.s-agent[aria-pressed="true"][data-presence="offline"] .ag::after,.s-agent[aria-pressed="true"][data-presence="notseen"] .ag::after{border-color:var(--current)}
-.shell[data-empty="1"] :is(.s-views,.s-projects,.s-search,.f-bar){display:none}
+.shell[data-empty="1"] :is(.s-views,.s-projects,.s-search,.f-bar,.pulse-bar,.hud-filter-btn){display:none}
+.hud-filter-btn{margin-left:auto}
+.hud-filter-btn[data-active="1"],.hud-filter-btn[aria-expanded="true"]{background:var(--current);color:var(--ink)}
 .s-search{position:relative;display:flex;align-items:center;gap:var(--s2);min-height:var(--hit);padding:0 var(--s2);border:1px solid var(--line-strong);border-radius:var(--radius-m);background:var(--inset)}
 .s-search:focus-within{border-color:var(--ink);outline:2px solid var(--ink);outline-offset:-1px}
 .s-search svg.i{flex:none;width:16px;height:16px;color:var(--muted)}
@@ -1363,16 +1403,33 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
 .f-opt[aria-checked="true"]{background:var(--current);font-weight:600}
 .f-opt-n{flex:none;color:var(--muted);font-variant-numeric:tabular-nums}
 .f-bar .quiet{min-height:var(--hit);padding:0 var(--s2);font-size:var(--text-xs)}
+/* #1023: the first line. The filter chips on the left; on the right, a count per view and the board's freshness, each one press away. */
+.f-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);min-width:0}
+.pulse-bar{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1);margin-left:auto}
+.pulse-bar button{display:inline-flex;align-items:center;gap:var(--s1);min-height:28px;padding:0 var(--s2);border:1px solid var(--line-strong);border-radius:var(--radius-round);background:var(--surface);color:var(--muted);font:inherit;font-size:var(--text-xs);font-weight:600;line-height:1.4;font-variant-numeric:tabular-nums;white-space:nowrap;cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+.pulse-bar button:hover{border-color:var(--muted);color:var(--ink)}
+.pulse-bar button[aria-pressed="true"]{border-color:var(--ink);color:var(--ink);background:var(--current)}
+.pulse-bar svg.i{width:12px;height:12px}
+.pulse-bar .p-need{border-color:var(--waiting-fill);background:var(--waiting-fill);color:var(--waiting-on)}
+.pulse-bar .p-need::before{content:"";width:7px;height:7px;border-radius:var(--radius-round);background:currentColor}
+.pulse-bar .sync-btn{font-weight:500}
+.pulse-bar .sync-btn.is-stale{border-color:var(--waiting-text);color:var(--waiting-text);font-weight:600}
+.pulse-bar .sync-btn.is-spin svg.i{animation:sync-spin var(--dur-layout) var(--ease-out)}
+@keyframes sync-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.pulse-bar .sync-btn.is-spin svg.i{animation:none}}
+/* A page that has not heard from the board dims its rows until the next good answer; the first line stays clear. */
+#board.stale :is(.rows,.cards){opacity:.55;transition:opacity var(--dur-fast) var(--ease-out)}
 /* Settings occupies the reserved sidebar row and follows the work when the sidebar folds. */
 .s-foot{margin-top:auto;position:sticky;bottom:0;background:var(--ground);padding:var(--s3) 0 max(var(--s2),env(safe-area-inset-bottom,0px));border-top:1px solid var(--line)}
-.side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
-.side .pfoot .set-row{order:-1;flex-basis:100%;margin-left:calc(var(--s2) * -1)}
+.side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-start;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
+.side .pfoot .set-row{margin-left:auto}
 .side .pfoot .grow{display:none}
 /* Close the board shows its name beside the icon (#1145): an X alone did not say it stops the board */
 .pfoot #close,.pfoot #settings-toggle{display:inline-flex;gap:var(--s1);width:auto;height:var(--hit);min-width:var(--hit);min-height:var(--hit);padding:0 var(--s2);font:inherit;font-size:var(--text-xs)}
 /* Close the board is a red power sign with no words: its name is the tooltip and what a screen reader says. */
-.pfoot #close{justify-content:center;padding:0;color:var(--alert)}.pfoot #close svg.i{width:18px;height:18px;stroke-width:2}
+.pfoot #close{justify-content:center;align-items:center;padding:0;color:var(--alert)}.pfoot #close svg.i{width:18px;height:18px;stroke-width:2}
 .pfoot #close:hover{color:var(--alert);background-color:color-mix(in srgb,var(--alert) 12%,transparent)}
+.pfoot #settings-toggle{justify-content:center;align-items:center;padding:0}.pfoot #settings-toggle svg.i{width:17px;height:17px}
 .side .pfoot .btn{min-height:24px;padding-inline:var(--s2);font-size:var(--text-xs);color:var(--muted)}
 .side .pfoot .btn:hover{color:var(--ink)}
 .side .pfoot p{order:3;flex-basis:100%}
@@ -1410,8 +1467,9 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
   .shell[data-rail="1"] .s-item{width:44px;height:44px;min-height:44px;padding:0;justify-content:center}
   .shell[data-rail="1"] .s-item>svg.i{margin:0}
   .shell[data-rail="1"] .s-txt{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  .shell[data-rail="1"] .s-agent .surf-wrap{display:none}
   .shell[data-rail="1"] .s-n:not(.hot){display:none}
-  .shell[data-rail="1"] :is(.s-n.hot,.side .badge){position:absolute;top:-3px;right:-5px;border:2px solid var(--ground);line-height:18px}
+  .shell[data-rail="1"] :is(.s-n.hot,.side .badge){position:absolute;top:-3px;right:-5px;margin-left:0;border:2px solid var(--ground);line-height:18px}
 }
 @media (max-width:559px){
   /* A narrow window shows the same sidebar as a drawer from the left, over the work, with a backdrop behind it.
@@ -1423,41 +1481,50 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
   .shell[data-drawer="1"] .drawer-close{display:flex}
   /* The rail toggle has nothing to fold in a drawer; the Close button is the way out. */
   .shell[data-drawer="1"] .s-toggle{display:none}
-}
-@media (max-width:399px){
-  /* The button is an icon alone where the heading would crowd its label out. */
-  .drawer-btn .drawer-label{display:none}
+  /* Narrow right-1/4 cockpit HUD: hide idle filter bar behind #hud-filter-btn and trim top chrome padding. */
+  .f-bar[data-hud-idle="1"]{display:none}
+  .head .topbar{min-height:46px}
+  .agents-in{padding-top:var(--s1);padding-bottom:var(--s1)}
 }
 @media (min-width:1440px){
   .shell[data-detail="1"]{grid-template-columns:232px minmax(0,1fr) 340px}
   .shell[data-rail="1"][data-detail="1"]{grid-template-columns:64px minmax(0,1fr) 340px}
   .shell[data-detail="1"] .detail-rail{display:flex;flex-direction:column;position:sticky;top:0;height:100dvh;overflow-x:hidden;overflow-y:auto;scrollbar-width:thin;border-left:1px solid var(--line);background:var(--ground);width:340px;max-width:340px}
   .card[data-rail-item="1"]{cursor:pointer}
-  .card-detail-btn{display:inline-flex;align-items:center;margin-left:auto;padding:0 var(--s2);min-height:24px;border:0;border-radius:var(--radius-s);background:transparent;color:var(--muted);font-size:var(--text-xs);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+  .card-detail-btn{display:inline-grid;place-items:center;margin-left:auto;width:26px;height:26px;min-height:26px;padding:0;border:0;border-radius:var(--radius-s);background:transparent;color:var(--muted);cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+  .card-detail-btn svg.i{width:14px;height:14px}
   .card-detail-btn:hover{background:var(--hover);color:var(--ink)}
   .card-detail-btn:active{background:var(--press)}
+}
+@media (max-width:799px){
+  .col{padding-left:max(var(--s4),env(safe-area-inset-left,0px));padding-right:max(var(--s4),env(safe-area-inset-right,0px))}
+  .page{gap:var(--s3);padding-top:var(--s2);padding-bottom:var(--s3)}
+  .shell[data-view="all"] #board>:not(.gone)~:not(.gone),.shell[data-view="needs"] #board>[data-sec="needs"]:not(.gone)~[data-sec="needs"]:not(.gone),.shell[data-view="others"] #board>[data-sec="others"]:not(.gone)~[data-sec="others"]:not(.gone){margin-top:var(--s4)}
+  .row-btn{padding:var(--s2);min-height:50px}
+  .r-meta .r-step{order:2;flex:1 1 100%;max-width:100%}
+  .pfoot{padding-top:var(--s3)}
+  .shell[data-view="all"] #tidy-bulk:not([open]){display:none}
 }
 @media (max-width:640px){
   .col{padding-left:max(var(--s3),env(safe-area-inset-left,0px));padding-right:max(var(--s3),env(safe-area-inset-right,0px))}
   .head{position:static}
   .agents{top:0}
   #offline:not(:empty){top:0}
-  .page,#board{gap:var(--s5)}
-  .page{padding-top:var(--s4)}
   .card{padding:var(--s3)}
+  .c-line2{flex-wrap:wrap}
   .row-open{padding-left:var(--s2)}
   .pfoot{gap:var(--s2)}
 }
 /* A finger, not the width, decides target size: a narrow window with a mouse keeps the desktop sizes. */
 @media (pointer:coarse){
-  .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.s-item,.f-chip,.f-opt,.f-bar .quiet{min-height:44px}
+  .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.s-item,.f-chip,.f-opt,.f-bar .quiet,.pulse-bar button{min-height:44px}
   .link{min-height:44px}
   .answers button,.answers .btn,.c-line2 .answers button{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet,.c-line2 .answers button.quiet{flex:0 0 auto;min-height:44px}
   .answers button.answer-send,.c-line2 .answers button.answer-send{flex:0 0 48px;width:48px;min-width:48px;min-height:48px;justify-content:center}
-  .answers button.answer-send[data-copy="1"],.c-line2 .answers button.answer-send[data-copy="1"]{flex:0 0 auto;width:auto;min-width:48px;padding:0 14px}
+  .answers button.answer-send[data-copy="1"],.c-line2 .answers button.answer-send[data-copy="1"]{flex:0 0 48px;width:48px;min-width:48px;min-height:48px;justify-content:center;padding:0}
   .pfoot #close,.pfoot #settings-toggle{height:48px;min-width:48px;min-height:48px}
-  .s-toggle,.d-close{width:44px;height:44px}
+  .s-toggle,.d-close,.card-detail-btn,.done-archive-btn{width:44px;height:44px}
   #away-line .away-x{width:44px;height:44px}
   textarea{min-height:96px}
 }
@@ -1507,19 +1574,29 @@ ${settingsCss}
 </aside>
 <div class="drawer-backdrop" id="drawer-backdrop"></div>
 <div class="stage">
-<header class="head" id="head"><div class="col topbar"><button type="button" class="btn drawer-btn" id="drawer-btn" data-local aria-expanded="false" aria-controls="side" aria-label="${esc(s.sideTitle)}" title="${esc(s.sideTitle)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg><span class="drawer-label">${esc(s.sideTitle)}</span></button><div class="brand"><h1>${boardLogo(esc(s.serveLiveHint))}</h1></div></div></header>
+<header class="head" id="head"><div class="col topbar"><button type="button" class="icon-btn drawer-btn" id="drawer-btn" data-local aria-expanded="false" aria-controls="side" aria-label="${esc(s.sideTitle)}" title="${esc(s.sideTitle)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg><span class="drawer-label">${esc(s.sideTitle)}</span></button><div class="brand"><h1>${boardLogo(esc(s.serveLiveHint))}</h1></div><button type="button" class="icon-btn hud-filter-btn" id="hud-filter-btn" data-local aria-expanded="false" aria-controls="filter-bar" aria-label="${esc(s.pgFilterBar)}" title="${esc(s.pgFilterBar)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M4.5 8h7M6.5 12h3"/></svg></button></div></header>
 <template id="fresh-mark">${boardIcon(44, '', true, ' is-arriving')}</template>
 <div id="offline" role="status" aria-live="polite"></div>
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
-<div class="f-bar" id="filter-bar" role="region" aria-label="${esc(s.pgFilterBar)}"></div>
+<div class="f-row"><div class="f-bar" id="filter-bar" role="region" aria-label="${esc(s.pgFilterBar)}"></div><div class="pulse-bar" id="pulse" role="group" aria-label="${esc(s.pgPulse)}"></div></div>
 <div id="board"></div>
 <details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><svg class="i" viewBox="0 0 16 16" role="img" aria-label="GitHub"><path d="${GITHUB_PATH}"/></svg><span id="versions"></span></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${settingsToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static aria-label="${esc(s.serveClose)}" title="${esc(s.serveClose)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="${POWER_PATH}"/></svg></button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
 <aside class="detail-rail" id="detail-rail" aria-label="${esc(s.pgDetailRail)}" hidden></aside>
+<template id="pulse-run-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.6 12.2 8 5 12.4Z" fill="currentColor" stroke="none"/></svg></template>
+<template id="pulse-stop-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.8" y="3.8" width="8.4" height="8.4" rx="1.6" fill="currentColor" stroke="none"/></svg></template>
+<template id="pulse-done-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8.5 3.2 3.2L13 4.8"/></svg></template>
+<template id="pulse-sync-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 8a5.2 5.2 0 1 1-1.3-3.4"/><path d="M13.4 2.6v2.6h-2.6"/></svg></template>
+<template id="pulse-warn-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.4 14 13H2Z"/><path d="M8 6.4v3.1"/><circle cx="8" cy="11.3" r=".8" fill="currentColor" stroke="none"/></svg></template>
 <template id="detail-close-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></template>
+<template id="surf-cli-icon"><svg class="si" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 5 3.5 3-3.5 3M8 11h4.5"/></svg></template>
+<template id="surf-app-icon"><svg class="si" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="2"/><path d="M2.2 6h11.6"/></svg></template>
+<template id="copy-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"/><path d="M10.5 5.5V3.8A1.3 1.3 0 0 0 9.2 2.5H3.8A1.3 1.3 0 0 0 2.5 3.8v5.4a1.3 1.3 0 0 0 1.3 1.3h1.7"/></svg></template>
+<template id="rail-peek-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M9.5 2.5v11"/></svg></template>
+<template id="archive-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.8" width="12" height="3" rx="1"/><path d="M3.2 5.8v6.4a1.2 1.2 0 0 0 1.2 1.2h7.2a1.2 1.2 0 0 0 1.2-1.2V5.8M6.5 8.8h3"/></svg></template>
 </div>
 ${settingsPanel(s, language, isLan, isLangOverridden)}
 <script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
@@ -1605,6 +1682,16 @@ const PAGE_SCRIPT = String.raw`
   var boardAbort = null;
   var isClosed = false;
   var isUnreachable = false;
+  // #1023: when the page last heard from the board. It is stale after 10 s of failed polls, or 2 minutes with no
+  // answer at all (a held request answers within 10 s), and then says so and dims its rows until the next good answer.
+  var lastGood = Date.now();
+  var STALE_FAILED_MS = 10000, STALE_QUIET_MS = 120000;
+  // A read that failed: the board unreachable, or an answer with a note and no board (progress.md unreadable).
+  var isReadFailing = false;
+  function isStale() {
+    var age = Date.now() - lastGood;
+    return age >= STALE_QUIET_MS || ((isUnreachable || isReadFailing) && age >= STALE_FAILED_MS);
+  }
   var offlineButtons = [];
   var since = null;
   var messageAttempts = {};
@@ -1765,6 +1852,7 @@ const PAGE_SCRIPT = String.raw`
     if (!isUnreachable) offlineButtons = Array.from(document.querySelectorAll('button:not([data-local])')).filter(function (node) { return !node.disabled; });
     isUnreachable = true;
     paintLight();
+    paintFresh();
     if (offline.textContent !== w('serveOffline')) offline.textContent = w('serveOffline');
     document.querySelectorAll('button:not([data-local])').forEach(function (node) { node.disabled = true; });
   }
@@ -1787,7 +1875,7 @@ const PAGE_SCRIPT = String.raw`
   // else idle. The tab icon turns amber only for waiting, so a page that stops never keeps an amber tab.
   var LIGHT_STATES = ${JSON.stringify(LOGO_STATES)};
   function lightState() {
-    if (isUnreachable || isClosed) return 'is-offline';
+    if (isUnreachable || isClosed || isStale()) return 'is-offline';
     if (pg.waitingNow > 0) return 'is-waiting';
     var view = pg.model && pg.model.view;
     return view && view.working && view.working.length ? 'is-working' : 'is-idle';
@@ -2095,12 +2183,19 @@ const PAGE_SCRIPT = String.raw`
     }).then(function (ok) { refresh(); return ok; });
   }
   // A draft that was sent is gone from the box on the page now, whatever redraw happened since it was pressed.
-  function clearDraft(draftKey) {
-    pg.drafts[draftKey] = '';
+  // Only text equal to what was sent goes: words typed after the press, or kept across a new connection, stay (#782).
+  function clearDraft(draftKey, sentText) {
     var detailRailEl = document.getElementById('detail-rail');
+    var kept = null;
     [board, detailRailEl].forEach(function (rootEl) {
-      if (rootEl) rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) { if (box.getAttribute('data-key') === draftKey) box.value = ''; });
+      if (rootEl) rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) {
+        if (box.getAttribute('data-key') !== draftKey) return;
+        if (box.value.trim() === sentText) box.value = '';
+        else kept = box.value;
+      });
     });
+    if (kept !== null) pg.drafts[draftKey] = kept;
+    else if (String(pg.drafts[draftKey] || '').trim() === sentText || pg.drafts[draftKey] === undefined) pg.drafts[draftKey] = '';
   }
   function brand(agent) {
     if (!agent) return '';
@@ -2200,7 +2295,9 @@ const PAGE_SCRIPT = String.raw`
     input.setAttribute('aria-label', placeholder);
     // A draft belongs to its session and its question: a redraw that puts another session's
     // line under the same key starts an empty box, so the text is never sent to that session.
-    input.setAttribute('data-key', [key, session || '', asked || '', delivery ? delivery.id + ':' + delivery.turn : ''].join('\u0001'));
+    // The connection id and turn are not part of it: a receiver that goes away and registers again
+    // changes them, and the person's text stays; a send reads the connection that is drawn at that moment (#782).
+    input.setAttribute('data-key', [key, session || '', asked || ''].join('\u0001'));
     var draftKey = input.getAttribute('data-key');
     // The card's route, from its receiver's record, says what the button is called and whether Copy sits beside it:
     // a route that waits for a turn or for the chat to open keeps Copy, one that goes in now, at a step's end,
@@ -2214,7 +2311,7 @@ const PAGE_SCRIPT = String.raw`
         // The same text goes again through the same path; the box keeps it until it was sent.
         var run = function () {
           var sent = mode === 'connected' || mode === 'mailbox' ? nativeAct(key, text, delivery, session, asked, fp, go, line) : act(key, 'send', text, w('serveSending', agentName(agent)), session, asked, fp, go);
-          return sent.then(function (ok) { if (ok) { clearDraft(draftKey); if (done) done(text); } return ok; });
+          return sent.then(function (ok) { if (ok) { clearDraft(draftKey, text); if (done) done(text); } return ok; });
         };
         sentLast[key] = { text: text, again: run };
         run();
@@ -2264,7 +2361,7 @@ const PAGE_SCRIPT = String.raw`
     }
     return node;
   }
-  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, hasWaitingOthers: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
+  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, hasWaitingOthers: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {}, doneKeys: null };
   var cardState = {};
   var cardParts = {};
   var cardChoices = Object.create(null);
@@ -2272,6 +2369,7 @@ const PAGE_SCRIPT = String.raw`
   var railItems = Object.create(null);
   function isWideDetail() { return typeof window.innerWidth === 'number' && window.innerWidth >= 1440; }
   var wasWideDetail = isWideDetail();
+  var wasNarrowHud = typeof window.innerWidth === 'number' && window.innerWidth > 0 && window.innerWidth < 800;
   var railDraftFocus = null;
   function syncRailDraftFocus() {
     var rail = document.getElementById('detail-rail');
@@ -2356,7 +2454,7 @@ const PAGE_SCRIPT = String.raw`
     closeBtn.title = w('sideClose');
     var tpl = document.getElementById('detail-close-icon');
     if (tpl && tpl.content) closeBtn.appendChild(tpl.content.cloneNode(true));
-    var head = add(el('div', 'd-head'), markOf(entry.ref), el('span', 'd-meta', entry.meta || ''), closeBtn);
+    var head = add(el('div', 'd-head'), markOf(entry.ref), surfaceBadge(interfaceOf(entry.ref), false), el('span', 'd-meta', entry.meta || ''), closeBtn);
     var body = el('div', 'd-body');
     add(body, el('h2', 'd-title', entry.title));
     if (entry.renderBody) add(body, entry.renderBody());
@@ -2367,7 +2465,7 @@ const PAGE_SCRIPT = String.raw`
     if (entry.trigger) entry.trigger.setAttribute('aria-expanded', 'true');
   }
   // The first screen describes work, so diagnostic identifiers and logs stay out of its labels.
-  function clean(value) {
+  function clean(value, maxLen) {
     var text = String(value || '').trim();
     if (/^[{[]/.test(text)) {
       try {
@@ -2375,12 +2473,43 @@ const PAGE_SCRIPT = String.raw`
         text = typeof data === 'string' ? data : ['text', 'message', 'summary', 'content', 'reply'].map(function (key) { return data && data[key]; }).find(function (one) { return typeof one === 'string'; }) || w('pgUnreadableReply');
       } catch (e) {}
     }
+    var limit = typeof maxLen === 'number' && maxLen > 0 ? maxLen : 220;
     return Array.from(text.replace(/\{\s*"[^"\n]*"\s*:[\s\S]*/g, '…')
       .replace(/\b[\da-f]{8}-(?:[\da-f]{4}-){3}[\da-f]{0,12}/gi, '…')
       .replace(/\bsession\s*[=:]\s*[\da-f]{8,}/gi, '…')
       .replace(/\b[\da-f]{7,}\b/gi, function (one) { return one.length === 40 || /\d/.test(one) && /[a-f]/i.test(one) ? '…' : one; })
       .replace(/(?:[A-Z]:[\\/]|\/(?:Users|home)\/)[^\s<>"'\x60|]*/gi, '…')
-      .replace(/\s+/g, ' ').trim()).slice(0, 220).join('');
+      .replace(/\s+/g, ' ').trim()).slice(0, limit).join('');
+  }
+  function cloneIcon(id) {
+    var tpl = document.getElementById(id);
+    return tpl && tpl.content && tpl.content.firstChild ? tpl.content.firstChild.cloneNode(true) : null;
+  }
+  function clipShort(text, max) {
+    var flat = String(text || '').replace(/\s+/g, ' ').trim();
+    var chars = Array.from(flat);
+    if (chars.length <= max) return flat;
+    return chars.slice(0, Math.max(1, max - 1)).join('').trimEnd() + '…';
+  }
+  function compactStep(raw) {
+    var text = clean(raw, Infinity);
+    if (Array.from(text).length <= 72) return text;
+    if (/\s+->\s+|\s*→\s*/.test(text)) {
+      var parts = text.split(/\s+->\s+|\s*→\s*/).map(function (one) { return one.trim(); }).filter(Boolean);
+      if (parts.length > 1) {
+        var last = parts[parts.length - 1];
+        var prev = parts[parts.length - 2];
+        var combine = Array.from(last).length <= 24 || /—\s*transferred$/i.test(prev);
+        if (combine) {
+          var prefix = parts.length > 2 ? '… → ' : '';
+          var end = clipShort(last, 24);
+          var head = clipShort(prev, Math.max(12, 69 - Array.from(prefix).length - Array.from(end).length));
+          return prefix + head + ' → ' + end;
+        }
+        return clipShort('… → ' + last, 72);
+      }
+    }
+    return clipShort(text, 72);
   }
   function source(ref) { return pg.sources[ref.sourceKey || ref.key] || pg.sources[ref.key.replace(/^stuck:/, '')] || {}; }
   function fullTitle(ref) { var one = source(ref); return String(one.title || one.task || one.text || ''); }
@@ -2431,6 +2560,52 @@ const PAGE_SCRIPT = String.raw`
     if (one.isOwn || ref.isOwn || !id || id === '?' || id === 'cursor') return '';
     if (id === 'antigravity' || id === 'claude-web' || id === 'chatgpt' || id === 'gemini-web' || id === 'grok-web') return 'app';
     return 'cli';
+  }
+  function surfaceBadge(iface, iconOnly) {
+    if (iface !== 'cli' && iface !== 'app') return null;
+    var label = w(iface === 'app' ? 'pgInterfaceApp' : 'pgInterfaceCli');
+    var pill = el('span', 'surf-pill surf-' + iface + (iconOnly ? ' surf-icon' : ''));
+    pill.setAttribute('translate', 'no');
+    if (iconOnly) pill.setAttribute('aria-hidden', 'true');
+    else pill.setAttribute('title', label);
+    var tpl = document.getElementById('surf-' + iface + '-icon');
+    if (tpl && tpl.content && tpl.content.firstChild) pill.appendChild(tpl.content.firstChild.cloneNode(true));
+    if (!iconOnly) add(pill, el('span', 'surf-lbl', label));
+    return pill;
+  }
+  function agentSurfaces(id) {
+    if (!id || id === 'own' || id === '?') return [];
+    var view = pg.model && pg.model.view;
+    var activeRefs = view ? [].concat(view.needs && view.needs.cards || [], view.needs && view.needs.waitingOthers || [], view.working || [], view.all && view.all.open || []) : [];
+    var fallbackRefs = view ? [].concat(view.needs && view.needs.older || [], view.all && view.all.stopped || [], view.all && view.all.done || []) : [];
+    var seen = { cli: false, app: false };
+    var scan = function (refs) {
+      refs.forEach(function (ref) {
+        if (!ref || agentOf(ref) !== id) return;
+        var one = source(ref);
+        if (one.isOwn || ref.isOwn) return;
+        var iface = interfaceOf(ref);
+        if (iface === 'cli' || iface === 'app') seen[iface] = true;
+      });
+    };
+    scan(activeRefs);
+    if (!seen.cli && !seen.app) {
+      scan(fallbackRefs);
+      if (!seen.cli && !seen.app) {
+        Object.keys(pg.sources).forEach(function (key) {
+          var one = pg.sources[key];
+          if (!one || one.isOwn) return;
+          var a = one.agent || 'claude';
+          if (String(a).toLowerCase() !== id) return;
+          var iface = interfaceOf({ key: key, agent: a });
+          if (iface === 'cli' || iface === 'app') seen[iface] = true;
+        });
+      }
+    }
+    var out = [];
+    if (seen.cli) out.push('cli');
+    if (seen.app) out.push('app');
+    return out;
   }
   // Search folding adapted from T3 Code (paletteSearch): NFKD + strip combining marks + apostrophe fold + case-fold.
   function foldSearchText(value) {
@@ -2615,13 +2790,17 @@ const PAGE_SCRIPT = String.raw`
     var detailBtn = null;
     if (!isOlder) {
       card.setAttribute('data-rail-item', '1');
-      detailBtn = navButton(w('pgDetailRail'), function () {
+      detailBtn = navButton('', function () {
         selectDetailRail(ref.key, true);
       });
       detailBtn.className = 'card-detail-btn';
       detailBtn.hidden = !isWideDetail();
       detailBtn.setAttribute('aria-expanded', String(isWideDetail() && selectedKey === ref.key));
       detailBtn.setAttribute('aria-label', w('pgDetailRail') + ': ' + text);
+      detailBtn.setAttribute('title', w('pgDetailRail'));
+      var peekSvg = cloneIcon('rail-peek-icon');
+      if (peekSvg) detailBtn.appendChild(peekSvg);
+      detailBtn.appendChild(el('span', 'sr-lbl', w('pgDetailRail')));
     }
     var setCardOpen = function (next) {
       if (isOlder) return;
@@ -2639,20 +2818,25 @@ const PAGE_SCRIPT = String.raw`
       add(qToggle, question);
       add(body, qToggle);
     }
+    var cardSurf = surfaceBadge(interfaceOf(ref), false);
     var meta;
     if (isOwnCard) {
       var smallMark = agent ? agentMark(agent, agentName(agent)) : null;
       if (smallMark) smallMark.className += ' ag-sm';
       var age = ageOf(ref);
-      meta = add(el('div', 'c-meta'), smallMark, project ? el('span', '', project) : null, age ? el('span', '', age) : null, detailBtn);
+      meta = add(el('div', 'c-meta'), smallMark, cardSurf, project ? el('span', '', project) : null, age ? el('span', '', age) : null, detailBtn);
     } else {
-      meta = add(el('div', 'c-meta'), project ? el('span', '', project) : null, el('span', '', ageOf(ref)), detailBtn);
+      meta = add(el('div', 'c-meta'), cardSurf, project ? el('span', '', project) : null, el('span', '', ageOf(ref)), detailBtn);
     }
     var detailIn = el('div', 'fold-in');
     var detailHost = isOlder ? body : detailIn;
     if (!isOlder) {
-      var askTitle = clean(String(ask.task || ''));
-      if (askTitle && askTitle !== text) add(detailHost, el('p', 'c-task', askTitle));
+      var rawAskTask = String(ask.task || '');
+      var askTitle = clean(rawAskTask, Infinity);
+      if (askTitle && askTitle !== text) {
+        if (Array.from(askTitle).length > 90) add(detailHost, clipped(clipShort(askTitle, 90), askTitle, 'c-task', 'ctask:' + key));
+        else add(detailHost, el('p', 'c-task', askTitle));
+      }
     }
     if (isStuck) add(detailHost, el('p', 'note', clean(ask.stuck && ask.stuck.reason)));
     else {
@@ -2725,7 +2909,14 @@ const PAGE_SCRIPT = String.raw`
         options.slice(0, 2).forEach(function (answer, index) { add(choiceArea, makeChoice(answer, index)); });
         options.slice(2).forEach(function (answer, index) { askExtras.push(makeChoice(answer, index + 2)); });
         var isCopyMode = !sends(mode);
-        pickerSend = button(isCopyMode ? w('pgCopyChoice') : '↑', function () { if (selected >= 0) pressAnswer(ask, key, options[selected], pickerSend); }, 'answer-send', isCopyMode);
+        if (isCopyMode) {
+          pickerSend = button('', function () { if (selected >= 0) pressAnswer(ask, key, options[selected], pickerSend); }, 'answer-send', true);
+          var copySvg = cloneIcon('copy-icon');
+          if (copySvg) pickerSend.appendChild(copySvg);
+          pickerSend.appendChild(el('span', 'sr-lbl', w('pgCopyChoice')));
+        } else {
+          pickerSend = button('↑', function () { if (selected >= 0) pressAnswer(ask, key, options[selected], pickerSend); }, 'answer-send', false);
+        }
         pickerSend.setAttribute('aria-label', w(isCopyMode ? 'pgCopyChoice' : 'pgSendChoice'));
         pickerSend.title = w(isCopyMode ? 'pgCopyChoice' : 'pgSendChoice');
         if (isCopyMode) pickerSend.setAttribute('data-copy', '1');
@@ -2831,7 +3022,7 @@ const PAGE_SCRIPT = String.raw`
         node: card,
         trigger: detailBtn,
         title: text,
-        meta: [agent ? agentName(agent) : '', project, ageOf(ref)].filter(Boolean).join(' · '),
+        meta: [project, ageOf(ref)].filter(Boolean).join(' · '),
         renderBody: function () {
           var wrap = el('div', 'row-open');
           if (ask.task && clean(String(ask.task)) !== text) add(wrap, el('p', 'context', clean(String(ask.task))));
@@ -2954,26 +3145,42 @@ const PAGE_SCRIPT = String.raw`
     var isExpandable = inner.childNodes.length > 0;
     if (isExpandable) resultSlot(inner, key, row.fp, row.title || row.task);
     var current = steps.filter(function (one) { return one.isCurrent; })[0] || steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled'; })[0];
-    var step = current ? clean(current.text) : '';
+    var currentWhole = current ? (current.note ? current.text + ' — ' + current.note : current.text) : '';
+    var stepRaw = currentWhole ? clean(currentWhole, Infinity) : '';
+    var step = currentWhole ? compactStep(currentWhole) : '';
     // "Last:" names the last finished step, not the next one: a task with nothing finished yet shows no Last: line.
     var lastDone = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
-    var lastFinished = lastDone.length ? clean(lastDone[lastDone.length - 1].text) : '';
-    // A plan-tool block with no title takes its current step as the title; the step is then said once.
-    if (sameName(step, clean(fullTitle(ref)))) step = '';
+    var lastStep = lastDone.length ? lastDone[lastDone.length - 1] : null;
+    var lastWhole = lastStep ? (lastStep.note ? lastStep.text + ' — ' + lastStep.note : lastStep.text) : '';
+    var lastFinishedRaw = lastWhole ? clean(lastWhole, Infinity) : '';
+    var lastFinished = lastWhole ? compactStep(lastWhole) : '';
+    var rawTitleText = fullTitle(ref);
+    var title = clean(rawTitleText);
+    var titleFull = clean(rawTitleText, Infinity);
+    // A plan-tool block with no title takes its current step as the title; only omit the step line when that title says all of it.
+    if (sameName(stepRaw, title)) { step = ''; stepRaw = ''; }
     var isAnsweredWaiting = row.status === w('answeredWaiting');
+    var rawDetail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinishedRaw ? w('pgLast', lastFinishedRaw) : '') : !stepRaw ? '' : section === 'working' ? stepRaw : section === 'stopped' ? w('pgStoppedAt', stepRaw) : '';
     var detail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
     // The same guard the terminal uses: a row the collapse already reads as
     // ended keeps today's stopped wording, not the grey unsure label.
     var isUnsureRow = row.rowState === 'unsure' && row.auto !== 'ended';
     var status = isUnsureRow ? w('rowUnsure', row.when) : ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
-    var title = clean(fullTitle(ref));
     var sameTitle = (pg.titleCounts && pg.titleCounts[title] || 0) > 1 ? clean(row.contextLine || row.context) : '';
     var project = showProject ? clean(ref.repo || row.project) : '';
     if (sameName(project, title)) project = '';
     var progress = isTask && row.total > 0 && (section === 'working' || section === 'stopped' || section === 'others') ? progressNode(row.cells || '', row.done, row.total, current ? clean(current.text) : '') : null;
-    var meta = add(el('span', 'r-meta'), progress, status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null, project ? el('span', '', project) : null, sameTitle ? el('span', '', sameTitle) : null, detail ? el('span', '', detail) : null);
+    var rowSurf = surfaceBadge(interfaceOf(ref), false);
+    var stepNode = detail ? el('span', section === 'working' ? 'r-step' : '', detail) : null;
+    if (stepNode && rawDetail) stepNode.setAttribute('title', rawDetail);
+    var statusNode = status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null;
+    var projectNode = project ? el('span', 'r-proj', project) : null;
+    var sameNode = sameTitle ? el('span', '', sameTitle) : null;
+    var meta = section === 'working'
+      ? add(el('span', 'r-meta'), progress, stepNode, statusNode, projectNode, sameNode, rowSurf)
+      : add(el('span', 'r-meta'), progress, rowSurf, statusNode, projectNode, sameNode, stepNode);
     var titleNode = el('span', 'r-title', title);
-    titleNode.setAttribute('title', title);
+    titleNode.setAttribute('title', titleFull || title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
     li.setAttribute('data-k', ref.key);
     var fold = el('div', 'fold');
@@ -2992,17 +3199,21 @@ const PAGE_SCRIPT = String.raw`
     }) : el('div');
     head.className = 'row-btn';
     if (isExpandable) head.setAttribute('aria-expanded', String(isOpen || isRailSelected));
-    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', 'r-right' + (dueOf(ref) && source(ref).dueTone === 'alert' ? ' t-alert' : ''), dueOf(ref) || ageOf(ref)), el('span', 'r-chev'));
+    var isStaleWorking = section === 'working' && !dueOf(ref) && (isUnsureRow || (ref.at > 0 && pg.model && pg.model.view && pg.model.view.now - ref.at >= 10 * 60 * 1000));
+    var rightCls = 'r-right' + (dueOf(ref) && source(ref).dueTone === 'alert' ? ' t-alert' : isStaleWorking ? ' t-stale' : '');
+    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', rightCls, dueOf(ref) || ageOf(ref)), el('span', 'r-chev'));
     var block = el('div', 'fx');
     add(block, add(el('div', 'fx-in'), head, isExpandable ? fold : null));
     add(li, block);
+    var railProject = clean(ref.repo || row.project);
+    if (sameName(railProject, title)) railProject = '';
     railItems[ref.key] = {
       kind: 'row',
       ref: ref,
       node: li,
       trigger: head,
       title: title,
-      meta: [agentName(row.agent), project, dueOf(ref) || ageOf(ref)].filter(Boolean).join(' · '),
+      meta: [railProject, dueOf(ref) || ageOf(ref)].filter(Boolean).join(' · '),
       renderBody: isExpandable ? function () { return inner; } : null,
     };
     return { li: li, block: block };
@@ -3058,16 +3269,20 @@ const PAGE_SCRIPT = String.raw`
       else parts.push(w('pgTipOpen', entry.open));
     }
     if (entry.unreadable) parts.push(w('pgTipCantRead'));
+    var surf = (entry.surfaces || []).filter(function (v) { return v === 'cli' || v === 'app'; }).map(function (v) { return w(v === 'app' ? 'pgInterfaceApp' : 'pgInterfaceCli'); }).join(' · ');
     var state = stateWord(entry);
-    if (entry.working > 0 && !parts.length) return entry.name + ' · ' + state;
-    return entry.name + (state ? ' · ' + state : '') + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
+    var head = entry.name + (surf ? ' · ' + surf : '') + (state ? ' · ' + state : '');
+    if (entry.working > 0 && !parts.length) return head;
+    return head + ': ' + (parts.length ? parts.join(', ') : w('pgChipEmpty'));
   }
   // One button per agent, twice: in the icon row (phones) and in the sidebar (the rail and wider). Same label, count, dot and filter.
   function newChip(entry, isSide) {
     var node = navButton('', function () { setFilter(pg.filter === entry.id ? '' : entry.id); });
     node.setAttribute('data-agent', entry.id);
-    var chip = { node: node, name: el('span', isSide ? 's-txt' : 'c-name'), badge: null, isSide: isSide };
-    add(node, agentMark(entry.agent), chip.name);
+    var surf = el('span', 'surf-wrap');
+    if (!isSide) surf.setAttribute('aria-hidden', 'true');
+    var chip = { node: node, name: el('span', isSide ? 's-txt' : 'c-name'), surf: surf, badge: null, isSide: isSide };
+    add(node, agentMark(entry.agent), chip.name, surf);
     return chip;
   }
   function paintChip(chip, entry, label) {
@@ -3076,6 +3291,11 @@ const PAGE_SCRIPT = String.raw`
     chip.node.className = (chip.isSide ? 's-item s-agent' : 'chip') + (entry.working > 0 ? ' working' : '');
     if (entry.presence) chip.node.setAttribute('data-presence', entry.presence);
     setText(chip.name, stateWord(entry) ? entry.name + ' · ' + stateWord(entry) : entry.name);
+    if (chip.surf) {
+      chip.surf.textContent = '';
+      (entry.surfaces || []).forEach(function (iface) { add(chip.surf, surfaceBadge(iface, !chip.isSide)); });
+      chip.surf.hidden = !chip.surf.firstChild;
+    }
     var text = entry.unreadable ? '!' : entry.needs > 0 ? String(entry.needs) : '';
     if (text && !chip.badge) { chip.badge = el('span', 'badge'); chip.node.appendChild(chip.badge); }
     if (!text && chip.badge) { chip.node.removeChild(chip.badge); chip.badge = null; }
@@ -3094,7 +3314,7 @@ const PAGE_SCRIPT = String.raw`
     pg.ids.forEach(function (id) {
       var group = view.agents.filter(function (one) { return one.agent === id; })[0];
       if (!group) return;
-      entries.push({ id: id, name: agentName(id), agent: id, needs: waiting(group.counts.needs, id), working: view.working.filter(function (ref) { return agentOf(ref) === id; }).length, unreadable: group.isUnreadable, presence: agentPresence[id] });
+      entries.push({ id: id, name: agentName(id), agent: id, needs: waiting(group.counts.needs, id), working: view.working.filter(function (ref) { return agentOf(ref) === id; }).length, unreadable: group.isUnreadable, presence: agentPresence[id], surfaces: agentSurfaces(id) });
     });
     if (pg.filters.agents.length) {
       pg.filters.agents = pg.filters.agents.filter(function (id) { return entries.some(function (one) { return one.id === id; }); });
@@ -3362,6 +3582,18 @@ const PAGE_SCRIPT = String.raw`
     layout();
   }
   var filterUi = null;
+  var hudFilterOpen = false;
+  function syncHudFilter() {
+    var bar = filterUi ? filterUi.bar : document.getElementById('filter-bar');
+    var btn = document.getElementById('hud-filter-btn');
+    var active = hasActiveFilters() || Boolean(pg.openMenu);
+    var shown = hudFilterOpen || active;
+    if (bar) bar.setAttribute('data-hud-idle', shown ? '0' : '1');
+    if (btn) {
+      btn.setAttribute('aria-expanded', String(shown));
+      btn.setAttribute('data-active', active ? '1' : '0');
+    }
+  }
   function ensureFilterBar() {
     var bar = document.getElementById('filter-bar');
     if (!bar) return null;
@@ -3394,6 +3626,7 @@ const PAGE_SCRIPT = String.raw`
     clearBtn.hidden = true;
     add(bar, clearBtn);
     filterUi = { bar: bar, groups: groups, clearBtn: clearBtn };
+    syncHudFilter();
     return filterUi;
   }
   function paintFilterMenus() {
@@ -3404,6 +3637,7 @@ const PAGE_SCRIPT = String.raw`
       g.menu.hidden = !isOpen;
       g.chip.setAttribute('aria-expanded', String(isOpen));
     });
+    syncHudFilter();
   }
   function drawFilterBar(tokens) {
     var ui = ensureFilterBar();
@@ -3549,6 +3783,106 @@ const PAGE_SCRIPT = String.raw`
     });
     drawSide(count, projects, allProjects);
     drawFilterBar(tokens);
+    paintPulse(count);
+  }
+  // #1023: the first line. A count for each view, the same counts as the sidebar's, each one press from its list,
+  // and the board's freshness, which refreshes on a press. Built once; each layout only sets its numbers.
+  var pulse = null;
+  var pulseCount = null;
+  function pulseIcon(name) {
+    var tpl = document.getElementById('pulse-' + name + '-icon');
+    return tpl && tpl.content && tpl.content.firstChild ? tpl.content.firstChild.cloneNode(true) : null;
+  }
+  function pulseButton(cls, icon, onPress) {
+    var node = navButton('', onPress);
+    node.className = cls;
+    var mark = icon ? pulseIcon(icon) : null;
+    if (mark) node.appendChild(mark);
+    node.numberNode = el('span', 'p-n');
+    node.appendChild(node.numberNode);
+    return node;
+  }
+  function jumpShelf(name) {
+    setView('all');
+    if (pg.openShelf[name]) pg.openShelf[name](true);
+    var node = pg.nodes.counts && pg.nodes.counts[name];
+    while (node && !hasClass(node, 'shelf')) node = node.parentNode;
+    if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'start', behavior: moving() ? 'smooth' : 'auto' });
+  }
+  function ensurePulse() {
+    var bar = document.getElementById('pulse');
+    if (!bar) return null;
+    if (pulse && pulse.bar === bar) return pulse;
+    pulse = { bar: bar };
+    pulse.needs = pulseButton('p-need', '', function () { setView('needs'); });
+    pulse.needs.id = 'jump-needs';
+    pulse.run = pulseButton('p-pill', 'run', function () { setView('working'); });
+    pulse.run.id = 'jump-run';
+    pulse.stop = pulseButton('p-pill', 'stop', function () { jumpShelf('stopped'); });
+    pulse.stop.id = 'jump-stop';
+    pulse.done = pulseButton('p-pill', 'done', function () { jumpShelf('done'); });
+    pulse.done.id = 'jump-done';
+    pulse.sync = navButton('', function () {
+      toggleClass(pulse.sync, 'is-spin', true);
+      setTimeout(function () { toggleClass(pulse.sync, 'is-spin', false); }, 400);
+      refresh(true);
+    });
+    pulse.sync.id = 'sync';
+    pulse.sync.className = 'sync-btn';
+    pulse.syncIcon = null;
+    pulse.syncText = el('span', '');
+    add(bar, pulse.needs, pulse.run, pulse.stop, pulse.done, add(pulse.sync, pulse.syncText));
+    return pulse;
+  }
+  function setPill(node, n, label) {
+    setText(node.numberNode, n);
+    if (node.getAttribute('aria-label') !== label) { node.setAttribute('aria-label', label); node.setAttribute('title', label); }
+  }
+  function paintPulse(count) {
+    var ui = ensurePulse();
+    if (count) pulseCount = count;
+    count = pulseCount;
+    if (!ui || !count) return;
+    setPill(ui.needs, count.cards, w('pgPulseNeeds', count.cards));
+    ui.needs.hidden = pg.view === 'needs' || count.cards === 0;
+    setPill(ui.run, count.working, w('pgPulseWorking', count.working));
+    ui.run.setAttribute('aria-pressed', String(pg.view === 'working'));
+    setPill(ui.stop, count.stopped, w('pgPulseStopped', count.stopped));
+    setPill(ui.done, count.done, w('pgPulseDone', count.done));
+    paintFresh();
+  }
+  // Seconds and minutes as 12s, 2m: the short form the stale pill uses in every language.
+  function shortAge(ms) {
+    if (ms < 60000) return Math.floor(ms / 1000) + 's';
+    if (ms < 3600000) return Math.floor(ms / 60000) + 'm';
+    return Math.floor(ms / 3600000) + 'h';
+  }
+  var wasStale = false;
+  function paintFresh() {
+    var ui = pulse;
+    var age = Math.max(0, Date.now() - lastGood);
+    var stale = isStale();
+    toggleClass(board, 'stale', stale);
+    if (stale !== wasStale) { wasStale = stale; paintLight(); }
+    if (!ui) return;
+    var when = age < 60000 ? w('justNow') : w('minutesAgo', Math.floor(age / 60000));
+    var label = stale ? w('pgStaleShort', shortAge(age)) : when;
+    var hint = stale ? w('pgStaleHint', shortAge(age)) : w('pgSyncHint', when);
+    toggleClass(ui.sync, 'is-stale', stale);
+    var icon = stale ? 'warn' : 'sync';
+    if (!ui.syncIcon || ui.syncIcon.kind !== icon) {
+      var mark = pulseIcon(icon);
+      if (ui.syncIcon && ui.syncIcon.node) ui.syncIcon.node.remove();
+      if (mark) ui.sync.insertBefore(mark, ui.syncText);
+      ui.syncIcon = { kind: icon, node: mark };
+    }
+    setText(ui.syncText, label);
+    if (ui.sync.getAttribute('aria-label') !== hint) { ui.sync.setAttribute('aria-label', hint); ui.sync.setAttribute('title', hint); }
+  }
+  function heardFromBoard() {
+    isReadFailing = false;
+    lastGood = Date.now();
+    paintFresh();
   }
   // The sidebar's numbers come from the same counts as the headings, so every number on the page agrees.
   function drawSide(count, projects, allProjects) {
@@ -3626,6 +3960,7 @@ const PAGE_SCRIPT = String.raw`
     shell.setAttribute('data-view', name);
     VIEWS.forEach(function (one) { document.getElementById('view-' + one).setAttribute('aria-pressed', String(one === name)); });
     if (name === 'done' && pg.openShelf.done) pg.openShelf.done(true);
+    if (name === 'others' && pg.openShelf.others) pg.openShelf.others(true);
     // A view picks a section; it leaves the agent and project filters as they were (#809). Before the first draw there is nothing to lay out.
     if (pg.sections) layout();
     enter(board);
@@ -3689,6 +4024,13 @@ const PAGE_SCRIPT = String.raw`
       btn.focus({ preventScroll: true });
     }
   }
+  function isFreshAiRef(ref, now) {
+    return !(source(ref).isOwn || ref.isOwn) && ref.at > 0 && now - ref.at <= 15 * 60 * 1000;
+  }
+  function hasFreshAiDone(view) {
+    var list = view && view.all && view.all.done || [];
+    return list.some(function (ref) { return isFreshAiRef(ref, view.now); });
+  }
   function fitSide() {
     var width = window.innerWidth;
     var shell = document.getElementById('shell');
@@ -3717,6 +4059,11 @@ const PAGE_SCRIPT = String.raw`
         if (pg.model) draw(pg.model);
       }
     }
+    var narrowHudNow = typeof width === 'number' && width > 0 && width < 800;
+    if (narrowHudNow && !wasNarrowHud && opened['shelf:done'] === undefined && pg.openShelf.done && pg.model && hasFreshAiDone(pg.model.view)) {
+      pg.openShelf.done(true);
+    }
+    wasNarrowHud = narrowHudNow;
     var foot = document.getElementById('pfoot');
     // The footer lives at the foot of the sidebar when it is shown full, or in the drawer when that is open; otherwise under the work.
     var inSide = (hasSide && !isRail) || (!hasSide && drawerOpen);
@@ -3913,10 +4260,28 @@ const PAGE_SCRIPT = String.raw`
       if (!by[name]) { by[name] = []; order.push(name); }
       by[name].push(ref);
     });
-    var sec = el('section', 'sec');
-    add(sec, sectionHead(w('pgOthers'), 'others'));
-    pg.nodes.othersText = el('p', '');
-    pg.nodes.othersEmpty = fx(add(el('div', 'empty'), pg.nodes.othersText));
+    // #1023: idle sessions fold under one line with their count, like Stopped and Done, so on the Overview only
+    // Needs you and Working are open. One press opens them; the Other work view opens them by itself.
+    // The Other work view opens it on the way in (setView); after that the person's own choice holds across polls.
+    var isOpen = opened['shelf:others'] === true || (opened['shelf:others'] === undefined && pg.view === 'others');
+    var sec = el('section', 'sec shelf' + (isOpen ? ' open' : ''));
+    var count = el('span', 'count');
+    pg.nodes.counts.others = count;
+    var fold = el('div', 'fold');
+    fold.inert = !isOpen;
+    var setOpen = function (now) {
+      toggleClass(sec, 'open', now);
+      head.setAttribute('aria-expanded', String(now));
+      fold.inert = !now;
+      opened['shelf:others'] = now;
+    };
+    var head = navButton('', function () { setOpen(!hasClass(sec, 'open')); });
+    pg.openShelf.others = setOpen;
+    head.className = 'shelf-head';
+    head.setAttribute('aria-expanded', String(isOpen));
+    add(head, el('span', 'chev'), el('span', '', w('pgOthers')), count);
+    head.firstChild.setAttribute('aria-hidden', 'true');
+    var body = el('div');
     order.forEach(function (name) {
       var list = el('ul', 'rows');
       var group = { ul: list, entries: [], block: null };
@@ -3927,11 +4292,15 @@ const PAGE_SCRIPT = String.raw`
       });
       if (name) {
         group.block = fx(el('p', 'proj', name));
-        add(sec, group.block);
+        add(body, group.block);
       }
       pg.groups.push(group);
-      add(sec, list);
+      add(body, list);
     });
+    pg.nodes.othersText = el('p', '');
+    pg.nodes.othersEmpty = fx(add(el('div', 'empty'), pg.nodes.othersText));
+    // With no idle rows there is nothing to fold: the Other work view says so on its empty line.
+    if (refs.length) add(sec, head, add(fold, add(el('div', 'fold-in'), body)));
     add(sec, pg.nodes.othersEmpty);
     return sec;
   }
@@ -3969,8 +4338,14 @@ const PAGE_SCRIPT = String.raw`
     return box;
   }
   function doneExtra() {
-    var wrap = el('div', 'acts');
-    add(wrap, button(w('archiveNow'), function () { tidyBoard('recent', '/api/tidy'); }));
+    var wrap = el('div', 'done-acts');
+    var archiveBtn = button('', function () { tidyBoard('recent', '/api/tidy'); }, 'icon-btn done-archive-btn');
+    archiveBtn.setAttribute('aria-label', w('archiveNow'));
+    archiveBtn.setAttribute('title', w('archiveNow'));
+    var archiveSvg = cloneIcon('archive-icon');
+    if (archiveSvg) archiveBtn.appendChild(archiveSvg);
+    archiveBtn.appendChild(el('span', 'sr-lbl', w('archiveNow')));
+    add(wrap, archiveBtn);
     resultSlot(wrap, 'recent', '', w('pgDone'));
     return wrap;
   }
@@ -4001,8 +4376,11 @@ const PAGE_SCRIPT = String.raw`
     var body = el('div', 'shelf-body');
     items.forEach(function (one) {
       var item = el('div', 'hid');
-      var line = [one.project, one.isOwn && !one.agent ? '' : agentName(one.agent)].filter(Boolean).join(' · ') + (one.task ? ' › ' + one.task : '');
-      add(item, el('p', 'c-meta', line), el('p', 'q', one.text));
+      var hidAgent = one.isOwn && !one.agent ? '' : (one.agent || 'claude');
+      var hidMark = agentMark(hidAgent, hidAgent ? agentName(hidAgent) : '');
+      hidMark.className += ' ag-sm';
+      var line = [one.project, one.task].filter(Boolean).join(' › ');
+      add(item, add(el('div', 'c-meta'), hidMark, line ? el('span', '', line) : null), el('p', 'q', one.text));
       if (!hasActiveRestore(one.key)) add(item, add(el('div', 'acts'), button(w('showAgain'), function () { act(one.key, 'unhide'); })));
       resultSlot(item, one.key, one.text, one.task);
       add(body, item);
@@ -4043,7 +4421,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function freshPage(view) {
     var ids = connectedIds(view);
-    if (!ids.length) return add(el('section', 'fresh'), freshMark(), el('h2', '', w('pgReady')), el('p', '', w('pgStartAny')));
+    if (!ids.length) return add(el('section', 'fresh'), freshMark(), el('h2', '', w('pgReady')), el('p', '', w('pgStartAny')), el('p', '', w('pgConnect')));
     var list = el('ul');
     ids.forEach(function (id) {
       add(list, add(el('li'), agentMark(id), add(el('span'), el('b', '', agentName(id)), el('span', 'ok', ' ✓ ' + w('pgConnected')))));
@@ -4221,6 +4599,7 @@ const PAGE_SCRIPT = String.raw`
     var priorCards = pg.cardNodes;
     var priorOrder = pg.order.cards || [];
     var priorRows = pg.rowKeys;
+    var priorDone = pg.doneKeys;
     pg.lis = [];
     pg.groups = [];
     pg.sections = [];
@@ -4246,8 +4625,10 @@ const PAGE_SCRIPT = String.raw`
     if (asked) parts.push(asked);
     var hasWork = Object.keys(view.all.counts).some(function (key) { return view.all.counts[key] > 0; });
     document.getElementById('shell').setAttribute('data-empty', !view.agents.length && !hasWork ? '1' : '');
-    if (!view.agents.length && !hasWork) parts.push(freshPage(view));
-    else {
+    if (!view.agents.length && !hasWork) {
+      parts.push(freshPage(view));
+      pg.doneKeys = Object.create(null);
+    } else {
       var titleCounts = Object.create(null);
       var seenKeys = Object.create(null);
       view.needs.cards.concat(view.needs.waitingOthers || [], view.working, view.all.open, view.all.stopped, view.all.done).forEach(function (ref) {
@@ -4266,11 +4647,22 @@ const PAGE_SCRIPT = String.raw`
       var stopped = shelf('stopped', w('pgStopped'), view.all.stopped.slice().sort(byTime), 'stopped');
       if (stopped) parts.push(sectionBlock(stopped, 'stopped'));
       var finished = view.all.done.slice().sort(byTime);
+      var nextDone = Object.create(null);
+      finished.forEach(function (ref) { nextDone[ref.key] = true; });
+      // Auto-surface freshly completed AI tasks while respecting any manual collapse by the user.
+      if (opened['shelf:done'] === undefined && finished.length) {
+        var justFinishedAi = priorDone !== null && finished.some(function (ref) {
+          return !priorDone[ref.key] && isFreshAiRef(ref, view.now);
+        });
+        var narrowFreshAi = typeof window.innerWidth === 'number' && window.innerWidth > 0 && window.innerWidth < 800 && hasFreshAiDone(view);
+        if (justFinishedAi || narrowFreshAi) opened['shelf:done'] = true;
+      }
       var done = shelf('done', w('pgDone'), finished, 'done', finished.length ? doneExtra() : null);
       if (done) parts.push(sectionBlock(done, 'done'));
       var hidden = hiddenShelf(model);
       if (hidden) parts.push(hidden);
       pg.rowKeys = workingKeys;
+      pg.doneKeys = nextDone;
     }
     var storageSec = document.getElementById('settings-storage');
     var storageLine = document.getElementById('settings-storage-line');
@@ -4400,13 +4792,15 @@ const PAGE_SCRIPT = String.raw`
       if (isClosed || pollPage !== pageId || ask !== boardAsk) return;
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) { showMoved(); return; }
-      if (data.unchanged) { reachable(); maybeShowAway(); return; }
+      if (data.unchanged) { reachable(); heardFromBoard(); maybeShowAway(); return; }
       if (!data.ok || !data.model) {
-        if (data.note) { reachable(); say(data.note, 'alert'); }
+        // The board answered, but with no board to show: the rows on the page are as old as the last good read.
+        if (data.note) { reachable(); isReadFailing = true; paintFresh(); say(data.note, 'alert'); }
         else unreachable();
         return;
       }
       reachable();
+      heardFromBoard();
       if (data.barStyle) barStyleShown(data.barStyle);
       if (data.lang && !settingsLanguage.disabled) { languageKept = data.lang; settingsLanguage.value = data.lang; }
       notifyWaiting(data.model);
@@ -4572,7 +4966,9 @@ const PAGE_SCRIPT = String.raw`
       var openGroup = filterUi.groups[pg.openMenu];
       pg.openMenu = '';
       paintFilterMenus();
-      if (openGroup && openGroup.chip) openGroup.chip.focus();
+      var collapsedNarrow = filterUi.bar.getAttribute('data-hud-idle') === '1' && typeof window.innerWidth === 'number' && window.innerWidth < 560;
+      var focusTarget = collapsedNarrow ? document.getElementById('hud-filter-btn') : (openGroup && openGroup.chip);
+      if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
       return;
     }
     if (selectedKey && isWideDetail()) {
@@ -4627,6 +5023,12 @@ const PAGE_SCRIPT = String.raw`
   document.getElementById('drawer-btn').addEventListener('click', function () { setDrawer(!drawerOpen); });
   document.getElementById('drawer-close').addEventListener('click', function () { setDrawer(false); });
   document.getElementById('drawer-backdrop').addEventListener('click', function () { setDrawer(false); });
+  var hudFilterBtn = document.getElementById('hud-filter-btn');
+  if (hudFilterBtn) hudFilterBtn.addEventListener('click', function () {
+    hudFilterOpen = !hudFilterOpen;
+    if (!hudFilterOpen && pg.openMenu) { pg.openMenu = ''; paintFilterMenus(); }
+    else syncHudFilter();
+  });
   if (typeof window.addEventListener === 'function') window.addEventListener('resize', fitSide);
   fitSide();
   document.getElementById('close').addEventListener('click', function () {
@@ -4720,5 +5122,8 @@ const PAGE_SCRIPT = String.raw`
     }, function () {});
   }
   pairApprovals().then(function () { refresh(); });
+  // A clock, not a transition: between answers it keeps the line's age current and finds a held request that never
+  // came back (a sleeping laptop, a half-open connection), which no failure would report.
+  if (typeof setInterval === 'function') setInterval(function () { if (!isClosed) paintFresh(); }, 5000);
 })();
 `

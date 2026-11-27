@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { test } from 'node:test'
+import { boardClient } from '../scripts/message-client.mjs'
+import { pageDom } from './e2e/lib/surfaces.mjs'
 
 const loader = registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -14,11 +16,11 @@ const loader = registerHooks({
     return nextResolve(specifier, context)
   },
 })
-let parseProgress, buildView, serveModel, handledOnly, cardSendKey, sendKey, boardCounts, boardStatus, boardText, boardDocument, readQueuedMessaging, queueMessage, mailboxId, BOARD_SCRIPT, EN, ZH_TW, STRINGS
+let parseProgress, buildView, serveModel, servePage, handledOnly, cardSendKey, sendKey, boardCounts, boardStatus, boardText, boardDocument, readQueuedMessaging, queueMessage, mailboxId, BOARD_SCRIPT, EN, ZH_TW, STRINGS
 try {
   ;({ parseProgress } = await import('../hooks/parse.ts'))
   ;({ buildView } = await import('../hooks/view.ts'))
-  ;({ serveModel, handledOnly, cardSendKey, sendKey } = await import('../hooks/serve.ts'))
+  ;({ serveModel, servePage, handledOnly, cardSendKey, sendKey } = await import('../hooks/serve.ts'))
   ;({ boardCounts, boardStatus } = await import('../hooks/board-status.ts'))
   ;({ boardText } = await import('../hooks/board.ts'))
   ;({ boardDocument } = await import('../hooks/board-json.ts'))
@@ -311,6 +313,8 @@ test('the network page model counts a queued answer as handled, from state that 
   assert.ok(!kept.includes(SECRET), kept)
   assert.ok(!JSON.stringify(phone).includes(SECRET))
   assert.deepEqual(handledOnly(messaging).connections, [])
+  assert.deepEqual(handledOnly({ messages: [] }).connections, [])
+  assert.equal(handledOnly({ messages: [] }).surfaces, undefined)
 })
 
 // Greptile P1 on #1339 (round 2 of the same class, R6): a stuck card's handled decision came from the reachable
@@ -419,7 +423,7 @@ Server.prototype.listen = function (...args) { if (args[1] === '192.168.42.2') a
   } finally {
     child.kill()
     await Promise.race([exited, delay(1000)])
-    rmSync(dir, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
 })
 
@@ -450,4 +454,101 @@ test('a queued answer on a folded waiting-on-others item agrees across boardCoun
   const waitAsk = model.asks.find(ask => ask.key === model.view.needs.waitingOthers[0].key)
   assert.equal(waitAsk?.isSending, true)
   assert.notEqual(waitAsk?.receipt, undefined)
+})
+
+test('LAN /api/board keeps CLI and App surfaces for dual-surface Codex while stripping connection secrets', { timeout: 40_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'lan-dual-surface-'))
+  const messages = join(dir, 'messages')
+  mkdirSync(messages)
+  mkdirSync(join(dir, 'run'), { mode: 0o700 })
+  const cliSession = '33333333-4444-4555-8666-777777777701'
+  const appSession = '33333333-4444-4555-8666-777777777702'
+  const dualProgress = [
+    '## Synthetic CLI project',
+    `<!-- auto session=ab110001 agent=codex resume=${cliSession} state=waiting updated=${new Date(now).toISOString()} -->`,
+    '### CLI review item',
+    '- [?] Ship CLI fix?',
+    '<!-- /auto session=ab110001 -->',
+    '',
+    '## Synthetic App project',
+    `<!-- auto session=ab110002 agent=codex resume=${appSession} state=working updated=${new Date(now).toISOString()} -->`,
+    '### Desktop build item',
+    '- [~] Check desktop build',
+    '<!-- /auto session=ab110002 -->',
+    '',
+  ].join('\n')
+  writeFileSync(join(dir, 'progress.md'), dualProgress)
+  const script = join(dir, 'agent-board.mjs')
+  writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: join(dir, 'progress.md'), lang: 'en' })}\n${BOARD_SCRIPT}`)
+  const preload = join(dir, 'preload.cjs')
+  writeFileSync(preload, `const os = require('node:os'), { Server } = require('node:net')
+os.networkInterfaces = () => ({ synthetic: [{ address: '192.168.42.2', family: 'IPv4', internal: false }] })
+const listen = Server.prototype.listen
+Server.prototype.listen = function (...args) { if (args[1] === '192.168.42.2') args[1] = '127.0.0.1'; return Reflect.apply(listen, this, args) }
+`)
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, APPDATA: dir, LOCALAPPDATA: dir, NO_COLOR: '1', XDG_RUNTIME_DIR: join(dir, 'run'), LANG: 'en' }
+  const child = spawn(process.execPath, ['--require', preload, script, '--serve-child', '--messages-dir', messages], { cwd: dir, env, stdio: ['ignore', 'pipe', 'pipe'] })
+  let stderr = ''
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const exited = new Promise(done => child.once('exit', code => done(code)))
+  let cliRecv, appRecv
+  try {
+    const url = await new Promise((done, fail) => {
+      let out = ''
+      child.stdout.setEncoding('utf8')
+      child.stdout.on('data', chunk => { out += chunk; if (out.includes('\n')) done(new URL(out.split('\n')[0].trim())) })
+      exited.then(code => fail(new Error(`server exited with ${code}: ${stderr}`)))
+    })
+    const attach = (session, surface, turn) => boardClient(url.href).attach({
+      agent: 'codex', session, turn, surface,
+      verify: async () => true, canReceive: () => true,
+      deliver: async msg => 'ACK ' + (msg.nonce || msg.id),
+      onError: () => {},
+    })
+    cliRecv = await attach(cliSession, 'Codex CLI', 'lan-cli-turn')
+    appRecv = await attach(appSession, 'Codex desktop app', 'lan-app-turn')
+    const port = Number(url.port)
+    const token = url.searchParams.get('t')
+    const opened = await postJson(port, token, '/api/lan', { address: '192.168.42.2' })
+    assert.equal(opened.status, 200, opened.body)
+    const phone = new URL(JSON.parse(opened.body).url)
+    const local = await getBoard(port, token, '127.0.0.1')
+    const remote = await getBoard(Number(phone.port), phone.searchParams.get('t'), phone.hostname)
+    assert.equal(local.status, 200, local.body)
+    assert.equal(remote.status, 200, remote.body)
+
+    const localConnections = JSON.parse(local.body).messaging.connections
+    assert.equal(localConnections.length, 2)
+    const parsedRemote = JSON.parse(remote.body)
+    assert.equal(parsedRemote.messaging, undefined)
+    for (const conn of localConnections) {
+      assert.ok(!remote.body.includes(conn.id), `LAN payload leaked connection id ${conn.id}`)
+      assert.ok(!remote.body.includes(conn.turn), `LAN payload leaked turn ${conn.turn}`)
+    }
+    assert.equal(parsedRemote.model.asks[0].surface, 'Codex CLI')
+    assert.equal(parsedRemote.model.groups[0].rows[0].surface, 'Codex desktop app')
+
+    const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+    const hasClass = (node, name) => String(node.className ?? '').split(' ').includes(name)
+    for (const [locale, words] of [['en', STRINGS.en], ['zh-TW', STRINGS['zh-TW']], ['zh-CN', STRINGS['zh-CN']]]) {
+      const dom = await pageDom(servePage(words, 'n', true), parsedRemote.model)
+      const side = dom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+      const chip = dom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+      const expectSurf = `${words.pgInterfaceCli} · ${words.pgInterfaceApp}`
+      assert.ok(side.getAttribute('aria-label').includes(expectSurf), `${locale} LAN side aria-label: ${side.getAttribute('aria-label')}`)
+      assert.ok(side.getAttribute('title').includes(expectSurf), `${locale} LAN side title: ${side.getAttribute('title')}`)
+      assert.ok(chip.getAttribute('aria-label').includes(expectSurf), `${locale} LAN chip aria-label: ${chip.getAttribute('aria-label')}`)
+      assert.ok(chip.getAttribute('title').includes(expectSurf), `${locale} LAN chip title: ${chip.getAttribute('title')}`)
+      assert.ok(walk(side).some(n => hasClass(n, 'surf-cli') && !hasClass(n, 'surf-icon')))
+      assert.ok(walk(side).some(n => hasClass(n, 'surf-app') && !hasClass(n, 'surf-icon')))
+      assert.ok(walk(chip).some(n => hasClass(n, 'surf-cli') && hasClass(n, 'surf-icon')))
+      assert.ok(walk(chip).some(n => hasClass(n, 'surf-app') && hasClass(n, 'surf-icon')))
+    }
+  } finally {
+    await Promise.allSettled([cliRecv?.close(), appRecv?.close()])
+    child.kill()
+    await Promise.race([exited, delay(1000)])
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
 })

@@ -168,6 +168,7 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // 44681768984), over the 105 s line of 150 s. By the rule of #1715: 109.1 x 1.3 / 0.7, rounded up to five seconds.
   // Grew with #1778's `setup --update` tests (#1314): 24 tests, 50.0 s of test time in its part. 170.8 s on Windows Node 24
   // (run 45073388887, attempt 2), over the 143.5 s line of 205 s. By the rule of #1715: 170.8 x 1.3 / 0.7, rounded up to five seconds.
+  // Since #1912 each part runs a share; as for legacy-connect, keep the whole-file budget until main measures its shares.
   'tests/host-upgrade.test.mjs': 320_000, // slowest 170.8 s
   // Re-derived by the same rule (#1715): 60.6-73.4 s on Windows Node 24 on #1709, which adds terminal setup tests here.
   'tests/setup-terminal.test.mjs': 140_000, // slowest 73.4 s
@@ -420,7 +421,9 @@ const parsePart = part => {
 // 164.0 s, and the Windows board part that held it to 448.6 s of its 480 s (#1366, runs 43641832826, 43644841624).
 // legacy-connect joined when, whole, it took 162.2 and 167.0 s in Windows Node 22 part 4 of 7 beside that part's share
 // of codex-local, and the part ran 487.9 and 494.4 s of its 480 s on main e977c727 (#1741, run 44697238483).
-export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
+// host-upgrade joined at 182.9 s in the refreshed table: Windows board part 6/10 ran 394.8 and 438.8 s of its 480 s
+// on main 6881827b (#1912, run 45920668633).
+export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/host-upgrade.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
 
 // The table of times that deals both the files and the tests out to the parts (#1762): the time of each test file, and of each
 // top-level test of a self-parted file, from a main run's job logs. `node scripts/ci-test-times.mjs <job logs>` writes it; see
@@ -458,7 +461,7 @@ const callerFile = () => {
 }
 
 // Which part runs each test of a self-parted file that the table holds: the tests of the files that share jobs (the same
-// group: the four board files, or messaging alone) go out together, slowest first, each to the part with the least time so
+// group: the five board files, or messaging alone) go out together, slowest first, each to the part with the least time so
 // far, so the parts of a job get the same time from all of them. It depends only on the table and the number of parts, so
 // every job works out the same split and the parts together run each test once.
 const dealCache = new WeakMap()

@@ -2248,19 +2248,19 @@ test('after setup --lang en --apply on a zh-TW system, a plain setup says alread
       return [file.slice(directory.length), { bytes: readFileSync(file), mtimeMs: statSync(file).mtimeMs }]
     }))
   const before = snapshot(f.home)
-  // Plain setup preview without --lang
+  // Plain setup preview without --lang: it keeps the language setup was given (#1245)
   const preview = setupAgent(zhTw, '--agent', 'codex')
   assert.equal(preview.status, 0, preview.stderr)
   assert.equal(preview.stderr, '')
-  assert.match(preview.stdout, /已設定完成/)
-  assert.doesNotMatch(preview.stdout, /將更新/)
+  assert.match(preview.stdout, /already set up/)
+  assert.doesNotMatch(preview.stdout, /would update|已設定完成/)
   assert.deepEqual(snapshot(f.home), before)
   // Plain setup apply without --lang
   const second = setupAgent(zhTw, '--agent', 'codex', '--apply')
   assert.equal(second.status, 0, second.stderr)
   assert.equal(second.stderr, '')
-  assert.match(second.stdout, /已設定完成/)
-  assert.doesNotMatch(second.stdout, /已更新/)
+  assert.match(second.stdout, /already set up/)
+  assert.doesNotMatch(second.stdout, /updated|已設定完成/)
   assert.deepEqual(snapshot(f.home), before)
   // Explicit --lang zh-TW preview names the updated files
   const langChange = setupAgent(zhTw, '--agent', 'codex', '--lang', 'zh-TW')
@@ -5048,7 +5048,44 @@ test('the PowerShell classifier uses the first Node path when several applicatio
   assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
   const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => ({ body: readFileSync(join(inbox, name), 'utf8') })) : []
   assert.equal(saved.length, 1, classifierDiagnostic(diagnostic))
-  assert.match(classifierDiagnostic(diagnostic), /phase=complete started=1/)
+  assert.match(classifierDiagnostic(diagnostic), / started=1 /)
+  assert.match(classifierDiagnostic(diagnostic), /innerType= innerHresult=0 nativeCode=0 /)
+  assert.deepEqual(JSON.parse(saved[0].body), { session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', board_request: true })
+  assert.ok(!/[^\x20-\x7e]/.test(saved[0].body))
+}))
+
+test('the PowerShell classifier still picks the first Node path when the caller uses up the reporter time (#1746)', { skip: process.platform !== 'win32' }, () => fixture(async f => {
+  const later = join(f.home, 'later node'), inbox = join(f.root, 'progress-inbox')
+  mkdirSync(later)
+  // A later lookup entry is deliberately not executable: it must never run.
+  writeFileSync(join(later, 'node.exe'), 'synthetic later application must not run')
+  const env = { ...f.env }
+  for (const key of Object.keys(env)) if (key.toLowerCase() === 'path') delete env[key]
+  env.PATH = [dirname(process.execPath), later].join(delimiter)
+  const powershell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  // Only bounds a hung process on a slow Windows CI runner; the reporter's own deadline is not timed here.
+  const lookup = spawnSync(powershell, ['-NoProfile', '-Command', '$c = @(Get-Command node -CommandType Application -ErrorAction Stop); $c.Count'], { env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+  assert.equal(lookup.error, undefined)
+  assert.equal(lookup.status, 0, 'the controlled application lookup must succeed')
+  assert.equal(lookup.stdout.trim(), '2', 'two real node.exe files on PATH, not a mocked lookup')
+  const file = join(f.root, 'progress-report.ps1'), diagnostic = join(f.home, 'classifier-probe.txt')
+  const raw = JSON.stringify({ session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', prompt: '/board' })
+  const source = reporterPs1()
+  assert.doesNotMatch(source, /Get-Command node/)
+  const callerLine = "      try { $raw = ConvertFrom-Json -InputObject $Payload } catch { throw 'INCOMPLETE_INPUT' }"
+  assert.equal(source.split(callerLine).length, 2, 'the caller block anchor must be unique')
+  // The caller's block runs after Node starts and inside the 2000 ms window, so 2100 ms there always reaches the timeout.
+  const delayedSource = source.replace(callerLine, `      Start-Sleep -Milliseconds 2100\n${callerLine}`)
+  f.save(file, observeClassifier(delayedSource, diagnostic, { isSelectionOnly: true }))
+  // Only bounds a hung process; the reporter's own 2000 ms deadline is what this test reaches on purpose.
+  const result = await nativeProcess(powershell, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', file, 'codex', 'prompt'], env, raw, callback => setTimeout(callback, 30000))
+  assert.equal(result.error, undefined)
+  assert.equal(result.status, 0, classifierDiagnostic(diagnostic))
+  const saved = existsSync(inbox) ? readdirSync(inbox).filter(name => name.endsWith('.json')).map(name => ({ body: readFileSync(join(inbox, name), 'utf8') })) : []
+  assert.equal(saved.length, 1, classifierDiagnostic(diagnostic))
+  assert.match(classifierDiagnostic(diagnostic), / started=1 /)
+  assert.match(classifierDiagnostic(diagnostic), /innerType= innerHresult=0 nativeCode=0 /)
+  assert.match(classifierDiagnostic(diagnostic), /phase=wait /)
   assert.deepEqual(JSON.parse(saved[0].body), { session_id: 'synthetic-multiple-node', cwd: '/synthetic/中文', board_request: true })
   assert.ok(!/[^\x20-\x7e]/.test(saved[0].body))
 }))
@@ -11290,8 +11327,8 @@ test('generated Codex and Antigravity hook commands reach Node without a PowerSh
   assert.equal(antigravity.status, 0, antigravity.stderr)
   const hooks = JSON.parse(readFileSync(join(f.home, '.gemini', 'config', 'hooks.json'), 'utf8'))['agent-board-local']
   assert.deepEqual(Object.keys(hooks), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
-  for (const group of Object.values(hooks)) {
-    assert.equal(group.length, 1)
+  for (const [event, group] of Object.entries(hooks)) {
+    assert.equal(group.length, event === 'Stop' ? 2 : 1)
     for (const { command } of group) {
       if (process.platform === 'win32' && expected === undefined) assert.match(command, /^powershell\.exe /i)
       else {
@@ -11323,8 +11360,8 @@ test('Windows setup rewrites the PowerShell wrapper hook from an older install a
   const file = join(home, '.gemini', 'config', 'hooks.json')
   const config = JSON.parse(readFileSync(file, 'utf8'))
   assert.deepEqual(Object.keys(config['agent-board-local']), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
-  for (const group of Object.values(config['agent-board-local'])) {
-    assert.equal(group.length, 1)
+  for (const [event, group] of Object.entries(config['agent-board-local'])) {
+    assert.equal(group.length, event === 'Stop' ? 2 : 1)
     for (const { command } of group) assert.match(command, /^powershell\.exe /i)
   }
   const foreign = { Stop: [{ command: 'user-command' }] }
@@ -11344,10 +11381,12 @@ test('Windows setup rewrites the PowerShell wrapper hook from an older install a
   assert.deepEqual(Object.keys(updated).sort(), ['agent-board-local', 'custom'])
   const hooks = updated['agent-board-local']
   assert.deepEqual(Object.keys(hooks), ['SessionStart', 'PreInvocation', 'PostInvocation', 'Stop'])
-  for (const group of Object.values(hooks)) {
-    assert.equal(group.length, 1)
-    assert.ok(group[0].command.startsWith(`${expected} --input-type=commonjs -e eval(`))
-    assert.doesNotMatch(group[0].command, /powershell/i)
+  for (const [event, group] of Object.entries(hooks)) {
+    assert.equal(group.length, event === 'Stop' ? 2 : 1)
+    for (const { command } of group) {
+      assert.ok(command.startsWith(`${expected} --input-type=commonjs -e eval(`))
+      assert.doesNotMatch(command, /powershell/i)
+    }
   }
   assert.deepEqual(updated.custom, foreign)
   const before = readFileSync(file)

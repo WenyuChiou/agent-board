@@ -78,6 +78,7 @@ describe('L1 first run', () => {
 
     expect(await ui.find({ type: 'Text', text: 'No work in progress right now.' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /Once Claude starts on a Task list/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /npx @wenyuchiou\/agent-board setup/ })).toBeDefined()
     noMachineIds(visiblePaneText(await ui.drawn()), world)
 
     world.files.set(FILE, block())
@@ -134,7 +135,7 @@ describe('L2 a busy board', () => {
     // the questions of the sessions still going (23 of the 63; the rest are stopped sessions').
     expect(world.files.get(ARCHIVE)?.match(/^## /gm)?.length).toBe(board.archivable)
     expect(board.waitingNow).toBe(23)
-    expect(statuses).toContain(`${EN.statusPrefix} · ${EN.statusWaiting(board.waitingNow)}`)
+    expect(statuses).toContain(`● ${EN.statusWaiting(board.waitingNow)}`)
     expect(within(longest, BUDGET_MS, at)).toBe('within')
   })
 

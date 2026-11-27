@@ -54,6 +54,10 @@
 //              second); 'none' leaves the key out, as a config that names no delay does
 //   configFaults  a file: while it is there, config/read gets an error answer, or a delay that is not a number when it holds 'odd'
 //   cwd        the folder thread/read reports for the thread (default '/synthetic/project')
+//   ephemeral  when true, thread/read says the thread is `ephemeral` (a short thread the daemon closes by itself)
+//   loadFlag   a file: until it appears the daemon has not loaded the thread (thread/loaded/list is empty); when it appears the
+//              thread is listed and the connection is told of it by one status notice (idle) and no thread/started, as a thread
+//              that `codex resume` loads is
 //   noMarker   when true, thread/read reports no `updatedAt`
 //   closeFlag  a file whose appearance sends thread/closed for the loaded thread (the list still shows it)
 //   ackDelay   ms before a delivery turn ends (default 50)
@@ -119,7 +123,9 @@ process.on('exit', () => {
 })
 // An unloaded thread stays unloaded until someone joins it or the person opens it again: a turn that ends later does not bring it back.
 // A running turn keeps it loaded whoever is on it, and its end restarts the delay (ended()).
+let isLoadedLater = !config.loadFlag
 const isListed = () => {
+  if (!isLoadedLater) return false
   if (!config.person) return true
   const hasPerson = existsSync(config.person)
   if (hadPerson && !hasPerson) restartUnload()
@@ -137,7 +143,7 @@ const isListed = () => {
 }
 const notice = frame => { if (isSubscribed) emitNow(frame) }
 const ended = () => { running = null; first = null; isWaiting = false; stamp += 1; restartUnload(); save() }
-const thread = id => ({ id, cwd: config.cwd ?? '/synthetic/project', ...(config.noMarker ? {} : { updatedAt: stamp }), status: running ? { type: 'active', activeFlags: isWaiting ? ['waitingOnApproval'] : [] } : { type: 'idle' } })
+const thread = id => ({ id, cwd: config.cwd ?? '/synthetic/project', ephemeral: config.ephemeral === true, ...(config.noMarker ? {} : { updatedAt: stamp }), status: running ? { type: 'active', activeFlags: isWaiting ? ['waitingOnApproval'] : [] } : { type: 'idle' } })
 const ackOf = text => 'ACK ' + text.match(/ACK ([0-9a-f]{6})/)[1]
 // A user message item, as the daemon reports one: the claim nonce a client gave comes back as `clientId`.
 const userMessage = (threadId, turnId, content, clientId) => ({ method: 'item/completed', params: { threadId, turnId, item: { type: 'userMessage', ...(clientId ? { clientId } : {}), content } } })
@@ -333,6 +339,7 @@ const watcher = setInterval(() => {
   if (!emitNow) return
   answerApproval()
   if (acking && config.ackFlag && existsSync(config.ackFlag)) { unlinkSync(config.ackFlag); finish('turn-delivery', acking.threadId, acking.text); acking = null }
+  if (!isLoadedLater && existsSync(config.loadFlag)) { unlinkSync(config.loadFlag); isLoadedLater = true; emitNow({ method: 'thread/status/changed', params: { threadId: config.loaded[0], status: { type: 'idle' } } }) }
   if (config.closeFlag && existsSync(config.closeFlag)) { unlinkSync(config.closeFlag); emitNow({ method: 'thread/closed', params: { threadId: config.loaded[0] } }) }
   if (config.interruptFlag && existsSync(config.interruptFlag)) for (const stop of interrupts.splice(0)) stop()
   if (reads.length > 0 && !existsSync(config.readHold)) for (const answer of reads.splice(0)) answer()

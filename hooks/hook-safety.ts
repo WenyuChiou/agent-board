@@ -24,7 +24,7 @@ export const HOOK_TIMEOUTS: Record<string, { timeout: number; events?: Record<st
   grok: { timeout: 5000, events: { Stop: 10000 } },
   muse: { timeout: 5000, events: { Stop: 10000 } },
   hermes: { timeout: 10000 },
-  antigravity: { timeout: 3000 },
+  antigravity: { timeout: 3000, events: { StopWait: 30000 } },
   opencode: { timeout: 3000 },
   openclaw: { timeout: 3000 },
   deepseek: { timeout: 3000 },
@@ -191,6 +191,7 @@ ${hookLogSource(home, '__AGENT__', true).replace(JSON.stringify('__AGENT__'), 's
 const isReport = args.includes('--codex-report')
 // The plan mirror (#922) is read as a decision by Codex and Gemini: it never prints and is never queued.
 const isPlan = args.includes('--plan-event')
+const isWait = value('--hook-event') === 'StopWait'
 const fail = code => { hookError(code); process.exitCode = isReport ? 1 : 0; if (!isReport && !isPlan && ['cursor', 'gemini', 'antigravity'].includes(agent)) process.stdout.write('{}\\n'); return false }
 ${hookRecoverySource(home, script, dataRoot)}
 // Antigravity's turn order (#1396; markTurnOrder in scripts/board-messaging.ts) is marked here, before the board script
@@ -315,7 +316,7 @@ const run = async () => {
   // even later, after a slow Windows PowerShell start (#241), still reads its input for a short
   // grace and queues the event, unless the host stops it first.
   // A report is never queued, so it waits only until its deadline.
-  const budget = isReport || isPlan ? deadline - Date.now() : Math.max(started + hostTimeout - 300 - Date.now(), ${HOOK_LATE_INPUT_GRACE})
+  const budget = isReport || isPlan || isWait ? deadline - Date.now() : Math.max(started + hostTimeout - 300 - Date.now(), ${HOOK_LATE_INPUT_GRACE})
   if (budget <= 0) return fail('REPORTER_TIMEOUT')
   let text = '', timer, isCut = false
   process.stdin.setEncoding('utf8')
@@ -341,7 +342,7 @@ const run = async () => {
     try {
       // A late copy is still written: it holds the worker's start time, and replay drops it once a
       // newer event was applied. A host that stops the worker mid-write leaves a .tmp file that is swept.
-      if (isReport || isPlan) return fail('REPORTER_TIMEOUT')
+      if (isReport || isPlan || isWait) return fail('REPORTER_TIMEOUT')
       const pending = path.join(${dataRoot === undefined ? `path.dirname(${JSON.stringify(script)})` : JSON.stringify(dataRoot)}, 'pending')
       fs.mkdirSync(pending, { recursive: true, mode: 0o700 })
       if (queueId !== undefined && fs.existsSync(path.join(pending, String(started).padStart(15, '0') + '-' + queueId + '.json'))) {
@@ -379,7 +380,7 @@ const run = async () => {
   }
   const remaining = deadline - Date.now()
   if (remaining <= 0) return queue()
-  const childArgs = [...reporterArgs, ...(!isReport && !isPlan ? ['--hook-recovery-parent'] : []), '--hook-deadline', String(deadline), '--hook-started', String(started), '--home', ${JSON.stringify(home)}]
+  const childArgs = [...reporterArgs, ...(!isReport && !isPlan && !isWait ? ['--hook-recovery-parent'] : []), '--hook-deadline', String(deadline), '--hook-started', String(started), '--home', ${JSON.stringify(home)}]
   // OpenCode starts this worker from its own process, so the parent here is OpenCode: the board script puts it on the row,
   // and the board ends the row once that process is gone, whether or not OpenCode's exit reached the plugin (#1595).
   // An environment variable, not a flag: a board script older than this worker ignores it instead of refusing the event.
@@ -389,12 +390,25 @@ const run = async () => {
   delete childEnv.AGENT_BOARD_TURN_MARK
   if (turn !== undefined) childEnv.AGENT_BOARD_TURN_MARK = JSON.stringify(turn)
   delete childEnv.AGENT_BOARD_HOOK_QUEUE_ID
-  if (!isReport && !isPlan) childEnv.AGENT_BOARD_HOOK_QUEUE_ID = queueId = randomUUID()
+  if (!isReport && !isPlan && !isWait) childEnv.AGENT_BOARD_HOOK_QUEUE_ID = queueId = randomUUID()
   if (agent === 'opencode' && Number.isSafeInteger(process.ppid) && process.ppid > 1) childEnv.AGENT_BOARD_HOOK_PARENT = String(process.ppid)
   const result = spawnSync(process.execPath, [${JSON.stringify(script)}, ...childArgs], {
     input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, env: childEnv,
     timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 1048576,
   })
+  const hasContinue = text => {
+    try { const parsed = JSON.parse(text); return Boolean(parsed && parsed.decision === 'continue' && typeof parsed.reason === 'string') }
+    catch { return false }
+  }
+  if (isWait && hasContinue(result.stdout ?? '')) {
+    if (result.error?.code === 'ETIMEDOUT' || result.signal || (result.error || result.status !== 0) && Date.now() >= deadline) hookError('REPORTER_TIMEOUT')
+    else if (result.error || result.status !== 0) {
+      const reason = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
+      hookError(reason ? 'REPORTER_FAILED ' + reason : 'REPORTER_FAILED')
+    }
+    process.stdout.write(result.stdout)
+    return true
+  }
   // A plan that failed in the board script exits 0 there; its code is only logged here.
   if (isPlan && !result.error && result.status === 0) {
     const code = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
@@ -418,10 +432,10 @@ const run = async () => {
     // foresaw (#241) costs a retry, not the event. A refusal of the event itself (INVALID_SESSION, say) would refuse
     // its replay too, and replay drops such an entry, so it is only logged. A refusal missing here is saved and dropped
     // at replay, which wastes a replay; a retryable code listed here would lose its event.
-    if (isReport || isPlan || /^(?:INVALID_|BLOCK_|SESSION_CONFLICT$|UNSUPPORTED_AGENT$|MISSING_ARGUMENT$|MISSING_TURN$|STALE_TURN$|SHARED_BOARD_PATH_CONFLICT$|UNSAFE_COMMAND_PATH$)/.test(reason ?? '')) return fail(failure)
+    if (isReport || isPlan || isWait || /^(?:INVALID_|BLOCK_|SESSION_CONFLICT$|UNSUPPORTED_AGENT$|MISSING_ARGUMENT$|MISSING_TURN$|STALE_TURN$|SHARED_BOARD_PATH_CONFLICT$|UNSAFE_COMMAND_PATH$)/.test(reason ?? '')) return fail(failure)
     return queue(failure)
   }
-  if (!isReport && result.stderr?.split(/\\r?\\n/).includes('AGENT_BOARD_HOOK_PENDING')) requestRecovery()
+  if (!isReport && !isWait && result.stderr?.split(/\\r?\\n/).includes('AGENT_BOARD_HOOK_PENDING')) requestRecovery()
   process.stdout.write(result.stdout)
   return true
 }

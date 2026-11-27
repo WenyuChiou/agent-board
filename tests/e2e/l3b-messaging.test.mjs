@@ -262,11 +262,12 @@ describe('messages: every sender-receiver pair either delivers with a receipt or
   const senderTitle = from => `Prepare ${from} sender`
   const receiverTitle = to => `Review ${to} receiver`
   let hub
+  // Traced (#1804): a receipt that comes late names which request was late (a poll, a receipt, a busy store) in its failure.
   before(async () => {
     hub = await openHub([
       ...SENDERS.filter(from => from !== 'page').map(from => ({ agent: from, title: senderTitle(from) })),
       ...RECEIVERS.map(to => ({ agent: to, title: receiverTitle(to) })),
-    ])
+    ], { traceReceipt: true })
   }, { timeout: 20000 })
   after(async () => { await hub?.close() }, { timeout: 20000 })
   pairs.forEach(({ from, to, relation }, index) => test(`messages: ${from} → ${to} (${relation}) delivers with a receipt or names the fallback in words`, { timeout: 20000 }, async () => {

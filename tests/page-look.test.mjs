@@ -29,7 +29,7 @@ try {
   ])
 } finally { loader.deregister() }
 
-const [{ pageTokens, BOARD_PATH: boardPath }, { serveModel, servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }, { RETENTION, sizeWarnings, storageDetails }, { buildView }, { parseProgress }, { observeQuestions }, { boardCounts }, { boardDocument }, { pageDom }] = source
+const [{ pageTokens, BOARD_PATH: boardPath }, { serveModel, servePage, pagePolicy, handledOnly }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }, { RETENTION, sizeWarnings, storageDetails }, { buildView }, { parseProgress }, { observeQuestions }, { boardCounts }, { boardDocument }, { pageDom }] = source
 const SANS = 'Inter,"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const SANS_SC = 'Inter,"PingFang SC","Noto Sans SC","Microsoft YaHei UI","Microsoft YaHei","PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
@@ -206,9 +206,9 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
   const text = ['ink', 'muted', 'accent', 'done', 'running', 'soon', 'alert', 'project', 'waiting-text']
   const marks = ['waiting', 'brand', 'accent', 'done', 'running', 'soon', 'alert', 'ink', 'muted']
   const pairs = []
-  assert.equal(light.waiting.toLowerCase(), '#9a7200', 'the light waiting flag uses the page mark colour')
+  assert.equal(light.waiting.toLowerCase(), '#8a5d00', 'the light waiting flag uses the page mark colour')
   assert.equal(dark.waiting.toLowerCase(), '#f8b500', 'the dark waiting flag keeps its page mark colour')
-  assert.equal(light['waiting-text'].toLowerCase(), '#715c1f', 'light waiting text has its separate readable colour')
+  assert.equal(light['waiting-text'].toLowerCase(), '#8a5200', 'light waiting text has its separate readable colour')
   assert.equal(dark['waiting-text'].toLowerCase(), '#f8b500', 'dark waiting text has its readable colour')
   // The roles: ink acts (the primary button is ink on the surface colour), green is alive, amber is only what needs you.
   for (const palette of [light, dark]) {
@@ -221,17 +221,16 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
   assert.equal(dark.brand.toLowerCase(), '#f8b500', 'the dark logo is the waiting amber')
   for (const [mode, palette] of Object.entries({ light, dark })) {
     const automatic = valuesOf(tokenRules.find(rule => rule.selector.includes(':not(')))
-    for (const name of [...text, ...marks, 'ground', 'surface', 'inset', 'on-accent', 'waiting-fill']) assert.equal(automatic[name], dark[name], `system dark and explicit dark agree for ${name}`)
+    for (const name of [...text, ...marks, 'ground', 'surface', 'inset', 'on-accent', 'waiting-fill', 'waiting-on', 'surf-cli-bg', 'surf-cli-line', 'surf-cli-ink', 'surf-app-bg', 'surf-app-line', 'surf-app-ink']) assert.equal(automatic[name], dark[name], `system dark and explicit dark agree for ${name}`)
     for (const [kind, tokens, threshold] of [['text', text, 4.5], ['mark', marks, 3]]) {
       for (const surface of ['ground', 'surface', 'inset']) {
         for (const token of tokens) pairs.push({ mode, rule: `${kind}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
       }
     }
-    // The count on an agent's badge and on the Needs you flag (on-accent on the amber fill), the "!" badge (on-accent on
-    // the alert colour), the primary button, and the glyph on an offline agent's muted tile. The 13px semibold numerals
-    // are not "large text", so the badge pairs need the full 4.5:1.
+    // The count on an agent's badge and on the Needs you flag (waiting-on on the Yamabuki amber fill), the "!" badge (on-accent on
+    // the alert colour), the surface pills (CLI and App), the primary button, and the glyph on an offline agent's muted tile.
     // 'surface' on 'ink' is a primary button: its text (--on-act) on its fill (--act), both of which are the ink pair.
-    for (const [token, surface, threshold] of [['on-accent', 'accent', 4.5], ['on-accent', 'waiting-fill', 4.5], ['on-accent', 'alert', 4.5], ['on-accent', 'muted', 3], ['ground', 'ink', 4.5], ['surface', 'ink', 4.5]]) pairs.push({ mode, rule: `${token}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
+    for (const [token, surface, threshold] of [['on-accent', 'accent', 4.5], ['waiting-on', 'waiting-fill', 4.5], ['on-accent', 'alert', 4.5], ['surf-cli-ink', 'surf-cli-bg', 4.5], ['surf-app-ink', 'surf-app-bg', 4.5], ['on-accent', 'muted', 3], ['ground', 'ink', 4.5], ['surface', 'ink', 4.5]]) pairs.push({ mode, rule: `${token}/${surface}`, token, surface, threshold, ratio: contrast(palette[token], palette[surface]) })
     // An outlined button's border (ink 55% over the surface) is a 3:1 boundary on the ground and on the sheet.
     const outline = `rgb(${mix(palette.ink, palette.surface, .55).join(',')})`
     for (const background of ['ground', 'surface']) pairs.push({ mode, rule: `btn-line/${background}`, token: 'btn-line', surface: background, threshold: 3, ratio: contrast(outline, palette[background]) })
@@ -265,8 +264,9 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
       assert.equal(declared(rules, '.s-blocked', 'color'), 'var(--alert)', `${name}: a blocked step is the alert red`)
     }
     assert.equal(declared(rules, '.badge', 'background'), 'var(--waiting-fill)', `${name}: the badge sits on the amber fill`)
-    assert.equal(declared(rules, '.badge', 'color'), 'var(--on-accent)', `${name}: the badge numerals are on-accent`)
+    assert.equal(declared(rules, '.badge', 'color'), 'var(--waiting-on)', `${name}: the badge numerals use waiting-on`)
     assert.equal(declared(rules, '.badge.bad', 'background'), 'var(--alert)', `${name}: the "!" badge is the alert colour`)
+    assert.equal(declared(rules, '.badge.bad', 'color'), 'var(--on-accent)', `${name}: the "!" badge numerals use on-accent`)
     assert.equal(declared(rules, '.badge', 'border'), '2px solid var(--ground)', `${name}: the badge has the 2px ground ring`)
     assert.ok(!rules.some(rule => /data-presence[^,]*\.ag(?!::)/.test(rule.selector)), `${name}: no state repaints an agent's icon`)
     assert.equal(declared(rules, '.chip[data-presence="open"]::after,.chip[data-presence="connected"]::after', 'border-color'), 'var(--alive)', `${name}: an open agent's mark is a green ring`)
@@ -275,6 +275,9 @@ test('every text colour passes 4.5:1 and every mark colour 3:1 on its surface in
     assert.equal(declared(rules, '.chip.working::after', 'background'), 'var(--alive)', `${name}: a working agent's mark is a green dot`)
     assert.ok(!rules.some(rule => rule.selector.includes('.chip') && rule.declarations.some(item => item.property === 'opacity')), `${name}: no icon is dimmed with opacity`)
     assert.equal(declared(rules, '.flag', 'background'), 'var(--waiting-fill)', `${name}: the flag sits on the amber fill`)
+    assert.equal(declared(rules, '.flag', 'color'), 'var(--waiting-on)', `${name}: the flag text uses waiting-on`)
+    assert.equal(declared(rules, '.s-n.hot,.side .badge', 'color'), 'var(--waiting-on)', `${name}: sidebar waiting badge uses waiting-on`)
+    assert.equal(declared(rules, '.side .badge.bad', 'color'), 'var(--on-accent)', `${name}: sidebar alert badge uses on-accent`)
   }
 })
 
@@ -828,3 +831,395 @@ test('parseProgress -> buildView -> serveModel orders cards by updated= age, put
   assert.ok(olderFold.visibleText.includes('Ten-day-old stopped question?'))
   assert.ok(olderFold.visibleText.includes('Four-day-old reminder question?'))
 })
+
+test('Redesign 2 pale washi & Yamabuki palette tokens keep terminal LIGHT/DARK untouched', async () => {
+  const { LIGHT, DARK, PAGE_LIGHT, PAGE_DARK } = await import('../hooks/palette.ts')
+  assert.equal(LIGHT.accent, '#165E83')
+  assert.equal(LIGHT.ground, undefined)
+  assert.equal(DARK.accent, '#00A3AF')
+  assert.equal(PAGE_LIGHT.ground, '#F3F5F7')
+  assert.equal(PAGE_LIGHT.surface, '#FCFDFE')
+  assert.equal(PAGE_LIGHT.inset, '#EAEFF2')
+  assert.equal(PAGE_LIGHT.ink, '#172026')
+  assert.equal(PAGE_LIGHT.accent, '#185A7D')
+  assert.equal(PAGE_LIGHT['waiting-fill'], '#F4B41A')
+  assert.equal(PAGE_LIGHT['waiting-on'], '#231800')
+  assert.equal(PAGE_LIGHT['surf-cli-bg'], '#ECEFF2')
+  assert.equal(PAGE_LIGHT['surf-app-bg'], '#E7F2F8')
+  assert.equal(PAGE_DARK['waiting-on'], '#141617')
+  assert.equal(PAGE_DARK['surf-cli-bg'], '#25282B')
+  assert.equal(PAGE_DARK['surf-app-bg'], '#182930')
+})
+
+test('Redesign 2 uses icon-only AI identity, distinct CLI/App .surf-pill badges, and keeps vendor names in [AI] filter checklist', async () => {
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const updated = new Date(now - 2 * 60_000).toISOString()
+  const md = [
+    '## cli-repo',
+    `<!-- auto session=cc100001 agent=codex state=waiting updated=${updated} -->`,
+    '### Codex CLI task',
+    '- [?] Ship CLI build?',
+    '<!-- /auto session=cc100001 -->',
+    '',
+    '## app-repo',
+    `<!-- auto session=cc100002 agent=antigravity state=working updated=${updated} -->`,
+    '### Antigravity App task',
+    '- [~] Running IDE task',
+    '<!-- /auto session=cc100002 -->',
+    '',
+  ].join('\n')
+  const s = STRINGS.en
+  const group = { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }
+  const view = buildView(parseProgress(md), ['cli-repo', 'app-repo'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  view.hidden = [{ hideKey: 'hid-1', project: 'cli-repo', agent: 'codex', task: 'Hidden plan', text: 'Hidden question?' }]
+  const model = serveModel(view, [], s, new Set(), false, {
+    connections: [
+      { id: 'c-cli', agent: 'codex', session: 'cc100001', surface: 'Codex CLI', scope: 'session', turn: 't1', contested: false, expires: now + 60_000 },
+      { id: 'c-app', agent: 'antigravity', session: 'cc100002', surface: 'IDE', scope: 'session', turn: 't2', contested: false, expires: now + 60_000 },
+    ],
+    messages: [],
+  }, false, group)
+  const html = servePage(s, 'n')
+  const rules = styleRules(html)
+  const ruleFor = sel => rules.find(r => r.selector === sel)
+  assert.ok(ruleFor('.s-agent .s-txt')?.declarations.some(d => d.property === 'clip-path' && d.value === 'inset(50%)'))
+  assert.ok(ruleFor('.chip .c-name')?.declarations.some(d => d.property === 'clip-path' && d.value === 'inset(50%)'))
+  assert.ok(!rules.some(r => r.selector === '.chip[aria-pressed="true"] .c-name'))
+  assert.ok(ruleFor('.shell[data-rail="1"] .s-agent .surf-wrap')?.declarations.some(d => d.property === 'display' && d.value === 'none'))
+  assert.ok(ruleFor('.side .badge')?.declarations.some(d => d.property === 'margin-left' && d.value === 'auto'))
+  assert.ok(ruleFor('.r-meta>span+span'), 'uses direct-child combinator .r-meta>span+span')
+  assert.ok(ruleFor('.surf-cli')?.declarations.some(d => d.property === 'background' && d.value === 'var(--surf-cli-bg)'))
+  assert.ok(ruleFor('.surf-app')?.declarations.some(d => d.property === 'background' && d.value === 'var(--surf-app-bg)'))
+  assert.ok(ruleFor('.surf-pill.surf-icon'), 'has compact icon-only pill rule for #chips')
+  assert.match(html, /<template id="surf-cli-icon">/)
+  assert.match(html, /<template id="surf-app-icon">/)
+
+  const dom = await pageDom(html, model)
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const hasClass = (node, name) => String(node.className ?? '').split(' ').includes(name)
+
+  // #side-agents renders full CLI/App .surf-pill badges while keeping vendor names and surface labels in aria-label/title.
+  const sideCodex = dom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+  const sideAntig = dom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'antigravity')
+  assert.ok(sideCodex.getAttribute('aria-label').includes('Codex · CLI'))
+  assert.ok(sideAntig.getAttribute('aria-label').includes('Antigravity · App'))
+  assert.ok(walk(sideCodex).some(n => hasClass(n, 'surf-cli') && !hasClass(n, 'surf-icon') && n.textContent.includes('CLI')))
+  assert.ok(walk(sideAntig).some(n => hasClass(n, 'surf-app') && !hasClass(n, 'surf-icon') && n.textContent.includes('App')))
+
+  // #chips renders compact icon-only .surf-icon pills and exposes surface labels in aria-label.
+  const chipCodex = dom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+  const chipAntig = dom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'antigravity')
+  assert.ok(chipCodex.getAttribute('aria-label').includes('Codex · CLI'))
+  assert.ok(chipAntig.getAttribute('aria-label').includes('Antigravity · App'))
+  assert.ok(walk(chipCodex).some(n => hasClass(n, 'surf-cli') && hasClass(n, 'surf-icon') && n.textContent.trim() === ''))
+  assert.ok(walk(chipAntig).some(n => hasClass(n, 'surf-app') && hasClass(n, 'surf-icon') && n.textContent.trim() === ''))
+
+  // Multi-surface agent (both CLI and App sessions at once) renders both badges and includes both surfaces in aria-label.
+  const multiMd = [
+    '## cli-repo',
+    `<!-- auto session=cc200001 agent=codex state=waiting updated=${updated} -->`,
+    '### Codex CLI task',
+    '- [?] Ship CLI build?',
+    '<!-- /auto session=cc200001 -->',
+    '',
+    '## app-repo',
+    `<!-- auto session=cc200002 agent=codex state=working updated=${updated} -->`,
+    '### Codex App task',
+    '- [~] Running Desktop task',
+    '<!-- /auto session=cc200002 -->',
+    '',
+  ].join('\n')
+  for (const [locale, words] of [['en', STRINGS.en], ['zh-TW', STRINGS['zh-TW']], ['zh-CN', STRINGS['zh-CN']]]) {
+    const multiView = buildView(parseProgress(multiMd), ['cli-repo', 'app-repo'], null, now, 0, {}, words, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+    const rawMessaging = {
+      connections: [
+        { id: 'c-cli', agent: 'codex', session: 'cc200001', surface: 'Codex CLI', scope: 'session', turn: 't1', contested: false, expires: now + 60_000 },
+        { id: 'c-app', agent: 'codex', session: 'cc200002', surface: 'Codex desktop app', scope: 'session', turn: 't2', contested: false, expires: now + 60_000 },
+      ],
+      messages: [],
+    }
+    const redacted = handledOnly(rawMessaging)
+    assert.deepEqual(redacted.connections, [])
+    const redactedJson = JSON.stringify(redacted)
+    for (const secret of ['c-cli', 'c-app', 't1', 't2']) assert.ok(!redactedJson.includes(secret), `${locale} leaked ${secret}`)
+
+    for (const [isLan, messaging] of [[false, rawMessaging], [true, redacted]]) {
+      const multiModel = serveModel(multiView, [], words, new Set(), isLan, messaging, false, group)
+      const multiDom = await pageDom(servePage(words, 'n', isLan), multiModel)
+      const multiSide = multiDom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+      const multiChip = multiDom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+      const expectSurf = `${words.pgInterfaceCli} · ${words.pgInterfaceApp}`
+      assert.ok(multiSide.getAttribute('aria-label').includes(expectSurf), `${locale} lan=${isLan} side aria-label: ${multiSide.getAttribute('aria-label')}`)
+      assert.ok(multiSide.getAttribute('title').includes(expectSurf), `${locale} lan=${isLan} side title: ${multiSide.getAttribute('title')}`)
+      assert.ok(multiChip.getAttribute('aria-label').includes(expectSurf), `${locale} lan=${isLan} chip aria-label: ${multiChip.getAttribute('aria-label')}`)
+      assert.ok(multiChip.getAttribute('title').includes(expectSurf), `${locale} lan=${isLan} chip title: ${multiChip.getAttribute('title')}`)
+      assert.ok(walk(multiSide).some(n => hasClass(n, 'surf-cli') && !hasClass(n, 'surf-icon')))
+      assert.ok(walk(multiSide).some(n => hasClass(n, 'surf-app') && !hasClass(n, 'surf-icon')))
+      assert.ok(walk(multiChip).some(n => hasClass(n, 'surf-cli') && hasClass(n, 'surf-icon')))
+      assert.ok(walk(multiChip).some(n => hasClass(n, 'surf-app') && hasClass(n, 'surf-icon')))
+    }
+  }
+
+  // .c-meta and .r-meta render .surf-pill and zero visible vendor names.
+  const cardMeta = walk(dom.node('needs')).find(n => hasClass(n, 'c-meta'))
+  assert.ok(walk(cardMeta).some(n => hasClass(n, 'surf-cli') && n.textContent.includes('CLI')))
+  assert.ok(!cardMeta.textContent.includes('Codex'))
+  const rowMeta = walk(dom.node('working-now')).find(n => hasClass(n, 'r-meta'))
+  assert.ok(walk(rowMeta).some(n => hasClass(n, 'surf-app') && n.textContent.includes('App')))
+  assert.ok(!rowMeta.textContent.includes('Antigravity'))
+
+  // .hid .c-meta renders agentMark icon instead of visible vendor name.
+  const hidNode = walk(dom.node('board')).find(n => hasClass(n, 'hid'))
+  assert.ok(walk(hidNode).some(n => hasClass(n, 'ag') && n.getAttribute('title') === 'Codex'))
+  assert.ok(!walk(hidNode).find(n => hasClass(n, 'c-meta')).textContent.includes('Codex'))
+
+  // [AI ▾] filter checklist retains vendor names.
+  const aiGroup = walk(dom.node('filter-bar')).find(n => n.getAttribute?.('data-filter-kind') === 'agent')
+  const aiLabels = walk(aiGroup).filter(n => hasClass(n, 'f-opt-lbl')).map(n => n.textContent)
+  assert.ok(aiLabels.includes('Codex') && aiLabels.includes('Antigravity'))
+})
+
+test('narrow cockpit HUD promotes live working steps, toggles idle filters, and surfaces freshly finished AI work', async () => {
+  const s = STRINGS.en
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const freshIso = new Date(now - 2 * 60_000).toISOString()
+  const staleIso = new Date(now - 14 * 60_000).toISOString()
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const hasClass = (node, name) => String(node?.className ?? '').split(/\s+/).includes(name)
+  const md = [
+    '## retrieval-eval',
+    `<!-- auto session=cc300001 agent=claude state=working updated=${freshIso} -->`,
+    '### Evaluate 4 retrieval methods',
+    '- [x] Index corpus',
+    '- [~] Run hybrid rerank benchmark',
+    '- [ ] Export table',
+    '<!-- /auto session=cc300001 -->',
+    '',
+    '## stale-repo',
+    `<!-- auto session=cc300002 agent=codex state=working updated=${staleIso} -->`,
+    '### Background refactor',
+    '- [~] Verify migrations',
+    '<!-- /auto session=cc300002 -->',
+    '',
+    '## finished-repo',
+    `<!-- auto session=cc300003 agent=codex state=done updated=${freshIso} -->`,
+    '### Build release bundle',
+    '- [x] Run checks',
+    '<!-- /auto session=cc300003 -->',
+    '',
+  ].join('\n')
+  const group = { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }
+  const view = buildView(parseProgress(md), ['retrieval-eval', 'stale-repo', 'finished-repo'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const model = serveModel(view, [], s, new Set(), false, undefined, false, group)
+  const html = servePage(s, 'n')
+
+  // Test live step order, stale heartbeat class, HUD filter toggle, and live Done shelf auto-open.
+  const dom = await pageDom(html, model)
+  const workingChildren = dom.node('working-now').querySelectorAll('li.row')
+  const evalRow = workingChildren.find(li => li.textContent.includes('Evaluate 4 retrieval methods'))
+  assert.ok(evalRow, 'working row renders')
+  const evalMeta = walk(evalRow).find(n => hasClass(n, 'r-meta'))
+  const metaClasses = evalMeta.childNodes.map(n => String(n.className || ''))
+  const progIdx = metaClasses.findIndex(cls => cls.split(' ').includes('prog'))
+  const stepIdx = metaClasses.findIndex(cls => cls.split(' ').includes('r-step'))
+  const projIdx = metaClasses.findIndex(cls => cls.split(' ').includes('r-proj'))
+  assert.ok(progIdx >= 0 && stepIdx === progIdx + 1 && projIdx > stepIdx, `expected prog -> r-step -> r-proj, got ${metaClasses.join(',')}`)
+  assert.equal(evalMeta.childNodes[stepIdx].textContent, 'Run hybrid rerank benchmark')
+
+  const staleRow = workingChildren.find(li => li.textContent.includes('Background refactor'))
+  assert.ok(staleRow, 'quiet working row renders')
+  const staleRight = walk(staleRow).find(n => hasClass(n, 'r-right'))
+  assert.ok(hasClass(staleRight, 't-stale'), `expected t-stale on quiet working row, got ${staleRight?.className}`)
+
+  // Idle filter bar starts collapsed behind #hud-filter-btn and expands on click or active filter.
+  const bar = dom.node('filter-bar')
+  const btn = dom.node('hud-filter-btn')
+  assert.equal(bar.getAttribute('data-hud-idle'), '1')
+  assert.equal(btn.getAttribute('aria-expanded'), 'false')
+  assert.equal(btn.getAttribute('data-active'), '0')
+  btn.click()
+  assert.equal(bar.getAttribute('data-hud-idle'), '0')
+  assert.equal(btn.getAttribute('aria-expanded'), 'true')
+  btn.click()
+  assert.equal(bar.getAttribute('data-hud-idle'), '1')
+  const aiChip = walk(bar).find(n => n.tag === 'button' && hasClass(n, 'f-chip'))
+  aiChip.click()
+  assert.equal(bar.getAttribute('data-hud-idle'), '0')
+
+  // Done shelf starts closed on desktop initial draw, auto-opens when a working AI finishes live, and respects manual close.
+  const doneShelf = () => walk(dom.node('board')).find(n => hasClass(n, 'shelf') && walk(n).some(c => c.textContent === s.pgDone))
+  assert.ok(!hasClass(doneShelf(), 'open'), 'desktop viewport leaves Done shelf closed initially')
+  const afterMd = md.replace('state=working updated=' + freshIso, 'state=done updated=' + new Date(now + 60_000).toISOString()).replace('- [~] Run hybrid rerank benchmark', '- [x] Run hybrid rerank benchmark').replace('- [ ] Export table', '- [x] Export table')
+  const afterView = buildView(parseProgress(afterMd), ['retrieval-eval', 'stale-repo', 'finished-repo'], null, now + 60_000, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const afterModel = serveModel(afterView, [], s, new Set(), false, undefined, false, { ...group, now: now + 60_000 })
+  await dom.redraw(afterModel)
+  assert.ok(hasClass(doneShelf(), 'open'), 'live AI transition from working to done auto-opens Done shelf')
+  const doneHead = walk(doneShelf()).find(n => n.tag === 'button' && hasClass(n, 'shelf-head'))
+  doneHead.click()
+  assert.ok(!hasClass(doneShelf(), 'open'), 'clicking Done shelf closes it')
+  await dom.redraw(afterModel)
+  assert.ok(!hasClass(doneShelf(), 'open'), 'redraw respects manual close of Done shelf')
+
+  // Waiting -> done transition (not in previous Working now) also auto-opens Done shelf on desktop.
+  const waitMd = [
+    md,
+    '## wait-to-done',
+    `<!-- auto session=cc300004 agent=gemini state=waiting updated=${freshIso} -->`,
+    '### Confirm production deploy',
+    '- [?] Ship release?',
+    '<!-- /auto session=cc300004 -->',
+    '',
+  ].join('\n')
+  const waitView = buildView(parseProgress(waitMd), ['retrieval-eval', 'stale-repo', 'finished-repo', 'wait-to-done'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const waitDom = await pageDom(html, serveModel(waitView, [], s, new Set(), false, undefined, false, group))
+  const waitDoneShelf = () => walk(waitDom.node('board')).find(n => hasClass(n, 'shelf') && walk(n).some(c => c.textContent === s.pgDone))
+  assert.ok(!hasClass(waitDoneShelf(), 'open'), 'desktop waiting state leaves Done shelf closed initially')
+  // Importing a two-day-old completed record does not pop open Done on desktop.
+  const twoDaysIso = new Date(now - 2 * 24 * 60 * 60_000).toISOString()
+  const oldMd = [
+    waitMd,
+    '## historic-done',
+    `<!-- auto session=cc300005 agent=codex state=done updated=${twoDaysIso} -->`,
+    '### Two-day-old completed task',
+    '- [x] Old step',
+    '<!-- /auto session=cc300005 -->',
+    '',
+  ].join('\n')
+  const oldView = buildView(parseProgress(oldMd), ['retrieval-eval', 'stale-repo', 'finished-repo', 'wait-to-done', 'historic-done'], null, now + 30_000, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  await waitDom.redraw(serveModel(oldView, [], s, new Set(), false, undefined, false, { ...group, now: now + 30_000 }))
+  assert.ok(!hasClass(waitDoneShelf(), 'open'), 'importing a two-day-old done record keeps Done shelf closed')
+  const waitAfterMd = waitMd.replace('state=waiting updated=' + freshIso, 'state=done updated=' + new Date(now + 60_000).toISOString()).replace('- [?] Ship release?', '- [x] Ship release')
+  const waitAfterView = buildView(parseProgress(waitAfterMd), ['retrieval-eval', 'stale-repo', 'finished-repo', 'wait-to-done'], null, now + 60_000, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  await waitDom.redraw(serveModel(waitAfterView, [], s, new Set(), false, undefined, false, { ...group, now: now + 60_000 }))
+  assert.ok(hasClass(waitDoneShelf(), 'open'), 'waiting-to-done AI transition auto-opens Done shelf')
+})
+
+test('row summaries clamp cleanly, phantom gaps collapse, and chrome controls render icons with full tooltips', async () => {
+  const s = STRINGS.en
+  const html = servePage(s, 'n')
+  const rules = styleRules(html)
+  const ruleFor = sel => rules.find(r => r.selector === sel)
+
+  assert.equal(ruleFor('.row:not(.open) .r-title')?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap')
+  assert.equal(ruleFor('.row:not(.open) .r-title')?.declarations.find(d => d.property === 'text-overflow')?.value, 'ellipsis')
+  assert.equal(ruleFor('.row.open .r-title')?.declarations.find(d => d.property === 'white-space')?.value, 'normal')
+  assert.equal(ruleFor('.r-meta')?.declarations.find(d => d.property === 'display')?.value, 'flex')
+  assert.equal(ruleFor('.r-meta .r-step')?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap')
+  assert.equal(ruleFor('.r-meta .r-proj')?.declarations.find(d => d.property === 'white-space')?.value, 'nowrap')
+  assert.equal(ruleFor('#board')?.declarations.find(d => d.property === 'gap')?.value, '0')
+  assert.ok(ruleFor('.shell[data-view="all"] #board>:not(.gone)~:not(.gone),.shell[data-view="needs"] #board>[data-sec="needs"]:not(.gone)~[data-sec="needs"]:not(.gone),.shell[data-view="others"] #board>[data-sec="others"]:not(.gone)~[data-sec="others"]:not(.gone)'), 'uses visible-sibling margin scoped to multi-section views')
+  assert.equal(ruleFor('.sec>.fx.gone,.sheet>.fx.gone')?.declarations.find(d => d.property === 'display')?.value, 'none')
+  assert.equal(ruleFor('.side .pfoot .set-row')?.declarations.find(d => d.property === 'margin-left')?.value, 'auto')
+  assert.ok(!ruleFor('.side .pfoot .set-row')?.declarations.some(d => d.property === 'flex-basis'), 'sidebar footer keeps single-row layout')
+
+  assert.match(html, /<button[^>]*class="icon-btn drawer-btn"[^>]*id="drawer-btn"/)
+  assert.match(html, new RegExp(`<button[^>]*id="settings-toggle"[^>]*title="${s.settingsTitle}"`))
+  for (const id of ['copy-icon', 'rail-peek-icon', 'archive-icon']) {
+    assert.match(html, new RegExp(`<template id="${id}"><svg[^>]*>`))
+  }
+
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const freshIso = new Date(now - 2 * 60_000).toISOString()
+  const olderWorkIso = new Date(now - 3 * 60_000).toISOString()
+  const longTaskTitle = 'Synthetic overlong prompt heading repeated across telemetry slices to verify folded row clipping and expanded full preservation without blowing up narrow right quarter HUD rows'
+  const longCardTask = 'Synthetic waiting card task title intentionally longer than two hundred and twenty characters '.repeat(3).trim()
+  const wideGlyphStep = 'W'.repeat(60)
+  const longWorklogStep = 'Step 1 initial ingestion completed in sandbox batch ' + 'validation shard check passed cleanly · '.repeat(32) + '-> Step 2 schema verification passed across all shards -> Step 3 final benchmark synthesis running live across long validation shards after cleanup and verification — transferred -> main-recall-2'
+  const md = [
+    '## synthetic-long-repo',
+    `<!-- auto session=dd100001 agent=claude state=waiting updated=${freshIso} -->`,
+    `### ${longCardTask}`,
+    `- [?] ${longCardTask.slice(0, 230)} — ship iconified compact card chrome now?`,
+    '<!-- options=["Yes","No"] -->',
+    '<!-- /auto session=dd100001 -->',
+    '',
+    `<!-- auto session=dd100002 agent=codex state=working updated=${freshIso} -->`,
+    `### ${longTaskTitle}`,
+    '- [x] Prepare fixtures',
+    `- [~] ${longWorklogStep}`,
+    '- [ ] Finish delivery',
+    '<!-- /auto session=dd100002 -->',
+    '',
+    `<!-- auto session=dd100003 agent=gemini state=done updated=${freshIso} -->`,
+    '### Compact done archive test',
+    '- [x] Verified icon button',
+    '<!-- /auto session=dd100003 -->',
+    '',
+    `<!-- auto session=dd100004 agent=codex state=working updated=${olderWorkIso} -->`,
+    `### ${longWorklogStep}`,
+    `- [~] ${longWorklogStep}`,
+    '- [ ] Finish untitled task',
+    '<!-- /auto session=dd100004 -->',
+    '',
+    `<!-- auto session=dd100005 agent=codex state=working updated=${olderWorkIso} -->`,
+    '### Wide glyph step test',
+    `- [~] ${wideGlyphStep}`,
+    '<!-- /auto session=dd100005 -->',
+    '',
+  ].join('\n')
+
+  const view = buildView(parseProgress(md), ['synthetic-long-repo'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const dom = await pageDom(html, serveModel(view, [], s, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }))
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const hasClass = (node, name) => String(node?.className ?? '').split(/\s+/).includes(name)
+
+  // Worklog step summarizes to its latest tail segment in .r-meta while preserving the full text in .title and expanded .whole.
+  const workRow = walk(dom.node('working-now')).find(n => n.tag === 'li' && hasClass(n, 'row'))
+  const stepNode = walk(workRow).find(n => hasClass(n, 'r-step'))
+  assert.ok(stepNode, '.r-step renders in Working now row')
+  assert.ok(Array.from(stepNode.textContent).length <= 72, `compact step <= 72 code points, got ${Array.from(stepNode.textContent).length}: ${stepNode.textContent}`)
+  assert.ok(stepNode.textContent.startsWith('… → '), `worklog chain shows latest tail with prefix: ${stepNode.textContent}`)
+  assert.ok(stepNode.textContent.includes('Step 3 final benchmark synthesis'), stepNode.textContent)
+  assert.ok(stepNode.textContent.endsWith('→ main-recall-2'), `preserves trailing handoff target: ${stepNode.textContent}`)
+  assert.ok((stepNode.getAttribute('title') || '').includes('Step 1 initial ingestion'), 'full step remains on tooltip')
+  assert.ok((stepNode.getAttribute('title') || '').endsWith('— transferred -> main-recall-2'), 'tooltip preserves full worklog tail past 1200 chars')
+  const openWholes = walk(workRow).filter(n => hasClass(n, 'whole')).map(n => n.textContent)
+  assert.ok(openWholes.includes(longWorklogStep), 'expanded row preserves verbatim full worklog step')
+
+  const workRows = walk(dom.node('working-now')).filter(n => n.tag === 'li' && hasClass(n, 'row'))
+  const untitledRow = workRows.find(r => walk(r).some(n => hasClass(n, 'r-title') && n.textContent.startsWith('Step 1 initial ingestion')))
+  const untitledTitle = walk(untitledRow).find(n => hasClass(n, 'r-title'))
+  const untitledStep = walk(untitledRow).find(n => hasClass(n, 'r-step'))
+  assert.ok(Array.from(untitledTitle?.textContent || '').length <= 220, 'untitled row .r-title stays <= 220 code points')
+  assert.equal(untitledTitle?.getAttribute('title'), longWorklogStep, 'untitled row .r-title tooltip preserves full >220 worklog')
+  assert.ok(untitledStep?.textContent.endsWith('→ main-recall-2'), 'untitled worklog row keeps active tail when 220-char title omits it')
+
+  const wideRow = workRows.find(r => walk(r).some(n => hasClass(n, 'r-title') && n.textContent === 'Wide glyph step test'))
+  const wideStepNode = walk(wideRow).find(n => hasClass(n, 'r-step'))
+  assert.equal(wideStepNode?.getAttribute('title'), wideGlyphStep, '40ch-clippable <=72-char step still gets tooltip')
+
+  // Long waiting-card task title uses <details class="clip"> inside expanded card body.
+  const waitCard = walk(dom.node('needs')).find(n => n.tag === 'article' && n.getAttribute('data-ref-key'))
+  const cTaskClip = walk(waitCard).find(n => hasClass(n, 'c-task') && hasClass(n, 'clip'))
+  assert.ok(cTaskClip, 'overlong ask.task wraps in .c-task.clip')
+  assert.equal(walk(cTaskClip).find(n => hasClass(n, 'whole'))?.textContent, longCardTask)
+
+  // Surface pills on card and row carry tooltip title while label sits inside .surf-lbl.
+  const cardPill = walk(waitCard).find(n => hasClass(n, 'surf-pill'))
+  const rowPill = walk(workRow).find(n => hasClass(n, 'surf-pill'))
+  assert.equal(cardPill?.getAttribute('title'), s.pgInterfaceCli)
+  assert.equal(rowPill?.getAttribute('title'), s.pgInterfaceCli)
+
+  // Copy confirm button keeps className="answer-send", data-copy="1", and exact textContent via .sr-lbl.
+  const copyBtn = walk(waitCard).find(n => n.className === 'answer-send')
+  assert.ok(copyBtn && copyBtn.getAttribute('data-copy') === '1')
+  assert.ok(walk(copyBtn).some(n => hasClass(n, 'sr-lbl')), 'copy button wraps label in .sr-lbl')
+  assert.equal(copyBtn.title, s.pgCopyChoice)
+  assert.equal(copyBtn.textContent, s.pgCopyChoice)
+
+  // Detail rail button wraps label in .sr-lbl and carries tooltip title.
+  const detailBtn = walk(waitCard).find(n => hasClass(n, 'card-detail-btn'))
+  assert.ok(walk(detailBtn).some(n => hasClass(n, 'sr-lbl')), 'detail button wraps label in .sr-lbl')
+  assert.equal(detailBtn?.getAttribute('title'), s.pgDetailRail)
+  assert.equal(detailBtn?.textContent, s.pgDetailRail)
+
+  // Done shelf archive button uses icon-first .done-archive-btn + .sr-lbl inside [data-card-key="recent"].
+  const doneSec = walk(dom.node('board')).find(n => n.getAttribute?.('data-sec') === 'done')
+  const archiveBtn = walk(doneSec).find(n => hasClass(n, 'done-archive-btn'))
+  assert.ok(archiveBtn, 'Done shelf renders compact icon-first .done-archive-btn')
+  assert.ok(walk(archiveBtn).some(n => hasClass(n, 'sr-lbl')), 'archive button wraps label in .sr-lbl')
+  assert.equal(archiveBtn.getAttribute('title'), s.archiveNow)
+  assert.equal(archiveBtn.textContent, s.archiveNow)
+  assert.equal(archiveBtn.parentNode?.getAttribute('data-card-key'), 'recent')
+})
+

@@ -66,8 +66,17 @@ export const lifecycleCapability = (_agent: LocalAgent): string => 'adapter-inst
 
 // Antigravity groups events under a named definition, rather than hooks.<event>.
 // Stop ends an execution loop, not the conversation. No session-end event is invented.
+// Route H (#1841) runs a second sequential Stop command (`StopWait`, 30 s) after the 3 s reporter.
 export const antigravityHooks = (command: (event: string, state: string) => string): Record<string, unknown> =>
-  Object.fromEntries(Object.entries(statusEvents.antigravity!).map(([event, state]) => [event, [{ type: 'command', command: command(event, state), timeout: hostHookTimeout('antigravity', event) }]]))
+  Object.fromEntries(Object.entries(statusEvents.antigravity!).map(([event, state]) => [
+    event,
+    event === 'Stop'
+      ? [
+          { type: 'command', command: command('Stop', state), timeout: hostHookTimeout('antigravity', 'Stop') },
+          { type: 'command', command: command('StopWait', state), timeout: hostHookTimeout('antigravity', 'StopWait') },
+        ]
+      : [{ type: 'command', command: command(event, state), timeout: hostHookTimeout('antigravity', event) }],
+  ]))
 
 // One installed hook: Node runs a bootstrap that fails open and loads the worker, which runs
 // the board script within the host's limit (#241). The installer and /progress connect write

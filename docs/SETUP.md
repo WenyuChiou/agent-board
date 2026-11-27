@@ -54,7 +54,7 @@ already updated as already current. The next steps name each host's actual actio
 start a new session for hooks already configured, or restart the named host to load its
 generated plugin. Installing the files does not verify a live host connection.
 
-Without `--lang`, setup uses `LANG`, then the system language, else English, and writes that language into the files it installs.
+Without `--lang`, setup uses `LANG`, then the system language, else English, and writes that language into the files it installs. Once a language is chosen, by `--lang` on setup or on the board's page, a later `setup`, `remove` and `agent-board --help` keep it until another is chosen; the page's Automatic follows the system again.
 
 Whenever Claude Code's config folder exists (`CLAUDE_CONFIG_DIR`, else `~/.claude`), or
 `claude` is on the PATH and `--home` was not given,

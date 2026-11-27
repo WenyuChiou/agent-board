@@ -99,9 +99,13 @@ export const stepColor = (palette: Palette, status: ProgressStepStatus): string 
 
 // Page surfaces differ from terminal surfaces while sharing the same colour roles.
 export const PAGE_LIGHT = {
-  ground: '#f1f2ee', surface: '#ffffff', inset: '#fbfaf5', ink: '#1f2324',
-  line: '#e3e4de', 'line-strong': '#cbcec6', 'on-accent': '#ffffff',
-  waiting: '#9A7200', 'waiting-text': '#715C1F', 'waiting-fill': '#8A6700', soon: '#B04E2E',
+  ground: '#F3F5F7', surface: '#FCFDFE', inset: '#EAEFF2', ink: '#172026', muted: '#525B63',
+  line: '#E0E6EB', 'line-strong': '#C8D2DA', 'on-accent': '#FFFFFF',
+  accent: '#185A7D', done: '#00733E',
+  waiting: '#8A5D00', 'waiting-text': '#8A5200', 'waiting-fill': '#F4B41A', 'waiting-on': '#231800',
+  running: '#6B4C8C', soon: '#A64B2A', alert: '#B0252B', project: '#005243',
+  'surf-cli-bg': '#ECEFF2', 'surf-cli-line': '#CFD7DE', 'surf-cli-ink': '#434B52',
+  'surf-app-bg': '#E7F2F8', 'surf-app-line': '#B8D4E3', 'surf-app-ink': '#185A7D',
   'receipt-wait': '#664D00', 'receipt-wait-bg': '#FBF3DC', 'receipt-wait-line': '#DFC98A',
   'receipt-done': '#006636', 'receipt-done-bg': '#EDF7F1', 'receipt-done-line': '#A5D4B8',
   'receipt-fail': '#A82026', 'receipt-fail-bg': '#FCEEEF', 'receipt-fail-line': '#E8B5B8',
@@ -114,7 +118,10 @@ export const PAGE_LIGHT = {
 export const PAGE_DARK = {
   ground: '#141617', surface: '#1e2022', inset: '#25282b', ink: '#e6e4dc',
   line: '#2e3134', 'line-strong': '#43474b', 'on-accent': '#141617',
-  waiting: '#F8B500', 'waiting-text': '#F8B500', 'waiting-fill': '#F8B500', alert: '#EE5E75', project: '#6BA3A2',
+  waiting: '#F8B500', 'waiting-text': '#F8B500', 'waiting-fill': '#F8B500', 'waiting-on': '#141617',
+  alert: '#EE5E75', project: '#6BA3A2',
+  'surf-cli-bg': '#25282B', 'surf-cli-line': '#3D4145', 'surf-cli-ink': '#C9C7BE',
+  'surf-app-bg': '#182930', 'surf-app-line': '#2B4C59', 'surf-app-ink': '#5EC2CC',
   'receipt-wait': '#F8B500', 'receipt-wait-bg': '#2E281B', 'receipt-wait-line': '#66501B',
   'receipt-done': '#68BE8D', 'receipt-done-bg': '#1B2B22', 'receipt-done-line': '#2F5E43',
   'receipt-fail': '#F27286', 'receipt-fail-bg': '#331F23', 'receipt-fail-line': '#733842',

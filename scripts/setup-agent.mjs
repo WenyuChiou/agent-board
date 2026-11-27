@@ -41,8 +41,30 @@ const systemLang = env => {
   if (language !== null) return language
   try { return langOf(Intl.DateTimeFormat().resolvedOptions().locale) } catch { return null }
 }
-const langAt = args.indexOf('--lang')
-const language = langOf(langAt < 0 ? undefined : args[langAt + 1]) ?? systemLang(process.env.LANG) ?? 'en'
+// A language the person chose stays until they choose another (#1245), in the board's own order
+// (hooks/board-settings.ts boardLanguage): --lang (auto included), then the page's saved choice beside
+// the progress.md the board reads (localProgressPath in scripts/codex-local.ts), then the language the
+// installed board script was set up in. Automatic follows the system.
+const valueOf = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1] }
+const chosenLang = script => {
+  let baked = null
+  let saved = null
+  try {
+    const head = JSON.parse(readFileSync(script, 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, ''))
+    baked = langOf(head?.lang)
+    const progress = valueOf('--progress-file') ?? (process.env.CLAUDE_PROGRESS_FILE || (typeof head?.path === 'string' ? head.path : undefined))
+    if (progress !== undefined) {
+      try {
+        const lang = JSON.parse(readFileSync(`${resolve(progress).replace(/\.md$/i, '')}-settings.json`, 'utf8'))?.lang
+        saved = lang === 'auto' ? 'auto' : langOf(lang)
+      } catch {}
+    }
+  } catch {}
+  return saved ?? baked
+}
+const langFlag = valueOf('--lang') === 'auto' ? 'auto' : langOf(valueOf('--lang'))
+const pickedLang = langFlag ?? chosenLang(join(valueOf('--data-dir') || join(valueOf('--home') || homedir(), '.agent-board'), 'agent-board.mjs'))
+const language = (pickedLang === 'auto' ? null : pickedLang) ?? systemLang(process.env.LANG) ?? 'en'
 const message = (en, tw, cn) => [en, tw, cn][['en', 'zh-TW', 'zh-CN'].indexOf(language)]
 // Bootstrap runs on Node 18 and the npm package has no TypeScript string tables.
 // Keep this copy identical to setupSummary in all three tables.
@@ -129,11 +151,7 @@ const summaries = [
     "updateTrustUnread": "{host}: the update could not read whether the board's hooks are approved, so it changed no approval. To check, preview {command}; to approve them, run it again with --apply.",
     "updateLater": "Nothing changed. To update, run this in a terminal and answer y: {command}",
     "updatePlugin": "This board comes from the Claude Code plugin, so setup leaves it alone. Update the plugin with claude plugin update agent-board@agent-board, then start a new Claude Code session.",
-    "updateNone": "Agent Board is not set up here, so there is nothing to update. Set it up: {command}",
-    "useVersionCheck": "Once a day, the board asks npm for the newest version number.",
-    "useVersionCheckOff": "\"Check for new versions\" in the board's Settings.",
-    "useCodexSessions": "The board reads the list of your Codex sessions (folder, start time, id, last-written time), never the conversation.",
-    "useCodexSessionsOff": "\"Show Codex sessions\" in the board's Settings."
+    "updateNone": "Agent Board is not set up here, so there is nothing to update. Set it up: {command}"
   },
   {
     "previewCreate": "將建立 {count} 個設定檔案",
@@ -217,11 +235,7 @@ const summaries = [
     "updateTrustUnread": "{host}：這次更新讀不到看板的 hooks 是否已被批准，所以沒有更動任何批准。要確認，先執行 {command} 預覽；要批准它們，再加上 --apply 重新執行同一命令。",
     "updateLater": "沒有任何變更。要更新，請在終端機執行這個命令並回答 y：{command}",
     "updatePlugin": "這個看板來自 Claude Code 外掛，setup 不會動它。請用 claude plugin update agent-board@agent-board 更新外掛，再開一個新的 Claude Code 工作階段。",
-    "updateNone": "這裡還沒設定 Agent Board，所以沒有可更新的東西。設定它：{command}",
-    "useVersionCheck": "看板每天向 npm 查一次最新的版本號。",
-    "useVersionCheckOff": "看板設定裡的「檢查新版本」。",
-    "useCodexSessions": "看板會讀取你的 Codex 工作階段清單（資料夾、開始時間、id、最後寫入時間），從不讀取對話內容。",
-    "useCodexSessionsOff": "看板設定裡的「顯示 Codex 工作階段」。"
+    "updateNone": "這裡還沒設定 Agent Board，所以沒有可更新的東西。設定它：{command}"
   },
   {
     "previewCreate": "将创建 {count} 个设置文件",
@@ -305,11 +319,7 @@ const summaries = [
     "updateTrustUnread": "{host}：这次更新读不到看板的 hooks 是否已被批准，所以没有更改任何批准。要确认，先运行 {command} 预览；要批准它们，再加上 --apply 重新运行同一命令。",
     "updateLater": "没有任何更改。要更新，请在终端运行这个命令并回答 y：{command}",
     "updatePlugin": "这个看板来自 Claude Code 插件，setup 不会动它。请用 claude plugin update agent-board@agent-board 更新插件，再开一个新的 Claude Code 会话。",
-    "updateNone": "这里还没设置 Agent Board，所以没有可更新的东西。设置它：{command}",
-    "useVersionCheck": "看板每天向 npm 查询一次最新的版本号。",
-    "useVersionCheckOff": "看板设置里的「检查新版本」。",
-    "useCodexSessions": "看板会读取你的 Codex 会话列表（文件夹、开始时间、id、最后写入时间），从不读取对话内容。",
-    "useCodexSessionsOff": "看板设置里的「显示 Codex 会话」。"
+    "updateNone": "这里还没设置 Agent Board，所以没有可更新的东西。设置它：{command}"
   }
 ]
 const summary = summaries[['en', 'zh-TW', 'zh-CN'].indexOf(language)]
