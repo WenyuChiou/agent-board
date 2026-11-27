@@ -735,8 +735,9 @@ process.stdout.write('Redis it is; wiring it up now.\\n')
     await heldLostPress('lost-result-press-reply-cancel', 'cancel')
   })
 
-  test('releasing a press held on a lost-result button across a background reply still fires its click (#1473)', { concurrency: false, timeout: 120_000 }, async () => {
-    await heldLostPress('lost-result-press-reply-click', 'click')
+  // TEMPORARY (#1810): 20 runs in a row in one CI run, no retry; reverted before Ready.
+  for (let run = 1; run <= 20; run += 1) test(`releasing a press held on a lost-result button across a background reply still fires its click (#1473) run ${run} of 20`, { concurrency: false, timeout: 120_000 }, async () => {
+    await heldLostPress(`lost-result-press-reply-click-${run}`, 'click')
   })
 
   test("the sidebar footer's bottom equals the window's bottom", { concurrency: false, timeout: 60_000 }, async () => {
