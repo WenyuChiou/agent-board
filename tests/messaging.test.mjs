@@ -6985,7 +6985,9 @@ test('a Codex claim that meets a busy thread still goes back to the queue after 
     writeFileSync(hold, '')
     while (Date.now() <= claimed + 3100) await pause(50)
     unlinkSync(hold)
-    assert.equal(codexStarts(daemon), 0)
+    // Still the same claim, held, after the pause: a claim given back before or during it would leave nothing to test.
+    const after = await codexMessage(board, 'AB-CX-001')
+    assert.deepEqual([after.status, after.claimed, codexStarts(daemon)], ['uncertain', claimed, 0])
     clock.set(claimed + 2401)
     await codexWaitStatus(board, daemon, 'queued', errors)
     assert.equal(codexStarts(daemon), 0)
