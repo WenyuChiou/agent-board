@@ -14468,6 +14468,25 @@ test('the terminal board keeps group headings, --all question shelves and the du
   }
 })
 
+// One finished task with no questions is still a report: the printed board must not say
+// no agent has reported yet, while a board with nothing on it still names the setup command.
+test('a finished task with no questions keeps the printed board from saying no agent has reported yet', async () => {
+  const { boardText, buildView, parseProgress } = await sourceBoard()
+  const now = Date.parse('2026-10-25T12:00:00Z')
+  const source = `## demo\n<!-- auto session=38300001 agent=codex state=ended updated=${new Date(now - 3600000).toISOString()} -->\n### Finished\n- [x] Finished\n<!-- /auto session=38300001 -->\n`
+  for (const s of [EN, ZH_TW, ZH_CN]) {
+    const view = buildView(parseProgress(source), [], null, now, 0, {}, s)
+    assert.deepEqual(view.recent.map(item => item.title), ['Finished'], s.lang)
+    assert.equal(view.recent[0]?.questions?.length ?? 0, 0, s.lang)
+    const text = boardText(view, [], s, { width: 80, isColor: false })
+    assert.ok(!text.includes(s.empty), `${s.lang}: a finished task is not an empty board`)
+    assert.ok(!text.includes(s.boardNoAgents), `${s.lang}: the setup line stays off a board an agent reported to`)
+    const empty = boardText(buildView(parseProgress(''), [], null, now, 0, {}, s), [], s, { width: 80, isColor: false })
+    assert.ok(empty.includes(s.empty), s.lang)
+    assert.ok(empty.includes(s.boardNoAgents), `${s.lang}: a board with nothing on it still names the setup command`)
+  }
+})
+
 // One grouped fixture test keeps its checker and the first-screen check together.
 test('the synthetic big board has the shape of a heavy user\'s board', async t => {
   const { bigBoard, bigBoardNow, bigBoardFirstObserved } = await import('./fixtures/big-board.mjs')

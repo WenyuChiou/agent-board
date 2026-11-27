@@ -799,7 +799,7 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
         <Box flexDirection="column" marginTop={1}>
           <Text>{s.empty}</Text>
           {muted(s.emptyHow)}
-          {muted(s.boardNoAgents)}
+          {muted(s.pgConnect)}
         </Box>
       ) : (
         focus(view.focus)

@@ -3536,7 +3536,7 @@ export const LINES = [
 "  pgChipEmpty: \"没有工作\",",
 "  pgStartIn: (agent) => `开一个新的 ${agent} 任务，它的进度就会出现在这里。`,",
 "  pgStartAny: \"在你设置好的代理里开一个新任务，它的进度就会出现在这里。\",",
-"  pgConnect: \"接上一個代理：npx @wenyuchiou/agent-board setup\",",
+"  pgConnect: \"接上一个代理：npx @wenyuchiou/agent-board setup\",",
 "  pgConnected: \"已连接\",",
 "  pgTipNeeds: (n) => `${n} 件需要你`,",
 "  pgTipNeedsOne: \"1 件需要你\",",
