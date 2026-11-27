@@ -13894,6 +13894,34 @@ test('a page whose poll has failed for 10 s says its data may be stale', async (
   assert.equal(sync.textContent, EN.pgStaleShort('2m'))
 })
 
+test('a page whose board answers only with a note for 10 s says its data may be stale', async () => {
+  const now = 1_000_000_000_000
+  let polls = 0
+  const model = redesignModel()
+  const dom = await pageDom(await sourcePage(), model, { now, width: 1280, getBoard: async () => {
+    polls += 1
+    // An unreadable progress.md: the board answers, with a note and no board.
+    if (polls >= 2 && polls <= 3) return { ok: false, json: async () => ({ ok: false, note: 'Synthetic unreadable board' }) }
+    return { ok: true, json: async () => ({ model, now: 1 }) }
+  } })
+  const sync = dom.node('sync')
+  const isStale = () => hasClassName(dom.node('board'), 'stale')
+  dom.setNow(now + 4_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), false)
+  dom.setNow(now + 11_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), true)
+  assert.equal(sync.textContent, EN.pgStaleShort('11s'))
+  dom.setNow(now + 12_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), false)
+  assert.equal(sync.textContent, EN.justNow)
+})
+
 test('the summary line counts what the tabs count', async () => {
   const model = viewed(redesignModel())
   const due = model.view.all.open.find(ref => ref.key === 'Due plan')
@@ -13957,8 +13985,16 @@ test('idle and stopped sessions fold under a count and one press opens them', as
   // The Other work view opens its fold by itself.
   const fresh = await pageDom(await sourcePage(), redesignModel(), { width: 1280 })
   fresh.node('view-others').click()
-  const opened = shelfOf(fresh.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes(EN.pgOthers)))
-  assert.equal(hasClassName(opened, 'open'), true)
+  const othersFold = () => shelfOf(fresh.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes(EN.pgOthers)))
+  assert.equal(hasClassName(othersFold(), 'open'), true)
+  // Closed there by hand, it stays closed after the next poll.
+  headOf(othersFold()).click()
+  assert.equal(hasClassName(othersFold(), 'open'), false)
+  const changed = redesignModel()
+  changed.recent = [...changed.recent, { project: 'Alpha', agent: 'codex', title: 'Second finished plan', when: 'Today', questions: [] }]
+  await fresh.redraw(changed)
+  await fresh.settle()
+  assert.equal(hasClassName(othersFold(), 'open'), false)
 })
 
 test('opening a view leaves the own-tasks filter as it was', async () => {

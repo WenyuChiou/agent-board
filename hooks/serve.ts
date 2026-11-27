@@ -1668,9 +1668,11 @@ const PAGE_SCRIPT = String.raw`
   // answer at all (a held request answers within 10 s), and then says so and dims its rows until the next good answer.
   var lastGood = Date.now();
   var STALE_FAILED_MS = 10000, STALE_QUIET_MS = 120000;
+  // A read that failed: the board unreachable, or an answer with a note and no board (progress.md unreadable).
+  var isReadFailing = false;
   function isStale() {
     var age = Date.now() - lastGood;
-    return age >= STALE_QUIET_MS || (isUnreachable && age >= STALE_FAILED_MS);
+    return age >= STALE_QUIET_MS || ((isUnreachable || isReadFailing) && age >= STALE_FAILED_MS);
   }
   var offlineButtons = [];
   var since = null;
@@ -3804,6 +3806,7 @@ const PAGE_SCRIPT = String.raw`
     if (ui.sync.getAttribute('aria-label') !== hint) { ui.sync.setAttribute('aria-label', hint); ui.sync.setAttribute('title', hint); }
   }
   function heardFromBoard() {
+    isReadFailing = false;
     lastGood = Date.now();
     paintFresh();
   }
@@ -4185,7 +4188,8 @@ const PAGE_SCRIPT = String.raw`
     });
     // #1023: idle sessions fold under one line with their count, like Stopped and Done, so on the Overview only
     // Needs you and Working are open. One press opens them; the Other work view opens them by itself.
-    var isOpen = opened['shelf:others'] === true || pg.view === 'others';
+    // The Other work view opens it on the way in (setView); after that the person's own choice holds across polls.
+    var isOpen = opened['shelf:others'] === true || (opened['shelf:others'] === undefined && pg.view === 'others');
     var sec = el('section', 'sec shelf' + (isOpen ? ' open' : ''));
     var count = el('span', 'count');
     pg.nodes.counts.others = count;
@@ -4710,7 +4714,8 @@ const PAGE_SCRIPT = String.raw`
       if (data.moved) { showMoved(); return; }
       if (data.unchanged) { reachable(); heardFromBoard(); maybeShowAway(); return; }
       if (!data.ok || !data.model) {
-        if (data.note) { reachable(); heardFromBoard(); say(data.note, 'alert'); }
+        // The board answered, but with no board to show: the rows on the page are as old as the last good read.
+        if (data.note) { reachable(); isReadFailing = true; paintFresh(); say(data.note, 'alert'); }
         else unreachable();
         return;
       }
