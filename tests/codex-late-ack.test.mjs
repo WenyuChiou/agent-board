@@ -267,17 +267,29 @@ test('a late Codex ACK that completes before a delayed turn/start answer arrives
   assert.equal(errors.includes('OWNER_DISCONNECTED'), false)
 }))
 
-test('closing the Codex receiver while leaving a thread after ACK still delivers the acknowledged receipt (#1796)', { timeout: 30_000 }, () => withHub({}, async f => {
-  const d = f.daemon('close-while-leaving', { unsubscribeFaults: [400] })
-  f.start(d)
-  const conn = await f.connectionOf()
-  assert.equal((await f.send(conn, 'AB-CX-1796-5')).status, 200)
-  await waitFor(() => d.calls().some(one => one.method === 'thread/unsubscribe'), 10_000, 'thread/unsubscribe started')
+test('closing the Codex receiver while leaving a thread after ACK still delivers the acknowledged receipt (#1796)', { timeout: 30_000 }, async () => {
+  let ackAttempts = 0
+  await withHub({
+    onReceipt: body => {
+      if (body.status === 'acknowledged') {
+        ackAttempts += 1
+        if (ackAttempts === 1) return { status: 503, body: { error: 'MESSAGE_STORE_BUSY' } }
+      }
+      return null
+    },
+  }, async f => {
+    const d = f.daemon('close-while-leaving', { unsubscribeFaults: [400] })
+    f.start(d)
+    const conn = await f.connectionOf()
+    assert.equal((await f.send(conn, 'AB-CX-1796-5')).status, 200)
+    await waitFor(() => d.calls().some(one => one.method === 'thread/unsubscribe'), 10_000, 'thread/unsubscribe started')
 
-  await f.stop()
-  const settled = f.messageOf('AB-CX-1796-5')
-  assert.equal(settled.status, 'acknowledged')
-  assert.equal(settled.error, '')
-  assert.equal(tsMod.messageStatus(settled, Date.now(), tsMod.EN).state, 'read')
-  assert.equal(f.starts(d), 1)
-}))
+    await f.stop()
+    const settled = f.messageOf('AB-CX-1796-5')
+    assert.equal(ackAttempts, 2)
+    assert.equal(settled.status, 'acknowledged')
+    assert.equal(settled.error, '')
+    assert.equal(tsMod.messageStatus(settled, Date.now(), tsMod.EN).state, 'read')
+    assert.equal(f.starts(d), 1)
+  })
+})
