@@ -913,7 +913,7 @@ const visibleLines = (text, { isPlaceKept = false } = {}) => {
 }
 // The body as a reader sees it: no fenced code, no HTML comment, and a comment marker inside a fence or a code span
 // is plain text, so it hides nothing after it (#1492).
-const visibleBody = body => visibleLines(body ?? '').join('\n')
+export const visibleBody = body => visibleLines(body ?? '').join('\n')
 // The tier a `Tier:` line's value names, or null. Every check reads the value with this one reader (#1531), so a
 // spelling the tier check accepts is one the surface, cases and round checks read too.
 const tierWord = value => value.match(/^`?(risk|normal|light)\b/i)?.[1].toLowerCase() ?? null

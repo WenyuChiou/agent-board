@@ -283,3 +283,17 @@ test('team stats rejects an unknown flag and a malformed date', () => {
     assert.deepEqual(errors, before)
   }
 })
+
+test('team stats review queue reads only a team verdict a reader sees: a bot line or a fenced or hidden line leaves the pull request queued (#1926)', () => {
+  const ready = comment(`Ready for review ${head}`, '2026-10-20T01:00:00Z')
+  const at = '2026-10-20T02:00:00Z'
+  const bot = { ...comment(`Review: REQUEST CHANGES ${head}`, at), user: { login: 'review-helper[bot]', type: 'Bot' } }
+  const fenced = comment(`An example:\n\`\`\`\nReview: APPROVE ${head}\n\`\`\``, at)
+  const hidden = comment(`<!-- Review: APPROVE ${head} -->`, at)
+  const outside = { ...comment(`Review: APPROVE ${head}`, at), author_association: 'CONTRIBUTOR' }
+  for (const item of [bot, fenced, hidden, outside]) assert.deepEqual(reviewQueue([pull(19, [ready, item])]), [19])
+  // A team verdict, and an outside request for changes, still name the head.
+  const team = { ...comment(`Review: APPROVE ${head}`, at), author_association: 'COLLABORATOR', user: { login: 'carol', type: 'User' } }
+  const outsideChanges = { ...comment(`Review: REQUEST CHANGES ${head}`, at), author_association: 'CONTRIBUTOR' }
+  for (const item of [team, outsideChanges]) assert.deepEqual(reviewQueue([pull(19, [ready, item])]), [])
+})
