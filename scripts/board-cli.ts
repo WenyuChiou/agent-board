@@ -58,6 +58,7 @@ import { appendJournal, archivePath, countDay, journalLine, journalPath, localDa
 import type { PendingArchiveRecord } from '../hooks/journal'
 import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, RETENTION, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
+import { foldRuns } from '../hooks/runs'
 import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReadReason, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
@@ -227,7 +228,7 @@ const doneBlockLines = (projects: readonly ProgressProject[], journal: string, n
   const day = localDay(now)
   const written = new Set(parseJournal(journal).filter(entry => entry.at === day).map(entry => `${entry.project}\n${entry.task}`))
   const lines: string[] = []
-  for (const project of projects) {
+  for (const project of foldRuns(projects).projects) {
     for (const task of project.tasks) {
       const updated = task.auto?.state === 'done' ? task.auto.updated : undefined
       if (updated === undefined || !Number.isFinite(updated) || updated <= 0 || updated > now || localDay(updated) !== day) continue

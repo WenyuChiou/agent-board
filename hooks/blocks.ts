@@ -599,6 +599,19 @@ export const archivableAsking = (text: string, now: number, keep?: string): Aski
   })
 }
 
+// Closed older blocks sharing `(agent, resume)` that are strictly outranked by `winner` (#1832).
+const outrankedBy = (spans: readonly BlockSpan[], winner: BlockSpan): BlockSpan[] => {
+  if (winner.resume == null) return []
+  const agent = (winner.agent || 'claude').toLowerCase()
+  return spans.filter(other =>
+    other !== winner &&
+    other.isClosed &&
+    other.resume === winner.resume &&
+    (other.agent || 'claude').toLowerCase() === agent &&
+    (other.updated < winner.updated || (other.updated === winner.updated && other.start < winner.start)),
+  )
+}
+
 // Moves old blocks out; each entry is the block without its markers, under a dated heading,
 // ready to append to progress-archive.md. A block with a visible `[?]` step stays unless it has
 // been quiet long enough (`isAskingArchiveDue`) and `mayTake` says its questions are kept outside
@@ -607,7 +620,18 @@ export const archivableAsking = (text: string, now: number, keep?: string): Aski
 export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean, isAgentRun?: (span: BlockSpan) => boolean): Archived => {
   const lines = linesOf(text)
   const visible = readable(lines)
-  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && (isAgentRun?.(span) === true || isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isAskingArchiveDue(span, now) && mayTake?.(span) === true))))
+  const allSpans = scanBlocks(lines)
+  const primary = allSpans.filter(span => span.isClosed && span.session !== keep && (isAgentRun?.(span) === true || isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isAskingArchiveDue(span, now) && mayTake?.(span) === true))))
+  const selected = new Set(primary)
+  for (const winner of primary) {
+    for (const older of outrankedBy(allSpans, winner)) {
+      if (older.session === keep || selected.has(older)) continue
+      if (!isAsking(visible, older) || (isAskingArchiveDue(older, now) && mayTake?.(older) === true)) {
+        selected.add(older)
+      }
+    }
+  }
+  const spans = allSpans.filter(span => selected.has(span))
   if (spans.length === 0) return { text, entries: [] }
   const entries = spans.map(span => {
     const body = lines.slice(span.start + 1, span.end)
@@ -738,7 +762,12 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       if (auto === null || !stopped) return null
     }
 
-    return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }
+    const day = localDay(now)
+    const removed = [span, ...outrankedBy(spans, span)]
+    return {
+      text: removeSpans(text, removed),
+      entries: removed.map(one => [`## ${one.project || s.uncategorized} · ${day}`, ...lines.slice(one.start + 1, one.end)].join('\n')),
+    }
   }
   const isHeading = (line: string | undefined): boolean => TASK.exec(line ?? '')?.[1] === ref.title
   let at = isHeading(seen[ref.line]) ? ref.line : -1

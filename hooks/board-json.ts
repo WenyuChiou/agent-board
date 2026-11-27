@@ -6,6 +6,7 @@ import { latestMessage, messageStatus } from './message-status'
 import type { StatusState } from './message-status'
 import { localDay, parseJournal } from './journal'
 import { isTaskComplete, parseProgress } from './parse'
+import { foldRuns } from './runs'
 import { serveModel } from './serve'
 import type { QueuedMessaging } from './board-status'
 import type { GroupOptions, ServeAsk, ServeModel, ServeRow, ServeTurn } from './serve'
@@ -138,7 +139,7 @@ export const collectFinished = (
   }
 
   if (progressText) {
-    const parsed = parseProgress(progressText)
+    const parsed = foldRuns(parseProgress(progressText)).projects
     for (const project of parsed) {
       const proj = named(project.name)
       for (const task of project.tasks) {

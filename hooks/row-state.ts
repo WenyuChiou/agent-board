@@ -95,9 +95,8 @@ export const deriveRowState = (input: RowStateInput): RowState => {
   // else the row holds — including an open ask, which then leaves Needs you
   // by the confirmed-ended rule (M7), not by the unsure rule.
   if (events.hasSessionEnd || auto.state === 'ended') return 'ended'
-  // A claimed process proven gone is ended too: the same fact Phase 1 already
-  // shows as ended through `isStopped`.
-  if (liveness === 'dead') return 'ended'
+  // A claimed process proven gone is ended too (except a task already state=done, #1832).
+  if (liveness === 'dead' && auto.state !== 'done') return 'ended'
   // The configured stale backstop, unchanged in shape: a working or waiting
   // row quiet past staleMs already displays as ended today (`isStale`), and
   // its open ask already leaves Needs you for the Older shelf — so 'ended'

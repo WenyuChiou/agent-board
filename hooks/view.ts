@@ -1379,27 +1379,9 @@ export const buildView = (
     }
   }
 
-  // The older block of two for one session: no row of its own, but the person may take it out.
-  for (const { project, task } of folded.duplicates) {
-    const auto = task.auto
-    if (auto === null) continue
-    const name = project.name || s.uncategorized
-    const title = task.title || s.unnamed
-    const base = `${name}::${title}`
-    const key = nextKey(base)
-    const updated = observedTime(auto, now, seen).updated
-    const { done, total } = countSteps(task)
-    stopped.push({
-      updated,
-      row: {
-        key,
-        project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
-        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', rowState: 'ended', steps: [], cells: [], left: [], next: null, due: null, pr: '',
-        agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
-        archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
-      },
-    })
-  }
+  // Duplicate blocks sharing one `(agent, resume)` fold into their winning row (#1832),
+  // rather than showing as a second Stopped (`ended`) row; `takeTask`/`takeArchivable` archive
+  // hidden older copies along with their winner.
   let background: RunGroup | null = folded.background
   for (const [task, group] of folded.runs) {
     if (!placed.has(task)) background = mergeGroups(background, group)

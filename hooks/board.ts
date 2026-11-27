@@ -346,7 +346,6 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   if (view.details) lines.push(c('quiet', view.details), '')
 
   const asks = asksOf(view, pending, s, project => project, agent => agentLabel(agent, s))
-  const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
   for (const [title, items] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
     if (items.length === 0) continue
     const isOpen = o.isIdleOpen || o.isQuestionsOpen
@@ -400,10 +399,10 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
-  if (recentQuestions.length > 0) {
+  if (view.recent.length > 0) {
     lines.push(c('done', s.sectionRecent))
-    for (const item of recentQuestions) {
-      lines.push(`  ${cut(`${item.project} › ${item.title} · ${item.when}`, o.width - 4)}`)
+    for (const item of view.recent) {
+      lines.push(`  ${cut(`${item.project} › ${item.title}${item.when ? ` · ${item.when}` : ''}`, o.width - 4)}`)
       for (const question of item.questions ?? []) lines.push(`    ${cut(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
     }
     lines.push('')
@@ -415,7 +414,7 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
-  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty), '')
+  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && view.recent.length === 0) lines.push(c('quiet', s.empty), '')
   // Runs agents started for themselves, with no session known: one folded line, never in the counts (#399).
   if (view.background) lines.push(c('quiet', cut(view.background, o.width)), '')
   for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2, isWide).map(part => c('quiet', part)))
