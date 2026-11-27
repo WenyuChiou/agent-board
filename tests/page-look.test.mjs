@@ -1129,7 +1129,7 @@ test('row summaries clamp cleanly, phantom gaps collapse, and chrome controls re
     '## synthetic-long-repo',
     `<!-- auto session=dd100001 agent=claude state=waiting updated=${freshIso} -->`,
     `### ${longCardTask}`,
-    '- [?] Ship iconified compact card chrome now?',
+    `- [?] ${longCardTask.slice(0, 230)} — ship iconified compact card chrome now?`,
     '<!-- options=["Yes","No"] -->',
     '<!-- /auto session=dd100001 -->',
     '',

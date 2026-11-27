@@ -7755,7 +7755,7 @@ export const LINES = [
 "    if (!isOlder) {",
 "      var rawAskTask = String(ask.task || '');",
 "      var askTitle = clean(rawAskTask, Infinity);",
-"      if (askTitle && clean(rawAskTask) !== text && askTitle !== text) {",
+"      if (askTitle && askTitle !== text) {",
 "        if (Array.from(askTitle).length > 90) add(detailHost, clipped(clipShort(askTitle, 90), askTitle, 'c-task', 'ctask:' + key));",
 "        else add(detailHost, el('p', 'c-task', askTitle));",
 "      }",
