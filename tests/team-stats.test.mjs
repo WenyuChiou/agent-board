@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
+import * as teamStats from '../scripts/team-stats.mjs'
 import { authorOf, dailyLine, fromGraphql, main, parseArgs, reviewQueue, scorecard } from '../scripts/team-stats.mjs'
 
 const date = '2026-10-20'
@@ -96,7 +97,7 @@ test('team stats scorecard groups merged pull requests by the Author line, with 
   }]
   const beforeNodes = structuredClone(nodes)
   const mapped = fromGraphql(nodes)
-  assert.deepEqual(mapped, [pullRequests[1]])
+  assert.deepEqual(mapped.map(({ reviews, ...rest }) => rest), [pullRequests[1]])
   assert.equal(scorecard({ issues, pullRequests: pullRequests.map(pr => pr.number === 2 ? mapped[0] : pr) }, date), scorecard({ issues, pullRequests }, date))
   assert.deepEqual(nodes, beforeNodes)
   assert.equal(authorOf('<!-- Author: fake, fix/x -->\nAuthor: `CoDeX (phase1)`, fix/x'), 'codex (phase1)')
@@ -133,6 +134,98 @@ test('team stats counts each reviewed head once across approvals and requests fo
   const text = scorecard({ issues: [], pullRequests: [merged(reviews)] }, date)
   assert.match(text, /\| codex \| 1 \| 0 \| 0\/1 \| 3\.0 \| 0 \|/)
   assert.doesNotMatch(text, /merged with no review verdict:/)
+})
+
+test('team stats never shows a first review for a pull request it lists as merged with no review verdict', () => {
+  const bot = { login: 'helper[bot]', type: 'Bot' }
+  const visitor = { login: 'visitor', type: 'User' }
+  const at = '2026-10-19T01:00:00Z'
+  const shapes = [
+    ['no comment', []],
+    ['bot approval', [{ ...comment(`Review: APPROVE ${head}`, at), user: bot }]],
+    ['bot request', [{ ...comment(`Review: REQUEST CHANGES ${head}`, at), user: bot }]],
+    ['outside approval', [{ ...comment(`Review: APPROVE ${head}`, at), user: visitor, author_association: 'NONE' }]],
+    ['code fence', [comment(`\`\`\`\nReview: APPROVE ${head}\n\`\`\``, at)]],
+    ['HTML comment', [comment(`<!--\nReview: REQUEST CHANGES ${head}\n-->`, at)]],
+  ]
+  for (const [shape, comments] of shapes) {
+    const pr = pull(31, comments, { body: 'Author: codex, fix/x', merged_at: '2026-10-20T12:00:00Z', state: 'closed' })
+    const text = scorecard({ issues: [], pullRequests: [pr] }, date)
+    assert.match(text, /^\| codex \| 1 \| 0 \| - \| 0\.0 \| 0 \|$/m, shape)
+    assert.match(text, /^merged with no review verdict: #31$/m, shape)
+  }
+})
+
+test('team stats takes the first review from the first team verdict when a bot\'s approval came earlier', () => {
+  const earlier = { ...comment(`Review: APPROVE ${head}`, '2026-10-19T01:00:00Z'), user: { login: 'helper[bot]', type: 'Bot' } }
+  const first = { ...comment(`Review: REQUEST CHANGES ${head}`, '2026-10-19T02:00:00Z'), user: { login: 'teammate', type: 'User' }, author_association: 'MEMBER' }
+  const later = { ...comment(`Review: APPROVE ${head}`, '2026-10-19T03:00:00Z'), user: { login: 'teammate', type: 'User' }, author_association: 'MEMBER' }
+  const pr = pull(32, [later, earlier, first], { body: 'Author: codex, fix/x', merged_at: '2026-10-20T12:00:00Z', state: 'closed' })
+  assert.match(scorecard({ issues: [], pullRequests: [pr] }, date), /^\| codex \| 1 \| 0 \| 0\/1 \| 1\.0 \| 0 \|$/m)
+})
+
+test('team stats reads an outside author\'s approval the same from GitHub\'s GraphQL shape and its REST shape', () => {
+  const body = `Review: APPROVE ${head}`
+  const createdAt = '2026-10-19T01:00:00Z'
+  const [graphql] = fromGraphql([{
+    number: 33, body: 'Author: codex, fix/x', mergedAt: '2026-10-20T12:00:00Z', state: 'MERGED', isDraft: false, headRefOid: head,
+    comments: { nodes: [{ body, createdAt, databaseId: 1, author: { login: 'visitor', __typename: 'User' }, authorAssociation: 'NONE' }] },
+    reviews: { nodes: [] },
+  }])
+  const rest = pull(33, [{ ...comment(body, createdAt), user: { login: 'visitor', type: 'User' }, author_association: 'NONE' }], { body: graphql.body, merged_at: graphql.merged_at, state: 'closed' })
+  const output = pr => scorecard({ issues: [], pullRequests: [pr] }, date)
+  assert.equal(output(graphql), output(rest))
+  assert.equal(graphql.comments[0].author_association, 'NONE')
+  assert.match(output(graphql), /^\| codex \| 1 \| 0 \| - \| 0\.0 \| 0 \|$/m)
+  assert.match(output(graphql), /^merged with no review verdict: #33$/m)
+})
+
+test('team stats counts a GitHub review that approves or requests changes as a verdict', () => {
+  const make = (state, number) => fromGraphql([{
+    number, body: 'Author: codex, fix/x', mergedAt: '2026-10-20T12:00:00Z', state: 'MERGED', isDraft: false, headRefOid: head,
+    comments: { nodes: [] },
+    reviews: { nodes: [{ body: '', state, submittedAt: '2026-10-19T01:00:00Z', commit: { oid: head }, author: { login: 'teammate', __typename: 'User' }, authorAssociation: 'MEMBER' }] },
+  }])[0]
+  for (const [state, cell] of [['APPROVED', '1/1'], ['CHANGES_REQUESTED', '0/1']]) {
+    const pr = make(state, 34)
+    const text = scorecard({ issues: [], pullRequests: [pr] }, date)
+    assert.ok(text.includes(`| codex | 1 | 0 | ${cell} | 1.0 | 0 |`), state)
+    assert.doesNotMatch(text, /merged with no review verdict:/)
+    assert.deepEqual(pr.reviews[0], { body: '', state, commit_id: head, created_at: '2026-10-19T01:00:00Z', user: { login: 'teammate', type: 'User' }, author_association: 'MEMBER' })
+  }
+  const pr = make('CHANGES_REQUESTED', 35)
+  pr.comments.push(comment(`Review: APPROVE ${head}`, '2026-10-19T02:00:00Z'))
+  assert.match(scorecard({ issues: [], pullRequests: [pr] }, date), /^\| codex \| 1 \| 0 \| 0\/1 \| 1\.0 \| 0 \|$/m)
+
+  const graph = {
+    number: 36, body: 'Author: codex, fix/x', mergedAt: '2026-10-20T12:00:00Z', state: 'MERGED', isDraft: false, headRefOid: head,
+    comments: { totalCount: 101, nodes: [] },
+    reviews: { nodes: [{ body: '', state: 'APPROVED', submittedAt: '2026-10-19T01:00:00Z', commit: { oid: head }, author: { login: 'teammate', __typename: 'User' }, authorAssociation: 'MEMBER' }] },
+  }
+  const restPr = number => ({ number, body: graph.body, merged_at: graph.mergedAt, state: 'closed', draft: false, head: { sha: head } })
+  const restReview = { body: '', state: 'CHANGES_REQUESTED', commit_id: head, created_at: '2026-10-19T01:00:00Z', user: { login: 'teammate', type: 'User' }, author_association: 'MEMBER' }
+  const calls = []
+  const run = (command, args) => {
+    assert.equal(command, 'gh')
+    calls.push(args)
+    if (args[1] === 'graphql') {
+      const query = args.find(arg => arg.startsWith('query='))
+      assert.match(query, /comments\(first: 100\)[\s\S]*?authorAssociation/)
+      assert.match(query, /reviews\(first: 100\)[\s\S]*?authorAssociation/)
+      return JSON.stringify(graph)
+    }
+    const endpoint = args.at(-1)
+    if (endpoint.includes('/issues?')) return ''
+    if (endpoint.includes('/pulls?')) return [restPr(36), restPr(37)].map(value => JSON.stringify(value)).join('\n')
+    if (endpoint.includes('/issues/36/comments?') || endpoint.includes('/issues/37/comments?')) return ''
+    if (endpoint.includes('/pulls/37/reviews?')) return JSON.stringify(restReview)
+    throw new Error(`unexpected endpoint: ${endpoint}`)
+  }
+  const fetched = teamStats.fetchStats({ repo: 'synthetic/example', date, isWeek: true }, run)
+  assert.deepEqual(fetched.pullRequests.find(item => item.number === 37).reviews, [restReview])
+  assert.match(scorecard(fetched, date), /^\| codex \| 2 \| 0 \| 1\/2 \| 1\.0 \| 0 \|$/m)
+  assert.equal(calls.filter(args => String(args.at(-1)).includes('/comments?')).length, 2)
+  assert.equal(calls.filter(args => String(args.at(-1)).includes('/reviews?')).length, 1)
 })
 
 test('team stats rejects an unknown flag and a malformed date', () => {

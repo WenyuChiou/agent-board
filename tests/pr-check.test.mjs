@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import * as prCheck from '../scripts/pr-check.mjs'
 import {
   addedLines, apiReader, authorKey, evidenceFirst, EVIDENCE_FROM, isAncestor, authorLine, binaryImages, cap, CASES_FROM, cases, changelog, checkIssue, checkPr,
   duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
@@ -2418,6 +2419,46 @@ const roundWarningPr = (comments, extra = {}) => {
 const warningReport = pr => report(checkPr(pr), 'synthetic')
 const diagnosisWarning = '2 REQUEST CHANGES rounds: if both found the same kind of fault, `Question:` on the issue and the maintainer\'s Fable diagnosis come before the next fix (team-process line 68)'
 const takeoverWarning = "the third round was the author's last (team-process line 65)"
+
+test('pr-check reads verdicts in one place: a bot\'s line, a hidden line and an outside approval are no verdict, and an outside request for changes is', () => {
+  const first = 'a'.repeat(40)
+  const second = 'b'.repeat(40)
+  const third = 'c'.repeat(40)
+  const items = [
+    { body: `Review: APPROVE ${first}`, user: { login: 'helper[bot]' }, author_association: 'MEMBER' },
+    { body: `Review: REQUEST CHANGES ${first}`, user: { login: 'helper', type: 'Bot' }, author_association: 'NONE' },
+    { body: `\`\`\`\nReview: REQUEST CHANGES ${first}\n\`\`\`` },
+    { body: `<!--\nReview: APPROVE ${first}\n-->` },
+    { body: `Review: APPROVE ${first}`, user: { login: 'visitor' }, author_association: 'NONE' },
+    { body: `Review: REQUEST CHANGES ${first}`, user: { login: 'visitor' }, author_association: 'NONE' },
+    { body: `Review: APPROVE ${first}`, state: 'CHANGES_REQUESTED', commit_id: second, user: { login: 'reviewer' }, author_association: 'MEMBER' },
+    `Review: APPROVE ${third} by teammate`,
+  ]
+  assert.deepEqual(prCheck.verdictsOf(items), [
+    { kind: 'REQUEST CHANGES', sha: first, reviewer: 'visitor' },
+    { kind: 'REQUEST CHANGES', sha: second, reviewer: 'reviewer' },
+    { kind: 'APPROVE', sha: third, reviewer: 'teammate' },
+  ])
+})
+
+test('pr-check round warnings are not cleared by a diagnosis, takeover or round cap line from a bot or an outside author', () => {
+  const pr = roundWarningPr(roundHeads(3))
+  const markers = ['Fable diagnosis: https://example.invalid/report', 'Takeover: reviewer takes the branch', 'Round cap: settled work remains']
+  const authors = [
+    { user: { login: 'helper[bot]', type: 'Bot' }, author_association: 'MEMBER' },
+    { user: { login: 'visitor', type: 'User' }, author_association: 'NONE' },
+  ]
+  for (const source of ['prComments', 'prReviews', 'issueComments']) {
+    for (const marker of markers) {
+      for (const author of authors) {
+        const item = { ...author, body: marker, state: 'COMMENTED' }
+        const text = warningReport({ ...pr, [source]: [...(pr[source] ?? []), item] })
+        assert.ok(text.includes(diagnosisWarning), `${source}: ${marker}`)
+        assert.ok(text.includes(takeoverWarning), `${source}: ${marker}`)
+      }
+    }
+  }
+})
 
 test('pr-check round warnings appear at two and three distinct requests for changes', () => {
   const before = warningReport(roundWarningPr(roundHeads(1)))

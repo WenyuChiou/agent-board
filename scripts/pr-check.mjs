@@ -1389,21 +1389,33 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
   return output
 }
 
-// The distinct heads with a `Review: REQUEST CHANGES`, over the whole pull request: several verdicts on one head are one
-// round, a short sha and its full sha are one head, and an APPROVE does not reset the count. A bot's review is input for
-// the reviewer, not a verdict (team-process, From claim to merge), so it starts no round.
-export const roundsOf = (comments, { includeApprovals = false } = {}) => {
+const isTeamAuthor = item => !isBotUser(item?.user) && !isOutsideAssociation(item?.author_association)
+
+export const verdictsOf = items => {
+  const verdicts = []
+  for (const item of items ?? []) {
+    if (isBotUser(item?.user)) continue
+    // A verdict in a code fence or an HTML comment is an example, not a review.
+    const shown = typeof item === 'string' ? visibleLines(item).join('\n')
+      : item && typeof item.body === 'string' ? { ...item, body: visibleLines(item.body).join('\n') } : item
+    // A request for changes is on its own commit, even when the review quotes an earlier approval.
+    const review = item && typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id
+      ? reviewOf({ ...shown, body: '' }) : reviewOf(shown)
+    if (review && (isTeamAuthor(item) || review.kind === 'REQUEST CHANGES')) {
+      const { kind, sha, reviewer } = review
+      verdicts.push({ kind, sha, ...(reviewer ? { reviewer } : {}) })
+    }
+  }
+  return verdicts
+}
+
+// Several verdicts on one head are one round, a short sha and its full sha are one head, and an approval does not reset
+// the count. A bot's review is input for the reviewer, not a verdict (team-process, From claim to merge).
+export const roundsOf = (items, { includeApprovals = false } = {}) => {
   const heads = []
-  const add = head => { if (!heads.some(sha => sha.startsWith(head) || head.startsWith(sha))) heads.push(head) }
-  for (const comment of comments ?? []) {
-    if (comment && typeof comment === 'object' && isBotUser(comment.user)) continue
-    // A verdict quoted in a code fence or an HTML comment is an example, not a round.
-    const shown = typeof comment === 'string' ? visibleLines(comment).join('\n')
-      : comment && typeof comment.body === 'string' ? { ...comment, body: visibleLines(comment.body).join('\n') } : comment
-    const review = reviewOf(shown)
-    if (review?.kind === 'REQUEST CHANGES' || (includeApprovals && review?.kind === 'APPROVE')) add(review.sha)
-    // A review that requests changes is a round whatever its text says, even when its body quotes an earlier approval.
-    if (comment && typeof comment === 'object' && comment.state === 'CHANGES_REQUESTED' && typeof comment.commit_id === 'string' && comment.commit_id) add(comment.commit_id.toLowerCase())
+  for (const review of verdictsOf(items)) {
+    if (review.kind !== 'REQUEST CHANGES' && !includeApprovals) continue
+    if (!heads.some(sha => sha.startsWith(review.sha) || review.sha.startsWith(sha))) heads.push(review.sha)
   }
   return heads.length
 }
@@ -1413,9 +1425,11 @@ const roundWarnings = ({ body, prComments, prReviews, issueComments }) => {
   if (visibleTier(body) !== 'risk') return []
   const count = roundsOf([...prComments, ...prReviews])
   const shownLines = item => visibleLines(typeof item === 'string' ? item : item?.body ?? '')
-  const hasDiagnosis = [body, ...prComments, ...prReviews, ...issueComments].some(item => shownLines(item).some(line =>
+  const teamPrMessages = [...prComments, ...prReviews].filter(isTeamAuthor)
+  const teamIssueComments = issueComments.filter(isTeamAuthor)
+  const hasDiagnosis = [body, ...teamPrMessages, ...teamIssueComments].some(item => shownLines(item).some(line =>
     /^[ \t]*Fable diagnosis:[ \t]*(?:https?:\/\/[^\s<>()]+|<https?:\/\/[^\s<>]+>|\[[^\]]+\]\(https?:\/\/[^\s)]+\))/i.test(line)))
-  const hasTakeover = [...prComments, ...prReviews].some(item => shownLines(item).some(line => /^[ \t]*(?:Takeover|Round cap):/i.test(line)))
+  const hasTakeover = teamPrMessages.some(item => shownLines(item).some(line => /^[ \t]*(?:Takeover|Round cap):/i.test(line)))
   const warnings = []
   if (count >= 2 && !hasDiagnosis) warnings.push("2 REQUEST CHANGES rounds: if both found the same kind of fault, `Question:` on the issue and the maintainer's Fable diagnosis come before the next fix (team-process line 68)")
   if (count >= 3 && !hasTakeover) warnings.push("the third round was the author's last (team-process line 65)")
