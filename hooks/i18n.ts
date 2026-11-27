@@ -1169,6 +1169,7 @@ export const ZH_TW = {
   pgChipEmpty: '沒有工作',
   pgStartIn: (agent: string): string => `開一個新的 ${agent} 任務，它的進度就會出現在這裡。`,
   pgStartAny: '在你設定好的代理程式裡開一個新任務，它的進度就會出現在這裡。',
+  pgConnect: '接上一個代理程式：npx @wenyuchiou/agent-board setup',
   pgConnected: '已連接',
   pgTipNeeds: (n: number): string => `${n} 件需要你`,
   pgTipNeedsOne: '1 件需要你',
