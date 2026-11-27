@@ -62,7 +62,8 @@ test('an unanswered question in an ended session adds to one stopped-sessions li
     expect(boardScreen(view, [], emptyBoardState, s)).toContain(s.stoppedAsking(3))
     expect(serveModel(view, [], s).stoppedAsking).toBe(3)
     // The page words the line as the count of its Older questions, from the same model number.
-    expect(servePage(s, 'n')).toContain("plural('pgOlder', count.older)")
+    expect(servePage(s, 'n')).toContain("plural('pgOlder', count.older - olderAnswered)")
+    expect(servePage(s, 'n')).toContain("plural('pgOlderAnswered', olderAnswered)")
     for (const quiet of [[], parseProgress('## Synthetic\n### Quiet work\n- [ ] Finish\n')]) {
       const empty = buildView(quiet, [], null, STOPPED_NOW, 0, {}, s, [], {}, emptyQuestions())
       expect(Object.hasOwn(empty, 'stoppedAsking')).toBe(false)

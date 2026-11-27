@@ -1074,7 +1074,7 @@ const PAGE_WORDS = [
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressTimedOut', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
-  'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
+  'pgOlder', 'pgOlderOne', 'pgOlderAnswered', 'pgOlderAnsweredOne', 'pgSeeAll', 'pgMore', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
   'settingsLanguageChanged', 'settingsLanguageOverridden', 'settingsNotifications', 'settingsOn', 'settingsOff', 'settingsDenied', 'settingsUnavailable', 'settingsChanged', 'settingsLanguage',
   'settingsAgentSetup', 'settingsAgentRemove', 'settingsAgentConfirm', 'settingsAgentCancel', 'settingsAgentsBusy', 'settingsAgentsReadFailed',
   'awayForMinutes', 'awayForHours', 'awayAskedNamedOne', 'awayAskedNamed', 'awayAskedGenericOne', 'awayAskedGenericOneAgent', 'awayAskedGeneric',
@@ -3731,11 +3731,17 @@ const PAGE_SCRIPT = String.raw`
     document.title = waitingShown ? w('pgTabTitle', waitingShown) : 'Agent Board';
     if (pg.model && pg.model.view) setText(pg.nodes.workingEmpty, quietLine(pg.model.view.quiet, pg.model.view.now));
     reveal(pg.nodes.workingEmpty, count.working === 0 && !isFiltered);
-    // The line counts every older question the filters allow, drawn or not.
-    if (pg.olderRefs) count.older = pg.olderRefs.filter(function (ref) { return matches(agentOf(ref), projectOf(ref), interfaceOf(ref), searchHaystack(ref), tokens); }).length;
+    // The line counts every older question the filters allow, drawn or not. Its words count only those with no answer
+    // handed to their session; answered ones stay on the shelf with their receipt (#1137).
+    var olderAnswered = 0;
+    if (pg.olderRefs) {
+      var olderShown = pg.olderRefs.filter(function (ref) { return matches(agentOf(ref), projectOf(ref), interfaceOf(ref), searchHaystack(ref), tokens); });
+      count.older = olderShown.length;
+      olderAnswered = olderShown.filter(function (ref) { var receipt = source(ref).receipt; return !!receipt && (receipt.status === 'accepted' || receipt.status === 'acknowledged'); }).length;
+    }
     if (pg.nodes.waitingOthersToggle) setText(pg.nodes.waitingOthersToggle, w('groupWaitOthersCount', count.waitingOthers));
     reveal(pg.nodes.waitingOthersBlock, count.waitingOthers > 0);
-    if (pg.nodes.olderLine) setText(pg.nodes.olderLine, plural('pgOlder', count.older));
+    if (pg.nodes.olderLine) setText(pg.nodes.olderLine, count.older > olderAnswered ? plural('pgOlder', count.older - olderAnswered) : plural('pgOlderAnswered', olderAnswered));
     reveal(pg.nodes.olderBlock, count.older > 0);
     Object.keys(pg.nodes.counts).forEach(function (name) { setText(pg.nodes.counts[name], name === 'done' ? w('pgDoneWeek', count.done) : count[name]); });
     pg.sections.forEach(function (section) {

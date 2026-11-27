@@ -1047,6 +1047,8 @@ export const EN: Strings = {
   pgNothingHint: 'When an agent asks you something or gets stuck, it shows up here, and the tab title shows a number.',
   pgOlder: (n: number): string => `${n} older questions still unanswered (their chats have stopped)`,
   pgOlderOne: (n: number): string => `${n} older question still unanswered (its chat has stopped)`,
+  pgOlderAnswered: (n: number): string => `${n} older questions already answered from the board (receipts below)`,
+  pgOlderAnsweredOne: (n: number): string => `${n} older question already answered from the board (receipt below)`,
   awayForMinutes: (n: number): string => `Away for ${n} min`,
   awayForHours: (n: number): string => `Away for ${n} h`,
   awayAskedNamedOne: (agent: string): string => `${agent} asked a question`,

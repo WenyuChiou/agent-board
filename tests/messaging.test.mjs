@@ -1543,6 +1543,38 @@ test('an answered question kept on the Older shelf still says its answer was del
   assert.ok(page.text().includes(model.older[0].receipt.shown.line), page.text())
 })
 
+test('the Older line counts only questions with no answer handed over, and an answered one still shows its receipt below it (#1137)', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now()
+  const answered = answeredBy(mailboxSeed(now), 'older-answered', 'synthetic-q1', now)
+  const kept = [keptQuestion('synthetic-q1', 'First?'), keptQuestion('synthetic-q2', 'Second?')]
+  const model = keptModel(answered.messages, now, kept)
+  assert.equal(model.older[0].receipt.status, 'accepted')
+  assert.equal(model.older[1].receipt, undefined)
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  const text = page.text()
+  assert.ok(text.includes('1 older question still unanswered (its chat has stopped)'), text)
+  assert.ok(!text.includes('2 older questions still unanswered'), text)
+  assert.ok(text.includes(model.older[0].receipt.shown.line), text)
+})
+
+test('when every Older question was answered the Older line says so and does not call the chats stopped (#1137)', async () => {
+  const { servePage } = await import('../hooks/serve.ts')
+  const { pageDom } = await import('./e2e/lib/surfaces.mjs')
+  const now = Date.now()
+  const first = answeredBy(mailboxSeed(now), 'older-one', 'synthetic-q1', now)
+  const second = answeredBy({ messages: first.messages, mailboxes: mailboxSeed(now).mailboxes }, 'older-two', 'synthetic-q2', now + 10)
+  const model = keptModel(second.messages, now, [keptQuestion('synthetic-q1', 'First?'), keptQuestion('synthetic-q2', 'Second?')])
+  const page = await pageDom(servePage(EN, 'synthetic-nonce'), model, async () => ({ ok: true, json: async () => ({ ok: true }) }))
+  const text = page.text()
+  assert.ok(text.includes('2 older questions already answered from the board (receipts below)'), text)
+  assert.ok(!text.includes('unanswered'), text)
+  assert.ok(!text.includes('have stopped'), text)
+  assert.ok(text.includes(model.older[0].receipt.shown.line), text)
+  assert.ok(text.includes(model.older[1].receipt.shown.line), text)
+})
+
 test('a question kept on the Older shelf shows no delivery line when nothing was sent to its session from the board', async () => {
   const { servePage } = await import('../hooks/serve.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
