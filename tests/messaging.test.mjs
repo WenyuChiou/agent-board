@@ -6356,7 +6356,10 @@ test('a Codex claim that meets a busy thread still goes back to the queue after 
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
     await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
-    const { claimed } = await codexMessage(board, 'AB-CX-001')
+    // The claim is still the receiver's here; a claim already given back would leave nothing for the pause to test.
+    const { status, claimed } = await codexMessage(board, 'AB-CX-001')
+    assert.ok(claimed > 0)
+    assert.equal(status, 'uncertain')
     // A runner's pause: the receiver's looks get no answer until more than the claim's whole 3 s have passed since the board's
     // claim. On the wall clock the claim ran out meanwhile, nothing was given back, and the message was never delivered.
     writeFileSync(hold, '')
