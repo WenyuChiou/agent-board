@@ -5373,7 +5373,7 @@ export const LINES = [
 "var handledOnly = (messaging) => ({",
 "  connections: [],",
 "  mailboxes: [],",
-"  ...messaging.connections.length > 0 || (messaging.mailboxes?.length ?? 0) > 0 ? { surfaces: { connections: surfaceOnly(messaging.connections), mailboxes: surfaceOnly(messaging.mailboxes) } } : messaging.surfaces === undefined ? {} : { surfaces: messaging.surfaces },",
+"  ...(messaging.connections?.length ?? 0) > 0 || (messaging.mailboxes?.length ?? 0) > 0 ? { surfaces: { connections: surfaceOnly(messaging.connections), mailboxes: surfaceOnly(messaging.mailboxes) } } : messaging.surfaces === undefined ? {} : { surfaces: messaging.surfaces },",
 "  messages: messaging.messages.map((one) => {",
 "    const isSurfaceLost = isMailboxSurfaceLost(one, messaging.mailboxes);",
 "    return {",

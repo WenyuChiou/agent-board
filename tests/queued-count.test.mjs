@@ -313,6 +313,8 @@ test('the network page model counts a queued answer as handled, from state that 
   assert.ok(!kept.includes(SECRET), kept)
   assert.ok(!JSON.stringify(phone).includes(SECRET))
   assert.deepEqual(handledOnly(messaging).connections, [])
+  assert.deepEqual(handledOnly({ messages: [] }).connections, [])
+  assert.equal(handledOnly({ messages: [] }).surfaces, undefined)
 })
 
 // Greptile P1 on #1339 (round 2 of the same class, R6): a stuck card's handled decision came from the reachable

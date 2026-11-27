@@ -492,7 +492,7 @@ const surfaceOnly = (list: readonly Connection[] = []): Connection[] => list.map
 export const handledOnly = (messaging: Messaging): Messaging => ({
   connections: [],
   mailboxes: [],
-  ...(messaging.connections.length > 0 || (messaging.mailboxes?.length ?? 0) > 0
+  ...((messaging.connections?.length ?? 0) > 0 || (messaging.mailboxes?.length ?? 0) > 0
     ? { surfaces: { connections: surfaceOnly(messaging.connections), mailboxes: surfaceOnly(messaging.mailboxes) } }
     : messaging.surfaces === undefined ? {} : { surfaces: messaging.surfaces }),
   messages: messaging.messages.map(one => {
