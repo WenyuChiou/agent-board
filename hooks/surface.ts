@@ -7,6 +7,8 @@
 
 export type Surface = 'text' | 'terminal' | 'page'
 
+// Variables set inside an active agent session (not user-profile config/home folders
+// like OPENCODE_CONFIG_DIR or HERMES_HOME, which a person may set over SSH; #1283).
 export const AGENT_ENV_VARS = [
   'CLAUDECODE',
   'CLAUDE_CODE',
@@ -14,16 +16,10 @@ export const AGENT_ENV_VARS = [
   'CURSOR_AGENT',
   'CURSOR_SESSION_ID',
   'OPENCODE',
-  'OPENCODE_CONFIG_DIR',
   'GEMINI_CLI',
   'GROK_SESSION_ID',
   'MUSE_SESSION_ID',
-  'MUSE_HOME',
-  'HERMES_HOME',
   'HERMES_SESSION_ID',
-  'OPENCLAW_STATE_DIR',
-  'DSH_HOME',
-  'DEEPSEEK_HOME',
   'AGENT_BOARD_AGENT',
   'AGENT_BOARD_SESSION_ID',
   'AGENT_BOARD_HOST_PID',
