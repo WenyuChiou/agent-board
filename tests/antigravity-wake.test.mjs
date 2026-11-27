@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import fs, { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import fs, { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, rmdirSync, statSync, truncateSync, writeFileSync } from 'node:fs'
 import { registerHooks, syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -17,9 +17,10 @@ registerHooks({ resolve(specifier, context, next) {
     return next(`${specifier}.ts`, context)
   }
 } })
-const { createMessaging, readTurnOrder, markTurnOrder, openTurnRecord } = await import('../scripts/board-messaging.ts')
+const { createMessaging, readTurnLog, startSeq, appendTurnStop } = await import('../scripts/board-messaging.ts')
 const { RECEIVER_ROUTES } = await import('../hooks/receiver-routes.ts')
-const { mailboxId, SIDECAR_ALIVE_MS, WAKE_IDLE_MS } = await import('../hooks/hook-messages.ts')
+const { mailboxId, SIDECAR_ALIVE_MS, WAKE_IDLE_MS, turnsOfLog } = await import('../hooks/hook-messages.ts')
+const { sha256 } = await import('../hooks/sha256.ts')
 const { ANTIGRAVITY_POLL_MS } = await import('../hooks/antigravity-sidecar.ts')
 const { serveModel, servePage } = await import('../hooks/serve.ts')
 const { parseProgress } = await import('../hooks/parse.ts')
@@ -33,14 +34,18 @@ const IDE = 'IDE', TUI = 'agy TUI'
 const APP = '0b6d6e0e-6f43-4c0b-9a58-3f1a7e3a1c11', APP_2 = '2d8f8a2a-8165-4e2d-9c7a-5a3c9a5c3e33', TERMINAL = '1c7e7f1f-7054-4d1c-8b69-4f2b8f4b2d22'
 const T = Date.UTC(2026, 10, 16, 12)
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/
+// A line of the turn log is written whole with a newline on each side (D2, #1396): a start is 36 bytes, a Stop at most 67.
+const START_LINE = /^\nS [0-9a-f]{32}\n$/
+const STOP_LINE = /^\nE \d+ \d+ [0-9a-f]{32}\n$/
 
-// A board's message store with its gate, and beside it each conversation's turn order file, by the name Antigravity's
-// hooks give it, written here as they write it: a turn start adds one to `started` and sends that number with its take, a
-// Stop sets `stopped` to it. `reports` holds when each conversation's progress rows last read waiting (a conversation
-// missing from it is working) and `written` when they were last written, in whole seconds as rows keep them: this board
-// reads neither for a wake, the board at e8025827 read both. That board also took the Stop by a call (`mailbox-idle`, with
-// the hook's time) and refuses a take's `seq`; this one refuses the call, so both answer UNKNOWN_FIELD and go on, as the
-// hook does for `seq`.
+// A board's message store with its gate, and beside it each conversation's turn log, by the name Antigravity's hooks give
+// it, written here as they write it (D2, #1396): a turn start appends one line `S <token>` and sends its number, the
+// line's place among the starts, with its take; a Stop reads the log's size first and later appends `E <size> <at> <token>`,
+// which ends every start that begins before that size. `reports` holds when each conversation's progress rows last read
+// waiting (a conversation missing from it is working) and `written` when they were last written, in whole seconds as rows
+// keep them: this board reads neither for a wake, the board at e8025827 read both. That board also took the Stop by a call
+// (`mailbox-idle`, with the hook's time) and refuses a take's `seq`; this one refuses the call, so both answer
+// UNKNOWN_FIELD and go on, as the hook does for `seq`.
 const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T - 20_000 }, written = { ...reports }, onTurns = () => {}) => {
   const dir = mkdtempSync(join(tmpdir(), 'agy-wake-'))
   const messages = join(dir, 'messages')
@@ -48,27 +53,28 @@ const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T
     routes: RECEIVER_ROUTES,
     stateOfSession: (_agent, session) => reports[session] === undefined ? 'working' : 'idle',
     writtenOfSession: (_agent, session) => written[session],
-    turnsOfSession: (agent, session) => { onTurns(agent, session); return readTurnOrder(messages, agent, session) },
+    // The log is read first, then `onTurns` runs, so a line it appends comes after the read, as a hook's does.
+    turnsOfSession: (agent, session) => { const turns = readTurnLog(messages, agent, session); onTurns(agent, session); return turns },
   })
   // A row is written again at each hook event and report, never back in time, and keeps whole seconds.
   const write = (session, now) => { written[session] = Math.max(written[session] ?? 0, Math.floor(now / 1000) * 1000) }
-  const order = session => join(messages, `${mailboxId('antigravity', session)}.turns.json`)
-  const turns = session => existsSync(order(session)) ? JSON.parse(readFileSync(order(session), 'utf8')) : { started: 0, stopped: 0, stoppedAt: 0 }
-  // A turn start's record (D1, #1612): the hook makes it before anything else and with no lock, named by a random token, never
-  // by a date; the turn's Stop lists the records first, then writes its number with `closed`, the names it listed, and removes
-  // exactly those. A start writes no `closed`.
-  const opened = session => `${mailboxId('antigravity', session)}.turns.open.`
-  const records = session => readdirSync(messages).filter(name => name.startsWith(opened(session)))
+  const log = session => join(messages, `${mailboxId('antigravity', session)}.turns.log`)
+  const text = session => existsSync(log(session)) ? readFileSync(log(session), 'latin1') : ''
+  const sizeOf = session => existsSync(log(session)) ? statSync(log(session)).size : 0
+  // A start is any line that is not blank and does not begin with E; this count is the test's own, apart from the board's.
+  const startsIn = session => text(session).split('\n').filter(line => line !== '' && !line.startsWith('E')).length
   let made = 0
-  const openRecord = session => writeFileSync(join(messages, `${opened(session)}${(made += 1).toString(16).padStart(32, '0')}`), '')
-  const withoutClosed = session => { const { closed: _closed, ...rest } = turns(session); return rest }
-  // The turn-start hook: its start record (unless it cannot be made), its order file write (unless it fails: the take still
-  // carries the number), its row write (unless the event repeats the row's last one, which is not written again), then its
-  // take (unless it never reaches the board), with the claim name a hook gives it when one is passed.
-  const enroll = (session, surface, now, ref, { isOpenLost = false, isFileLost = false, isRowKept = false, isTakeLost = false } = {}) => {
-    if (!isOpenLost) openRecord(session)
-    const seq = turns(session).started + 1
-    if (!isFileLost) writeFileSync(order(session), JSON.stringify({ ...withoutClosed(session), started: seq }))
+  const token = () => (made += 1).toString(16).padStart(32, '0')
+  const append = (session, line) => appendFileSync(log(session), line, 'latin1')
+  // A start's line, appended whole; it answers the start's number.
+  const appendStart = session => { append(session, `\nS ${token()}\n`); return startsIn(session) }
+  // The turn-start hook: its start line (unless it cannot be appended: the take still carries the count plus one), its row
+  // write (unless the event repeats the row's last one, which is not written again), then its take (unless it never reaches
+  // the board), with the claim name a hook gives it when one is passed. `seq` names a line the hook appended already.
+  const enroll = (session, surface, now, ref, { isAppendLost = false, isRowKept = false, isTakeLost = false, seq: given } = {}) => {
+    const before = startsIn(session)
+    if (given === undefined && !isAppendLost) append(session, `\nS ${token()}\n`)
+    const seq = given ?? before + 1
     if (!isRowKept) write(session, now)
     if (isTakeLost) return null
     const body = { agent: 'antigravity', session, surface, ...(ref === undefined ? {} : { ref }) }
@@ -81,13 +87,11 @@ const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T
   const stopCall = (session, at) => {
     try { hub.act('mailbox-idle', { agent: 'antigravity', session, at }, at) } catch (error) { if (error.message !== 'UNKNOWN_FIELD') throw error }
   }
-  // A turn's Stop hook at `at`: it lists the start records, ends the turn last started in the order file with `closed` naming
-  // them and removes them, and writes its row as waiting; its call follows at once unless it is late (`stopCall` then sends
-  // it). With `isOpenKept` it is a hook from before D1 that died after writing its number: no `closed`, no record removed.
-  const stop = (session, at, isCallLate = false, { isOpenKept = false } = {}) => {
-    const listed = records(session)
-    writeFileSync(order(session), JSON.stringify({ ...withoutClosed(session), stopped: turns(session).started, stoppedAt: at, ...(isOpenKept ? {} : { closed: listed }) }))
-    if (!isOpenKept) for (const name of listed) rmSync(join(messages, name))
+  // A turn's Stop hook at `at`: it reads the log's size as its first act (`size` passes one read earlier), appends its one
+  // line `E <size> <at> <token>`, which ends every start that begins before that size, and writes its row as waiting; its
+  // call follows at once unless it is late (`stopCall` then sends it).
+  const stop = (session, at, isCallLate = false, { size } = {}) => {
+    append(session, `\nE ${size ?? sizeOf(session)} ${at} ${token()}\n`)
     reports[session] = at
     write(session, at)
     if (!isCallLate) stopCall(session, at)
@@ -100,7 +104,9 @@ const world = (reports = { [APP]: T - 20_000, [APP_2]: T - 20_000, [TERMINAL]: T
   const poll = now => hub.act('wake-poll', { agent: 'antigravity' }, now)
   const shown = (id, now) => hub.snapshot(now).messages.find(one => one.id === id)
   const saved = id => JSON.parse(readFileSync(join(dir, 'messages', 'messages.json'), 'utf8')).messages.find(one => one.id === id)
-  return { hub, reports, written, order, records, openRecord, enroll, stop, stopCall, report, ready, send, poll, shown, saved, close: () => { hub.close(); rmSync(dir, { recursive: true, force: true }) } }
+  // The sidecar's nonce for a message, worked out from the message as the board does (the board keeps none).
+  const nonceOf = id => sha256(`wake:${id}:${saved(id).hash}`).slice(0, 16)
+  return { hub, reports, written, log, text, sizeOf, startsIn, append, appendStart, enroll, stop, stopCall, report, ready, send, poll, shown, saved, nonceOf, close: () => { hub.close(); rmSync(dir, { recursive: true, force: true }) } }
 }
 const using = async fn => {
   const w = world()
@@ -247,7 +253,7 @@ test('a turn start whose board call failed starts no wake while its progress row
   w.poll(T)
   // Sent within 10 s of the Stop, on the idle route.
   assert.equal(w.send(APP, 'm-mid', T + 2000).line, 'now')
-  // A new turn starts: its hook numbers it in the order file and writes the progress row as working, but its take never
+  // A new turn starts: its hook appends its line to the turn log and writes the progress row as working, but its take never
   // reaches the board.
   assert.equal(w.enroll(APP, IDE, T + 3000, undefined, { isTakeLost: true }), null)
   delete w.reports[APP]
@@ -343,21 +349,21 @@ test('a wall clock set back between a Stop and the next take starts no wake', ()
   assert.deepEqual(w.poll(T + 20_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-back'])
 }))
 
-test('a failed order-file write with a take that reached the board starts no wake', () => using(w => {
+test('a turn start whose line cannot be appended but whose take reached the board starts no wake', () => using(w => {
   w.enroll(APP, IDE, T - 30_000)
   w.poll(T - 1000)
   w.stop(APP, T, true)
-  // The next turn's order file write fails, so the file still reads that turn's Stop as the last event; its take carries
-  // the number the write would have saved, and reaches the board.
-  assert.equal(w.enroll(APP, IDE, T + 1000, undefined, { isFileLost: true }), null)
+  // The next turn's line cannot be appended, so the log still reads that turn's Stop as the last event; its take carries
+  // the start count plus one, and reaches the board.
+  assert.equal(w.enroll(APP, IDE, T + 1000, undefined, { isAppendLost: true }), null)
   delete w.reports[APP]
   w.report(APP, T + 1500)
   assert.equal(w.send(APP, 'm-seq', T + 1600).line, 'now')
   w.stopCall(APP, T + 2000)
   assert.deepEqual(w.poll(T + 15_000), { wakes: [] })
   assert.equal(w.hub.snapshot(T + 15_000).mailboxes[0].busySeq, 2)
-  // That turn's Stop reads only the file's number, so the numbers meet again after the next turn, whose take hands the
-  // message over.
+  // That turn's Stop can end only the one start the log holds, so the numbers meet again after the next turn, whose take
+  // hands the message over.
   w.stop(APP, T + 30_000)
   assert.deepEqual(w.poll(T + 30_000 + WAKE_IDLE_MS), { wakes: [] })
   assert.equal(w.enroll(APP, IDE, T + 50_000).id, 'm-seq')
@@ -368,144 +374,134 @@ test('a failed order-file write with a take that reached the board starts no wak
   assert.throws(() => w.hub.act('mailbox-turn', { agent: 'gemini', session: 'synthetic-gemini', surface: 'CLI', seq: 1 }, T + 52_000), /INVALID_MAILBOX_CALL/)
 }))
 
-test('no order file holds the wake', () => using(w => {
+test('no turn log, or one that cannot be read, holds the wake', () => using(w => {
   w.ready(APP)
   w.poll(T)
   assert.equal(w.send(APP, 'm-file', T).line, 'now')
-  const kept = readFileSync(w.order(APP), 'utf8')
-  rmSync(w.order(APP))
+  const kept = readFileSync(w.log(APP))
+  rmSync(w.log(APP))
   assert.deepEqual(w.poll(T + 1000), { wakes: [] })
-  // One that cannot be read holds too, as does one whose numbers do not add up.
-  for (const text of ['{', 'null', JSON.stringify({ started: 1, stopped: 1 }), JSON.stringify({ started: 1, stopped: 2, stoppedAt: T - 20_000 }), JSON.stringify({ started: 1.5, stopped: 1, stoppedAt: T - 20_000 })]) {
-    writeFileSync(w.order(APP), text)
-    assert.deepEqual(w.poll(T + 1000), { wakes: [] }, text)
-  }
-  writeFileSync(w.order(APP), kept)
+  // A directory in its place holds too.
+  mkdirSync(w.log(APP))
+  assert.deepEqual(w.poll(T + 1000), { wakes: [] })
+  rmdirSync(w.log(APP))
+  // So does a log over the 16 MB the board reads (a sparse file of that size, written only in its first bytes).
+  writeFileSync(w.log(APP), kept)
+  truncateSync(w.log(APP), 16 * 1024 * 1024 + 1)
+  assert.deepEqual(w.poll(T + 1000), { wakes: [] })
+  writeFileSync(w.log(APP), kept)
   assert.equal(w.poll(T + 2000).wakes[0]?.id, 'm-file')
 }))
 
-test('an order file whose lock is there holds the wake', () => using(w => {
-  w.ready(APP)
+test('a Stop that read the log\'s size before the next turn\'s take does not end that turn, whose line could not be appended (codex_786)', () => using(w => {
+  // The turn's start line is in the log, and a Stop hook reads the log's size as its first act, before its input.
+  w.enroll(APP, IDE, T - 40_000)
+  const size = w.sizeOf(APP)
+  assert.equal(size, 36)
+  // The next turn starts while that Stop is still working: its line cannot be appended, and its take sends the count plus one.
+  delete w.reports[APP]
+  assert.equal(w.enroll(APP, IDE, T - 30_000, undefined, { isAppendLost: true }), null)
+  assert.equal(w.hub.snapshot(T - 30_000).mailboxes[0].busySeq, 2)
+  // The Stop appends its line with the size it read first, then the model reports waiting and a message is sent.
+  w.stop(APP, T - 20_000, false, { size })
+  assert.match(w.text(APP).slice(36), STOP_LINE)
+  assert.deepEqual(turnsOfLog(w.text(APP)), { started: 1, stopped: 1, stoppedAt: T - 20_000, size: w.sizeOf(APP) })
   w.poll(T)
-  w.send(APP, 'm-lock', T)
-  const [wake] = w.poll(T + 1000).wakes
-  assert.equal(wake?.id, 'm-lock')
-  // A hook is writing the next turn's number, or died holding the lock, so the file may be one turn behind: no wake
-  // until the lock is gone, at the poll and at the attempt alike.
-  const lock = `${w.order(APP)}.lock`
-  writeFileSync(lock, JSON.stringify({ version: 1, pid: process.pid, started: T, token: 'b'.repeat(32) }))
-  assert.deepEqual(w.poll(T + 1500), { wakes: [] })
-  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1500), { ok: false, code: 'NOT_HELD' })
-  rmSync(lock)
-  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 2000), { ok: true })
-}))
-
-test('a wake-attempt reads the order file while it holds the file\'s lock, so a turn start writes before that read or waits until the board has answered', async () => {
-  const reads = []
-  let lock
-  const w = world(undefined, undefined, () => { if (lock !== undefined) reads.push(existsSync(lock)) })
-  try {
-    w.ready(APP)
-    w.poll(T)
-    w.send(APP, 'm-under', T)
-    const [wake] = w.poll(T + 1000).wakes
-    lock = `${w.order(APP)}.lock`
-    assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), { ok: true })
-    // Every read the attempt made was under the lock, which is gone again once it answers, with the start saved.
-    assert.ok(reads.length > 0)
-    assert.deepEqual(reads.filter(isHeld => !isHeld), [])
-    assert.equal(existsSync(lock), false)
-    assert.equal(w.saved('m-under').woke, T + 1000)
-  } finally { w.close() }
-})
-
-// Design A (design diagnosis 4 on #1396; the owner's choice of 2026-11-20): a turn start's hook makes a record first, with
-// no lock, so a start the order file does not show yet still holds the wake.
-test('a turn start whose order-file write and take both fail is held by its start record until its Stop, and one whose record cannot be made is held by its count', () => using(w => {
-  w.ready(APP); w.ready(APP_2)
-  w.poll(T)
-  w.send(APP, 'm-record', T)
-  w.send(APP_2, 'm-count', T)
-  const [wake] = w.poll(T + 1000).wakes
-  assert.equal(wake?.id, 'm-record')
-  // In APP only the record says a turn runs: the order file still reads the last turn's Stop, and no take came. In APP_2
-  // the record could not be made, and the order file holds the turn's number.
-  assert.equal(w.enroll(APP, IDE, T + 1200, undefined, { isFileLost: true, isTakeLost: true }), null)
-  assert.equal(w.enroll(APP_2, IDE, T + 1200, undefined, { isOpenLost: true, isTakeLost: true }), null)
-  assert.equal(w.records(APP).length, 1)
-  assert.deepEqual(w.records(APP_2), [])
-  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1300), { ok: false, code: 'NOT_HELD' })
+  assert.equal(w.send(APP, 'm-786', T).line, 'now')
+  // Ten seconds on: one stopped against a take that sent two, so no wake is listed and an attempt is refused.
   assert.deepEqual(w.poll(T + 15_000), { wakes: [] })
-  // Each turn's Stop ends the hold: APP's removes its record.
-  w.stop(APP, T + 20_000); w.stop(APP_2, T + 20_000)
-  assert.deepEqual(w.records(APP), [])
-  const [first] = w.poll(T + 20_000 + WAKE_IDLE_MS).wakes
-  assert.equal(first?.id, 'm-record')
-  assert.deepEqual(w.hub.act('wake-attempt', { id: first.id, nonce: first.nonce }, T + 20_000 + WAKE_IDLE_MS), { ok: true })
-  assert.deepEqual(w.poll(T + 21_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-count'])
+  assert.deepEqual(w.hub.act('wake-attempt', { id: 'm-786', nonce: w.nonceOf('m-786') }, T + 15_000), { ok: false, code: 'NOT_HELD' })
+  // That turn's own Stop ends no line of its own, so the hold stays until the next turn's take hands the message over.
+  w.stop(APP, T + 30_000)
+  assert.deepEqual(w.poll(T + 30_000 + WAKE_IDLE_MS), { wakes: [] })
+  const handed = w.enroll(APP, IDE, T + 50_000)
+  assert.equal(handed?.id, 'm-786')
+  w.hub.act('mailbox-accept', { agent: 'antigravity', session: APP, id: handed.id, nonce: handed.nonce }, T + 50_500)
+  w.stop(APP, T + 60_000)
+  w.send(APP, 'm-after', T + 60_000)
+  assert.deepEqual(w.poll(T + 60_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-after'])
 }))
 
-test('a turn start whose record is made while a wake-attempt decides undoes the saved start, so the attempt is refused and the turn takes the message', () => {
-  let isStarting = false
-  const w = world(undefined, undefined, (_agent, session) => { if (isStarting) { isStarting = false; w.openRecord(session, T + 1000) } })
+test('a start appended after a Stop read the log\'s size stays open and holds the wake', () => using(w => {
+  w.enroll(APP, IDE, T - 40_000)
+  const size = w.sizeOf(APP)
+  // The next turn's line lands after the Stop read the size and before its line: it begins at or after that size.
+  w.enroll(APP, IDE, T - 25_000)
+  w.stop(APP, T - 20_000, false, { size })
+  assert.equal(w.text(APP).indexOf('\nS ', 1) >= size, true)
+  assert.deepEqual(turnsOfLog(w.text(APP)), { started: 2, stopped: 1, stoppedAt: T - 20_000, size: w.sizeOf(APP) })
+  w.poll(T)
+  assert.equal(w.send(APP, 'm-open', T).line, 'now')
+  assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
+  // That turn's own Stop reads the log's size after both lines, and the wake follows it by 10 s.
+  w.stop(APP, T + 61_000)
+  assert.deepEqual(w.poll(T + 61_000 + WAKE_IDLE_MS - 1), { wakes: [] })
+  assert.deepEqual(w.poll(T + 61_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-open'])
+}))
+
+test('two Stops that read the same size end the same turns, and a start appended after both reads still holds the wake', () => using(w => {
+  w.enroll(APP, IDE, T - 40_000)
+  const size = w.sizeOf(APP)
+  // The first Stop appends; a new turn's line lands; the second Stop, with the same size, appends after it.
+  w.stop(APP, T - 30_000, false, { size })
+  w.enroll(APP, IDE, T - 24_000)
+  w.stop(APP, T - 20_000, false, { size })
+  assert.deepEqual(turnsOfLog(w.text(APP)), { started: 2, stopped: 1, stoppedAt: T - 20_000, size: w.sizeOf(APP) })
+  w.poll(T)
+  w.send(APP, 'm-overlap', T)
+  assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
+  // That turn's own Stop ends it, and the wake goes in 10 s later.
+  w.stop(APP, T + 61_000)
+  assert.deepEqual(w.poll(T + 61_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-overlap'])
+}))
+
+test('a Stop ends every start that begins before the size it read, in one appended line', () => using(w => {
+  // Two model calls of one turn each appended a start line.
+  w.enroll(APP, IDE, T - 40_000)
+  w.enroll(APP, IDE, T - 39_000)
+  const before = w.text(APP)
+  assert.equal(before.length, 72)
+  w.stop(APP, T - 20_000)
+  const added = w.text(APP).slice(before.length)
+  assert.equal(w.text(APP).startsWith(before), true)
+  assert.equal(added.startsWith(`\nE 72 ${T - 20_000} `), true)
+  assert.match(added, STOP_LINE)
+  assert.deepEqual(turnsOfLog(w.text(APP)), { started: 2, stopped: 2, stoppedAt: T - 20_000, size: w.sizeOf(APP) })
+  // The standing edge: a next turn whose line landed before the size was read is ended by that Stop too.
+  w.enroll(APP, IDE, T - 10_000)
+  w.stop(APP, T - 9_000)
+  assert.deepEqual(turnsOfLog(w.text(APP)), { started: 3, stopped: 3, stoppedAt: T - 9_000, size: w.sizeOf(APP) })
+  // No lock and no temporary file is left (the board's own server lock is not the Stop's).
+  assert.deepEqual(readdirSync(dirname(w.log(APP))).filter(name => name.includes('.turns.') && !name.endsWith('.turns.log')), [])
+}))
+
+test('a line appended while a wake-attempt decides undoes the saved start, so the attempt is refused and the turn takes the message', () => {
+  let isStarting = false, seq
+  const w = world(undefined, undefined, (_agent, session) => { if (isStarting) { isStarting = false; seq = w.appendStart(session) } })
   try {
     w.ready(APP)
     w.poll(T)
     w.send(APP, 'm-undo', T)
     const [wake] = w.poll(T + 1000).wakes
-    // The person starts a turn as the attempt reads the order file: the hook's record comes after the attempt first looked,
-    // and its order-file write waits for the attempt's lock.
+    // The person starts a turn as the attempt reads the log: the hook's line lands after the attempt's read, before its
+    // second look at the log's size.
     isStarting = true
     assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), { ok: false, code: 'NOT_HELD' })
     assert.equal(isStarting, false)
     assert.equal(w.saved('m-undo').woke, undefined)
     assert.deepEqual(w.poll(T + 1100), { wakes: [] })
-    // The turn's hook goes on with its order-file write and its take, which hands the message over.
-    assert.equal(w.enroll(APP, IDE, T + 1200, undefined, { isOpenLost: true }).id, 'm-undo')
+    // The turn's hook goes on with its take, which hands the message over.
+    assert.equal(w.enroll(APP, IDE, T + 1200, undefined, { seq }).id, 'm-undo')
   } finally { w.close() }
 })
 
-test('a Stop that wrote its number but died before removing its turn\'s record holds the wake until the next Stop', () => using(w => {
-  w.enroll(APP, IDE, T - 30_000)
-  w.stop(APP, T - 20_000, false, { isOpenKept: true })
-  w.poll(T)
-  assert.equal(w.send(APP, 'm-kept', T).line, 'now')
-  assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
-  // The next turn's take hands the message over. That turn's Stop removes both records, and a message sent after it
-  // goes in at once.
-  const handed = w.enroll(APP, IDE, T + 61_000)
-  assert.equal(handed.id, 'm-kept')
-  w.hub.act('mailbox-accept', { agent: 'antigravity', session: APP, id: handed.id, nonce: handed.nonce }, T + 61_500)
-  w.stop(APP, T + 62_000)
-  assert.deepEqual(w.records(APP), [])
-  w.send(APP, 'm-after', T + 62_000)
-  assert.deepEqual(w.poll(T + 62_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-after'])
-}))
-
-test('an order-file lock a dead hook left holds the wake while it is fresh, and the poll takes it over once 30 s old, so the wake goes in', () => using(w => {
-  w.ready(APP)
-  w.poll(T)
-  w.send(APP, 'm-dead', T)
-  // A Stop hook's worker wrote the order file and died before it removed its lock.
-  const lock = `${w.order(APP)}.lock`
-  const dead = spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid
-  writeFileSync(lock, JSON.stringify({ version: 1, pid: dead, started: Date.now(), token: 'c'.repeat(32) }))
-  assert.deepEqual(w.poll(T + 1000), { wakes: [] })
-  const old = (Date.now() - 31_000) / 1000
-  utimesSync(lock, old, old)
-  const [wake] = w.poll(T + 2000).wakes
-  assert.equal(wake?.id, 'm-dead')
-  assert.equal(existsSync(lock), false)
-  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 2000), { ok: true })
-}))
-
 test('a wake-attempt whose undo cannot be saved answers with an error, so the sidecar sends nothing, and the saved start keeps the message to the turn\'s take', () => {
   const write = fs.writeFileSync
-  let isArmed = false, saves = 0
+  let isArmed = false, saves = 0, seq
   const w = world(undefined, undefined, (_agent, session) => {
     if (!isArmed) return
     isArmed = false
-    w.openRecord(session, T + 1000)
+    seq = w.appendStart(session)
     // The attempt's own save goes through; its undo finds the disk full.
     fs.writeFileSync = (path, ...rest) => {
       if (String(path).includes('messages.json.') && (saves += 1) === 2) throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })
@@ -527,9 +523,32 @@ test('a wake-attempt whose undo cannot be saved answers with an error, so the si
     assert.equal(w.saved('m-full').woke, T + 1000)
     assert.equal(w.shown('m-full', T + 1000).wake, 'started')
     assert.deepEqual(w.poll(T + 1100), { wakes: [] })
-    assert.equal(w.enroll(APP, IDE, T + 1200, undefined, { isOpenLost: true }).id, 'm-full')
+    assert.equal(w.enroll(APP, IDE, T + 1200, undefined, { seq }).id, 'm-full')
   } finally { w.close() }
 })
+
+test('a wake-attempt takes no lock and reads the log\'s size again after saving the start', () => using(w => {
+  w.ready(APP)
+  w.poll(T)
+  w.send(APP, 'm-nolock', T)
+  const [wake] = w.poll(T + 1000).wakes
+  // A lock file an older hook left stays as it is: no lock is read, waited for or made.
+  const lock = join(dirname(w.log(APP)), `${mailboxId('antigravity', APP)}.turns.json.lock`)
+  const held = JSON.stringify({ version: 1, pid: process.pid, started: T, token: 'b'.repeat(32) })
+  writeFileSync(lock, held)
+  // Each time the board looks at the turn log, whether the attempt's start is saved yet.
+  const looks = [], look = fs.lstatSync
+  fs.lstatSync = (path, ...rest) => { if (String(path).endsWith('.turns.log')) looks.push(w.saved('m-nolock').woke !== undefined); return look(path, ...rest) }
+  syncBuiltinESMExports()
+  try {
+    assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), { ok: true })
+  } finally { fs.lstatSync = look; syncBuiltinESMExports() }
+  assert.equal(readFileSync(lock, 'utf8'), held)
+  assert.equal(w.saved('m-nolock').woke, T + 1000)
+  assert.ok(looks.length >= 2, JSON.stringify(looks))
+  assert.equal(looks[0], false)
+  assert.equal(looks.at(-1), true)
+}))
 
 // The windows the owner accepted (docs/dev/plan-0.25.1.md, M5b), two on 2026-11-18 and one on 2026-11-20, pinned as the board
 // meets them.
@@ -538,7 +557,7 @@ test('a turn whose start hook never ran is woken into, the first window the owne
   w.poll(T)
   w.send(APP, 'm-marked', T)
   w.send(APP_2, 'm-unmarked', T)
-  // Both people start a turn whose take never reaches the board. In APP the hook wrote the turn's number, which holds the
+  // Both people start a turn whose take never reaches the board. In APP the hook's line is in the log, which holds the
   // wake; in APP_2 the hook never ran, so nothing on disk or on the board says a turn runs, and the wake goes in.
   assert.equal(w.enroll(APP, IDE, T + 500, undefined, { isTakeLost: true }), null)
   assert.deepEqual(w.poll(T + 1000).wakes.map(one => one.id), ['m-unmarked'])
@@ -563,18 +582,44 @@ test('a turn the person starts after the board\'s yes to a wake takes the messag
   assert.deepEqual(w.poll(T + 60_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-next'])
 }))
 
-test('a turn the person starts just before the board\'s yes, whose hook makes its start record only after the attempt\'s last look, takes the message once, the third window the owner accepted on 2026-11-20', () => using(w => {
+test('a turn the person starts just before the board\'s yes, whose hook appends its start only after the attempt\'s second size read, takes the message once, the third window the owner accepted on 2026-11-20', () => using(w => {
   w.ready(APP)
   w.poll(T)
   w.send(APP, 'm-blind', T)
   const [wake] = w.poll(T + 1000).wakes
-  // The app has begun the person's turn and launched its hook, which has not made its record yet (58 to 94 ms in C3's
+  // The app has begun the person's turn and launched its hook, which has not appended its line yet (58 to 94 ms in C3's
   // runs, plus the app's own delay before it launches the hook): nothing on disk says a turn runs, and the board says yes.
   assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), { ok: true })
   assert.equal(w.saved('m-blind').woke, T + 1000)
-  // The record lands after the attempt's last look, so the start stands; the turn's take hands the message over, once.
+  // The line lands after the attempt's second look, so the start stands; the turn's take hands the message over, once.
   assert.equal(w.enroll(APP, IDE, T + 1090).id, 'm-blind')
   assert.deepEqual(w.poll(T + 1100), { wakes: [] })
+}))
+
+test('a turn start whose line cannot be appended before the board\'s yes takes the message once, the third window\'s write-fault case the owner accepted on 2026-11-26', () => using(w => {
+  w.ready(APP)
+  w.poll(T)
+  w.send(APP, 'm-fault', T)
+  const [wake] = w.poll(T + 1000).wakes
+  // The person starts a turn and neither the worker nor the board script can append its line, so the attempt sees no sign of
+  // it and answers yes. The window lasts until the take lands, at most 2 s.
+  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), { ok: true })
+  // The turn's take hands the message over once, and no second wake follows for that Stop.
+  const handed = w.enroll(APP, IDE, T + 1200, undefined, { isAppendLost: true })
+  assert.equal(handed.id, 'm-fault')
+  w.hub.act('mailbox-accept', { agent: 'antigravity', session: APP, id: handed.id, nonce: handed.nonce }, T + 1250)
+  w.send(APP, 'm-next', T + 1300)
+  assert.deepEqual(w.poll(T + 1400 + WAKE_IDLE_MS), { wakes: [] })
+  // That turn left no line, so its Stop ends nothing new and the take's count keeps the wake held: a delay, never a wake into
+  // a turn. The next turn's take hands the next message over, and the wake follows that turn's Stop.
+  w.stop(APP, T + 20_000)
+  assert.deepEqual(w.poll(T + 20_000 + WAKE_IDLE_MS), { wakes: [] })
+  const next = w.enroll(APP, IDE, T + 40_000)
+  assert.equal(next.id, 'm-next')
+  w.hub.act('mailbox-accept', { agent: 'antigravity', session: APP, id: next.id, nonce: next.nonce }, T + 40_100)
+  w.stop(APP, T + 41_000)
+  w.send(APP, 'm-after', T + 41_000)
+  assert.deepEqual(w.poll(T + 41_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-after'])
 }))
 
 test('a peer message queued before the board message starts no wake while the next turn would take the peer message', () => using(w => {
@@ -613,8 +658,8 @@ test('a woken message whose turn\'s claim is handed back goes back to the queue 
 }))
 
 // Antigravity's real hook (scripts/codex-local.ts) run in a process of its own, `AGY_COUNT` times for one conversation,
-// writing after each run the `started` its order file reads. It waits for the processes named in `AGY_PEERS` to be ready
-// first, so their hooks run at the same time.
+// writing after each run what its turn log reads (null for no log). It waits for the processes named in `AGY_PEERS` to be
+// ready first, so their hooks run at the same time.
 const HOOKS = `
 import { registerHooks } from 'node:module'
 import { existsSync, writeFileSync } from 'node:fs'
@@ -628,7 +673,7 @@ registerHooks({ resolve(specifier, context, next) {
 const { AGY_REPO: repo, AGY_HOME: home, AGY_NAME: name, AGY_EVENT: event, AGY_COUNT: count, AGY_PEERS: peers, AGY_SESSION: session } = process.env
 const load = file => import(new URL(file, repo).href)
 const { runCodexLocal } = await load('scripts/codex-local.ts')
-const { readTurnOrder } = await load('scripts/board-messaging.ts')
+const { readTurnLog } = await load('scripts/board-messaging.ts')
 const { defaultMessagesDirectory } = await load('scripts/runtime-folder.ts')
 const { EN } = await load('hooks/strings-en.ts')
 const root = join(home, '.agent-board'), progress = join(root, 'progress.md')
@@ -639,12 +684,13 @@ while (Date.now() < until && !peers.split(',').every(peer => existsSync(join(hom
 const seen = []
 for (let index = 0; index < Number(count); index += 1) {
   await runCodexLocal(['--agent-status', '--agent', 'antigravity', '--state', event === 'Stop' ? 'waiting' : 'working', '--event', event, '--home', home, '--data-dir', root, '--progress-file', progress], progress, EN, { conversationId: session }, { output: () => {} })
-  seen.push(readTurnOrder(messages, 'antigravity', session)?.started ?? null)
+  const turns = readTurnLog(messages, 'antigravity', session)
+  seen.push(turns === undefined ? null : { started: turns.started, stopped: turns.stopped })
 }
 writeFileSync(join(home, 'seen-' + name + '.json'), JSON.stringify(seen))
 `
 
-test('two hooks of one conversation under the lock get increasing turn numbers', async () => {
+test('two hooks of one conversation with no lock get increasing turn numbers', async () => {
   const { defaultMessagesDirectory } = await import('../scripts/runtime-folder.ts')
   const home = mkdtempSync(join(tmpdir(), 'agy-order-'))
   // The hooks find the messages folder from the environment; without XDG_RUNTIME_DIR it is under this home on every system.
@@ -652,7 +698,7 @@ test('two hooks of one conversation under the lock get increasing turn numbers',
   delete env.XDG_RUNTIME_DIR
   const root = join(home, '.agent-board'), progress = join(root, 'progress.md')
   const messages = defaultMessagesDirectory(progress, home, env, process.platform)
-  const file = join(messages, `${mailboxId('antigravity', APP)}.turns.json`)
+  const file = join(messages, `${mailboxId('antigravity', APP)}.turns.log`)
   // No time limit is passed, so a slow computer only makes the run slower.
   const hooks = (name, event, count, peers = name) => new Promise((done, fail) => {
     const child = spawn(process.execPath, ['--input-type=module', '-e', HOOKS], {
@@ -675,15 +721,21 @@ test('two hooks of one conversation under the lock get increasing turn numbers',
     // Each process reads a larger number after each of its hooks, and no start is lost between the two.
     for (const seen of [first, second]) {
       assert.equal(seen.length, COUNT)
-      assert.ok(seen.every((number, index) => index === 0 || number > seen[index - 1]), JSON.stringify(seen))
+      assert.ok(seen.every((turns, index) => index === 0 || turns.started > seen[index - 1].started), JSON.stringify(seen))
     }
-    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { started: 2 * COUNT, stopped: 0, stoppedAt: 0 })
-    // The conversation's Stop ends the last turn started, at its own time.
-    const before = Date.now()
-    assert.deepEqual(await hooks('stop', 'Stop', 1), [2 * COUNT])
-    const { stopped, stoppedAt } = JSON.parse(readFileSync(file, 'utf8'))
-    assert.equal(stopped, 2 * COUNT)
-    assert.ok(stoppedAt >= before && stoppedAt <= Date.now(), String(stoppedAt))
+    // Sixteen whole start lines, each token once, and no lock or temporary file beside the log.
+    const lines = readFileSync(file, 'latin1').split('\n').filter(line => line !== '')
+    assert.equal(lines.length, 2 * COUNT)
+    assert.ok(lines.every(line => /^S [0-9a-f]{32}$/.test(line)), lines.join(' '))
+    assert.equal(new Set(lines).size, 2 * COUNT)
+    assert.deepEqual(readdirSync(messages).filter(name => name.includes('.turns.') && name !== basename(file)), [])
+    // The conversation's Stop ends the last turn started, at its own time, with the size the log had.
+    const before = Date.now(), size = statSync(file).size
+    assert.deepEqual(await hooks('stop', 'Stop', 1), [{ started: 2 * COUNT, stopped: 2 * COUNT }])
+    const text = readFileSync(file, 'latin1')
+    const [, b, at] = /\nE (\d+) (\d+) [0-9a-f]{32}\n$/.exec(text)
+    assert.equal(Number(b), size)
+    assert.ok(Number(at) >= before && Number(at) <= Date.now(), at)
     // The file is named by the mailbox id, so no session id is in a path a person sees.
     assert.ok(readdirSync(messages).every(name => !name.includes(APP)), readdirSync(messages).join(' '))
   } finally {
@@ -699,8 +751,6 @@ writeFileSync(process.env.AGY_SEEN, JSON.stringify(process.env.AGENT_BOARD_TURN_
 if (process.env.AGY_SLOW) setInterval(() => {}, 1000)
 `
 
-// A lock a live process holds: the hook worker waits for it only briefly.
-const liveLock = () => JSON.stringify({ version: 1, pid: process.pid, started: Math.round(performance.timeOrigin), token: 'a'.repeat(32) })
 // The hook worker (hooks/hook-safety.ts) in a home of its own, with the stand-in board script above. `hook` runs it for one
 // event of APP's conversation and returns the mark it handed the board script, null for none.
 const workerHome = async () => {
@@ -712,9 +762,8 @@ const workerHome = async () => {
   delete env.AGENT_BOARD_TURN_MARK
   const root = join(home, '.agent-board'), progress = join(root, 'progress.md'), script = join(root, 'agent-board.mjs'), worker = join(root, 'agent-board-hook.mjs'), seen = join(home, 'seen.json')
   const messages = defaultMessagesDirectory(progress, home, env, process.platform)
-  const file = join(messages, `${mailboxId('antigravity', APP)}.turns.json`)
-  const opened = `${mailboxId('antigravity', APP)}.turns.open.`
-  const records = () => readdirSync(messages).filter(name => name.startsWith(opened)).sort()
+  const file = join(messages, `${mailboxId('antigravity', APP)}.turns.log`)
+  const text = () => existsSync(file) ? readFileSync(file, 'latin1') : ''
   mkdirSync(root, { recursive: true })
   writeFileSync(script, standIn(HOOK_VERSION))
   writeFileSync(worker, hookWorker(home, script, 'const isBoardRequest = () => false', root))
@@ -732,10 +781,15 @@ const workerHome = async () => {
     const handed = JSON.parse(readFileSync(seen, 'utf8'))
     return handed === null ? null : JSON.parse(handed)
   }
-  return { home, root, messages, file, opened, records, hook, close: () => rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
+  // A preload that refuses the worker's appends to the turn log, every time it is tried, and nothing else.
+  const refuse = join(home, 'refuse.cjs')
+  writeFileSync(refuse, `const fs = require('node:fs'), open = fs.openSync
+fs.openSync = (target, flags, ...rest) => { if (String(target).endsWith('.turns.log') && flags === 'a') throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); return open(target, flags, ...rest) }
+`)
+  return { home, root, messages, file, text, hook, refuse, close: () => rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 // Antigravity's real board script (scripts/codex-local.ts, through HOOKS) for one event of APP's conversation, given the mark
-// a hook worker handed it; it answers what `started` reads after it.
+// a hook worker handed it; it answers what the turn log reads after it.
 const boardRun = (home, name, event, handed) => new Promise((done, fail) => {
   const env = { ...process.env }
   delete env.XDG_RUNTIME_DIR
@@ -756,390 +810,320 @@ const boardHome = async () => {
   delete env.XDG_RUNTIME_DIR
   const progress = join(home, '.agent-board', 'progress.md')
   const messages = defaultMessagesDirectory(progress, home, env, process.platform)
-  const file = join(messages, `${mailboxId('antigravity', APP)}.turns.json`)
-  const opened = `${mailboxId('antigravity', APP)}.turns.open.`
-  const records = () => readdirSync(messages).filter(name => name.startsWith(opened)).sort()
-  return { home, messages, file, opened, records, run: (name, event, handed) => boardRun(home, name, event, handed), close: () => rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
+  const file = join(messages, `${mailboxId('antigravity', APP)}.turns.log`)
+  const text = () => existsSync(file) ? readFileSync(file, 'latin1') : ''
+  return { home, messages, file, text, run: (name, event, handed) => boardRun(home, name, event, handed), close: () => rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 }
 
-test('the hook worker marks an Antigravity turn before the board script runs, so a board script stopped at its deadline still leaves the mark', async () => {
+test('the hook worker appends an Antigravity turn\'s start before the board script runs, so a board script stopped at its deadline still leaves it', async () => {
   const h = await workerHome()
   try {
     // No board has made the messages folder: the worker writes nothing, makes no folder, and hands on no mark, not
     // even one its own parent set.
-    assert.equal(h.hook('PreInvocation', { AGENT_BOARD_TURN_MARK: JSON.stringify({ file: h.file, mark: 'start', count: 9 }) }), null)
+    assert.equal(h.hook('PreInvocation', { AGENT_BOARD_TURN_MARK: JSON.stringify({ file: h.file, mark: 'start', token: 'a'.repeat(32) }) }), null)
     assert.equal(existsSync(h.messages), false)
     mkdirSync(h.messages, { recursive: true })
-    // A board script that never ends is stopped at the worker's deadline and its event is queued; the turn's mark is there.
+    // A board script that never ends is stopped at the worker's deadline and its event is queued; the turn's line is there:
+    // 36 bytes, whole, named by a random token and no date.
     h.hook('PreInvocation', { AGY_SLOW: '1' }, { deadline: Date.now() + 1500 })
-    assert.deepEqual(JSON.parse(readFileSync(h.file, 'utf8')), { started: 1, stopped: 0, stoppedAt: 0 })
-    // The start's record is there too, named by a random token: no date and no process id (D1, #1612).
-    assert.equal(h.records().length, 1)
-    assert.match(h.records()[0].slice(h.opened.length), /^[0-9a-f]{32}$/)
+    assert.match(h.text(), START_LINE)
     assert.equal(readdirSync(join(h.root, 'pending')).filter(name => name.endsWith('.json')).length, 1)
-    // A healthy board script is told which file the worker wrote, which mark and the number it holds. The Stop names the
-    // record it listed in the same write as its number, then removes it.
-    const before = Date.now(), listed = h.records()
-    assert.deepEqual(h.hook('Stop'), { file: h.file, mark: 'stop', count: 1 })
-    const { stopped, stoppedAt, closed } = JSON.parse(readFileSync(h.file, 'utf8'))
-    assert.equal(stopped, 1)
-    assert.ok(stoppedAt >= before && stoppedAt <= Date.now(), String(stoppedAt))
-    assert.deepEqual(closed, listed)
-    assert.deepEqual(h.records(), [])
-    assert.deepEqual(h.hook('PreInvocation'), { file: h.file, mark: 'start', count: 2 })
-    // A lock another process holds is waited for only briefly; the worker then leaves the lock and the mark to the
-    // board script, which can wait longer and take over a dead owner's lock. A start's record is made before the lock, so
-    // it is there when the lock is not taken.
-    const lock = `${h.file}.lock`
-    writeFileSync(lock, liveLock())
-    assert.equal(h.hook('PreInvocation'), null)
-    assert.equal(h.records().length, 2)
-    rmSync(lock)
-    // Nothing else is left beside the order file and the records: no lock and no temporary file.
-    assert.deepEqual(readdirSync(h.messages).sort(), [basename(h.file), ...h.records()].sort())
-  } finally { h.close() }
-})
-
-test('a turn start whose record cannot be made still writes its number at once and hands on that no record was made', async () => {
-  const h = await workerHome()
-  // A stand-in for a disk that refuses the start's record, every time it is tried, and nothing else.
-  const refuse = join(h.home, 'refuse.cjs')
-  writeFileSync(refuse, `const fs = require('node:fs'), write = fs.writeFileSync
-fs.writeFileSync = (target, ...rest) => { if (String(target).includes(${JSON.stringify(h.opened)})) throw Object.assign(new Error('EPERM'), { code: 'EPERM' }); return write(target, ...rest) }
+    // A Stop reads the log's size as its first act, before its input: a start that lands right after that read (a preload
+    // that wraps the read appends one) begins at or after the size the Stop's line names, so it stays open.
+    const late = join(h.home, 'late.cjs')
+    writeFileSync(late, `const fs = require('node:fs'), look = fs.lstatSync
+let isDone = false
+fs.lstatSync = (target, ...rest) => {
+  const found = look(target, ...rest)
+  if (!isDone && String(target).endsWith('.turns.log')) { isDone = true; fs.appendFileSync(target, '\\nS ' + 'e'.repeat(32) + '\\n') }
+  return found
+}
 `)
-  try {
-    mkdirSync(h.messages, { recursive: true })
-    // The number is then the start's first sign that lands (gemini_731 P1 1): once it is written a wake reads the turn as
-    // running. The board script is told to make the record.
-    assert.deepEqual(h.hook('PreInvocation', {}, { nodeArgs: ['--require', refuse] }), { file: h.file, mark: 'start', count: 1, record: false })
-    assert.deepEqual(h.records(), [])
-    const order = readTurnOrder(h.messages, 'antigravity', APP)
-    assert.ok(order !== undefined && order.started > order.stopped, JSON.stringify(order))
+    const before = Date.now()
+    const stopped = h.hook('Stop', {}, { nodeArgs: ['--require', late] })
+    assert.deepEqual(Object.keys(stopped).sort(), ['file', 'mark', 'token'])
+    assert.equal(stopped.file, h.file)
+    assert.equal(stopped.mark, 'stop')
+    assert.match(stopped.token, /^[0-9a-f]{32}$/)
+    const [, b, at, token] = /\nE (\d+) (\d+) ([0-9a-f]{32})\n$/.exec(h.text())
+    assert.equal(Number(b), 36)
+    assert.ok(Number(at) >= before && Number(at) <= Date.now(), at)
+    assert.equal(token, stopped.token)
+    assert.deepEqual(turnsOfLog(h.text()), { started: 2, stopped: 1, stoppedAt: Number(at), size: h.text().length })
+    // A healthy board script is told which file the worker wrote, which mark and the token of its line.
+    const started = h.hook('PreInvocation')
+    assert.deepEqual(Object.keys(started).sort(), ['file', 'mark', 'token'])
+    assert.equal(started.mark, 'start')
+    assert.ok(h.text().endsWith(`\nS ${started.token}\n`))
+    assert.equal(startSeq(h.messages, 'antigravity', APP, started.token), 3)
+    // Nothing else is left beside the log: no lock, no record and no temporary file.
+    assert.deepEqual(readdirSync(h.messages), [basename(h.file)])
   } finally { h.close() }
 })
 
-test('the board script makes the start record when the hook worker handed it a number and no record', async () => {
-  const b = await boardHome()
-  try {
-    mkdirSync(b.messages, { recursive: true })
-    // The worker counted turn 3 but could not make its record.
-    writeFileSync(b.file, JSON.stringify({ started: 3, stopped: 2, stoppedAt: T }))
-    assert.deepEqual(await b.run('a', 'PreInvocation', JSON.stringify({ file: b.file, mark: 'start', count: 3, record: false })), [3])
-    // The board script makes the record and does not count the turn again.
-    assert.equal(b.records().length, 1)
-    assert.deepEqual(JSON.parse(readFileSync(b.file, 'utf8')), { started: 3, stopped: 2, stoppedAt: T })
-  } finally { b.close() }
-})
-
-test('a Stop whose worker cannot take the lock hands its list of start records to the board script, which closes exactly those', async () => {
+test('a turn start the hook worker could not append is appended by the board script, once', async () => {
   const h = await workerHome()
   try {
     mkdirSync(h.messages, { recursive: true })
-    assert.deepEqual(h.hook('PreInvocation'), { file: h.file, mark: 'start', count: 1 })
-    const listed = h.records()
-    // Another process holds the order file's lock through the worker's short wait: the worker writes nothing, removes
-    // nothing, and hands its list on.
-    const lock = `${h.file}.lock`
-    writeFileSync(lock, liveLock())
-    const handed = h.hook('Stop')
-    assert.deepEqual(handed, { file: h.file, mark: 'stop', list: listed })
-    assert.equal(JSON.parse(readFileSync(h.file, 'utf8')).stopped, 0)
-    assert.deepEqual(h.records(), listed)
-    rmSync(lock)
-    // The next turn's record comes after the worker's list. The board script closes exactly the names it was handed.
-    const later = `${h.opened}${'f'.repeat(32)}`
-    writeFileSync(join(h.messages, later), '')
-    assert.deepEqual(await boardRun(h.home, 'stop', 'Stop', JSON.stringify(handed)), [1])
-    assert.deepEqual(h.records(), [later])
-    const order = JSON.parse(readFileSync(h.file, 'utf8'))
-    assert.equal(order.stopped, 1)
-    assert.deepEqual(order.closed, listed)
+    // The log refuses each of the worker's three appends: it hands on nothing and writes nothing.
+    assert.equal(h.hook('PreInvocation', {}, { nodeArgs: ['--require', h.refuse] }), null)
+    assert.equal(existsSync(h.file), false)
+    // The board script appends one line and sends its number.
+    assert.deepEqual(await boardRun(h.home, 'a', 'PreInvocation', undefined), [{ started: 1, stopped: 0 }])
+    assert.match(h.text(), START_LINE)
   } finally { h.close() }
 })
 
-test('the board script\'s Stop removes only this conversation\'s start records from a handed list, never another name', async () => {
+test('the board script takes the start the hook worker appended and does not append the turn again', async () => {
   const b = await boardHome()
   try {
     mkdirSync(b.messages, { recursive: true })
-    writeFileSync(b.file, JSON.stringify({ started: 1, stopped: 0, stoppedAt: 0 }))
-    const own = `${b.opened}${'a'.repeat(32)}`, other = `${mailboxId('antigravity', APP_2)}.turns.open.${'b'.repeat(32)}`
-    const outside = join(dirname(b.messages), 'outside')
-    for (const name of [own, other]) writeFileSync(join(b.messages, name), '')
-    writeFileSync(outside, '')
-    // A handed list comes through the environment: only names of this conversation's records, with no path in them, count.
-    const list = [own, other, '../outside', `${b.opened}x/../../outside`, `${b.opened}x\\..\\..\\outside`, 7]
-    assert.deepEqual(await b.run('stop', 'Stop', JSON.stringify({ file: b.file, mark: 'stop', list })), [1])
-    assert.deepEqual(readdirSync(b.messages).filter(name => name.includes('.turns.open.')), [other])
-    assert.equal(existsSync(outside), true)
-    assert.deepEqual(JSON.parse(readFileSync(b.file, 'utf8')).closed, [own])
+    const one = 'a'.repeat(32), two = 'b'.repeat(32)
+    // Turn one has started and stopped; the worker appended turn two's line, so the board script counts the turn once.
+    writeFileSync(b.file, `\nS ${one}\n\nE 36 5 ${'c'.repeat(32)}\n\nS ${two}\n`)
+    const kept = b.text()
+    assert.equal(startSeq(b.messages, 'antigravity', APP, one), 1)
+    assert.equal(startSeq(b.messages, 'antigravity', APP, two), 2)
+    // A token the log does not hold takes the number of starts plus one.
+    assert.equal(startSeq(b.messages, 'antigravity', APP, 'd'.repeat(32)), 3)
+    assert.deepEqual(await b.run('a', 'PreInvocation', JSON.stringify({ file: b.file, mark: 'start', token: two })), [{ started: 2, stopped: 1 }])
+    assert.equal(b.text(), kept)
+    // A token for another file or for the other mark is not taken: the board script appends the turn itself.
+    assert.deepEqual(await b.run('b', 'PreInvocation', JSON.stringify({ file: `${b.file}.other`, mark: 'start', token: 'd'.repeat(32) })), [{ started: 3, stopped: 1 }])
+    assert.deepEqual(await b.run('c', 'PreInvocation', JSON.stringify({ file: b.file, mark: 'stop', token: 'd'.repeat(32) })), [{ started: 4, stopped: 1 }])
+    assert.equal(b.text().split('\n').filter(line => /^S [0-9a-f]{32}$/.test(line)).length, 4)
+    // A Stop with no mark at all reads the log's size itself and appends its one line, which ends all four.
+    assert.deepEqual(await b.run('d', 'Stop', 'null'), [{ started: 4, stopped: 4 }])
+    // With no log, a start's number is one.
+    rmSync(b.file)
+    assert.equal(startSeq(b.messages, 'antigravity', APP, undefined), 1)
   } finally { b.close() }
 })
 
-// A Stop that died after writing its number and before removing its records leaves the records (and its lock).
-const deadLock = (w, session, age = 31_000) => {
-  const lock = `${w.order(session)}.lock`
-  const dead = spawnSync(process.execPath, ['-e', ''], { windowsHide: true }).pid
-  writeFileSync(lock, JSON.stringify({ version: 1, pid: dead, started: Date.now(), token: 'c'.repeat(32) }))
-  const old = (Date.now() - age) / 1000
-  utimesSync(lock, old, old)
-  return lock
-}
-const diedStop = (w, session, order) => writeFileSync(w.order(session), JSON.stringify({ started: 1, stopped: 1, stoppedAt: T - 20_000, ...order }))
-// Antigravity's real start and Stop (scripts/board-messaging.ts) in a world's messages folder; the start's take goes to the
-// board as the hook sends it.
-const folderOf = w => dirname(w.order(APP))
-const realStart = (w, session, now) => {
-  openTurnRecord(folderOf(w), 'antigravity', session)
-  const seq = markTurnOrder(folderOf(w), 'antigravity', session, 'start', now, 0)
-  return w.hub.act('mailbox-turn', { agent: 'antigravity', session, surface: IDE, seq }, now).message
-}
-const realStop = (w, session, at, listed) => {
-  markTurnOrder(folderOf(w), 'antigravity', session, 'stop', at, 0, listed)
-  w.report(session, at)
-}
-const accept = (w, handed, now) => w.hub.act('mailbox-accept', { agent: 'antigravity', session: APP, id: handed.id, nonce: handed.nonce }, now)
+test('a Stop whose worker cannot append hands the size it read to the board script, which ends exactly the turns before it', async () => {
+  const h = await workerHome()
+  try {
+    mkdirSync(h.messages, { recursive: true })
+    assert.equal(h.hook('PreInvocation').mark, 'start')
+    const size = h.text().length
+    // The log refuses the worker's three appends: it hands on the size it read first and writes nothing.
+    const handed = h.hook('Stop', {}, { nodeArgs: ['--require', h.refuse] })
+    assert.deepEqual(handed, { file: h.file, mark: 'stop', size })
+    assert.equal(h.text().length, size)
+    // The next turn's start lands after the worker's read; the board script appends the size it was handed, so that start stays open.
+    appendFileSync(h.file, `\nS ${'f'.repeat(32)}\n`)
+    assert.deepEqual(await boardRun(h.home, 'stop', 'Stop', JSON.stringify(handed)), [{ started: 2, stopped: 1 }])
+    assert.match(h.text(), new RegExp(`\\nE ${size} \\d+ [0-9a-f]{32}\\n$`))
+  } finally { h.close() }
+})
 
-test('a turn start whose record cannot be made while a wake-attempt holds the lock takes the message once, the third window\'s write-fault case the owner accepted on 2026-11-26', () => using(w => {
-  w.ready(APP)
-  w.poll(T)
-  w.send(APP, 'm-fault', T)
-  const [wake] = w.poll(T + 1000).wakes
-  // The person starts a turn while the attempt holds the lock: the record cannot be made and the number waits for the lock,
-  // so the attempt sees no sign of the turn and answers yes. The window lasts until the number lands, at most 2 s.
-  assert.deepEqual(w.hub.act('wake-attempt', { id: wake.id, nonce: wake.nonce }, T + 1000), { ok: true })
-  // The turn's take hands the message over once, and no second wake follows for that Stop.
-  const handed = w.enroll(APP, IDE, T + 1200, undefined, { isOpenLost: true })
-  assert.equal(handed.id, 'm-fault')
-  accept(w, handed, T + 1250)
-  w.send(APP, 'm-next', T + 1300)
-  assert.deepEqual(w.poll(T + 1400 + WAKE_IDLE_MS), { wakes: [] })
-  // The next wake waits for that turn's Stop.
-  w.stop(APP, T + 20_000)
-  assert.deepEqual(w.poll(T + 20_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-next'])
-}))
-
-test('a Stop writes its turn number and the names of the start records it listed in one file write, then removes exactly those records', () => using(w => {
-  w.ready(APP)
-  realStart(w, APP, T - 9_000)
-  // A second model call of the same turn makes a second record.
-  openTurnRecord(folderOf(w), 'antigravity', APP)
-  const listed = w.records(APP).sort()
-  assert.equal(listed.length, 2)
-  realStop(w, APP, T - 8_000)
-  const order = readTurnOrder(folderOf(w), 'antigravity', APP)
-  assert.equal(order.stopped, order.started)
-  assert.deepEqual(order.closed?.slice().sort(), listed)
-  assert.deepEqual(w.records(APP), [])
-  // No order-file lock and no temporary file is left (the board's own server lock is not the Stop's).
-  assert.deepEqual(readdirSync(folderOf(w)).filter(name => name.endsWith('.turns.json.lock') || name.endsWith('.tmp')), [])
-}))
-
-test('a Stop removes every start record it listed, whatever date is in its name, so a clock set back inside the Stop\'s run keeps no record', () => using(w => {
+test('a Stop size larger than the log is never appended, and a stop line that names a size past itself ends no turn', () => using(async w => {
+  const b = await boardHome()
+  try {
+    mkdirSync(b.messages, { recursive: true })
+    writeFileSync(b.file, `\nS ${'a'.repeat(32)}\n`)
+    // A size handed on counts only when it is a whole number no larger than the log: nothing is appended otherwise.
+    for (const size of [10_000, 37, -1, 1.5, '36', null, Number.NaN]) {
+      assert.equal(appendTurnStop(b.messages, 'antigravity', APP, size), false, String(size))
+      assert.equal(b.text().length, 36)
+    }
+    assert.deepEqual(await b.run('a', 'Stop', JSON.stringify({ file: b.file, mark: 'stop', size: 10_000 })), [{ started: 1, stopped: 0 }])
+    assert.equal(b.text().length, 36)
+    assert.equal(appendTurnStop(b.messages, 'antigravity', APP, 36), true)
+    assert.deepEqual(turnsOfLog(b.text()).stopped, 1)
+  } finally { b.close() }
+  // A line in the log that names a size past its own place is a forgery or a fault: it is ignored, and holds the wake.
   w.enroll(APP, IDE, T - 30_000)
-  const folder = folderOf(w), opened = `${mailboxId('antigravity', APP)}.turns.open.`, now = Date.now()
-  // Names an older hook gave its records: one dated inside the Stop's own run (the clock set back by a small step), one in
-  // the future, one long ago.
-  for (const name of [`${opened}${now - 500}.1`, `${opened}${now + 3_600_000}.2`, `${opened}${now - 3_600_000}.3`]) writeFileSync(join(folder, name), '')
-  const listed = w.records(APP).sort()
-  markTurnOrder(folder, 'antigravity', APP, 'stop', T - 20_000, 0)
-  w.report(APP, T - 20_000)
-  assert.deepEqual(w.records(APP), [])
-  assert.deepEqual(readTurnOrder(folder, 'antigravity', APP).closed?.slice().sort(), listed)
-  // The wake goes in 10 s after this Stop, not after the next one.
+  w.append(APP, `\nE 99999 ${T - 20_000} ${'e'.repeat(32)}\n`)
+  w.append(APP, `\nE ${w.sizeOf(APP) + 1} ${T - 20_000} ${'e'.repeat(32)}\n`)
+  assert.deepEqual(turnsOfLog(w.text(APP)), { started: 1, stopped: 0, stoppedAt: 0, size: w.sizeOf(APP) })
   w.poll(T)
-  w.send(APP, 'm-set-back', T)
-  assert.deepEqual(w.poll(T + 1000).wakes.map(one => one.id), ['m-set-back'])
-}))
-
-test('a start record made after a Stop took its list stays and holds the wake, whatever date its name holds', () => using(w => {
-  w.enroll(APP, IDE, T - 30_000)
-  const folder = folderOf(w), listed = w.records(APP)
-  // The next turn's record comes after the Stop took its list and before the Stop writes; an older hook would have dated it
-  // long before the Stop.
-  const later = `${mailboxId('antigravity', APP)}.turns.open.${T - 3_600_000}.1`
-  writeFileSync(join(folder, later), '')
-  realStop(w, APP, T - 20_000, listed)
-  assert.deepEqual(w.records(APP), [later])
-  assert.deepEqual(readTurnOrder(folder, 'antigravity', APP).closed, listed)
-  w.poll(T)
-  w.send(APP, 'm-later', T)
+  w.send(APP, 'm-forged', T)
   assert.deepEqual(w.poll(T + 1000), { wakes: [] })
+  // A line that names exactly its own place is whole: a Stop that read the size just before it.
+  w.append(APP, `\nE ${w.sizeOf(APP)} ${T - 20_000} ${'e'.repeat(32)}\n`)
+  assert.equal(turnsOfLog(w.text(APP)).stopped, 1)
+  assert.deepEqual(w.poll(T + 1000).wakes.map(one => one.id), ['m-forged'])
 }))
 
-test('a start record named in the closed list of a Stop that died after writing its number holds no wake, and the wake goes in once the poll has taken the dead Stop\'s lock over', () => using(w => {
-  w.enroll(APP, IDE, T - 30_000)
-  diedStop(w, APP, { closed: w.records(APP) })
-  const lock = deadLock(w, APP, 0)
-  w.report(APP, T - 20_000)
-  w.poll(T)
-  w.send(APP, 'm-closed', T)
-  // The dead Stop's lock holds the wake while it is fresh.
-  assert.deepEqual(w.poll(T + 2000), { wakes: [] })
-  const old = (Date.now() - 31_000) / 1000
-  utimesSync(lock, old, old)
-  assert.deepEqual(w.poll(T + 3000).wakes.map(one => one.id), ['m-closed'])
-  assert.equal(existsSync(lock), false)
-  assert.equal(w.records(APP).length, 1)
-}))
-
-test('a start record the dead Stop\'s closed list does not name still holds the wake, whatever date its name holds', () => using(w => {
-  w.enroll(APP, IDE, T - 30_000)
-  const listed = w.records(APP)
-  // An older hook's record, dated long before that Stop, beside the Stop's start time an older board read.
-  const unlisted = `${mailboxId('antigravity', APP)}.turns.open.${T - 3_600_000}.1`
-  writeFileSync(join(folderOf(w), unlisted), '')
-  diedStop(w, APP, { closed: listed, stopBegan: T - 20_000 })
-  deadLock(w, APP)
-  w.report(APP, T - 20_000)
-  w.poll(T)
-  w.send(APP, 'm-unlisted', T)
-  assert.deepEqual(w.poll(T + 2000), { wakes: [] })
-  rmSync(join(folderOf(w), unlisted))
-  assert.deepEqual(w.poll(T + 3000).wakes.map(one => one.id), ['m-unlisted'])
-}))
-
-test('start records left by a turn whose Stop never wrote its number hold the wake across a restart until the next turn\'s Stop removes them', () => using(w => {
-  w.ready(APP)
-  // A turn starts; the app closes, or the computer restarts, before its Stop writes anything.
-  realStart(w, APP, T - 15_000)
-  w.poll(T)
-  w.send(APP, 'm-left', T)
-  assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
-  // The next turn's take hands the message over; that turn's Stop lists and removes every record left.
-  const handed = realStart(w, APP, T + 61_000)
-  assert.equal(handed?.id, 'm-left')
-  accept(w, handed, T + 61_500)
-  realStop(w, APP, T + 62_000)
-  assert.deepEqual(w.records(APP), [])
-  w.send(APP, 'm-after', T + 62_000)
-  assert.deepEqual(w.poll(T + 62_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-after'])
-}))
-
-test('a Stop whose number cannot be written leaves its start records, and the wake waits for the next Stop', () => using(w => {
+test('a Stop whose line cannot be appended leaves the turn open, and the wake waits for the next Stop', () => using(w => {
   w.ready(APP)
   w.enroll(APP, IDE, T - 15_000)
-  // Neither the worker nor the board script could write the Stop's number: the row reads waiting, nothing else changed.
+  // Neither the worker nor the board script could append the Stop's line: the row reads waiting, nothing else changed.
   w.report(APP, T - 14_000)
   w.poll(T)
   w.send(APP, 'm-unwritten', T)
   assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
-  assert.equal(w.records(APP).length, 1)
+  assert.equal(turnsOfLog(w.text(APP)).started, 2)
+  assert.equal(turnsOfLog(w.text(APP)).stopped, 1)
   // The next turn's take hands the message over; no wake ever goes into a turn.
   const handed = w.enroll(APP, IDE, T + 61_000)
   assert.equal(handed?.id, 'm-unwritten')
-  accept(w, handed, T + 61_500)
+  w.hub.act('mailbox-accept', { agent: 'antigravity', session: APP, id: handed.id, nonce: handed.nonce }, T + 61_500)
   w.stop(APP, T + 62_000)
-  assert.deepEqual(w.records(APP), [])
+  assert.equal(turnsOfLog(w.text(APP)).stopped, 3)
+  w.send(APP, 'm-after', T + 62_000)
+  assert.deepEqual(w.poll(T + 62_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-after'])
 }))
 
-test('a Stop that cannot list the folder removes no start record, so the records hold the wake until the next Stop', () => using(w => {
+test('a Stop that cannot read the log\'s size appends nothing, so the turn stays open until the next Stop', async () => {
+  const h = await workerHome()
+  try {
+    mkdirSync(h.messages, { recursive: true })
+    assert.equal(h.hook('PreInvocation').mark, 'start')
+    const kept = h.text()
+    // The worker cannot read the messages folder: it appends nothing and tells the board script, which appends nothing.
+    const blind = join(h.home, 'blind.cjs')
+    writeFileSync(blind, `const fs = require('node:fs'), list = fs.readdirSync
+fs.readdirSync = (target, ...rest) => { if (String(target).endsWith('-messages')) throw Object.assign(new Error('EIO'), { code: 'EIO' }); return list(target, ...rest) }
+`)
+    const handed = h.hook('Stop', {}, { nodeArgs: ['--require', blind] })
+    assert.deepEqual(handed, { file: h.file, mark: 'stop', none: true })
+    assert.equal(h.text(), kept)
+    assert.deepEqual(await boardRun(h.home, 'stop', 'Stop', JSON.stringify(handed)), [{ started: 1, stopped: 0 }])
+    assert.equal(h.text(), kept)
+  } finally { h.close() }
+})
+
+test('starts left by a turn whose Stop never wrote hold the wake across a restart until the next turn\'s Stop', () => using(w => {
   w.ready(APP)
-  realStart(w, APP, T - 15_000)
-  // The worker could not take its list, so it hands on an empty one.
-  realStop(w, APP, T - 14_000, [])
-  assert.equal(w.records(APP).length, 1)
-  assert.deepEqual(readTurnOrder(folderOf(w), 'antigravity', APP).closed ?? [], [])
+  // A turn starts; the app closes, or the computer restarts, before its Stop appends anything.
+  w.enroll(APP, IDE, T - 15_000)
   w.poll(T)
-  w.send(APP, 'm-unlisted', T)
+  w.send(APP, 'm-left', T)
   assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
-  // The next turn's Stop lists the record and removes it.
-  const handed = realStart(w, APP, T + 61_000)
-  assert.equal(handed?.id, 'm-unlisted')
-  accept(w, handed, T + 61_500)
-  realStop(w, APP, T + 62_000)
-  assert.deepEqual(w.records(APP), [])
+  // The next turn's take hands the message over; that turn's Stop reads the size after both starts and ends them all.
+  const handed = w.enroll(APP, IDE, T + 61_000)
+  assert.equal(handed?.id, 'm-left')
+  w.hub.act('mailbox-accept', { agent: 'antigravity', session: APP, id: handed.id, nonce: handed.nonce }, T + 61_500)
+  w.stop(APP, T + 62_000)
+  assert.deepEqual(turnsOfLog(w.text(APP)).stopped, 3)
+  w.send(APP, 'm-after', T + 62_000)
+  assert.deepEqual(w.poll(T + 62_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-after'])
 }))
 
-test('two Stops that listed the same start records close them once, and a record made after both lists still holds the wake', () => using(w => {
+test('a cut or unknown line in the turn log holds the wake until the next Stop, and a cut stop line ends no turn', () => using(w => {
   w.ready(APP)
-  realStart(w, APP, T - 30_000)
-  const folder = folderOf(w), listed = w.records(APP)
-  // The first Stop writes and removes; a new turn then makes its record and takes its number; the second Stop, with the
-  // same list, writes the new turn's number.
-  markTurnOrder(folder, 'antigravity', APP, 'stop', T - 25_000, 0, listed)
-  realStart(w, APP, T - 24_000)
-  const next = w.records(APP)
-  assert.equal(next.length, 1)
-  assert.notDeepEqual(next, listed)
-  realStop(w, APP, T - 20_000, listed)
-  assert.deepEqual(w.records(APP), next)
   w.poll(T)
-  w.send(APP, 'm-overlap', T)
-  assert.deepEqual(w.poll(T + 60_000), { wakes: [] })
-  // That turn's own Stop closes its record, and the wake goes in 10 s later.
-  realStop(w, APP, T + 61_000)
-  assert.deepEqual(w.poll(T + 61_000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-overlap'])
+  w.send(APP, 'm-cut', T)
+  assert.equal(w.poll(T + 1000).wakes[0]?.id, 'm-cut')
+  const whole = w.text(APP)
+  // A cut stop line ends nothing, and reads as no start either: the log is as idle as it was.
+  const tail = `\nE ${whole.length} ${T} abcd`
+  w.append(APP, tail)
+  assert.deepEqual(turnsOfLog(w.text(APP)), { ...turnsOfLog(whole), size: whole.length + tail.length })
+  assert.equal(w.poll(T + 1000).wakes[0]?.id, 'm-cut')
+  // A cut start, NUL bytes and an unterminated tail each read as a start, so each holds the wake.
+  for (const [index, line] of ['\nS 0123', '\n\0\0\0\n', '\nxyz'].entries()) {
+    w.append(APP, line)
+    assert.equal(turnsOfLog(w.text(APP)).started, 2 + index, JSON.stringify(line))
+    assert.deepEqual(w.poll(T + 2000 + index), { wakes: [] }, JSON.stringify(line))
+  }
+  // A whole Stop reads the size after all of them: they begin before it, so the next Stop releases the wake.
+  w.stop(APP, T + 10_000)
+  assert.equal(turnsOfLog(w.text(APP)).stopped, turnsOfLog(w.text(APP)).started)
+  assert.deepEqual(w.poll(T + 10_000 + WAKE_IDLE_MS - 1), { wakes: [] })
+  assert.equal(w.poll(T + 10_000 + WAKE_IDLE_MS).wakes[0]?.id, 'm-cut')
 }))
 
-test('an order file with no closed list keeps every start record holding the wake, and one whose list names the record does not', () => using(w => {
-  w.enroll(APP, IDE, T - 30_000)
-  diedStop(w, APP, {})
-  deadLock(w, APP)
-  w.report(APP, T - 20_000)
+test('after an upgrade the old order file and start records are not read, and the wake waits for one turn\'s Stop in the log', () => using(w => {
+  const folder = dirname(w.log(APP)), id = mailboxId('antigravity', APP)
+  // A development copy of D1 left its order file, with a closed list, its lock and a start record.
+  const old = new Map([
+    [join(folder, `${id}.turns.json`), JSON.stringify({ started: 1, stopped: 1, stoppedAt: T - 20_000, closed: [`${id}.turns.open.${'a'.repeat(32)}`] })],
+    [join(folder, `${id}.turns.json.lock`), JSON.stringify({ version: 1, pid: process.pid, started: T, token: 'b'.repeat(32) })],
+    [join(folder, `${id}.turns.open.${'c'.repeat(32)}`), ''],
+  ])
+  for (const [file, content] of old) writeFileSync(file, content)
+  // A turn whose line could not be appended made the mailbox, so the board can be sent to; no log is written.
+  w.enroll(APP, IDE, T - 30_000, undefined, { isAppendLost: true })
   w.poll(T)
-  w.send(APP, 'm-bare', T)
-  assert.deepEqual(w.poll(T + 2000), { wakes: [] })
-  // A `closed` that is not a list of names counts as none.
-  diedStop(w, APP, { closed: w.records(APP)[0] })
-  assert.deepEqual(w.poll(T + 2500), { wakes: [] })
-  // The same file with the record named reads it as closed.
-  diedStop(w, APP, { closed: w.records(APP) })
-  assert.deepEqual(w.poll(T + 3000).wakes.map(one => one.id), ['m-bare'])
-}))
-
-test('after an upgrade a date-named start record holds the wake until the next Stop removes it, and stopBegan is not read', () => using(w => {
-  w.ready(APP)
-  // A development copy of design A left a record named by its date, and a Stop's start time later than that date.
-  const dated = `${mailboxId('antigravity', APP)}.turns.open.${T - 25_000}.1`
-  writeFileSync(join(folderOf(w), dated), '')
-  diedStop(w, APP, { stopBegan: T - 20_000 })
-  w.poll(T)
-  w.send(APP, 'm-upgrade', T)
+  assert.equal(w.send(APP, 'm-old', T).line, 'now')
+  // No log holds the wake, whatever the old file says.
   assert.deepEqual(w.poll(T + 1000), { wakes: [] })
-  // The next Stop lists it and removes it; the wake goes in 10 s later.
-  realStop(w, APP, T + 2000)
-  assert.deepEqual(w.records(APP), [])
-  assert.deepEqual(w.poll(T + 2000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-upgrade'])
+  const handed = w.enroll(APP, IDE, T + 2000)
+  assert.equal(handed.id, 'm-old')
+  w.hub.act('mailbox-accept', { agent: 'antigravity', session: APP, id: handed.id, nonce: handed.nonce }, T + 2100)
+  w.send(APP, 'm-new', T + 2500)
+  assert.deepEqual(w.poll(T + 5000), { wakes: [] })
+  // One turn's Stop in the log, and the wake follows it by 10 s.
+  w.stop(APP, T + 6000)
+  assert.deepEqual(w.poll(T + 6000 + WAKE_IDLE_MS - 1), { wakes: [] })
+  assert.deepEqual(w.poll(T + 6000 + WAKE_IDLE_MS).wakes.map(one => one.id), ['m-new'])
+  // The old files are neither read nor swept.
+  for (const [file, content] of old) assert.equal(readFileSync(file, 'utf8'), content)
 }))
 
-test('the board script takes the turn number the hook worker handed it and does not mark the turn again', async () => {
-  const { defaultMessagesDirectory } = await import('../scripts/runtime-folder.ts')
-  const home = mkdtempSync(join(tmpdir(), 'agy-handed-'))
-  const env = { ...process.env }
-  delete env.XDG_RUNTIME_DIR
-  const root = join(home, '.agent-board'), progress = join(root, 'progress.md')
-  const messages = defaultMessagesDirectory(progress, home, env, process.platform)
-  const file = join(messages, `${mailboxId('antigravity', APP)}.turns.json`)
-  const records = () => readdirSync(messages).filter(name => name.startsWith(`${mailboxId('antigravity', APP)}.turns.open.`))
-  const hook = (name, event, handed) => new Promise((done, fail) => {
-    const child = spawn(process.execPath, ['--input-type=module', '-e', HOOKS], {
-      env: { ...env, AGY_REPO: new URL('../', import.meta.url).href, AGY_HOME: home, AGY_NAME: name, AGY_EVENT: event, AGY_COUNT: '1', AGY_PEERS: name, AGY_SESSION: APP, AGENT_BOARD_TURN_MARK: handed },
+// Eight processes appending to one log through the hook worker's own helper (`TURN_LOG_SOURCE` in hooks/hook-safety.ts),
+// six writing start lines and two writing stop lines, each reading the log's size before each append.
+const APPENDERS = `
+import { registerHooks } from 'node:module'
+import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
+registerHooks({ resolve(specifier, context, next) {
+  try { return next(specifier, context) } catch (error) {
+    if (error.code !== 'ERR_MODULE_NOT_FOUND' || !specifier.startsWith('.')) throw error
+    return next(specifier + '.ts', context)
+  }
+} })
+const { AGY_REPO: repo, AGY_DIR: dir, AGY_LOG: log, AGY_ROLE: role, AGY_NAME: name, AGY_COUNT: count, AGY_PEERS: peers } = process.env
+const { TURN_LOG_SOURCE } = await import(new URL('hooks/hook-safety.ts', repo).href)
+const helper = new Function('fs', 'randomUUID', TURN_LOG_SOURCE + '\\nreturn { turnToken, startLine, stopLine, appendTurnLine }')(fs, randomUUID)
+fs.writeFileSync(join(dir, 'ready-' + name), '')
+const until = Date.now() + 20000
+while (Date.now() < until && !peers.split(',').every(peer => fs.existsSync(join(dir, 'ready-' + peer)))) await new Promise(done => setTimeout(done, 10))
+const sizeNow = () => { try { return fs.lstatSync(log).size } catch (error) { if (error.code === 'ENOENT') return 0; throw error } }
+const done = []
+for (let index = 0; index < Number(count); index += 1) {
+  const size = sizeNow(), token = helper.turnToken()
+  const line = role === 'S' ? helper.startLine(token) : helper.stopLine(size, Date.now(), token)
+  helper.appendTurnLine(log, line)
+  done.push({ token, size, length: line.length, role })
+}
+fs.writeFileSync(join(dir, 'done-' + name + '.json'), JSON.stringify(done))
+`
+
+test('eight processes appending to one turn log leave every line whole, each at or after the size its writer read first', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'agy-append-'))
+  const log = join(dir, `${mailboxId('antigravity', APP)}.turns.log`)
+  const names = ['s1', 's2', 's3', 's4', 's5', 's6', 'e1', 'e2'], COUNT = 500
+  const run = name => new Promise((done, fail) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', APPENDERS], {
+      env: { ...process.env, AGY_REPO: new URL('../', import.meta.url).href, AGY_DIR: dir, AGY_LOG: log, AGY_ROLE: name.startsWith('s') ? 'S' : 'E', AGY_NAME: name, AGY_COUNT: String(COUNT), AGY_PEERS: names.join(',') },
       stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true,
     })
     let errors = ''
     child.stderr.on('data', chunk => { errors += chunk })
     child.on('error', fail)
-    child.on('exit', code => code === 0 ? done(JSON.parse(readFileSync(join(home, `seen-${name}.json`), 'utf8'))) : fail(new Error(`${name} exited ${code}: ${errors}`)))
+    child.on('exit', code => code === 0 ? done(JSON.parse(readFileSync(join(dir, `done-${name}.json`), 'utf8'))) : fail(new Error(`${name} exited ${code}: ${errors}`)))
   })
   try {
-    mkdirSync(messages, { recursive: true })
-    // The worker already counted turn 3 here.
-    writeFileSync(file, JSON.stringify({ started: 3, stopped: 2, stoppedAt: T }))
-    assert.deepEqual(await hook('a', 'PreInvocation', JSON.stringify({ file, mark: 'start', count: 3 })), [3])
-    // A worker that marked the turn made its record first, so the board script makes none.
-    assert.deepEqual(records(), [])
-    // A number for another file or for the other mark is not taken: the board script marks the turn itself.
-    assert.deepEqual(await hook('b', 'PreInvocation', JSON.stringify({ file: `${file}.other`, mark: 'start', count: 3 })), [4])
-    assert.deepEqual(await hook('c', 'PreInvocation', JSON.stringify({ file, mark: 'stop', count: 4 })), [5])
-    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { started: 5, stopped: 2, stoppedAt: T })
-    // A start it marks itself it also makes a record for, in case the worker could not; a Stop it marks itself lists the
-    // records, then closes exactly those.
-    assert.equal(records().length, 2)
-    assert.deepEqual(await hook('d', 'Stop', 'null'), [5])
-    assert.deepEqual(records(), [])
-  } finally {
-    rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
-  }
+    const written = (await Promise.all(names.map(run))).flat()
+    assert.equal(written.length, names.length * COUNT)
+    const text = readFileSync(log, 'latin1')
+    // One: the file's length is the sum of the lines' lengths, so no write was cut or overwritten.
+    assert.equal(text.length, written.reduce((sum, one) => sum + one.length, 0))
+    // Two: every line, between its newlines, is a whole start or stop line.
+    const lines = text.split('\n').filter(line => line !== '')
+    assert.equal(lines.length, written.length)
+    assert.ok(lines.every(line => /^S [0-9a-f]{32}$/.test(line) || /^E \d+ \d+ [0-9a-f]{32}$/.test(line)))
+    // Three: every token appears once.
+    const tokens = new Set(lines.map(line => line.slice(-32)))
+    assert.equal(tokens.size, written.length)
+    assert.ok(written.every(one => tokens.has(one.token)))
+    // Four: each line begins at or after the size its writer read before it, and a stop line names that size.
+    for (const one of written) {
+      const at = text.indexOf(`${one.token}\n`)
+      const start = text.lastIndexOf('\n', at - 1)
+      assert.ok(start >= one.size, `${one.role} ${one.token}: begins at ${start}, writer read ${one.size}`)
+      if (one.role === 'E') assert.match(text.slice(start, at), new RegExp(`^\\nE ${one.size} \\d+ $`))
+    }
+    // The reader reads it whole: every start counted, and the largest size a stop named ends the starts before it.
+    const read = turnsOfLog(text)
+    assert.equal(read.started, 6 * COUNT)
+    assert.equal(read.size, text.length)
+  } finally { rmSync(dir, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 }) }
 })
 
 test('the app\'s idle route says a message sent just as the person starts a turn may join that turn, in en, zh-TW and zh-CN', () => {
