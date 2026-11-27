@@ -1052,6 +1052,19 @@ test('the language saved for the progress file a command picks is the one help a
   assertWords(f.run(pkg, ['setup', '--home', f.home], { ...env, CLAUDE_PROGRESS_FILE: second }), 'zh-CN', 1)
 }))
 
+test('a board command with --data-dir reads that board\'s saved language, not CLAUDE_PROGRESS_FILE\'s', () => fixture(f => {
+  const pkg = packed(f)
+  const env = { LANG: 'en_US.UTF-8' }
+  const data = join(f.box, 'other data')
+  success(f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--data-dir', data, '--lang', 'en', '--apply'], env))
+  const progress = JSON.parse(readFileSync(join(data, 'agent-board.mjs'), 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, '')).path
+  save(`${progress.replace(/\.md$/i, '')}-settings.json`, `${JSON.stringify({ lang: 'en' })}\n`)
+  const elsewhere = join(f.box, 'elsewhere', 'progress.md')
+  save(join(dirname(elsewhere), 'progress-settings.json'), `${JSON.stringify({ lang: 'zh-CN' })}\n`)
+  assertWords(f.run(pkg, ['--help', '--data-dir', data], { ...env, CLAUDE_PROGRESS_FILE: elsewhere }), 'en', 0)
+  assertWords(f.run(pkg, ['--help'], { ...env, CLAUDE_PROGRESS_FILE: elsewhere }), 'zh-CN', 0)
+}))
+
 test('--lang auto follows the system over a saved language in help and setup', () => fixture(f => {
   const pkg = packed(f)
   const env = { LANG: 'zh_TW.UTF-8' }

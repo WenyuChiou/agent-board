@@ -81,13 +81,16 @@ const candidatesFor = dataDir => [
   ]),
 ]
 const isFileAt = list => list.find(path => { try { return statSync(path).isFile() } catch { return false } })
+const isSetupCommand = args[0] === 'setup' || args[0] === 'remove'
 // A language the person chose stays until they choose another (#1245), in the board's own order
 // (hooks/board-settings.ts boardLanguage): --lang (auto included), then the page's saved choice beside
 // the progress.md the board reads (localProgressPath in scripts/codex-local.ts), then the language the
 // installed board script was set up in. Automatic follows the system.
 const chosenLang = head => {
   let saved = null
-  const progress = flag('--progress-file') ?? (process.env.CLAUDE_PROGRESS_FILE || (typeof head?.path === 'string' ? head.path : undefined))
+  // A board command with --data-dir runs that board without CLAUDE_PROGRESS_FILE (below), so its words do not read it either.
+  const envProgress = isSetupCommand || !flag('--data-dir') ? process.env.CLAUDE_PROGRESS_FILE : undefined
+  const progress = flag('--progress-file') ?? (envProgress || (typeof head?.path === 'string' ? head.path : undefined))
   if (progress !== undefined) {
     try {
       const lang = JSON.parse(readFileSync(`${resolve(progress).replace(/\.md$/i, '')}-settings.json`, 'utf8'))?.lang
@@ -102,7 +105,6 @@ const headOf = path => {
 }
 // Help and setup's own messages come before the board script is found, so they look for it here.
 // Setup and remove look where setup-agent.mjs does: --data-dir, else the .agent-board of --home.
-const isSetupCommand = args[0] === 'setup' || args[0] === 'remove'
 const early = isSetupCommand && (flag('--data-dir') || flag('--home'))
   ? join(resolve(flag('--data-dir') || join(flag('--home'), '.agent-board')), 'agent-board.mjs')
   : isFileAt(candidatesFor(flag('--data-dir')))
