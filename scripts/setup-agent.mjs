@@ -41,8 +41,29 @@ const systemLang = env => {
   if (language !== null) return language
   try { return langOf(Intl.DateTimeFormat().resolvedOptions().locale) } catch { return null }
 }
+// A language the person chose stays until they choose another (#1245), in the board's own order
+// (hooks/board-settings.ts boardLanguage): --lang, then the page's saved choice beside the board's
+// progress.md, then the language the installed board script was set up in. Automatic follows the system.
+const chosenLang = script => {
+  let baked = null
+  let saved = null
+  try {
+    const head = JSON.parse(readFileSync(script, 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, ''))
+    baked = langOf(head?.lang)
+    if (typeof head?.path === 'string') {
+      try {
+        const lang = JSON.parse(readFileSync(`${head.path.replace(/\.md$/i, '')}-settings.json`, 'utf8'))?.lang
+        saved = lang === 'auto' ? 'auto' : langOf(lang)
+      } catch {}
+    }
+  } catch {}
+  return saved ?? baked
+}
 const langAt = args.indexOf('--lang')
-const language = langOf(langAt < 0 ? undefined : args[langAt + 1]) ?? systemLang(process.env.LANG) ?? 'en'
+const valueOf = name => { const at = args.indexOf(name); return at < 0 ? undefined : args[at + 1] }
+const installedLang = chosenLang(join(valueOf('--data-dir') || join(valueOf('--home') || homedir(), '.agent-board'), 'agent-board.mjs'))
+const pickedLang = langOf(langAt < 0 ? undefined : args[langAt + 1]) ?? installedLang
+const language = (pickedLang === 'auto' ? null : pickedLang) ?? systemLang(process.env.LANG) ?? 'en'
 const message = (en, tw, cn) => [en, tw, cn][['en', 'zh-TW', 'zh-CN'].indexOf(language)]
 // Bootstrap runs on Node 18 and the npm package has no TypeScript string tables.
 // Keep this copy identical to setupSummary in all three tables.
