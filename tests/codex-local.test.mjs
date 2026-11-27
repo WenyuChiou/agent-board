@@ -9049,6 +9049,56 @@ test('Antigravity reads only a current closing question from a bounded transcrip
   assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-PRIVATE'))
 }))
 
+test('Antigravity closing question refuses transcripts outside the hook conversation folder (#1467)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const user = { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Synthetic question prompt' }
+  const model = content => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', content })
+  const send = (conversationId, transcriptPath) => f.command(
+    ['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'],
+    { conversationId, transcriptPath },
+  )
+  const record = id => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`antigravity:${id}`).digest('hex') + '.json'), 'utf8'))
+
+  const outside = join(f.home, 'outside', 'transcript.jsonl')
+  f.save(outside, `${JSON.stringify(user)}\n${JSON.stringify(model('Should I leak this outside question?'))}\n`)
+  assert.equal(send('synthetic-outside-q-1467', outside).status, 0)
+  assert.equal(record('synthetic-outside-q-1467').asked, undefined)
+
+  const foreignId = 'synthetic-other-1467'
+  const selfId = 'synthetic-self-1467'
+  const foreign = join(f.home, '.gemini', 'antigravity', 'brain', foreignId, 'transcript.jsonl')
+  f.save(foreign, `${JSON.stringify(user)}\n${JSON.stringify(model('Should I leak a foreign question?'))}\n`)
+  assert.equal(send(selfId, foreign).status, 0)
+  assert.equal(record(selfId).asked, undefined)
+
+  const traversal = join(f.home, '.gemini', 'antigravity', 'brain', selfId, '..', foreignId, 'transcript.jsonl')
+  assert.equal(send(selfId, traversal).status, 0)
+  assert.equal(record(selfId).asked, undefined)
+
+  const symlinkPath = join(f.home, '.gemini', 'antigravity', 'brain', selfId, 'transcript.jsonl')
+  mkdirSync(dirname(symlinkPath), { recursive: true })
+  let symlinked = false
+  try {
+    symlinkSync(foreign, symlinkPath)
+    symlinked = true
+  } catch { /* Windows without symlink privilege */ }
+  if (symlinked) {
+    assert.equal(send(selfId, symlinkPath).status, 0)
+    assert.equal(record(selfId).asked, undefined)
+  }
+
+  const boardAfterRejected = readFileSync(f.progress, 'utf8')
+  assert.ok(!boardAfterRejected.includes('Should I leak this outside question?'))
+  assert.ok(!boardAfterRejected.includes('Should I leak a foreign question?'))
+
+  const ownTranscript = join(f.home, '.gemini', 'antigravity-cli', 'brain', selfId, '.system_generated', 'logs', 'transcript_full.jsonl')
+  f.save(ownTranscript, `${JSON.stringify(user)}\n${JSON.stringify(model('SYNTHETIC-OWN-BODY\n\nOwn session question?'))}\n`)
+  assert.equal(send(selfId, ownTranscript).status, 0)
+  assert.ok(record(selfId).steps.includes('- [?] Own session question?'))
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Own session question\?/)
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-OWN-BODY'))
+}))
+
 test('queued Grok status retains only the closing question and replays it', () => fixture(f => {
   assert.equal(f.install('--agent', 'grok', '--apply').status, 0)
   const id = 'synthetic-grok-queued-question', locked = lockedProgress(f)
