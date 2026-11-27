@@ -274,6 +274,26 @@ test('team stats reads every GitHub review through the REST fallback when a pull
   assert.doesNotMatch(scorecard(fetched, date), /merged with no review verdict:/)
 })
 
+test('team stats daily reads use the supplied runner for the milestone fragment too', () => {
+  const milestone = { number: 15, title: '0.26.0 The mainstream AIs end to end', state: 'open' }
+  const calls = []
+  const run = (command, args) => {
+    assert.equal(command, 'gh')
+    calls.push(args.at(-1))
+    const endpoint = args.at(-1)
+    if (endpoint.includes('/milestones?')) return JSON.stringify(milestone)
+    if (endpoint.includes('/issues?milestone=')) return ''
+    if (endpoint.includes('/issues?') || endpoint.includes('/pulls?')) return ''
+    if (endpoint.includes('/comments?')) return ''
+    throw new Error(`unexpected endpoint: ${endpoint}`)
+  }
+  const fetched = teamStats.fetchStats({ repo: 'synthetic/example', date, isWeek: false }, run)
+  assert.equal(fetched.milestoneWork?.milestone?.title, milestone.title)
+  assert.equal(fetched.milestoneWork?.open, 0)
+  assert.ok(calls.some(endpoint => endpoint.includes('/milestones?')))
+  assert.match(dailyLine(fetched, date), /milestone 0\.26\.0: open 0, ready 0, really free 0/)
+})
+
 test('team stats rejects an unknown flag and a malformed date', () => {
   for (const argv of [['--unknown'], ['--date', '2026-02-30'], ['--date', '2026-2-01'], ['--date', 'invalid'], ['--date'], ['--repo'], ['--week', '--week'], ['--repo', '../bad'], ['--repo', 'owner/..']]) assert.throws(() => parseArgs(argv))
   assert.deepEqual(parseArgs([], new Date('2026-10-20T23:00:00Z')), { date, repo: 'WenyuChiou/agent-board', isWeek: false, isHelp: false })

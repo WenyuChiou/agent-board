@@ -198,7 +198,7 @@ export const fetchStats = ({ repo, date, isWeek }, run = execFileSync) => {
   // standing with "uncertain" instead of failing the whole run.
   let milestoneWork
   try {
-    const raw = fetchMilestoneRaw({ repo })
+    const raw = fetchMilestoneRaw({ repo }, { run })
     milestoneWork = raw ? summarizeMilestoneWork(raw, { prs: pullRequests, prListComplete: true, now: new Date() }) : null
   } catch { milestoneWork = null }
   return { issues, pullRequests, milestoneWork }

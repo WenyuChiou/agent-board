@@ -465,8 +465,19 @@ const liveClaimOf = entries => {
   return live
 }
 
-// Someone who took the claim over after it ran out holds it now.
-const hasTakeoverAfter = (entries, time) => entries.some(({ comment, time: at }) => at > time && /^[ \t]*Claim taken over:/im.test(comment.body ?? ''))
+// Someone who took the claim over after it ran out holds it until they post `Handover:`
+// (CONTRIBUTING rule 14 ends a claim at handover, and a relinquished takeover holds nothing).
+// Takeovers and handovers replay in time order; a handover releases only its writer's takeover.
+const hasTakeoverAfter = (entries, time) => {
+  let holder = null
+  for (const { comment, time: at } of entries) {
+    if (at <= time) continue
+    const login = (comment.user?.login ?? 'unknown').toLowerCase()
+    if (/^[ \t]*Claim taken over:/im.test(comment.body ?? '')) holder = login
+    else if (holder === login && /^[ \t]*Handover:/im.test(comment.body ?? '')) holder = null
+  }
+  return holder !== null
+}
 
 // Open issues labelled claimed whose latest claim has run out (CONTRIBUTING rule 3) while no open pull request names them.
 export const readClaims = (issues, prs, now) => {
@@ -479,7 +490,7 @@ export const readClaims = (issues, prs, now) => {
     const comments = entriesOf((issue.comments ?? []).map(item => ({ body: item.body, created_at: item.createdAt ?? item.created_at, user: item.author ?? item.user })))
     const live = liveClaimOf(comments)
     if (!live || live.until >= nowMs) continue
-    // Someone who took the claim over after it ran out holds it now.
+    // Someone who took the claim over after it ran out holds it now, unless they handed it over.
     if (hasTakeoverAfter(comments, live.time)) continue
     expired.push({ number: issue.number, login: live.login })
   }

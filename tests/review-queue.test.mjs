@@ -1254,6 +1254,36 @@ test('a claim in the shape pr-check reads holds the issue, and a handover ends i
   assert.equal(work.ready, 4)
 })
 
+test('a takeover handed over by its holder frees the issue and lists the expired claim', () => {
+  const issues = [
+    milestoneIssue(1, { labels: [label('ready')] }),
+    milestoneIssue(2, { labels: [label('ready')] }),
+    milestoneIssue(3, { labels: [label('ready')] }),
+  ]
+  const comments = {
+    // Alice's claim ran out, Bob took it over, then Bob handed it over: free, and the expired claim is listed.
+    1: [
+      issueComment('Claim: codex, fix/a, until 2026-10-19 09:00 UTC', '2026-10-18T09:00:00Z', 'alice'),
+      issueComment('Claim taken over: codex, fix/a2', '2026-10-19T10:00:00Z', 'bob'),
+      issueComment('Handover: fix/a2, done: nothing left', '2026-10-19T11:00:00Z', 'bob'),
+    ],
+    // A takeover with no handover still holds the issue.
+    2: [
+      issueComment('Claim: codex, fix/b, until 2026-10-19 09:00 UTC', '2026-10-18T09:00:00Z', 'alice'),
+      issueComment('Claim taken over: codex, fix/b2', '2026-10-19T10:00:00Z', 'bob'),
+    ],
+    // A handover from someone other than the takeover holder does not release it.
+    3: [
+      issueComment('Claim: codex, fix/c, until 2026-10-19 09:00 UTC', '2026-10-18T09:00:00Z', 'alice'),
+      issueComment('Claim taken over: codex, fix/c2', '2026-10-19T10:00:00Z', 'bob'),
+      issueComment('Handover: fix/c2, done: nothing left', '2026-10-19T11:00:00Z', 'carol'),
+    ],
+  }
+  const work = summarize(milestoneRaw(issues, comments))
+  assert.equal(work.reallyFree, 1)
+  assert.deepEqual(work.expiredClaims, [{ number: 1, login: 'alice' }])
+})
+
 test('the clock is read after the GitHub reads, so a comment posted during them counts', () => {
   let clock = Date.parse('2026-10-20T00:00:00Z')
   const extra = {
