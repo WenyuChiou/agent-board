@@ -48,7 +48,10 @@ the mailbox's own route in place, on the card too. An unrecorded route returns
 `NO_RECORDED_ROUTE`, unless the target is refused first as gone or expired
 (`OFFLINE`) or contested (`CONTESTED`). Retrying an existing message id returns that message
 when its contents match, even if the route has since changed. The server records the route
-line itself; callers cannot supply `line`.
+line itself; callers cannot supply `line`. The message store keeps `line` to the lines 0.25.1
+reads, so a typed install of 0.25.1 still opens it: a newer line, such as the Codex daemon's
+`afterWait`, is stored as the older line it replaces (`now`) with the line itself in `routeLine`,
+which 0.25.1 keeps and does not read (#1860).
 
 ## Next-turn mailbox
 

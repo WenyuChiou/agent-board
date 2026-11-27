@@ -8,7 +8,7 @@ import type { TakeTurn } from '../hooks/hook-messages'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
-import { isClaimRef, parseMessageStore, queuedMessagingOf, shownMessages } from '../hooks/queued-store'
+import { isClaimRef, parseMessageStore, queuedMessagingOf, shownMessages, storedMessageState } from '../hooks/queued-store'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
 import { claimMessageStore } from './message-store-claim'
 import { readSettings } from './settings-file'
@@ -259,7 +259,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
     try {
       // A temp file an earlier save could not remove would block every save after it.
       try { unlinkSync(temp) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-      writeFileSync(temp, JSON.stringify({ version: 2, ...next }), { mode: 0o600, flag: 'wx' })
+      writeFileSync(temp, JSON.stringify({ version: 2, ...storedMessageState(next) }), { mode: 0o600, flag: 'wx' })
       replaceFile(temp, file)
       state = next
     } finally {
@@ -659,7 +659,7 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
           throw error
         }
         try {
-          writeFileSync(temp, JSON.stringify({ version: 2, ...pruneMessages(state, now) }), { flag: 'wx', mode: 0o600 })
+          writeFileSync(temp, JSON.stringify({ version: 2, ...storedMessageState(pruneMessages(state, now)) }), { flag: 'wx', mode: 0o600 })
           replaceFile(temp, file)
         } catch (error) {
           if (WRITE_CONTENTION_ERRNO.has(String((error as NodeJS.ErrnoException | null)?.code ?? ''))) hasDeferred = true
