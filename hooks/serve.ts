@@ -1074,6 +1074,7 @@ const PAGE_WORDS = [
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressTimedOut', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
+  'pgPulse', 'pgPulseNeeds', 'pgPulseWorking', 'pgPulseStopped', 'pgPulseDone', 'pgSyncHint', 'pgStaleShort', 'pgStaleHint', 'justNow', 'minutesAgo',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
   'settingsLanguageChanged', 'settingsLanguageOverridden', 'settingsNotifications', 'settingsOn', 'settingsOff', 'settingsDenied', 'settingsUnavailable', 'settingsChanged', 'settingsLanguage',
   'settingsAgentSetup', 'settingsAgentRemove', 'settingsAgentConfirm', 'settingsAgentCancel', 'settingsAgentsBusy', 'settingsAgentsReadFailed',
@@ -1365,7 +1366,7 @@ ${ICON_CSS}
 .s-agent[data-presence="notseen"] .ag::after{background:linear-gradient(var(--muted),var(--muted)) center/6px 2px no-repeat var(--ground)}
 .s-agent.working .ag::after{border-color:var(--ground);border-radius:var(--radius-round);background:var(--alive)}
 .s-agent[aria-pressed="true"].working .ag::after,.s-agent[aria-pressed="true"][data-presence="offline"] .ag::after,.s-agent[aria-pressed="true"][data-presence="notseen"] .ag::after{border-color:var(--current)}
-.shell[data-empty="1"] :is(.s-views,.s-projects,.s-search,.f-bar,.hud-filter-btn){display:none}
+.shell[data-empty="1"] :is(.s-views,.s-projects,.s-search,.f-bar,.pulse-bar,.hud-filter-btn){display:none}
 .hud-filter-btn{margin-left:auto}
 .hud-filter-btn[data-active="1"],.hud-filter-btn[aria-expanded="true"]{background:var(--current);color:var(--ink)}
 .s-search{position:relative;display:flex;align-items:center;gap:var(--s2);min-height:var(--hit);padding:0 var(--s2);border:1px solid var(--line-strong);border-radius:var(--radius-m);background:var(--inset)}
@@ -1388,6 +1389,22 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
 .f-opt[aria-checked="true"]{background:var(--current);font-weight:600}
 .f-opt-n{flex:none;color:var(--muted);font-variant-numeric:tabular-nums}
 .f-bar .quiet{min-height:var(--hit);padding:0 var(--s2);font-size:var(--text-xs)}
+/* #1023: the first line. The filter chips on the left; on the right, a count per view and the board's freshness, each one press away. */
+.f-row{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);min-width:0}
+.pulse-bar{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1);margin-left:auto}
+.pulse-bar button{display:inline-flex;align-items:center;gap:var(--s1);min-height:28px;padding:0 var(--s2);border:1px solid var(--line-strong);border-radius:var(--radius-round);background:var(--surface);color:var(--muted);font:inherit;font-size:var(--text-xs);font-weight:600;line-height:1.4;font-variant-numeric:tabular-nums;white-space:nowrap;cursor:pointer;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+.pulse-bar button:hover{border-color:var(--muted);color:var(--ink)}
+.pulse-bar button[aria-pressed="true"]{border-color:var(--ink);color:var(--ink);background:var(--current)}
+.pulse-bar svg.i{width:12px;height:12px}
+.pulse-bar .p-need{border-color:var(--waiting-fill);background:var(--waiting-fill);color:var(--waiting-on)}
+.pulse-bar .p-need::before{content:"";width:7px;height:7px;border-radius:var(--radius-round);background:currentColor}
+.pulse-bar .sync-btn{font-weight:500}
+.pulse-bar .sync-btn.is-stale{border-color:var(--waiting-text);color:var(--waiting-text);font-weight:600}
+.pulse-bar .sync-btn.is-spin svg.i{animation:sync-spin var(--dur-layout) var(--ease-out)}
+@keyframes sync-spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.pulse-bar .sync-btn.is-spin svg.i{animation:none}}
+/* A page that has not heard from the board dims its rows until the next good answer; the first line stays clear. */
+#board.stale :is(.rows,.cards){opacity:.55;transition:opacity var(--dur-fast) var(--ease-out)}
 /* Settings occupies the reserved sidebar row and follows the work when the sidebar folds. */
 .s-foot{margin-top:auto;position:sticky;bottom:0;background:var(--ground);padding:var(--s3) 0 max(var(--s2),env(safe-area-inset-bottom,0px));border-top:1px solid var(--line)}
 .side .pfoot{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:var(--s1) var(--s2);border-top:0;padding:0 0 0 var(--s2)}
@@ -1485,7 +1502,7 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
 }
 /* A finger, not the width, decides target size: a narrow window with a mouse keeps the desktop sizes. */
 @media (pointer:coarse){
-  .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.s-item,.f-chip,.f-opt,.f-bar .quiet{min-height:44px}
+  .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.s-item,.f-chip,.f-opt,.f-bar .quiet,.pulse-bar button{min-height:44px}
   .link{min-height:44px}
   .answers button,.answers .btn,.c-line2 .answers button{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet,.c-line2 .answers button.quiet{flex:0 0 auto;min-height:44px}
@@ -1547,13 +1564,18 @@ ${settingsCss}
 <div id="offline" role="status" aria-live="polite"></div>
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
 <main class="col page">
-<div class="f-bar" id="filter-bar" role="region" aria-label="${esc(s.pgFilterBar)}"></div>
+<div class="f-row"><div class="f-bar" id="filter-bar" role="region" aria-label="${esc(s.pgFilterBar)}"></div><div class="pulse-bar" id="pulse" role="group" aria-label="${esc(s.pgPulse)}"></div></div>
 <div id="board"></div>
 <details id="tidy-bulk"><summary>${esc(s.tidyBulk)}</summary><div class="fold-in"><p><label>${esc(s.tidyBulk)} <select id="tidy-kind"><option value="stopped">${esc(s.tidyStopped)}</option><option value="agent">${esc(s.tidyAgent)}</option><option value="older">${esc(s.tidyOlder)}</option></select> <input id="tidy-value" type="text" inputmode="text" placeholder="${esc(s.tidyValue)}" aria-label="${esc(s.tidyValue)}"></label></p><div class="acts"><button type="button" id="tidy-preview" data-local>${esc(s.tidyPreviewButton)}</button><button type="button" id="tidy-confirm" data-local disabled>${esc(s.tidyConfirmButton)}</button><button type="button" id="tidy-cancel" data-local disabled>${esc(s.tidyCancelButton)}</button></div></div></details><footer class="pfoot" id="pfoot"><a class="ver-link" href="https://github.com/WenyuChiou/agent-board" target="_blank" rel="noopener" title="${esc(s.pgGithub)}"><svg class="i" viewBox="0 0 16 16" role="img" aria-label="GitHub"><path d="${GITHUB_PATH}"/></svg><span id="versions"></span></a><span class="grow"></span>${isLan ? `<p>${esc(s.serveLanIdle)}</p>` : idleMs > 0 ? `<p>${esc(s.serveIdleTimed(idleMs / 60_000))}</p>` : ''}<span class="set-row">${settingsToggle(s)}</span><button type="button" class="icon-btn" id="close" data-static aria-label="${esc(s.serveClose)}" title="${esc(s.serveClose)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="${POWER_PATH}"/></svg></button></footer>
 <div id="note" role="status" aria-live="polite"></div>
 </main>
 </div>
 <aside class="detail-rail" id="detail-rail" aria-label="${esc(s.pgDetailRail)}" hidden></aside>
+<template id="pulse-run-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.6 12.2 8 5 12.4Z" fill="currentColor" stroke="none"/></svg></template>
+<template id="pulse-stop-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.8" y="3.8" width="8.4" height="8.4" rx="1.6" fill="currentColor" stroke="none"/></svg></template>
+<template id="pulse-done-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="m3 8.5 3.2 3.2L13 4.8"/></svg></template>
+<template id="pulse-sync-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M13.2 8a5.2 5.2 0 1 1-1.3-3.4"/><path d="M13.4 2.6v2.6h-2.6"/></svg></template>
+<template id="pulse-warn-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.4 14 13H2Z"/><path d="M8 6.4v3.1"/><circle cx="8" cy="11.3" r=".8" fill="currentColor" stroke="none"/></svg></template>
 <template id="detail-close-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg></template>
 <template id="surf-cli-icon"><svg class="si" viewBox="0 0 16 16" aria-hidden="true"><path d="m3.5 5 3.5 3-3.5 3M8 11h4.5"/></svg></template>
 <template id="surf-app-icon"><svg class="si" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.2" y="2.8" width="11.6" height="10.4" rx="2"/><path d="M2.2 6h11.6"/></svg></template>
@@ -1642,6 +1664,14 @@ const PAGE_SCRIPT = String.raw`
   var boardAbort = null;
   var isClosed = false;
   var isUnreachable = false;
+  // #1023: when the page last heard from the board. It is stale after 10 s of failed polls, or 2 minutes with no
+  // answer at all (a held request answers within 10 s), and then says so and dims its rows until the next good answer.
+  var lastGood = Date.now();
+  var STALE_FAILED_MS = 10000, STALE_QUIET_MS = 120000;
+  function isStale() {
+    var age = Date.now() - lastGood;
+    return age >= STALE_QUIET_MS || (isUnreachable && age >= STALE_FAILED_MS);
+  }
   var offlineButtons = [];
   var since = null;
   var messageAttempts = {};
@@ -1802,6 +1832,7 @@ const PAGE_SCRIPT = String.raw`
     if (!isUnreachable) offlineButtons = Array.from(document.querySelectorAll('button:not([data-local])')).filter(function (node) { return !node.disabled; });
     isUnreachable = true;
     paintLight();
+    paintFresh();
     if (offline.textContent !== w('serveOffline')) offline.textContent = w('serveOffline');
     document.querySelectorAll('button:not([data-local])').forEach(function (node) { node.disabled = true; });
   }
@@ -1824,7 +1855,7 @@ const PAGE_SCRIPT = String.raw`
   // else idle. The tab icon turns amber only for waiting, so a page that stops never keeps an amber tab.
   var LIGHT_STATES = ${JSON.stringify(LOGO_STATES)};
   function lightState() {
-    if (isUnreachable || isClosed) return 'is-offline';
+    if (isUnreachable || isClosed || isStale()) return 'is-offline';
     if (pg.waitingNow > 0) return 'is-waiting';
     var view = pg.model && pg.model.view;
     return view && view.working && view.working.length ? 'is-working' : 'is-idle';
@@ -3676,6 +3707,105 @@ const PAGE_SCRIPT = String.raw`
     });
     drawSide(count, projects, allProjects);
     drawFilterBar(tokens);
+    paintPulse(count);
+  }
+  // #1023: the first line. A count for each view, the same counts as the sidebar's, each one press from its list,
+  // and the board's freshness, which refreshes on a press. Built once; each layout only sets its numbers.
+  var pulse = null;
+  var pulseCount = null;
+  function pulseIcon(name) {
+    var tpl = document.getElementById('pulse-' + name + '-icon');
+    return tpl && tpl.content && tpl.content.firstChild ? tpl.content.firstChild.cloneNode(true) : null;
+  }
+  function pulseButton(cls, icon, onPress) {
+    var node = navButton('', onPress);
+    node.className = cls;
+    var mark = icon ? pulseIcon(icon) : null;
+    if (mark) node.appendChild(mark);
+    node.numberNode = el('span', 'p-n');
+    node.appendChild(node.numberNode);
+    return node;
+  }
+  function jumpShelf(name) {
+    setView('all');
+    if (pg.openShelf[name]) pg.openShelf[name](true);
+    var node = pg.nodes.counts && pg.nodes.counts[name];
+    while (node && !hasClass(node, 'shelf')) node = node.parentNode;
+    if (node && typeof node.scrollIntoView === 'function') node.scrollIntoView({ block: 'start', behavior: moving() ? 'smooth' : 'auto' });
+  }
+  function ensurePulse() {
+    var bar = document.getElementById('pulse');
+    if (!bar) return null;
+    if (pulse && pulse.bar === bar) return pulse;
+    pulse = { bar: bar };
+    pulse.needs = pulseButton('p-need', '', function () { setView('needs'); });
+    pulse.needs.id = 'jump-needs';
+    pulse.run = pulseButton('p-pill', 'run', function () { setView('working'); });
+    pulse.run.id = 'jump-run';
+    pulse.stop = pulseButton('p-pill', 'stop', function () { jumpShelf('stopped'); });
+    pulse.stop.id = 'jump-stop';
+    pulse.done = pulseButton('p-pill', 'done', function () { jumpShelf('done'); });
+    pulse.done.id = 'jump-done';
+    pulse.sync = navButton('', function () {
+      toggleClass(pulse.sync, 'is-spin', true);
+      setTimeout(function () { toggleClass(pulse.sync, 'is-spin', false); }, 400);
+      refresh(true);
+    });
+    pulse.sync.id = 'sync';
+    pulse.sync.className = 'sync-btn';
+    pulse.syncIcon = null;
+    pulse.syncText = el('span', '');
+    add(bar, pulse.needs, pulse.run, pulse.stop, pulse.done, add(pulse.sync, pulse.syncText));
+    return pulse;
+  }
+  function setPill(node, n, label) {
+    setText(node.numberNode, n);
+    if (node.getAttribute('aria-label') !== label) { node.setAttribute('aria-label', label); node.setAttribute('title', label); }
+  }
+  function paintPulse(count) {
+    var ui = ensurePulse();
+    if (count) pulseCount = count;
+    count = pulseCount;
+    if (!ui || !count) return;
+    setPill(ui.needs, count.cards, w('pgPulseNeeds', count.cards));
+    ui.needs.hidden = pg.view === 'needs' || count.cards === 0;
+    setPill(ui.run, count.working, w('pgPulseWorking', count.working));
+    ui.run.setAttribute('aria-pressed', String(pg.view === 'working'));
+    setPill(ui.stop, count.stopped, w('pgPulseStopped', count.stopped));
+    setPill(ui.done, count.done, w('pgPulseDone', count.done));
+    paintFresh();
+  }
+  // Seconds and minutes as 12s, 2m: the short form the stale pill uses in every language.
+  function shortAge(ms) {
+    if (ms < 60000) return Math.floor(ms / 1000) + 's';
+    if (ms < 3600000) return Math.floor(ms / 60000) + 'm';
+    return Math.floor(ms / 3600000) + 'h';
+  }
+  var wasStale = false;
+  function paintFresh() {
+    var ui = pulse;
+    var age = Math.max(0, Date.now() - lastGood);
+    var stale = isStale();
+    toggleClass(board, 'stale', stale);
+    if (stale !== wasStale) { wasStale = stale; paintLight(); }
+    if (!ui) return;
+    var when = age < 60000 ? w('justNow') : w('minutesAgo', Math.floor(age / 60000));
+    var label = stale ? w('pgStaleShort', shortAge(age)) : when;
+    var hint = stale ? w('pgStaleHint', shortAge(age)) : w('pgSyncHint', when);
+    toggleClass(ui.sync, 'is-stale', stale);
+    var icon = stale ? 'warn' : 'sync';
+    if (!ui.syncIcon || ui.syncIcon.kind !== icon) {
+      var mark = pulseIcon(icon);
+      if (ui.syncIcon && ui.syncIcon.node) ui.syncIcon.node.remove();
+      if (mark) ui.sync.insertBefore(mark, ui.syncText);
+      ui.syncIcon = { kind: icon, node: mark };
+    }
+    setText(ui.syncText, label);
+    if (ui.sync.getAttribute('aria-label') !== hint) { ui.sync.setAttribute('aria-label', hint); ui.sync.setAttribute('title', hint); }
+  }
+  function heardFromBoard() {
+    lastGood = Date.now();
+    paintFresh();
   }
   // The sidebar's numbers come from the same counts as the headings, so every number on the page agrees.
   function drawSide(count, projects, allProjects) {
@@ -3753,6 +3883,7 @@ const PAGE_SCRIPT = String.raw`
     shell.setAttribute('data-view', name);
     VIEWS.forEach(function (one) { document.getElementById('view-' + one).setAttribute('aria-pressed', String(one === name)); });
     if (name === 'done' && pg.openShelf.done) pg.openShelf.done(true);
+    if (name === 'others' && pg.openShelf.others) pg.openShelf.others(true);
     // A view picks a section; it leaves the agent and project filters as they were (#809). Before the first draw there is nothing to lay out.
     if (pg.sections) layout();
     enter(board);
@@ -4052,10 +4183,27 @@ const PAGE_SCRIPT = String.raw`
       if (!by[name]) { by[name] = []; order.push(name); }
       by[name].push(ref);
     });
-    var sec = el('section', 'sec');
-    add(sec, sectionHead(w('pgOthers'), 'others'));
-    pg.nodes.othersText = el('p', '');
-    pg.nodes.othersEmpty = fx(add(el('div', 'empty'), pg.nodes.othersText));
+    // #1023: idle sessions fold under one line with their count, like Stopped and Done, so on the Overview only
+    // Needs you and Working are open. One press opens them; the Other work view opens them by itself.
+    var isOpen = opened['shelf:others'] === true || pg.view === 'others';
+    var sec = el('section', 'sec shelf' + (isOpen ? ' open' : ''));
+    var count = el('span', 'count');
+    pg.nodes.counts.others = count;
+    var fold = el('div', 'fold');
+    fold.inert = !isOpen;
+    var setOpen = function (now) {
+      toggleClass(sec, 'open', now);
+      head.setAttribute('aria-expanded', String(now));
+      fold.inert = !now;
+      opened['shelf:others'] = now;
+    };
+    var head = navButton('', function () { setOpen(!hasClass(sec, 'open')); });
+    pg.openShelf.others = setOpen;
+    head.className = 'shelf-head';
+    head.setAttribute('aria-expanded', String(isOpen));
+    add(head, el('span', 'chev'), el('span', '', w('pgOthers')), count);
+    head.firstChild.setAttribute('aria-hidden', 'true');
+    var body = el('div');
     order.forEach(function (name) {
       var list = el('ul', 'rows');
       var group = { ul: list, entries: [], block: null };
@@ -4066,11 +4214,15 @@ const PAGE_SCRIPT = String.raw`
       });
       if (name) {
         group.block = fx(el('p', 'proj', name));
-        add(sec, group.block);
+        add(body, group.block);
       }
       pg.groups.push(group);
-      add(sec, list);
+      add(body, list);
     });
+    pg.nodes.othersText = el('p', '');
+    pg.nodes.othersEmpty = fx(add(el('div', 'empty'), pg.nodes.othersText));
+    // With no idle rows there is nothing to fold: the Other work view says so on its empty line.
+    if (refs.length) add(sec, head, add(fold, add(el('div', 'fold-in'), body)));
     add(sec, pg.nodes.othersEmpty);
     return sec;
   }
@@ -4556,13 +4708,14 @@ const PAGE_SCRIPT = String.raw`
       if (isClosed || pollPage !== pageId || ask !== boardAsk) return;
       // A newer page took over: this one stops asking and says so, once (#265).
       if (data.moved) { showMoved(); return; }
-      if (data.unchanged) { reachable(); maybeShowAway(); return; }
+      if (data.unchanged) { reachable(); heardFromBoard(); maybeShowAway(); return; }
       if (!data.ok || !data.model) {
-        if (data.note) { reachable(); say(data.note, 'alert'); }
+        if (data.note) { reachable(); heardFromBoard(); say(data.note, 'alert'); }
         else unreachable();
         return;
       }
       reachable();
+      heardFromBoard();
       if (data.barStyle) barStyleShown(data.barStyle);
       if (data.lang && !settingsLanguage.disabled) { languageKept = data.lang; settingsLanguage.value = data.lang; }
       notifyWaiting(data.model);
@@ -4884,5 +5037,8 @@ const PAGE_SCRIPT = String.raw`
     }, function () {});
   }
   pairApprovals().then(function () { refresh(); });
+  // A clock, not a transition: between answers it keeps the line's age current and finds a held request that never
+  // came back (a sleeping laptop, a half-open connection), which no failure would report.
+  if (typeof setInterval === 'function') setInterval(function () { if (!isClosed) paintFresh(); }, 5000);
 })();
 `

@@ -13824,6 +13824,143 @@ test('the Other work view shows its rows or says there are none', async () => {
   assert.ok(!shownWords(sec).includes(EN.pgNoOthers))
 })
 
+// #1023: the first screen says at a glance whether anything needs you, and whether the page is current.
+const pulseWalk = node => node.childNodes.flatMap(child => [child, ...pulseWalk(child)])
+const hasClassName = (node, name) => String(node.className ?? '').split(' ').includes(name)
+
+test('an empty Needs you says nothing needs you and when it last checked', async () => {
+  const model = redesignModel()
+  model.asks = []
+  const now = 1_000_000_000_000
+  const dom = await pageDom(await sourcePage(), model, { now, width: 1280 })
+  const needs = dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'needs')
+  assert.ok(shownWords(needs).includes(EN.pgNothing), shownWords(needs))
+  assert.equal(EN.pgNothing, 'Nothing needs you')
+  // The freshness button beside the filters says when the page last heard from the board.
+  const sync = dom.node('sync')
+  assert.equal(sync.textContent, EN.justNow)
+  assert.equal(sync.getAttribute('aria-label'), EN.pgSyncHint(EN.justNow))
+  // Nothing waits, so there is no Needs you count to press.
+  assert.equal(dom.node('jump-needs').hidden, true)
+  // A minute and a half later, before the next answer, the line says so.
+  dom.setNow(now + 90_000)
+  dom.node('view-all').click()
+  assert.equal(sync.textContent, EN.minutesAgo(1))
+  assert.equal(hasClassName(sync, 'is-stale'), false)
+  // The next answer from the board makes it current again.
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(sync.textContent, EN.justNow)
+})
+
+test('a page whose poll has failed for 10 s says its data may be stale', async () => {
+  const now = 1_000_000_000_000
+  let polls = 0
+  const model = redesignModel()
+  const dom = await pageDom(await sourcePage(), model, { now, width: 1280, getBoard: async () => {
+    polls += 1
+    if (polls === 2 || polls === 3) throw new Error('Synthetic offline')
+    return { ok: true, json: async () => ({ model, now: 1 }) }
+  } })
+  const sync = dom.node('sync')
+  const isStale = () => hasClassName(dom.node('board'), 'stale')
+  assert.equal(sync.textContent, EN.justNow)
+  assert.equal(isStale(), false)
+  // One failed poll is not yet stale: the page says it is offline, and keeps its rows.
+  dom.setNow(now + 4_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), false)
+  assert.equal(hasClassName(sync, 'is-stale'), false)
+  // Ten seconds without an answer: the button turns into the stale pill, and the rows dim.
+  dom.setNow(now + 11_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), true)
+  assert.equal(hasClassName(sync, 'is-stale'), true)
+  assert.equal(sync.textContent, EN.pgStaleShort('11s'))
+  assert.equal(sync.getAttribute('aria-label'), EN.pgStaleHint('11s'))
+  // The next good poll says so again and undims the rows.
+  dom.setNow(now + 12_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), false)
+  assert.equal(hasClassName(sync, 'is-stale'), false)
+  assert.equal(sync.textContent, EN.justNow)
+  // A held request that never comes back is stale too, after two minutes with no answer at all.
+  dom.setNow(now + 12_000 + 120_000)
+  dom.node('view-all').click()
+  assert.equal(isStale(), true)
+  assert.equal(sync.textContent, EN.pgStaleShort('2m'))
+})
+
+test('the summary line counts what the tabs count', async () => {
+  const model = viewed(redesignModel())
+  const due = model.view.all.open.find(ref => ref.key === 'Due plan')
+  model.view.working = [due]
+  model.view.all.open = model.view.all.open.filter(ref => ref.key !== 'Due plan')
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const pill = id => dom.node(id).textContent
+  assert.equal(pill('jump-needs'), dom.node('count-needs').textContent)
+  assert.equal(pill('jump-needs'), '2')
+  assert.equal(dom.node('jump-needs').getAttribute('aria-label'), EN.pgPulseNeeds(2))
+  assert.equal(pill('jump-run'), dom.node('count-working').textContent)
+  assert.equal(pill('jump-run'), '1')
+  assert.equal(pill('jump-stop'), '1')
+  assert.equal(dom.node('jump-stop').getAttribute('aria-label'), EN.pgPulseStopped(1))
+  assert.equal(pill('jump-done'), '1')
+  assert.equal(dom.node('jump-done').getAttribute('aria-label'), EN.pgPulseDone(1))
+  // Each count is one press from its list; on Needs you itself, its own count steps aside.
+  dom.node('jump-run').click()
+  assert.equal(dom.node('shell').getAttribute('data-view'), 'working')
+  assert.equal(dom.node('jump-run').getAttribute('aria-pressed'), 'true')
+  dom.node('jump-needs').click()
+  assert.equal(dom.node('shell').getAttribute('data-view'), 'needs')
+  assert.equal(dom.node('jump-needs').hidden, true)
+  // Under an agent filter the counts follow the same filter as the tabs.
+  const filtered = await pageDom(await sourcePage(), model, { width: 1280, storage: new Map([['agent-board.filter', 'gemini']]) })
+  assert.equal(filtered.node('jump-needs').textContent, filtered.node('count-needs').textContent)
+  assert.equal(filtered.node('jump-needs').textContent, '1')
+  assert.equal(filtered.node('jump-run').textContent, '0')
+  assert.equal(filtered.node('jump-done').textContent, '0')
+})
+
+test('idle and stopped sessions fold under a count and one press opens them', async () => {
+  const dom = await pageDom(await sourcePage(), redesignModel(), { width: 1280 })
+  const shelfOf = node => [node, ...pulseWalk(node)].find(one => hasClassName(one, 'shelf'))
+  const headOf = node => pulseWalk(node).find(one => hasClassName(one, 'shelf-head'))
+  const foldOf = node => pulseWalk(node).find(one => hasClassName(one, 'fold'))
+  // On the Overview, only Needs you and Working are open: idle work folds under its count, closed.
+  const idle = shelfOf(dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes(EN.pgOthers)))
+  assert.ok(idle)
+  assert.equal(headOf(idle).textContent, EN.pgOthers + '1')
+  assert.equal(hasClassName(idle, 'open'), false)
+  assert.equal(foldOf(idle).inert, true)
+  assert.equal(headOf(idle).getAttribute('aria-expanded'), 'false')
+  // One press opens it, and the choice survives the next poll.
+  headOf(idle).click()
+  assert.equal(hasClassName(idle, 'open'), true)
+  assert.equal(foldOf(idle).inert, false)
+  await dom.redraw(redesignModel())
+  await dom.settle()
+  const idleAgain = shelfOf(dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes(EN.pgOthers)))
+  assert.equal(hasClassName(idleAgain, 'open'), true)
+  // Stopped sessions keep their own closed fold; the first line's Stopped count opens it and brings it into view.
+  const stopped = () => shelfOf(dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes(EN.pgStopped)))
+  assert.equal(hasClassName(stopped(), 'open'), false)
+  dom.node('jump-run').click()
+  dom.node('jump-stop').click()
+  assert.equal(dom.node('shell').getAttribute('data-view'), 'all')
+  assert.equal(hasClassName(stopped(), 'open'), true)
+  assert.equal(stopped().scrolled, true)
+  assert.ok(shownWords(stopped()).includes('Stopped plan'))
+  // The Other work view opens its fold by itself.
+  const fresh = await pageDom(await sourcePage(), redesignModel(), { width: 1280 })
+  fresh.node('view-others').click()
+  const opened = shelfOf(fresh.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes(EN.pgOthers)))
+  assert.equal(hasClassName(opened, 'open'), true)
+})
+
 test('opening a view leaves the own-tasks filter as it was', async () => {
   const model = redesignModel()
   // Gemini's only work is the question; nothing of it is in Other work or on the Stopped shelf.
@@ -13989,8 +14126,9 @@ test('the page uses ink for actions and amber only for what needs you', async ()
   assert.ok(html.includes('--act:var(--ink)') && html.includes('--on-act:var(--surface)') && html.includes('--btn-line:'))
   const primary = rules.find(([selector]) => selector === 'button.primary')[1]
   assert.ok(primary.includes('var(--act)') && primary.includes('var(--on-act)'), primary)
-  // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words, the Needs you view, and a progress-bar cell for a step that waits on the person (#1085).
-  assert.deepEqual(using('waiting'), ['.badge', '.flag', '.pbar .c-w', '.pbar.cont u.c-w', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
+  // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words, the Needs you view, a progress-bar cell for a step that waits on the person (#1085),
+  // and on the first line the Needs you count and the stale pill that asks for a refresh (#1023).
+  assert.deepEqual(using('waiting'), ['.badge', '.flag', '.pbar .c-w', '.pbar.cont u.c-w', '.pulse-bar .p-need', '.pulse-bar .sync-btn.is-stale', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
   // The blue accent is on the live page only when the person picks the Blue progress-bar style (#1085), and on its swatch in the look menu.
   assert.deepEqual(using('accent'), ['[data-bar="blue"] .pbar .c-x,[data-bar="blue"] .pbar .c-c,[data-bar="blue"] .pbar.cont b,[data-bar="blue"] .pbar.cont u.c-c,[data-sw="blue"] .sw .c-x,[data-sw="blue"] .sw .c-c'], 'the blue accent is only the Blue bar style')
   // The question card's send arrow is an action, so it is ink on the page colour, like a primary button (#1107).
