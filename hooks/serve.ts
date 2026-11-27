@@ -2310,7 +2310,7 @@ const PAGE_SCRIPT = String.raw`
     }
     return node;
   }
-  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, hasWaitingOthers: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
+  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, hasWaitingOthers: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {}, doneKeys: null };
   var cardState = {};
   var cardParts = {};
   var cardChoices = Object.create(null);
@@ -4362,6 +4362,7 @@ const PAGE_SCRIPT = String.raw`
     var priorCards = pg.cardNodes;
     var priorOrder = pg.order.cards || [];
     var priorRows = pg.rowKeys;
+    var priorDone = pg.doneKeys;
     pg.lis = [];
     pg.groups = [];
     pg.sections = [];
@@ -4387,8 +4388,10 @@ const PAGE_SCRIPT = String.raw`
     if (asked) parts.push(asked);
     var hasWork = Object.keys(view.all.counts).some(function (key) { return view.all.counts[key] > 0; });
     document.getElementById('shell').setAttribute('data-empty', !view.agents.length && !hasWork ? '1' : '');
-    if (!view.agents.length && !hasWork) parts.push(freshPage(view));
-    else {
+    if (!view.agents.length && !hasWork) {
+      parts.push(freshPage(view));
+      pg.doneKeys = Object.create(null);
+    } else {
       var titleCounts = Object.create(null);
       var seenKeys = Object.create(null);
       view.needs.cards.concat(view.needs.waitingOthers || [], view.working, view.all.open, view.all.stopped, view.all.done).forEach(function (ref) {
@@ -4407,10 +4410,12 @@ const PAGE_SCRIPT = String.raw`
       var stopped = shelf('stopped', w('pgStopped'), view.all.stopped.slice().sort(byTime), 'stopped');
       if (stopped) parts.push(sectionBlock(stopped, 'stopped'));
       var finished = view.all.done.slice().sort(byTime);
+      var nextDone = Object.create(null);
+      finished.forEach(function (ref) { nextDone[ref.key] = true; });
       // Auto-surface freshly completed AI tasks while respecting any manual collapse by the user.
       if (opened['shelf:done'] === undefined && finished.length) {
-        var justFinishedAi = priorRows && finished.some(function (ref) {
-          return priorRows[ref.key] && !(source(ref).isOwn || ref.isOwn);
+        var justFinishedAi = priorDone !== null && finished.some(function (ref) {
+          return !priorDone[ref.key] && !(source(ref).isOwn || ref.isOwn);
         });
         var narrowFreshAi = typeof window.innerWidth === 'number' && window.innerWidth > 0 && window.innerWidth < 800 && hasFreshAiDone(view);
         if (justFinishedAi || narrowFreshAi) opened['shelf:done'] = true;
@@ -4420,6 +4425,7 @@ const PAGE_SCRIPT = String.raw`
       var hidden = hiddenShelf(model);
       if (hidden) parts.push(hidden);
       pg.rowKeys = workingKeys;
+      pg.doneKeys = nextDone;
     }
     var storageSec = document.getElementById('settings-storage');
     var storageLine = document.getElementById('settings-storage-line');

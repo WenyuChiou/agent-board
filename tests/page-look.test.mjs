@@ -1059,4 +1059,23 @@ test('narrow cockpit HUD promotes live working steps, toggles idle filters, and 
   assert.ok(!hasClass(doneShelf(), 'open'), 'clicking Done shelf closes it')
   await dom.redraw(afterModel)
   assert.ok(!hasClass(doneShelf(), 'open'), 'redraw respects manual close of Done shelf')
+
+  // Waiting -> done transition (not in previous Working now) also auto-opens Done shelf on desktop.
+  const waitMd = [
+    md,
+    '## wait-to-done',
+    `<!-- auto session=cc300004 agent=gemini state=waiting updated=${freshIso} -->`,
+    '### Confirm production deploy',
+    '- [?] Ship release?',
+    '<!-- /auto session=cc300004 -->',
+    '',
+  ].join('\n')
+  const waitView = buildView(parseProgress(waitMd), ['retrieval-eval', 'stale-repo', 'finished-repo', 'wait-to-done'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const waitDom = await pageDom(html, serveModel(waitView, [], s, new Set(), false, undefined, false, group))
+  const waitDoneShelf = () => walk(waitDom.node('board')).find(n => hasClass(n, 'shelf') && walk(n).some(c => c.textContent === s.pgDone))
+  assert.ok(!hasClass(waitDoneShelf(), 'open'), 'desktop waiting state leaves Done shelf closed initially')
+  const waitAfterMd = waitMd.replace('state=waiting updated=' + freshIso, 'state=done updated=' + new Date(now + 60_000).toISOString()).replace('- [?] Ship release?', '- [x] Ship release')
+  const waitAfterView = buildView(parseProgress(waitAfterMd), ['retrieval-eval', 'stale-repo', 'finished-repo', 'wait-to-done'], null, now + 60_000, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  await waitDom.redraw(serveModel(waitAfterView, [], s, new Set(), false, undefined, false, { ...group, now: now + 60_000 }))
+  assert.ok(hasClass(waitDoneShelf(), 'open'), 'waiting-to-done AI transition auto-opens Done shelf')
 })

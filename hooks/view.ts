@@ -59,6 +59,8 @@ export type CurrentView = {
   done: number
   total: number
   steps: ViewStep[]
+  // The active or next open step before foldSteps shortens long lists.
+  currentStep?: string
   // One cell per step, unfolded, for the progress bar (#1085).
   cells: Cell[]
   // The runs this session started for itself, as one line; absent when it started none (#399).
@@ -489,6 +491,10 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     }
   })
 
+  const active =
+    steps.find(one => one.isCurrent)?.text ??
+    steps.find(one => one.status !== 'done' && one.status !== 'cancelled')?.text
+
   return {
     state: mirror.state,
     project: mirror.project,
@@ -500,6 +506,7 @@ const currentOf = (mirror: ProgressMirror, s: Strings): CurrentView | null => {
     done,
     total: mirror.tasks.filter(task => !task.handoffTo).length,
     steps: foldSteps(steps, 6, s),
+    ...(active === undefined ? {} : { currentStep: active }),
     cells: cellsOf(withCurrent(steps)),
   }
 }
@@ -1647,8 +1654,9 @@ const clip = (text: string, room: number): string => {
 // task title or proportional-font box-drawing bars), so what is running right now stays readable in narrow strips.
 const currentPart = (current: CurrentView): string => {
   const step =
-    current.steps.find(one => one.isCurrent)?.text ||
-    current.steps.find(one => one.status !== 'done' && one.status !== 'cancelled')?.text ||
+    current.currentStep ??
+    current.steps.find(one => one.isCurrent)?.text ??
+    current.steps.find(one => one.status !== 'done' && one.status !== 'cancelled')?.text ??
     ''
   const focus = step !== '' && step !== current.title ? step : (current.title || current.status)
   if (current.total > 0) return `${current.done}/${current.total} · ${clip(focus, 20)}`

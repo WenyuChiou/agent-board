@@ -734,6 +734,14 @@ test('the status line leads with cross-session waiting alerts and active step te
     expect(hud).not.toContain(s.statusPrefix)
     expect(hud).not.toMatch(/[━─╸]/)
   }
+
+  // Unfolded active step wins even when earlier steps stay pending and foldSteps hides step 8.
+  let late = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
+  for (let i = 1; i <= 8; i += 1) {
+    late = applyTaskCreate(late, { subject: i === 8 ? '跑最後驗證' : `步驟 ${i}`, activeForm: i === 8 ? '跑最後驗證' : '' }, String(i), NOW)
+  }
+  late = applyTaskUpdate(late, { taskId: '8', status: 'in_progress' }, NOW)
+  expect(statusLine(buildView([], [], { ...late, title: '長清單測試', state: 'working' }, NOW))).toBe('0/8 · 跑最後驗證')
 })
 
 test('two 和色 sets: the light one under a light theme, the dark one otherwise', () => {
