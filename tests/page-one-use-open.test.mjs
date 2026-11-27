@@ -1059,6 +1059,8 @@ const runServedPageInOrigin = async (html, pageUrl, originStores, { throwStorage
     _text: '',
     set textContent(v) { this._text = v; if (v === '') this.childNodes = [] },
     get textContent() { return this._text },
+    // The page script reads a shelf head's first child, its chevron (#1937).
+    get firstChild() { return this.childNodes[0] ?? null },
     set id(v) { this.attributes.id = v; nodes.set(v, this) },
     get id() { return this.attributes.id ?? '' },
     appendChild(c) { c.parentNode = this; this.childNodes.push(c); return c },
