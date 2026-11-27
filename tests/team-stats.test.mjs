@@ -118,6 +118,10 @@ test('team stats lists merged pull requests with no review verdict as zero round
   assert.match(text, /\| codex \| 2 \| 0 \| - \| 0\.0 \| 0 \|/)
   assert.match(text, /^merged with no review verdict: #9, #12$/m)
   assert.doesNotMatch(text, /#99/)
+  // A bot's verdict is input for the reviewer, not a verdict: read from GitHub with its author's kind, it counts no round.
+  const botComment = { body: `Review: APPROVE ${head} by synthetic-bot`, createdAt: '2026-10-19T01:00:00Z', databaseId: 7, author: { login: 'synthetic-bot', __typename: 'Bot' } }
+  const [byBot] = fromGraphql([{ number: 30, body: 'Author: codex, fix/x', mergedAt: '2026-10-20T12:00:00Z', state: 'MERGED', isDraft: false, headRefOid: head, comments: { nodes: [botComment] } }])
+  assert.match(scorecard({ issues: [], pullRequests: [byBot] }, date), /^merged with no review verdict: #30$/m)
 })
 
 test('team stats counts each reviewed head once across approvals and requests for changes', () => {

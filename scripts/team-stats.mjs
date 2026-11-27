@@ -126,7 +126,8 @@ export const fromGraphql = nodes => nodes.map(pr => ({
   state: pr.state === 'MERGED' ? 'closed' : pr.state.toLowerCase(),
   draft: pr.isDraft,
   head: { sha: pr.headRefOid },
-  comments: pr.comments.nodes.map(comment => ({ body: comment.body, created_at: comment.createdAt, id: comment.databaseId })),
+  // The author's kind lets roundsOf leave a bot's verdict out, as pr-check does.
+  comments: pr.comments.nodes.map(comment => ({ body: comment.body, created_at: comment.createdAt, id: comment.databaseId, ...(comment.author ? { user: { login: comment.author.login, type: comment.author.__typename } } : {}) })),
 }))
 
 const fetchStats = ({ repo, date, isWeek }) => {
@@ -146,7 +147,7 @@ const fetchStats = ({ repo, date, isWeek }) => {
         headRefOid
         comments(first: 100) {
           totalCount
-          nodes { body createdAt databaseId }
+          nodes { body createdAt databaseId author { login __typename } }
         }
       }
     }

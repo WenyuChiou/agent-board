@@ -2463,16 +2463,21 @@ test('pr-check round warnings treat takeover and round cap comments separately f
   const bodyCap = warningReport({ ...pr, body: `${pr.body}Round cap: #99\n` })
   assert.ok(bodyCap.includes(diagnosisWarning), bodyCap)
   assert.ok(bodyCap.includes(takeoverWarning), bodyCap)
+  // A marker in a GitHub review's body counts as one in a comment.
+  const inReview = warningReport({ ...pr, prReviews: [{ body: 'Fable diagnosis: https://example.invalid/report\nTakeover: reviewer takes the branch', state: 'COMMENTED' }] })
+  assert.equal(inReview.includes(diagnosisWarning), false, inReview)
+  assert.equal(inReview.includes(takeoverWarning), false, inReview)
   const diagnosis = warningReport({ ...pr, prComments: [...pr.prComments, { body: 'Fable diagnosis: https://example.invalid/report' }] })
   assert.equal(diagnosis.includes(diagnosisWarning), false)
   assert.ok(diagnosis.includes(takeoverWarning), diagnosis)
 })
 
-test('pr-check round warnings are limited to ready risk pull requests and leave the command successful', async t => {
+test('pr-check round warnings are limited to risk pull requests, draft or ready, and leave the command successful', async t => {
   const risk = roundWarningPr(roundHeads(2))
   assert.ok(warningReport(risk).includes(diagnosisWarning))
   for (const tier of ['light', 'normal']) assert.doesNotMatch(warningReport({ ...risk, body: risk.body.replace('Tier: risk', `Tier: ${tier}`) }), /^WARN /m)
-  assert.doesNotMatch(warningReport({ ...risk, isDraft: true }), /^WARN /m)
+  // Back in draft after its rounds, the pull request still needs the stop before the next fix.
+  assert.ok(warningReport({ ...risk, isDraft: true }).includes(diagnosisWarning))
 
   const setup = fixture(t)
   const event = join(setup.directory, 'event.json')
@@ -2482,11 +2487,13 @@ test('pr-check round warnings are limited to ready risk pull requests and leave 
   const originalFetch = globalThis.fetch
   t.after(() => { globalThis.fetch = originalFetch })
   let issueComments = []
+  let isIssueReadFailing = false
   globalThis.fetch = async url => {
     const payload = /\/pulls\/17$/.test(url.pathname) ? { head: { sha: '0'.repeat(40) } }
       : url.pathname.endsWith('/issues/17/comments') ? [...roundHeads(2), { body: `Review: APPROVE ${setup.head} by independent reviewer` }]
         : url.pathname.endsWith('/issues/42') ? { state: 'open' }
           : url.pathname.endsWith('/issues/42/comments') ? issueComments : []
+    if (isIssueReadFailing && url.pathname.endsWith('/issues/42/comments')) return { ok: false, status: 502, json: async () => ({ message: 'synthetic outage' }), headers: new Headers() }
     return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
   }
   const env = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value', GITHUB_STEP_SUMMARY: summary }
@@ -2499,6 +2506,11 @@ test('pr-check round warnings are limited to ready risk pull requests and leave 
   const cleared = await runMain(['--event', event, '--repo-dir', setup.directory], env)
   assert.equal(cleared.status, 0, cleared.stdout + cleared.stderr)
   assert.equal(cleared.stdout.includes(diagnosisWarning), false, cleared.stdout)
+  // A failed read of those comments leaves the warning up and never fails the check.
+  isIssueReadFailing = true
+  const failedRead = await runMain(['--event', event, '--repo-dir', setup.directory], env)
+  assert.equal(failedRead.status, 0, failedRead.stdout + failedRead.stderr)
+  assert.ok(failedRead.stdout.includes(`WARN ${diagnosisWarning}`), failedRead.stdout)
 })
 
 test('pr-check counts one round per head with REQUEST CHANGES over the whole pull request', () => {

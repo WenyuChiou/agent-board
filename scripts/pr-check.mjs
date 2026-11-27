@@ -1408,13 +1408,14 @@ export const roundsOf = (comments, { includeApprovals = false } = {}) => {
   return heads.length
 }
 
-const roundWarnings = ({ body, prComments, prReviews, issueComments, isDraft }) => {
-  if (isDraft || visibleTier(body) !== 'risk') return []
+// Draft or Ready: a pull request back in draft after its rounds still needs the stop before the next fix.
+const roundWarnings = ({ body, prComments, prReviews, issueComments }) => {
+  if (visibleTier(body) !== 'risk') return []
   const count = roundsOf([...prComments, ...prReviews])
   const shownLines = item => visibleLines(typeof item === 'string' ? item : item?.body ?? '')
-  const hasDiagnosis = [body, ...prComments, ...issueComments].some(item => shownLines(item).some(line =>
+  const hasDiagnosis = [body, ...prComments, ...prReviews, ...issueComments].some(item => shownLines(item).some(line =>
     /^[ \t]*Fable diagnosis:[ \t]*(?:https?:\/\/[^\s<>()]+|<https?:\/\/[^\s<>]+>|\[[^\]]+\]\(https?:\/\/[^\s)]+\))/i.test(line)))
-  const hasTakeover = prComments.some(item => shownLines(item).some(line => /^[ \t]*(?:Takeover|Round cap):/i.test(line)))
+  const hasTakeover = [...prComments, ...prReviews].some(item => shownLines(item).some(line => /^[ \t]*(?:Takeover|Round cap):/i.test(line)))
   const warnings = []
   if (count >= 2 && !hasDiagnosis) warnings.push("2 REQUEST CHANGES rounds: if both found the same kind of fault, `Question:` on the issue and the maintainer's Fable diagnosis come before the next fix (team-process line 68)")
   if (count >= 3 && !hasTakeover) warnings.push("the third round was the author's last (team-process line 65)")
@@ -1571,7 +1572,7 @@ export const checkPr = data => {
     add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body) }))
     add(rounds([...data.prComments, ...(data.prReviews ?? [])], { body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
     const linkedComments = [...new Set(issue.issues)].flatMap((number, index) => (index === 0 ? data.issueComments : data.moreIssues?.[number]?.issueComments) ?? [])
-    output.warnings.push(...roundWarnings({ body: data.body, prComments: data.prComments, prReviews: data.prReviews ?? [], issueComments: linkedComments, isDraft: data.isDraft }))
+    output.warnings.push(...roundWarnings({ body: data.body, prComments: data.prComments, prReviews: data.prReviews ?? [], issueComments: linkedComments }))
     // A round can be a review state alone, so reviews that could not be read leave the count unknown, never zero.
     if (data.isReviewsUnread && visibleTier(data.body) === 'risk' && !isRelease && data.number !== null && data.number > CASES_FROM) {
       output.problems.push(problem('rounds', 'the reviews of this pull request could not be read, so its review rounds are not counted.', 'run the check again; the round count reads every review, and it stops a risk-tier pull request at its cap (RULES.md, R6).'))
@@ -1987,7 +1988,10 @@ export const main = async (argv = process.argv.slice(2)) => {
         const issueData = await api(`issues/${number}`, { isMissingAllowed: true })
         // A team author needs no claim (#607), but a risk-tier pull request's round warning looks there for a `Fable diagnosis:` link (#1914).
         const isRead = issueData !== false && (!isTeam() || visibleTier(data.body) === 'risk')
-        return { issueData, issueComments: isRead ? await api(`issues/${number}/comments`, { isList: true }) : [] }
+        if (!isRead) return { issueData, issueComments: [] }
+        if (!isTeam()) return { issueData, issueComments: await api(`issues/${number}/comments`, { isList: true }) }
+        // For a team author the comments feed only a warning, so a failed read leaves the warning up and never fails the check.
+        try { return { issueData, issueComments: await api(`issues/${number}/comments`, { isList: true }) } } catch { return { issueData, issueComments: [] } }
       }
       if (first !== undefined) {
         Object.assign(data, await lookup(first))
