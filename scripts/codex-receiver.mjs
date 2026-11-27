@@ -59,7 +59,7 @@ const LEFT = new Set(['unsubscribed', 'notSubscribed', 'notLoaded'])
 const OVER = new Set(['completed', 'interrupted', 'failed'])
 // The board's refusals of a receipt that are about the message itself (it expired, was dismissed, or is settled otherwise): the
 // same receipt would be refused again, whichever connection sent it.
-const SETTLED = new Set(['MESSAGE_EXPIRED', 'MESSAGE_DISMISSED', 'RECEIPT_CONFLICT', 'TARGET_MISMATCH', 'CLAIM_REQUIRED', 'INVALID_RECEIPT', 'INVALID_TEXT', 'UNKNOWN_FIELD'])
+const SETTLED = new Set(['MESSAGE_EXPIRED', 'MESSAGE_DISMISSED', 'RECEIPT_CONFLICT', 'TARGET_MISMATCH', 'CLAIM_REQUIRED', 'INVALID_RECEIPT', 'INVALID_TEXT', 'UNKNOWN_FIELD', 'ACK_REQUIRED'])
 const RETRY_MAX_MS = 30_000
 
 // The Codex program to run, as a path that needs no shell: an `.exe` or a script Node runs. On Windows
@@ -844,6 +844,7 @@ export const startCodexReceiver = ({
           // already marked.
           let said = null, settledAck = null, acking = null, finishAck = null
           try {
+          try {
             for (;;) {
               for (;;) {
                 if (isDone()) return undefined
@@ -971,28 +972,27 @@ export const startCodexReceiver = ({
           }
           // Send the final ACK receipt only after `leave(thread)` completes (#318, #1796), falling back to `sub.owed` if disconnected or busy.
           if (settledAck !== null) {
+            const { message: messageToAck, line } = settledAck
+            if (!one.receiver || one.receiver.isClosed() || one.receiver.isContested()) {
+              queueOwed(thread, messageToAck, 'acknowledged', { reply: line })
+              if (attached.get(thread)?.receiver && attached.get(thread).receiver !== one.receiver) void report(thread)
+              return undefined
+            }
             try {
-              const { message: messageToAck, line } = settledAck
-              if (!one.receiver || one.receiver.isClosed() || one.receiver.isContested()) {
+              await one.receiver.receipt(messageToAck, 'acknowledged', line)
+            } catch (error) {
+              if (!SETTLED.has(error?.message)) {
                 queueOwed(thread, messageToAck, 'acknowledged', { reply: line })
                 if (attached.get(thread)?.receiver && attached.get(thread).receiver !== one.receiver) void report(thread)
-                return undefined
               }
-              try {
-                await one.receiver.receipt(messageToAck, 'acknowledged', line)
-              } catch (error) {
-                if (!SETTLED.has(error?.message)) {
-                  queueOwed(thread, messageToAck, 'acknowledged', { reply: line })
-                  if (attached.get(thread)?.receiver && attached.get(thread).receiver !== one.receiver) void report(thread)
-                }
-                onError(error)
-              }
-            } finally {
-              if (sub.acking === acking) sub.acking = null
-              finishAck?.()
+              onError(error)
             }
           }
           return undefined
+          } finally {
+            if (acking !== null && sub.acking === acking) sub.acking = null
+            finishAck?.()
+          }
         },
       })
     } catch (error) { attached.delete(thread); throw error }
