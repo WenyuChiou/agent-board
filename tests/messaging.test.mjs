@@ -6235,7 +6235,7 @@ test("a Codex claim whose give-back met a busy message store (503, nothing saved
 
 // The person's turn runs on past the first give-back: the turn ends about 1.4 s after it (minute 24 of 30 for real), when a whole
 // wait no longer fits in the claim's time. The first three give-backs meet a busy store (503), a tick apart; the fourth reaches the board.
-for (let run = 0; run <= 20; run += 1) test("a Codex claim whose give-back met a busy message store and whose thread stays busy is given back a tick later, and is delivered once after (#1625)" + (run ? ' [TEMP #1878 repeat ' + run + ']' : ''), () => codexFixture(async (board, dir) => {
+test("a Codex claim whose give-back met a busy message store and whose thread stays busy is given back a tick later, and is delivered once after (#1625)", () => codexFixture(async (board, dir) => {
   const errors = [], clock = codexClaimClock()
   const { daemon, proxy, close } = await codexGiveBackCase(board, dir, 'unsent-busy-thrice', { onError: error => errors.push(error.message), receiverOptions: { claimNow: clock.now }, endTurn: async ({ proxy, daemon }) => {
     // The claim's time stood still until the receiver left; now less than a whole wait and two ticks is left of it (2200 ms of
@@ -6311,7 +6311,7 @@ test('a Codex claim whose unsent receipt got no answer is not started by that de
   } finally { await close() }
 }))
 
-for (let run = 0; run <= 20; run += 1) test('a Codex claim that meets a busy thread goes back to the queue with its text before too little of its time is left for a whole wait, and is delivered once after (#1578)' + (run ? ' [TEMP #1878 repeat ' + run + ']' : ''), () => codexFixture(async (board, dir) => {
+test('a Codex claim that meets a busy thread goes back to the queue with its text before too little of its time is left for a whole wait, and is delivered once after (#1578)', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person'), endFlag = join(dir, 'end-turn')
   writeFileSync(person, '')
   // The person's turn begins as the claim joins, so the receiver leaves again. The claim's own time is 3 s here (30 minutes for
@@ -6346,7 +6346,7 @@ for (let run = 0; run <= 20; run += 1) test('a Codex claim that meets a busy thr
   } finally { await receiver.close() }
 }))
 
-for (let run = 0; run <= 20; run += 1) test('a Codex claim that meets a busy thread still goes back to the queue after a pause longer than the time left for it (#1878)' + (run ? ' [TEMP #1878 repeat ' + run + ']' : ''), () => codexFixture(async (board, dir) => {
+test('a Codex claim that meets a busy thread still goes back to the queue after a pause longer than the time left for it (#1878)', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person'), endFlag = join(dir, 'end-turn'), hold = join(dir, 'read-hold')
   writeFileSync(person, '')
   const daemon = codexDaemon(dir, { readActive: true, endFlag, person, readHold: hold })
