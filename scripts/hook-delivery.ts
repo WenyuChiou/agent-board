@@ -124,7 +124,7 @@ export type TurnDelivery = {
   root: string
   hookDeadline: number
   s: Strings
-  // Antigravity's turn number for a turn start, from its turn order file, sent with the take (#1396).
+  // Antigravity's turn number for a turn start, from its turn log, sent with the take (#1396).
   seq?: number
   // These stay in codex-local.ts, which owns the file lock, the deadline and the hash scheme;
   // importing them back would make the two files import each other.

@@ -266,26 +266,29 @@ What each side may rely on:
   for a mailbox on `IDE`, and only when it is the message the next turn's hook would take: a peer message or a claim in
   doubt ahead of it means no wake. The turn's state comes from Antigravity's own hooks, which number its turns, never
   from progress rows or from any clock (a model may report waiting before its turn ends, and a hook's time is the time
-  its handler ran, not the time of the event). Each conversation has a turn order file in the messages folder, named by
-  its mailbox id: the turn-start hook adds one to `started` and sends that number with its take, and the `Stop` hook sets
-  `stopped` to the number of the turn it ends. Each writes the file under the file's own lock, before any board call;
-  the board only reads it, and keeps the highest number a take sent. A wake is due only when the turn that started last,
-  by the file and by every take the board saw, has had its `Stop`, 10 s after that `Stop`, and once per `Stop`. So a
-  failed take, a failed file write, a waiting report, a repeated event or a clock set back starts no wake into a running
-  turn. No file, or one that does not read, holds every wake; no file is written until a board has made the folder.
-- **Start records.** A turn start first makes an empty record beside the order file, `<mailbox id>.turns.open.<token>`,
-  named by a random token, with no lock, and a record holds the wake until a `Stop` closes it. A `Stop` lists the records
-  as its first act, writes the names it listed as `closed` in the same write as its number, then removes exactly those, so
-  a record the next turn makes after the list stays. A `Stop` that dies after writing its number leaves its records, and
-  a record its `closed` names holds no wake; a poll goes on to take over its dead lock after 30 s. A `Stop` that cannot take
-  the lock hands its list to the board script, which closes those names; one that cannot list the folder closes none. No
-  rule compares a record's date, so a clock set back or forward changes nothing. A file without `closed` keeps every record
-  holding the wake until the next `Stop`.
+  its handler ran, not the time of the event). Each conversation has a turn log in the messages folder, named by its
+  mailbox id plus `.turns.log`: one append-only file whose lines are single writes. A turn-start hook appends
+  `S <token>` and sends the place of that line among the log's starts with its take; a `Stop` hook reads the log's size as
+  its first act and later appends `E <size> <time> <token>`, which ends every start that begins before that size. The
+  board only reads the log, and keeps the highest number a take sent. A wake is due only when the turn that started last,
+  by the log and by every take the board saw, has had its `Stop`, 10 s after that `Stop`, and once per `Stop`. So a
+  failed take, a failed log write, a waiting report, a repeated event or a clock set back starts no wake into a running
+  turn. No log, or one that does not read, holds every wake; nothing is appended until a board has made the folder.
+- **Turn log lines.** There is no lock and no record file. A line has a newline on each side and is one write on a
+  descriptor opened for append, so a line that was cut stands apart from its neighbours: a start is 36 bytes and a stop at
+  most 70. An `E` line counts only if it has the exact shape, ends in a newline and names a size no larger than its own
+  offset; any other line starting with `E` is ignored, and every other non-empty line is a start, so a cut start still
+  holds the wake. Each append is tried three times, 10 ms and 25 ms apart, with a new token. A start the hook worker could
+  not append is appended by the board script; a `Stop` the worker could not append hands the size it read to the board
+  script, which appends it only if it is a whole number no larger than the log's size now. A `Stop` that dies before its
+  line leaves the turn open until the next `Stop`. No rule compares a date, so a clock set back or forward changes nothing.
 - **Not covered.** Between the board's yes and the sidecar's `send-message` call the person may start a turn; a `Stop`
   hook that starts after the next turn's start reads that turn's number and ends it while it runs (only a turn number
   in the `Stop` input, or the app waiting for its `Stop` hook, closes that); a turn whose turn-start hook never ran
   leaves no mark. What the app does with `send-message` into a running turn, and whether it waits for its `Stop` hook,
-  are the live run's to record. Turn order files are kept, one small file per conversation.
+  are the live run's to record. Turn logs are kept and never truncated, one per conversation; the board reads at most
+  16 MB of one (about 440,000 model calls), and a log over that, a file or folder in its place, or a read error holds
+  every wake. Old `.turns.json`, lock and `.turns.open.*` files from earlier builds are neither read nor removed.
 - **Attempt.** The board saves the start (`woke`, a field of its own; OpenCode's `attempted` rules never read it) before
   it answers `{"ok":true}`. The `nonce` is worked out from the message, so the board keeps none. The hook mailbox hands the
   message over in the turn the wake starts; a hook that hands its claim back puts the message back in the queue at once,

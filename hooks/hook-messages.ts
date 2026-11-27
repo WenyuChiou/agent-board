@@ -109,14 +109,61 @@ export const turnStartEnvelope = (agent: string, event: string, text: string, ba
 export const SIDECAR_ALIVE_MS = ANTIGRAVITY_POLL_MS.slow + 2 * ANTIGRAVITY_POLL_MS.fast
 // The owner's plan: a conversation is woken only once it has been idle this long after its turn's end.
 export const WAKE_IDLE_MS = 10_000
-// Antigravity's own hooks number its turns (#1396): its turn-start hook adds one to `started` in the conversation's turn
-// order file and sends that number with its take, and its Stop hook sets `stopped` to the number of the turn it ends. Both
-// write the file before any board call, so the order comes from the hooks' own sequence, not from any clock. A progress
-// report says nothing of this, since a model may report waiting before its turn ends. `closed` names the start records
-// the last Stop listed and removed (#1612): a record it names holds no wake.
-export type TurnOrder = { started: number; stopped: number; stoppedAt: number; closed?: string[] }
-// The order file as the running board reads it now; undefined when there is none or it cannot be read, which holds a wake.
-export type TurnsOfSession = (agent: string, session: string) => TurnOrder | undefined
+// Antigravity's own hooks keep one append-only turn log per conversation (#1396, D2): a turn-start hook appends the line
+// `S <token>`, a Stop hook reads the log's size as its first act and later appends `E <size> <at> <token>`, which ends every
+// start whose line begins before that size. Each line is one write with a newline on each side, so a cut line is cut apart
+// from its neighbours. A start sends its number, its place among the starts, with its take. The order comes from the hooks'
+// own sequence, not from any clock; a progress report says nothing of it, since a model may report waiting before its
+// turn ends. A Stop's `at` only feeds the 10 s wait below.
+export type TurnOrder = { started: number; stopped: number; stoppedAt: number }
+// What the board reads of a log: the order, and the length of the text it was read from, which a wake-attempt compares with
+// the log's size a second time.
+export type TurnLog = TurnOrder & { size: number }
+// The log as the running board reads it now; undefined when there is none or it cannot be read, which holds a wake.
+export type TurnsOfSession = (agent: string, session: string) => TurnLog | undefined
+// A stop line is whole only when it matches this and its newline came; any other line that begins with E is ignored.
+const STOP_LINE = /^E (\d{1,16}) (\d{1,16}) [0-9a-f]{32}$/
+const START_LINE = /^S ([0-9a-f]{32})$/
+// Each line of the text, with the offset where its write began (its leading newline) and whether its own newline came.
+// The text is read as latin1, so a character index is a byte offset. The last piece, after the final newline, is an
+// unterminated tail; a blank line is the join of two whole lines.
+const forEachLine = (text: string, each: (line: string, offset: number, isWhole: boolean) => boolean | void): void => {
+  for (let from = 0; ;) {
+    const end = text.indexOf('\n', from), isWhole = end >= 0
+    if (each(text.slice(from, isWhole ? end : text.length), Math.max(0, from - 1), isWhole) === true || !isWhole) return
+    from = end + 1
+  }
+}
+// The turn log as one pure read. A start is any non-blank line that does not begin with E: a whole one, a cut one, garbage or
+// an unterminated tail, so anything unknown holds a wake. A stop is a whole line of the grammar whose size is at most its own
+// offset, since the size is read before the line is appended and the log only grows; a line that names a size past itself
+// is a forgery or a fault and is ignored, like every other line that begins with E. `stopped` counts the starts that begin
+// before the largest size any stop named, and `stoppedAt` is the last stop's time.
+export const turnsOfLog = (text: string): TurnLog => {
+  let started = 0, largest = 0, stoppedAt = 0
+  const offsets: number[] = []
+  forEachLine(text, (line, offset, isWhole) => {
+    if (line === '') return
+    if (!line.startsWith('E')) { started += 1; offsets.push(offset); return }
+    const found = isWhole ? STOP_LINE.exec(line) : null
+    if (found === null) return
+    const size = Number(found[1]), at = Number(found[2])
+    if (!Number.isSafeInteger(size) || !Number.isSafeInteger(at) || size > offset) return
+    largest = Math.max(largest, size)
+    stoppedAt = at
+  })
+  return { started, stopped: offsets.filter(offset => offset < largest).length, stoppedAt, size: text.length }
+}
+// The place of the start line `S <token>` among the starts, counted as turnsOfLog counts them; undefined when it is not there.
+export const startOrdinal = (text: string, token: string): number | undefined => {
+  let count = 0, found: number | undefined
+  forEachLine(text, line => {
+    if (line === '' || line.startsWith('E')) return
+    count += 1
+    if (START_LINE.exec(line)?.[1] === token) { found = count; return true }
+  })
+  return found
+}
 // The board keeps the highest number a take sent, so a turn whose file write failed still reads as started.
 export const markBusy = (state: MessageState, agent: string, session: string, seq: number): MessageState => {
   const id = mailboxId(agent, session), mailboxes = state.mailboxes ?? []
@@ -133,10 +180,10 @@ const wakeStop = (state: MessageState, one: Message, now: number, turnsOfSession
   if (one.status !== 'queued' || one.woke !== undefined || !isWakeMessage(one)) return undefined
   const box = state.mailboxes?.find(mailbox => mailbox.id === one.target && mailbox.surface === one.surface && mailbox.expires > now)
   if (box === undefined) return undefined
-  // Idle only when the last turn that started has had its Stop, by the file and by every take the board saw, and for 10 s
-  // since. Not covered (an Edge): a Stop hook that starts after the next turn's start reads that turn's number, so it ends
-  // the turn still running; only a turn number in the Stop's own input, or the app waiting for its Stop hook, closes that.
-  // Antigravity 2.35.2 started no turn during a slowed Stop in one live run, and its hook inputs carry no turn id.
+  // Idle only when the last start has had its Stop, by the log and by every take the board saw, and for 10 s since. Not
+  // covered (an Edge): a Stop whose size read comes after the next turn's start line landed ends that turn while it runs;
+  // only a turn number in the Stop's own input, or the app waiting for its Stop hook, closes that. Antigravity 2.35.2
+  // started no turn during a slowed Stop in one live run, and its hook inputs carry no turn id.
   const turns = turnsOfSession(box.agent, box.session)
   if (turns === undefined || turns.stopped <= 0 || turns.stopped !== Math.max(turns.started, box.busySeq ?? 0) || now - turns.stoppedAt < WAKE_IDLE_MS) return undefined
   // One wake per Stop: a wake started since then has its turn to run.

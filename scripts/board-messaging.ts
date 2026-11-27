@@ -1,14 +1,13 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
-import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, markBusy, releaseMailboxMessage, shownWake, SIDECAR_ALIVE_MS, takeMailboxMessage, wakeAction, type TurnOrder, type TurnsOfSession } from '../hooks/hook-messages'
+import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, markBusy, releaseMailboxMessage, shownWake, SIDECAR_ALIVE_MS, startOrdinal, takeMailboxMessage, turnsOfLog, wakeAction, type TurnLog, type TurnsOfSession } from '../hooks/hook-messages'
 import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isHostTurn, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, openAnswer, originOf, pruneMessages, queueMessage, rebindMessages, restartMessages, ROUTE_LINES, sendDecision, shownMessage, sidecarRoutes, textHash } from '../hooks/messaging'
 import type { TakeTurn } from '../hooks/hook-messages'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
-import { withLocalLock } from './local-lock'
 import { isClaimRef, isTurnNumber, parseMessageStore, queuedMessagingOf, shownMessages, storedMessageState } from '../hooks/queued-store'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
 import { claimMessageStore } from './message-store-claim'
@@ -134,8 +133,8 @@ export const moveLockAside = (lock: string, recorded: string, claim: MessageStor
 
 // Only a host adapter can register a receiving session. Registrations and secrets die with
 // this server; message ids and receipts survive restart so uncertainty is never auto-retried.
-// turnsOfSession: an Antigravity conversation's turn order file, read fresh at each wake call; none holds every wake, and so
-// does a turn start's record (isTurnOpen). reportedAt: when the session last reported, -1 for never (one answer per question, #1843).
+// turnsOfSession: an Antigravity conversation's turn log, read fresh at each wake call; none holds every wake.
+// reportedAt: when the session last reported, -1 for never (one answer per question, #1843).
 export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined; turnsOfSession?: TurnsOfSession; reportedAt?: (agent: string, session: string) => number }
 
 const openMessaging = (directory: string, isDefault = false, gate?: MessageGate) => {
@@ -466,43 +465,28 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         return { ok: true }
       }
       if (action === 'wake-poll' || action === 'wake-attempt' || action === 'wake-report') {
-        const turnsOf = gate?.turnsOfSession
-        const decide = (isLockHeld: boolean) => wakeAction(state, action, body, now, (agent, session) => {
-          // A turn start's record holds the wake; it is looked for before the order file is read (D1, #1612).
-          if (isTurnOpen(root, agent, session)) return undefined
-          const turns = turnsOf?.(agent, session)
-          if (turns === undefined || isLockHeld || !isTurnOrderLocked(root, agent, session)) return turns
-          // A poll that finds the lock takes it, which takes over a dead hook's lock once it is 30 s old (local-lock), and
-          // reads the file again under it; a lock a live hook holds stays its own and holds the wake (#1751).
-          try { return withLocalLock(`${turnOrderFile(root, agent, session)}.lock`, () => turnsOf?.(agent, session), { waitMs: 0 }) } catch { return undefined }
-        })
+        // The log as the decision read it: its length is what the attempt compares with the log's size once its start is saved.
+        let read: TurnLog | undefined
+        const before = state
+        const next = wakeAction(state, action, body, now, (agent, session) => (read = gate?.turnsOfSession?.(agent, session)))
         if (action === 'wake-poll') sidecarSeen = now
-        // An attempt reads the order file under the file's own lock and saves its start before it lets go, so a turn
-        // start writes either before that read, which holds the wake, or after the board's yes (round 4, codex_481). A
-        // lock it cannot take in 100 ms, a hook's or one a dead hook left less than 30 s ago, holds the wake. A start's
-        // record needs no lock, so the attempt looks for one again once its start is saved: a start whose hook made its
-        // record by then undoes the start (#1612), and one that makes it later comes after the board's yes.
-        // An undo that cannot be saved is the board's error, so the sidecar runs nothing and the saved start keeps the
-        // message to the next turn's take.
-        const one = action === 'wake-attempt' && typeof body.id === 'string' ? state.messages.find(message => message.id === body.id) : undefined
-        const box = one === undefined ? undefined : state.mailboxes?.find(mailbox => mailbox.id === one.target && mailbox.agent === 'antigravity')
-        if (box !== undefined) {
-          try {
-            return withLocalLock(`${turnOrderFile(root, box.agent, box.session)}.lock`, () => {
-              const before = state, next = decide(true)
-              if (next.state === state) return next.result
-              save(next.state, now)
-              if (!isTurnOpen(root, box.agent, box.session)) return next.result
-              save(before, now)
-              return { ok: false, code: 'NOT_HELD' }
-            }, { waitMs: 100 })
-          } catch (error) {
-            if ((error as Error).message === 'LOCK_BUSY' || (error as Error).message === 'LOCK_DENIED') return { ok: false, code: 'NOT_HELD' }
-            throw error
+        if (next.state === state) return next.result
+        save(next.state, now)
+        // An attempt that says yes has saved its start. The log only grows, so a log of the length the decision read has had no
+        // line appended since: the start was saved before any line a turn start appends from here on, which comes after the
+        // board's yes. A log of another length, or whose size cannot be read, had a line appended in between, so the start is
+        // saved back and the attempt is refused, and the turn's take hands the message over. No lock is read or made (D2, #1396).
+        // An undo that cannot be saved is the board's error, so the sidecar runs nothing and the saved start keeps the message
+        // to the next turn's take.
+        if (action === 'wake-attempt') {
+          const one = state.messages.find(message => message.id === body.id)
+          const box = one === undefined ? undefined : state.mailboxes?.find(mailbox => mailbox.id === one.target && mailbox.agent === 'antigravity')
+          const length = box === undefined ? undefined : turnLogSize(root, box.agent, box.session)
+          if (length === undefined || length !== read?.size) {
+            save(before, now)
+            return { ok: false, code: 'NOT_HELD' }
           }
         }
-        const next = decide(false)
-        if (next.state !== state) save(next.state, now)
         return next.result
       }
       if (['mailbox-turn', 'mailbox-release', 'mailbox-attempt', 'mailbox-open', 'mailbox-accept', 'mailbox-end', 'mailbox-ack', 'mcp-enroll'].includes(action)) {
@@ -741,106 +725,101 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
   return { call, isDeferred: () => hasDeferred, isCutOff: () => isCutOff, hasTransportError: () => hasTransportError, isAbsent: () => isAbsent, error: () => lastError }
 }
 export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(directory, budget).call
-// Antigravity's turn order file (#1396; TurnOrder in hooks/hook-messages.ts): one per conversation in the messages folder,
-// named by its mailbox id, so its name holds no session id. Its hooks write it, each under the file's own lock and before
-// any board call; the running board only reads it.
-const turnOrderFile = (directory: string, agent: string, session: string): string => join(resolve(directory), `${mailboxId(agent, session)}.turns.json`)
-// A turn start's record (D1, #1612): an empty file the turn-start hook makes before anything else and with no lock, named
-// by a random token, so a start the order file does not show yet holds the wake. Records are owned by their names, never
-// by a date: a Stop lists them first, then writes its number with `closed`, the names it listed, in the same write, and
-// removes exactly those. A record made after the list stays and holds the wake until its own turn's Stop. A Stop that died
-// after writing its number leaves its records, which hold nothing once `closed` names them. A record the order file's
-// `closed` does not name holds the wake, and so does an order file or a folder that cannot be read.
-const turnRecords = (agent: string, session: string): string => `${mailboxId(agent, session)}.turns.open.`
-// A name a Stop may remove: one of this conversation's records, with no path in it. A list handed through the
-// environment is read only through this (an older hook's `<time>.<pid>` names pass too, so an upgrade clears them).
-const isOwnRecord = (prefix: string, name: unknown): name is string => typeof name === 'string' && name.startsWith(prefix) && /^[A-Za-z0-9._-]{1,64}$/.test(name.slice(prefix.length))
-export const isTurnOpen = (directory: string, agent: string, session: string): boolean => {
-  try {
-    const prefix = turnRecords(agent, session)
-    const open = readdirSync(resolve(directory)).filter(name => name.startsWith(prefix))
-    if (open.length === 0) return false
-    const closed = new Set(readTurnOrder(directory, agent, session)?.closed ?? [])
-    return open.some(name => !closed.has(name))
-  } catch { return true }
-}
-export const openTurnRecord = (directory: string, agent: string, session: string): void => {
-  const root = resolve(directory)
-  const folder = lstatSync(root)
-  if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING')
-  writeFileSync(join(root, `${turnRecords(agent, session)}${randomBytes(16).toString('hex')}`), '', { flag: 'wx', mode: 0o600 })
-}
-// This conversation's records as a Stop lists them, before it takes the lock; undefined when the folder cannot be read.
-const listTurnRecords = (root: string, agent: string, session: string): string[] | undefined => {
-  try {
-    const prefix = turnRecords(agent, session)
-    return readdirSync(root).filter(name => isOwnRecord(prefix, name))
-  } catch { return undefined }
-}
-// A record already gone is no error: two Stops may have listed it.
-const closeTurnRecords = (root: string, names: readonly string[]): void => {
-  for (const name of names) try { unlinkSync(join(root, name)) } catch {}
-}
+// Antigravity's turn log (#1396, D2; turnsOfLog in hooks/hook-messages.ts): one append-only file per conversation in the
+// messages folder, named by its mailbox id, so its name holds no session id. Its hooks append to it, each line one write on a
+// descriptor opened for append; the running board only reads it. A turn start appends `S <token>`; a Stop reads the log's size
+// first and later appends `E <size> <at> <token>`, which ends the starts that begin before that size. There is no lock, no
+// record and no order file: a Stop that dies before its line leaves the turn open until the next Stop, and one that dies
+// after it is whole. Nothing is truncated or removed, since a rewrite would break "the size only grows" and every size a Stop
+// named; the board reads at most 16 MB of a log (about 440,000 model calls), and over that it reads as unreadable, which
+// holds every wake. A file or folder in its place, or a read error, is unreadable too. Network folders are not supported.
+const turnLogFile = (directory: string, agent: string, session: string): string => join(resolve(directory), `${mailboxId(agent, session)}.turns.log`)
+const TURN_LOG_CAP = 16 * 1024 * 1024
+// No line this long is ever built: one sector, a conservative habit and not a documented bound (lines are at most 70 bytes).
+const TURN_LINE_MAX = 512
 const isCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
-// Undefined when there is no file, or it is not a plain file, or it does not read as one: the board then holds the wake.
-export const readTurnOrder = (directory: string, agent: string, session: string): TurnOrder | undefined => {
+const isTurnToken = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{32}$/.test(value)
+const pauseFor = (ms: number): void => { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
+// The log's text, read as latin1 so a character index is a byte offset. It throws when the log cannot be read: not a plain
+// file, over the cap, or a read error. A missing log throws ENOENT.
+const readLogText = (file: string): string => {
+  const found = lstatSync(file)
+  if (!found.isFile() || found.size > TURN_LOG_CAP) throw new Error('TURN_LOG_UNREADABLE')
+  const text = readFileSync(file).toString('latin1')
+  if (text.length > TURN_LOG_CAP) throw new Error('TURN_LOG_UNREADABLE')
+  return text
+}
+// Undefined when there is no log, or it is not a plain file, or it cannot be read: the board then holds the wake.
+export const readTurnLog = (directory: string, agent: string, session: string): TurnLog | undefined => {
+  try { return turnsOfLog(readLogText(turnLogFile(directory, agent, session))) } catch { return undefined }
+}
+// The log's size now; undefined when it is missing, no plain file or cannot be looked at.
+export const turnLogSize = (directory: string, agent: string, session: string): number | undefined => {
   try {
-    const file = turnOrderFile(directory, agent, session)
-    if (!lstatSync(file).isFile()) return undefined
-    const { started, stopped, stoppedAt, closed } = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
-    if (!(isCount(started) && isCount(stopped) && isCount(stoppedAt) && stopped <= started)) return undefined
-    // `closed` is optional: a file an older hook wrote, or one whose list is not a list of names, closes no record.
-    return Array.isArray(closed) && closed.every(name => typeof name === 'string') ? { started, stopped, stoppedAt, closed } : { started, stopped, stoppedAt }
+    const found = lstatSync(turnLogFile(directory, agent, session))
+    return found.isFile() ? found.size : undefined
   } catch { return undefined }
 }
-// A turn-start hook adds one to `started` and gets the new number back; a Stop hook sets `stopped` to the number of the
-// turn it ends, `stoppedAt` to now and `closed` to the records it listed, then removes exactly those. `listed` is the list
-// the hook worker took as its first act and handed on; without it the list is taken here, before the lock. A Stop that
-// cannot list the folder closes nothing, so the records hold the wake until the next Stop. A file that cannot be read
-// starts again from nothing, which holds wakes until its numbers pass the board's. Nothing is written where no board has
-// made the folder, since a folder made here would not be the private one a board makes.
-export const markTurnOrder = (directory: string, agent: string, session: string, mark: 'start' | 'stop', now: number, waitMs: number, listed?: readonly string[]): number => {
-  const root = resolve(directory), file = turnOrderFile(root, agent, session)
-  const folder = lstatSync(root)
+// One line appended with one write, whose return must equal the line's length, since a short write would leave a cut line.
+// Nothing is written where no board has made the messages folder, since a folder made here would not be the private one a
+// board makes.
+const appendTurnLine = (directory: string, agent: string, session: string, line: string): void => {
+  const bytes = Buffer.from(line, 'latin1')
+  if (bytes.length > TURN_LINE_MAX) throw new Error('LINE_TOO_LONG')
+  const folder = lstatSync(resolve(directory))
   if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING')
-  const prefix = turnRecords(agent, session)
-  const names = mark === 'stop' ? (listed ?? listTurnRecords(root, agent, session) ?? []).filter(name => isOwnRecord(prefix, name)) : []
-  return withLocalLock(`${file}.lock`, () => {
-    const was = readTurnOrder(root, agent, session) ?? { started: 0, stopped: 0, stoppedAt: 0 }
-    // A start writes no `closed`: the records it named are gone, or a later Stop lists them again.
-    const next: TurnOrder = mark === 'start' ? { started: was.started + 1, stopped: was.stopped, stoppedAt: was.stoppedAt } : { started: was.started, stopped: was.started, stoppedAt: now, closed: names }
-    const temp = `${file}.${process.pid}.tmp`
-    try {
-      try { unlinkSync(temp) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-      writeFileSync(temp, JSON.stringify(next), { flag: 'wx', mode: 0o600 })
-      replaceFile(temp, file)
-    } finally { try { unlinkSync(temp) } catch {} }
-    if (mark === 'stop') closeTurnRecords(root, names)
-    return next.started
-  }, { waitMs })
+  const fd = openSync(turnLogFile(directory, agent, session), 'a', 0o600)
+  try { if (writeSync(fd, bytes, 0, bytes.length) !== bytes.length) throw new Error('SHORT_WRITE') } finally { try { closeSync(fd) } catch {} }
 }
-// The order file's lock is there while a hook writes a turn's number, or after a hook died holding it, so the file may be
-// a turn behind: a poll that finds it after reading the file takes the lock and reads again (round 4, codex_481; #1751).
-// One that cannot be looked at holds the wake. An attempt takes the lock itself instead.
-export const isTurnOrderLocked = (directory: string, agent: string, session: string): boolean => {
+// Three tries, 10 and 25 ms apart, each with a new token, as the hook worker makes them. A cut line a failed try left reads
+// as a start. Where no board has made the folder, nothing is retried.
+const appendTurnLineTried = (directory: string, agent: string, session: string, makeLine: (token: string) => string): string | undefined => {
+  for (const wait of [10, 25, undefined]) {
+    const token = randomBytes(16).toString('hex')
+    try { appendTurnLine(directory, agent, session, makeLine(token)); return token } catch (error) {
+      if (wait === undefined || (error as Error).message === 'BOARD_NOT_RUNNING') return undefined
+      pauseFor(wait)
+    }
+  }
+  return undefined
+}
+// A turn start's line, appended by the board script when the hook worker handed on none; undefined when no try landed.
+export const appendTurnStart = (directory: string, agent: string, session: string): string | undefined =>
+  appendTurnLineTried(directory, agent, session, token => `\nS ${token}\n`)
+// A Stop's line `E <size> <at> <token>`. `size` is the one the hook worker read first and could not append, or undefined when
+// no worker marked the Stop, and the log's size is read now. It is appended only if it is a whole number no larger than the
+// log's current size, with a missing log counting as 0; a size past the log is a fault or a forgery, and nothing is appended.
+export const appendTurnStop = (directory: string, agent: string, session: string, size?: unknown): boolean => {
+  let current: number | undefined
   try {
-    lstatSync(`${turnOrderFile(directory, agent, session)}.lock`)
-    return true
-  } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT' }
+    const found = lstatSync(turnLogFile(directory, agent, session))
+    current = found.isFile() ? found.size : undefined
+  } catch (error) { current = (error as NodeJS.ErrnoException).code === 'ENOENT' ? 0 : undefined }
+  const named = size === undefined ? current : size
+  if (current === undefined || !isCount(named) || named > current) return false
+  return appendTurnLineTried(directory, agent, session, token => `\nE ${named} ${Date.now()} ${token}\n`) !== undefined
 }
-// The hook worker marks the turn before it starts the board script (hooks/hook-safety.ts) and hands on what it wrote:
-// the file, the mark and the number, `record: false` for a start whose record it could not make, or, for a Stop that could
-// not take the lock, no number and the list of records it took first. It counts only for the file this board would write
-// and for the same mark; anything else is undefined, and the board script then marks the turn itself, so a turn counts
-// once. A handed list keeps only this conversation's record names.
-export type WorkerMark = { count: number; hasRecord: boolean } | { count?: undefined; list: string[] }
+// The number a turn start sends with its take: the place of its own line among the log's starts, or, when no line of its own
+// is there, the number of starts plus one, so the take alone holds the wake through `busySeq`. Undefined when the log cannot be
+// read; a missing log has no starts.
+export const startSeq = (directory: string, agent: string, session: string, token?: string): number | undefined => {
+  let text = ''
+  try { text = readLogText(turnLogFile(directory, agent, session)) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return undefined }
+  return (token === undefined ? undefined : startOrdinal(text, token)) ?? turnsOfLog(text).started + 1
+}
+// The hook worker marks the turn before it starts the board script (hooks/hook-safety.ts) and hands on what it wrote: the
+// file, the mark and the token of its line, or, for a Stop that could not append, the size it read first, or `none` when it
+// could not read a size. It counts only for the file this board would write and for the same mark; anything else is
+// undefined, and the board script then appends the turn itself, so a turn counts once. A mark from an older worker names
+// another file and is ignored.
+export type WorkerMark = { token?: string; size?: number; none?: boolean }
 export const workerTurnMark = (handed: string | undefined, directory: string, agent: string, session: string, mark: 'start' | 'stop'): WorkerMark | undefined => {
   try {
     const found = JSON.parse(handed ?? 'null') as Record<string, unknown> | null
-    if (found?.file !== turnOrderFile(directory, agent, session) || found.mark !== mark) return undefined
-    const { count, list } = found
-    if (isCount(count) && (mark === 'stop' || count > 0)) return { count, hasRecord: found.record !== false }
-    if (mark === 'stop' && Array.isArray(list)) return { list: list.filter(name => isOwnRecord(turnRecords(agent, session), name)) }
+    if (found?.file !== turnLogFile(directory, agent, session) || found.mark !== mark) return undefined
+    if (isTurnToken(found.token)) return { token: found.token }
+    if (mark === 'stop' && found.none === true) return { none: true }
+    if (mark === 'stop' && isCount(found.size)) return { size: found.size }
     return undefined
   } catch { return undefined }
 }

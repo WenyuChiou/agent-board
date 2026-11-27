@@ -9865,17 +9865,17 @@ test('the real Antigravity sidecar runs a stand-in agentapi\'s send-message once
   // The sidecar finds the board by the owner record a board keeps only in its default folder, so this board runs there;
   // Antigravity's hooks keep the conversation's turn log in it too.
   const folder = (await board.call('/api/ping')).body.messagesDirectory
-  const log = join(folder, `${mailboxId('antigravity', conversation)}.turns.log`)
+  const turnLog = join(folder, `${mailboxId('antigravity', conversation)}.turns.log`)
   // What Antigravity's turn-start hook does: it appends the turn's start line to that log, then takes with that line's number
   // from the board's mailbox API, called here directly. Its Stop hook appends the size it read and calls no board.
   let stopped = 0, starts = 0
   const hook = async seq => {
-    fs.appendFileSync(log, `\nS ${(starts += 1).toString(16).padStart(32, '0')}\n`)
+    fs.appendFileSync(turnLog, `\nS ${(starts += 1).toString(16).padStart(32, '0')}\n`)
     return (await board.call('/api/messages/mailbox-turn', { agent: 'antigravity', session: conversation, surface: 'IDE', seq })).body.message
   }
   assert.equal(await hook(1), null)
   stopped = Date.now()
-  fs.appendFileSync(log, `\nE ${statSync(log).size} ${stopped} ${'e'.repeat(32)}\n`)
+  fs.appendFileSync(turnLog, `\nE ${statSync(turnLog).size} ${stopped} ${'e'.repeat(32)}\n`)
   const card = async () => (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'antigravity')
   assert.equal((await card()).line, 'nextTurn')
   // The sidecar setup writes, with a stand-in for Antigravity's agentapi that only logs its arguments.

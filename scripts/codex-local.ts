@@ -38,7 +38,7 @@ import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { antigravitySurface, deliverAntigravityStopWait, deliverTurnEvent } from './hook-delivery'
-import { checkStoreFile, hookMailbox, markTurnOrder, openTurnRecord, readTurnOrder, workerTurnMark } from './board-messaging'
+import { appendTurnStart, appendTurnStop, checkStoreFile, hookMailbox, startSeq, workerTurnMark } from './board-messaging'
 import { isTurnStart } from '../hooks/hook-messages'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
@@ -1492,9 +1492,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
       queuedFile = file
     }
-    // Antigravity's turn order (#1396): written before the lock below and before any board call, so a lock that stays busy,
-    // a row write that fails or a take that fails each loses one mark at most. A turn start's number also goes with its
-    // take, so a file write that fails still reaches the board. A replayed event writes nothing: no turn counts twice.
+    // Antigravity's turn log (#1396, D2): appended to before the lock below and before any board call, so a lock that stays
+    // busy, a row write that fails or a take that fails each loses one mark at most. A turn start's number also goes with its
+    // take, so a log write that fails still reaches the board. A replayed event writes nothing: no turn counts twice.
     const turnMark = current?.agent === 'antigravity' && current.mode === '--agent-status' && current.event !== undefined
       ? isTurnStart('antigravity', current.event) ? 'start' : current.event === 'Stop' ? 'stop' : undefined : undefined
     let turnSeq: number | undefined
@@ -1505,24 +1505,17 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (current !== undefined && turnMark !== undefined) {
       const messages = defaultMessagesDirectory(progress, home, process.env, process.platform)
       const marked = workerTurnMark(handed, messages, 'antigravity', current.session, turnMark)
-      if (marked?.count !== undefined) {
-        // A start the worker numbered but could not make a record for gets one here; the number is already written.
+      try {
         if (turnMark === 'start') {
-          turnSeq = marked.count
-          if (!marked.hasRecord) try { openTurnRecord(messages, 'antigravity', current.session) } catch {}
+          // A start the worker could not append is appended here, with the same three tries; its number is the place of its
+          // own line, or, with none, the number of starts plus one.
+          const token = marked?.token ?? appendTurnStart(messages, 'antigravity', current.session)
+          turnSeq = startSeq(messages, 'antigravity', current.session, token)
+        } else if (marked?.token === undefined && marked?.none !== true) {
+          // A Stop the worker did not mark, or could not append, ends the turns before the size it read first.
+          appendTurnStop(messages, 'antigravity', current.session, marked?.size)
         }
-      } else {
-        // A start the worker did not mark may have no record either (#1612), so this makes one too; a second record is
-        // harmless, since the turn's Stop lists and removes both. A Stop the worker could not mark closes the records it
-        // listed first, handed on here, so a record made after that list stays.
-        if (turnMark === 'start') try { openTurnRecord(messages, 'antigravity', current.session) } catch {}
-        try {
-          const count = markTurnOrder(messages, 'antigravity', current.session, turnMark, Date.now(), Math.max(0, Math.min(500, hookDeadline - Date.now() - 500)), marked?.list)
-          if (turnMark === 'start') turnSeq = count
-        } catch {
-          if (turnMark === 'start') turnSeq = (readTurnOrder(messages, 'antigravity', current.session)?.started ?? 0) + 1
-        }
-      }
+      } catch {}
     }
     // A board that refuses writes, for its lock or any file under it, as agy's terminal sandbox does (#1384).
     const isDenied = (error: unknown): boolean => !isBusy(error)

@@ -26,7 +26,7 @@ import { cardSendKey, handledOnly, lanAddress, localHosts, pagePolicy, replyText
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { isFolder, runSendPlan } from './background-resume'
-import { createMessaging, readTurnOrder } from './board-messaging'
+import { createMessaging, readTurnLog } from './board-messaging'
 import { messageStatus, nextStatusDeadline } from '../hooks/message-status'
 import { watchBoard } from './board-watch'
 import type { BoardWatch, WatchFn } from './board-watch'
@@ -357,8 +357,8 @@ export const startServer = (o: ServeOptions): void => {
     try {
       return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory, {
         routes: o.routes ?? RECEIVER_ROUTES, stateOfSession: (agent, session) => sessionState(o.view(), agent, session),
-        // An Antigravity conversation's turn order file, read fresh at each wake call (#1396).
-        turnsOfSession: (agent, session) => readTurnOrder(o.messagesDirectory, agent, session),
+        // An Antigravity conversation's turn log, read fresh at each wake call (#1396).
+        turnsOfSession: (agent, session) => readTurnLog(o.messagesDirectory, agent, session),
         // Read only when the board sends an answer to a question (#1843, B3.2).
         reportedAt: (agent, session) => Math.max(-1, ...(o.reports?.() ?? []).filter(one => one.agent === agent && one.session === session).map(one => one.updated)),
       })
