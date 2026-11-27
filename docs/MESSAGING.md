@@ -425,6 +425,8 @@ it waits for the turn; after disconnect, the 30-minute limit applies. The page c
 to show expired messages as no reply confirmed. The one exception is a wake the OpenCode
 plugin started: at 30 minutes it reads "sent, not confirmed" (`uncertain` / `UNCONFIRMED`)
 instead, keeps its text and takes a late accept or ACK, and becomes `EXPIRED` a day later.
+A late `uncertain` receipt that does not say the turn ended leaves it as it is, so it holds
+nothing, as a late accept does.
 Only the board writes `UNCONFIRMED`, `BOARD_RESTARTED` and `HOLDER_LOST`; a receipt that sends one, like one
 that sends `EXPIRED` or `DISMISSED`, fails with `INVALID_RECEIPT`.
 
