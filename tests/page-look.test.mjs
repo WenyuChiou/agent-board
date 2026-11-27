@@ -29,7 +29,7 @@ try {
   ])
 } finally { loader.deregister() }
 
-const [{ pageTokens, BOARD_PATH: boardPath }, { serveModel, servePage, pagePolicy }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }, { RETENTION, sizeWarnings, storageDetails }, { buildView }, { parseProgress }, { observeQuestions }, { boardCounts }, { boardDocument }, { pageDom }] = source
+const [{ pageTokens, BOARD_PATH: boardPath }, { serveModel, servePage, pagePolicy, handledOnly }, { STRINGS }, { AGENT_ICONS }, { FONT_LICENSE }, { RETENTION, sizeWarnings, storageDetails }, { buildView }, { parseProgress }, { observeQuestions }, { boardCounts }, { boardDocument }, { pageDom }] = source
 const SANS = 'Inter,"PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans","PingFang SC","Noto Sans SC","Microsoft YaHei",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const SANS_SC = 'Inter,"PingFang SC","Noto Sans SC","Microsoft YaHei UI","Microsoft YaHei","PingFang TC","Noto Sans TC","Microsoft JhengHei UI","Microsoft JhengHei","Hiragino Sans",system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans",sans-serif'
 const MONO = 'ui-monospace,"SF Mono","Cascadia Mono","Segoe UI Mono",Menlo,Consolas,"Liberation Mono",monospace'
@@ -931,23 +931,33 @@ test('Redesign 2 uses icon-only AI identity, distinct CLI/App .surf-pill badges,
   ].join('\n')
   for (const [locale, words] of [['en', STRINGS.en], ['zh-TW', STRINGS['zh-TW']], ['zh-CN', STRINGS['zh-CN']]]) {
     const multiView = buildView(parseProgress(multiMd), ['cli-repo', 'app-repo'], null, now, 0, {}, words, [], {}, { version: 1, next: 1, records: [], legacy: {} })
-    const multiModel = serveModel(multiView, [], words, new Set(), false, {
+    const rawMessaging = {
       connections: [
         { id: 'c-cli', agent: 'codex', session: 'cc200001', surface: 'Codex CLI', scope: 'session', turn: 't1', contested: false, expires: now + 60_000 },
         { id: 'c-app', agent: 'codex', session: 'cc200002', surface: 'Codex desktop app', scope: 'session', turn: 't2', contested: false, expires: now + 60_000 },
       ],
       messages: [],
-    }, false, group)
-    const multiDom = await pageDom(servePage(words, 'n'), multiModel)
-    const multiSide = multiDom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
-    const multiChip = multiDom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
-    const expectSurf = `${words.pgInterfaceCli} · ${words.pgInterfaceApp}`
-    assert.ok(multiSide.getAttribute('aria-label').includes(expectSurf), `${locale} side aria-label: ${multiSide.getAttribute('aria-label')}`)
-    assert.ok(multiChip.getAttribute('aria-label').includes(expectSurf), `${locale} chip aria-label: ${multiChip.getAttribute('aria-label')}`)
-    assert.ok(walk(multiSide).some(n => hasClass(n, 'surf-cli') && !hasClass(n, 'surf-icon')))
-    assert.ok(walk(multiSide).some(n => hasClass(n, 'surf-app') && !hasClass(n, 'surf-icon')))
-    assert.ok(walk(multiChip).some(n => hasClass(n, 'surf-cli') && hasClass(n, 'surf-icon')))
-    assert.ok(walk(multiChip).some(n => hasClass(n, 'surf-app') && hasClass(n, 'surf-icon')))
+    }
+    const redacted = handledOnly(rawMessaging)
+    assert.deepEqual(redacted.connections, [])
+    const redactedJson = JSON.stringify(redacted)
+    for (const secret of ['c-cli', 'c-app', 't1', 't2']) assert.ok(!redactedJson.includes(secret), `${locale} leaked ${secret}`)
+
+    for (const [isLan, messaging] of [[false, rawMessaging], [true, redacted]]) {
+      const multiModel = serveModel(multiView, [], words, new Set(), isLan, messaging, false, group)
+      const multiDom = await pageDom(servePage(words, 'n', isLan), multiModel)
+      const multiSide = multiDom.node('side-agents').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+      const multiChip = multiDom.node('chips').childNodes.find(n => n.getAttribute?.('data-agent') === 'codex')
+      const expectSurf = `${words.pgInterfaceCli} · ${words.pgInterfaceApp}`
+      assert.ok(multiSide.getAttribute('aria-label').includes(expectSurf), `${locale} lan=${isLan} side aria-label: ${multiSide.getAttribute('aria-label')}`)
+      assert.ok(multiSide.getAttribute('title').includes(expectSurf), `${locale} lan=${isLan} side title: ${multiSide.getAttribute('title')}`)
+      assert.ok(multiChip.getAttribute('aria-label').includes(expectSurf), `${locale} lan=${isLan} chip aria-label: ${multiChip.getAttribute('aria-label')}`)
+      assert.ok(multiChip.getAttribute('title').includes(expectSurf), `${locale} lan=${isLan} chip title: ${multiChip.getAttribute('title')}`)
+      assert.ok(walk(multiSide).some(n => hasClass(n, 'surf-cli') && !hasClass(n, 'surf-icon')))
+      assert.ok(walk(multiSide).some(n => hasClass(n, 'surf-app') && !hasClass(n, 'surf-icon')))
+      assert.ok(walk(multiChip).some(n => hasClass(n, 'surf-cli') && hasClass(n, 'surf-icon')))
+      assert.ok(walk(multiChip).some(n => hasClass(n, 'surf-app') && hasClass(n, 'surf-icon')))
+    }
   }
 
   // .c-meta and .r-meta render .surf-pill and zero visible vendor names.

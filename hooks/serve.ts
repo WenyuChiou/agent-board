@@ -40,7 +40,7 @@ type ShownMessage = Omit<Message, 'nonce' | 'hash'> & { isSurfaceLost?: boolean;
 // isAfterAppQuit: a message to a Codex desktop app conversation, which runs only once the app has let go of it (#557).
 // shown: the card's one status line, from hooks/message-status.ts (#1843); none for a message taken back after it was handed out.
 type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean; isSurfaceLost?: true; isAfterAppQuit?: true; shown?: { state: StatusState; line: string; tone: StatusTone } }
-type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; messages: readonly ShownMessage[] }
+type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; surfaces?: { connections: readonly Connection[]; mailboxes: readonly Connection[] }; messages: readonly ShownMessage[] }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
   const matches = session === undefined ? [] : connections.filter(one => address(one.agent, one.session) === address(agent || 'claude', session))
@@ -477,11 +477,24 @@ const answerFailed = (messages: readonly ShownMessage[], to: string | undefined,
   const last = messages.filter(one => answersQuestion(one, to, questionId, openInSession)).at(-1)
   return last !== undefined && (isFailedReceipt(last) || isSurfaceLost(last))
 }
-// What the page on the local network is given of the messaging state: enough to tell which answers are queued, and no
-// connection, text or reply (that page shows counts only).
+// What the page on the local network is given of the messaging state: enough to tell which answers are queued and which
+// interface (CLI vs App) each session runs on, and no connection id, turn, owner, folder digest, text or reply.
+const surfaceOnly = (list: readonly Connection[] = []): Connection[] => list.map(one => ({
+  id: '',
+  agent: one.agent,
+  session: one.session,
+  surface: one.surface,
+  turn: '',
+  ...(one.scope === undefined ? {} : { scope: one.scope }),
+  expires: 0,
+  ...(one.contested ? { contested: true } : {}),
+}))
 export const handledOnly = (messaging: Messaging): Messaging => ({
   connections: [],
   mailboxes: [],
+  ...(messaging.connections.length > 0 || (messaging.mailboxes?.length ?? 0) > 0
+    ? { surfaces: { connections: surfaceOnly(messaging.connections), mailboxes: surfaceOnly(messaging.mailboxes) } }
+    : messaging.surfaces === undefined ? {} : { surfaces: messaging.surfaces }),
   messages: messaging.messages.map(one => {
     const isSurfaceLost = isMailboxSurfaceLost(one, messaging.mailboxes)
     return {
@@ -538,10 +551,13 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const stateOfSession = (agent: string, session: string): RowState | undefined => sessionState(view, agent, session)
   // A live connection hides its session's mailbox only on a route its record shows for the session's state now (#318).
   const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes, live => isRecordedRoute(live, stateOfSession, routes))
+  const surfaceConnections = messaging?.surfaces ? messaging.surfaces.connections : (messaging?.connections ?? [])
+  const surfaceMailboxes = messaging?.surfaces ? messaging.surfaces.mailboxes : messaging?.mailboxes
+  const surfaceTargets = messaging?.surfaces ? deliveryTargets(surfaceConnections, surfaceMailboxes, live => isRecordedRoute(live, stateOfSession, routes)) : targets
   const surfaceOf = (agent: string, session: string | undefined, target: AgentTarget | null): string | undefined =>
-    reachable(agent, session, target, targets)?.surface
-    ?? liveTarget(agent, session, messaging?.connections ?? [])?.surface
-    ?? (target?.isClosed === true ? undefined : liveTarget(agent, session, messaging?.mailboxes ?? [])?.surface)
+    reachable(agent, session, target, surfaceTargets)?.surface
+    ?? liveTarget(agent, session, surfaceConnections)?.surface
+    ?? (target?.isClosed === true ? undefined : liveTarget(agent, session, surfaceMailboxes ?? [])?.surface)
   const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], stateOfSession, routes, group?.now ?? 0)
   const isMessageSurfaceLost = (one: ShownMessage): boolean => isMailboxSurfaceLost(one, messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)

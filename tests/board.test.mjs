@@ -13628,7 +13628,7 @@ test('stale saved agent filter clears cleanly and LAN models preserve interface 
     mailboxes: [],
     messages: [],
   }
-  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, messaging, false, { now, repoOf: () => null, versions: { board: '1.2.3', package: null } })
+  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, runtime.handledOnly(messaging), false, { now, repoOf: () => null, versions: { board: '1.2.3', package: null } })
   assert.equal(lanModel.asks[0].surface, 'Codex desktop app')
   assert.equal(lanModel.groups[0].rows[0].surface, 'Codex desktop app')
   const dom = await pageDom(await sourcePage(), lanModel, { width: 1280, storage: new Map([['agent-board.filter', 'gemini']]) })
@@ -13676,7 +13676,7 @@ test('completed Codex desktop task keeps App classification in Done shelf', asyn
   }
   const opts = { now, repoOf: () => null, versions: { board: '1.2.3', package: null } }
   const model = runtime.serveModel(view, [], EN, new Set(), false, messaging, false, opts)
-  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, messaging, false, opts)
+  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, runtime.handledOnly(messaging), false, opts)
   for (const m of [model, lanModel]) {
     assert.equal(m.finished.length, 1)
     assert.equal(m.finished[0].surface, 'Codex desktop app')
