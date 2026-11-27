@@ -119,11 +119,14 @@ const pairedLast = (first: string, last: string): string => /^[^\s㐀-鿿]+$/.te
 const NUMBER = /^\d/
 // Words that join the last number to an earlier one (`3 to 5`, `1 day and 12 hours`, `3 - 5`).
 const RANGE_JOIN = /^(?:and|or|to|through|thru|plus|\+|-|–|~)$/i
-// Words that bound the number (`at least 2`, `more than 3`, `between 3`, `up to 2`).
-const QUALIFIER = /^(?:than|least|most|under|over|below|above|about|around|approximately|roughly|nearly|almost|between|from|within)$/i
-const LIMIT = /^(?:max|min|maximum|minimum)$/i
-// Words that can sit between a bound and its number (`at least the last 24 hours`, `max of 3`).
-const AMOUNT_LEAD = /^(?:the|a|an|last|first|next|past|of|just|only|another)$/i
+// Words that only ever bound a number (`at least 2`, `more than 3`, `between 3`): anywhere in the lead
+// they keep the words whole (`at least a full 24 hours`).
+const BOUND = /^(?:than|least|approximately|roughly|nearly|almost|between|within)$/i
+// Words that bound a number only when they lead into it (`about the last 3`, `max of 3`, `from 2`);
+// elsewhere they name the subject (`the export from staging`, `the maximum retry limit`).
+const LEADING_BOUND = /^(?:most|under|over|below|above|about|around|from|max|min|maximum|minimum)$/i
+// Words that can sit between a bound and its number (`about the last 24 hours`, `max of 3`).
+const AMOUNT_LEAD = /^(?:the|a|an|last|first|next|past|of|just|only|another|full|whole|entire|extra|additional)$/i
 const SPELLED = /^(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|hundred|thousand|half|few|a few|several|couple|dozen)$/i
 const UNIT = /^(?:ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|months?|y|yrs?|years?|[kmgt]i?b|bytes?|%)$/i
 const parallelAmounts = (first: string, last: string): [string, string] | null => {
@@ -140,12 +143,12 @@ const parallelAmounts = (first: string, last: string): [string, string] | null =
   const word = (index: number): string => (firstWords[index] ?? '').replace(/,$/, '')
   const amountEndsAt = (index: number): boolean => NUMBER.test(word(index)) || (UNIT.test(word(index)) && NUMBER.test(word(index - 1)))
   const before = word(from - 1)
-  // A bound or limit word leading into the number, directly or across words like `the last`
-  // (`at least the last 24 hours`, `max of 3`), keeps the words whole. The same word earlier in the
-  // lead names the subject (`the export from staging keep`, `the maximum retry limit to 3`).
+  // A bound keeps the words whole, so a button never drops it: a word that only bounds numbers anywhere
+  // in the lead, or another bound word leading into the number, directly or across words like `the
+  // last` (`about the last 24 hours`, `max of 3`).
   let lead = from - 1
   while (lead > 0 && AMOUNT_LEAD.test(word(lead))) lead -= 1
-  const bounded = QUALIFIER.test(word(lead)) || LIMIT.test(word(lead))
+  const bounded = LEADING_BOUND.test(word(lead)) || firstWords.some((_, index) => BOUND.test(word(index)))
   // A join word other than `to` (`between three and 5`) keeps the words whole too. `to` joins a range
   // only after an amount, spelled or not (`3 to 5`, `three to 5`, `up to 5`); after a noun it only
   // names the value (`limit to 3`).
