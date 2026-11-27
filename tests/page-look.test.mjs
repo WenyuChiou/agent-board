@@ -1122,7 +1122,7 @@ test('row summaries clamp cleanly, phantom gaps collapse, and chrome controls re
   const freshIso = new Date(now - 2 * 60_000).toISOString()
   const longTaskTitle = 'Synthetic overlong prompt heading repeated across telemetry slices to verify folded row clipping and expanded full preservation without blowing up narrow right quarter HUD rows'
   const longCardTask = 'Synthetic waiting card task title intentionally longer than ninety characters so expanded details use clip'
-  const longWorklogStep = 'Step 1 initial ingestion completed in sandbox batch -> Step 2 schema verification passed across all shards -> Step 3 final benchmark synthesis running live across long validation shards after cleanup and verification — transferred -> main-recall-2'
+  const longWorklogStep = 'Step 1 initial ingestion completed in sandbox batch ' + 'validation shard check passed cleanly · '.repeat(32) + '-> Step 2 schema verification passed across all shards -> Step 3 final benchmark synthesis running live across long validation shards after cleanup and verification — transferred -> main-recall-2'
   const md = [
     '## synthetic-long-repo',
     `<!-- auto session=dd100001 agent=claude state=waiting updated=${freshIso} -->`,
@@ -1159,6 +1159,7 @@ test('row summaries clamp cleanly, phantom gaps collapse, and chrome controls re
   assert.ok(stepNode.textContent.includes('Step 3 final benchmark synthesis'), stepNode.textContent)
   assert.ok(stepNode.textContent.endsWith('→ main-recall-2'), `preserves trailing handoff target: ${stepNode.textContent}`)
   assert.ok((stepNode.getAttribute('title') || '').includes('Step 1 initial ingestion'), 'full step remains on tooltip')
+  assert.ok((stepNode.getAttribute('title') || '').endsWith('— transferred -> main-recall-2'), 'tooltip preserves full worklog tail past 1200 chars')
   const openWholes = walk(workRow).filter(n => hasClass(n, 'whole')).map(n => n.textContent)
   assert.ok(openWholes.includes(longWorklogStep), 'expanded row preserves verbatim full worklog step')
 

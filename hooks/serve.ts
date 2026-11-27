@@ -2453,7 +2453,7 @@ const PAGE_SCRIPT = String.raw`
     return chars.slice(0, Math.max(1, max - 1)).join('').trimEnd() + '…';
   }
   function compactStep(raw) {
-    var text = clean(raw, 1200);
+    var text = clean(raw, Infinity);
     if (Array.from(text).length <= 72) return text;
     if (/\s+->\s+|\s*→\s*/.test(text)) {
       var parts = text.split(/\s+->\s+|\s*→\s*/).map(function (one) { return one.trim(); }).filter(Boolean);
@@ -3106,16 +3106,16 @@ const PAGE_SCRIPT = String.raw`
     if (isExpandable) resultSlot(inner, key, row.fp, row.title || row.task);
     var current = steps.filter(function (one) { return one.isCurrent; })[0] || steps.filter(function (one) { return one.status !== 'done' && one.status !== 'cancelled'; })[0];
     var currentWhole = current ? (current.note ? current.text + ' — ' + current.note : current.text) : '';
-    var stepRaw = currentWhole ? clean(currentWhole, 400) : '';
+    var stepRaw = currentWhole ? clean(currentWhole, Infinity) : '';
     var step = currentWhole ? compactStep(currentWhole) : '';
     // "Last:" names the last finished step, not the next one: a task with nothing finished yet shows no Last: line.
     var lastDone = steps.filter(function (one) { return one.status === 'done' || one.status === 'cancelled'; });
     var lastStep = lastDone.length ? lastDone[lastDone.length - 1] : null;
     var lastWhole = lastStep ? (lastStep.note ? lastStep.text + ' — ' + lastStep.note : lastStep.text) : '';
-    var lastFinishedRaw = lastWhole ? clean(lastWhole, 400) : '';
+    var lastFinishedRaw = lastWhole ? clean(lastWhole, Infinity) : '';
     var lastFinished = lastWhole ? compactStep(lastWhole) : '';
     // A plan-tool block with no title takes its current step as the title; the step is then said once.
-    if (sameName(stepRaw, clean(fullTitle(ref)))) { step = ''; stepRaw = ''; }
+    if (sameName(stepRaw, clean(fullTitle(ref), Infinity))) { step = ''; stepRaw = ''; }
     var isAnsweredWaiting = row.status === w('answeredWaiting');
     var rawDetail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinishedRaw ? w('pgLast', lastFinishedRaw) : '') : !stepRaw ? '' : section === 'working' ? stepRaw : section === 'stopped' ? w('pgStoppedAt', stepRaw) : '';
     var detail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
