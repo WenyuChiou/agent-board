@@ -332,7 +332,66 @@ export const fetchContext = ({ repo, roadmap }, { run = execFileSync } = {}) => 
       .split(/\r?\n/).map(line => line.trim()).filter(Boolean))
   const claimed = attempt('claims could not be read, so expired claims are not listed',
     () => JSON.parse(run('gh', ['issue', 'list', '--label', 'claimed', '--state', 'open', '--json', 'number,title,comments', '--limit', '100', '--repo', repo], options)))
-  return { roadmapComments, collaborators, claimed, notes }
+  const milestoneRaw = attempt('milestone work could not be read, so the milestone counts are not listed',
+    () => fetchMilestoneRaw({ repo }, { run }))
+  return { roadmapComments, collaborators, claimed, milestoneRaw, notes }
+}
+
+// The milestone's raw data for summarizeMilestoneWork: the newest open milestone that is not Backlog,
+// its open issues, every issue's comments, the time each unchecked issue entered the milestone, and the
+// state of every issue a NOT READY check names in a First: line. Only the milestones list or the issues
+// list failing throws: a single issue's read failing marks the result uncertain and names the issue.
+export const fetchMilestoneRaw = ({ repo }, { run = execFileSync } = {}) => {
+  const options = { encoding: 'utf8', maxBuffer, timeout: 30000, stdio: ['ignore', 'pipe', 'pipe'] }
+  const notes = []
+  let isUncertain = false
+  const empty = { milestone: null, issues: [], commentsByNumber: {}, milestonedAt: {}, firstStates: {}, notes, isUncertain }
+  const milestones = jsonLines(run('gh', ['api', '--paginate', '--jq', '.[] | tojson', `repos/${repo}/milestones?state=open&per_page=100`], options))
+  const milestone = pickMilestone(milestones)
+  if (!milestone) return empty
+  const issues = jsonLines(run('gh', ['api', '--paginate', '--jq', '.[] | tojson', `repos/${repo}/issues?milestone=${milestone.number}&state=open&per_page=100`], options))
+    .filter(item => !item.pull_request)
+  const commentsByNumber = {}
+  for (const issue of issues) {
+    try {
+      commentsByNumber[issue.number] = jsonLines(run('gh', ['api', '--paginate', '--jq', '.[] | tojson', `repos/${repo}/issues/${issue.number}/comments?per_page=100`], options))
+    } catch {
+      commentsByNumber[issue.number] = []
+      isUncertain = true
+      notes.push(`comments for #${issue.number} could not be read, so its Ready check and claim state are unknown`)
+    }
+  }
+  // Only unchecked issues need their time in the milestone: the latest milestoned event for this milestone.
+  // A timeline event names its milestone by title only, never by number, so the match is by title.
+  const milestonedAt = {}
+  for (const issue of issues) {
+    if (entriesOf(commentsByNumber[issue.number]).some(({ comment }) => readyCheckOf(comment.body) !== null)) continue
+    try {
+      const events = jsonLines(run('gh', ['api', '--paginate', '--jq', '.[] | tojson', `repos/${repo}/issues/${issue.number}/timeline?per_page=100`], options))
+      const times = events.filter(event => event.event === 'milestoned' && event.milestone?.title === milestone.title)
+        .map(event => Date.parse(event.created_at)).filter(Number.isFinite)
+      if (times.length) milestonedAt[issue.number] = Math.max(...times)
+    } catch {
+      isUncertain = true
+      notes.push(`timeline for #${issue.number} could not be read, so its time in the milestone falls back to when it was opened`)
+    }
+  }
+  const firstNumbers = new Set()
+  for (const issue of issues) {
+    const checks = entriesOf(commentsByNumber[issue.number]).filter(({ comment }) => readyCheckOf(comment.body) === 'not ready')
+    const first = checks.at(-1) ? firstOf(checks.at(-1).comment.body) : null
+    if (first) firstNumbers.add(first)
+  }
+  const firstStates = {}
+  for (const number of firstNumbers) {
+    try {
+      firstStates[number] = run('gh', ['api', '--jq', '.state', `repos/${repo}/issues/${number}`], options).trim()
+    } catch {
+      isUncertain = true
+      notes.push(`issue #${number} named by a First: line could not be read, so its state is unknown`)
+    }
+  }
+  return { milestone: { number: milestone.number, title: milestone.title }, issues, commentsByNumber, milestonedAt, firstStates, notes, isUncertain }
 }
 
 // Collaborators who can approve, lower case, without the repository owner (the part of owner/name before the slash).
@@ -380,6 +439,29 @@ export const readAway = (comments, now) => {
   return { active: standing.map(({ login, until }) => ({ login, until })), notes, backs }
 }
 
+// A Claim comment's expiry: a timed claim runs out at its "until" time; one waiting for a slot runs out
+// 7 days after its comment unless renewed the same way (CONTRIBUTING rule 3). Anything else claims nothing.
+const claimUntil = (body, time) => {
+  const timed = (body ?? '').match(/^[ \t]*Claim:[^\r\n]*,[ \t]*until[ \t]+(\d{4}-\d{2}-\d{2})[ \t]+(\d{2}:\d{2})[ \t]*UTC\b/m)
+  if (timed) return utcMs(timed[1], `${timed[2]}:00`)
+  if (/^[ \t]*Claim:[^\r\n]*\bwaiting for a slot\b/im.test(body ?? '')) return time + claimSlotDays * day
+  return NaN
+}
+
+// The live claim is the Claim comment that runs out last: a renewal is a later Claim comment, so the
+// latest expiry wins even when an older claim runs out later than a newer timed one.
+const liveClaimOf = entries => {
+  let live = null
+  for (const { comment, time } of entries) {
+    const until = claimUntil(comment.body ?? '', time)
+    if (Number.isFinite(until) && (!live || until > live.until)) live = { until, time, login: comment.user?.login ?? 'unknown' }
+  }
+  return live
+}
+
+// Someone who took the claim over after it ran out holds it now.
+const hasTakeoverAfter = (entries, time) => entries.some(({ comment, time: at }) => at > time && /^[ \t]*Claim taken over:/im.test(comment.body ?? ''))
+
 // Open issues labelled claimed whose latest claim has run out (CONTRIBUTING rule 3) while no open pull request names them.
 export const readClaims = (issues, prs, now) => {
   const nowMs = new Date(now).getTime()
@@ -389,21 +471,137 @@ export const readClaims = (issues, prs, now) => {
   for (const issue of issues) {
     if (linked.has(issue.number)) continue
     const comments = entriesOf((issue.comments ?? []).map(item => ({ body: item.body, created_at: item.createdAt ?? item.created_at, user: item.author ?? item.user })))
-    // A renewal is a later Claim comment, so the live claim is the one that runs out last.
-    let live = null
-    for (const { comment, time } of comments) {
-      const body = comment.body ?? ''
-      const timed = body.match(/^[ \t]*Claim:[^\r\n]*,[ \t]*until[ \t]+(\d{4}-\d{2}-\d{2})[ \t]+(\d{2}:\d{2})[ \t]*UTC\b/m)
-      const until = timed ? utcMs(timed[1], `${timed[2]}:00`)
-        : /^[ \t]*Claim:[^\r\n]*\bwaiting for a slot\b/im.test(body) ? time + claimSlotDays * day : NaN
-      if (Number.isFinite(until) && (!live || until > live.until)) live = { until, time, login: comment.user?.login ?? 'unknown' }
-    }
+    const live = liveClaimOf(comments)
     if (!live || live.until >= nowMs) continue
     // Someone who took the claim over after it ran out holds it now.
-    if (comments.some(({ comment, time }) => time > live.time && /^[ \t]*Claim taken over:/im.test(comment.body ?? ''))) continue
+    if (hasTakeoverAfter(comments, live.time)) continue
     expired.push({ number: issue.number, login: live.login })
   }
   return expired.sort((a, b) => a.number - b.number)
+}
+
+// A Ready check comment starts with "Ready check:" and names its verdict on that line, so a comment
+// quoting an earlier check does not read as a new one. A check with no verdict reads as 'unknown'
+// and still counts as checked.
+export const readyCheckOf = body => {
+  const first = (body ?? '').trimStart().split(/\r\n|[\n\r\u2028\u2029]/, 1)[0] ?? ''
+  if (!/^[ \t]*Ready check:/i.test(first)) return null
+  return first.match(/^[ \t]*Ready check:[ \t]*(NOT READY|READY|needs-owner)\b/i)?.[1]?.toLowerCase() ?? 'unknown'
+}
+
+// The one thing a NOT READY check names as standing in the way: a line starting "First:" naming an issue.
+const firstOf = body => {
+  const line = (body ?? '').split(/\r\n|[\n\r\u2028\u2029]/).find(item => /^[ \t]*First:/i.test(item))
+  const number = line?.match(/#(\d+)/)?.[1]
+  return number ? Number(number) : null
+}
+
+// The newest open milestone that is not Backlog: the latest created, the higher number breaking a tie.
+// "Backlog" is a milestone title, not a state, so it is excluded by name.
+export const pickMilestone = milestones => [...(milestones ?? [])]
+  .filter(item => item?.state === 'open' && (item.title ?? '').trim().toLowerCase() !== 'backlog')
+  .sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0) || b.number - a.number)[0] ?? null
+
+const labelNames = issue => (issue.labels ?? []).map(label => (typeof label === 'string' ? label : label?.name ?? '').toLowerCase())
+const assigneeLogins = issue => (issue.assignees ?? []).map(assignee => assignee?.login).filter(Boolean)
+// A line saying someone works on the issue: a line starting Claim:, Claim taken over: or Working on.
+const worksOn = body => /^[ \t]*(?:Claim:|Claim taken over:|Working on\b)/im.test(body ?? '')
+
+// The milestone's work from already-fetched data: no gh call here, so tests run on synthetic issues.
+// raw: { milestone, issues, commentsByNumber, milestonedAt, firstStates, notes, isUncertain } from fetchMilestoneRaw.
+// Taken follows CONTRIBUTING rule 3 and RULES R4 exactly as #1904 states them; the claimed label alone never takes.
+export const summarizeMilestoneWork = (raw, { prs, prListComplete, now }) => {
+  const nowMs = new Date(now).getTime()
+  if (!Number.isFinite(nowMs)) throw new Error('invalid current time')
+  if (!raw?.milestone) {
+    return {
+      milestone: null, open: 0, ready: 0, reallyFree: 0, unchecked: [], expiredClaims: [],
+      staleClaimed: [], idleAssignees: [], staleFirst: [], isUncertain: Boolean(raw?.isUncertain),
+    }
+  }
+  const linked = new Set()
+  for (const pr of prs ?? []) for (const match of (pr.body ?? '').matchAll(/^[ \t]*(?:Fixes|Part of|Closes|Resolves)[ \t]+#(\d+)/gim)) linked.add(Number(match[1]))
+  const notes = [...(raw.notes ?? [])]
+  let isUncertain = Boolean(raw.isUncertain)
+  // An incomplete pull request list cannot prove an issue has no open pull request, so the free counts are uncertain.
+  if (prListComplete === false) {
+    isUncertain = true
+    notes.push('Pull request list may be truncated (at its 100-item limit, or a pull request body could not be read), so an issue may look free while an open pull request names it.')
+  }
+  const work = {
+    milestone: { number: raw.milestone.number, title: raw.milestone.title },
+    open: raw.issues.length, ready: 0, reallyFree: 0, unchecked: [], expiredClaims: [],
+    staleClaimed: [], idleAssignees: [], staleFirst: [], isUncertain,
+  }
+  for (const issue of raw.issues) {
+    const labels = labelNames(issue)
+    const isReady = labels.includes('ready')
+    const isBlocked = labels.includes('blocked')
+    const comments = entriesOf(raw.commentsByNumber?.[issue.number] ?? [])
+    const checks = comments.filter(({ comment }) => readyCheckOf(comment.body) !== null)
+    const latestCheck = checks.at(-1)
+    const verdict = latestCheck ? readyCheckOf(latestCheck.comment.body) : null
+    const live = liveClaimOf(comments)
+    const isLiveClaim = Boolean(live && live.until >= nowMs)
+    const isTakeoverHeld = Boolean(live && live.until < nowMs && hasTakeoverAfter(comments, live.time))
+    const isRecentWork = comments.some(({ comment, time }) => time > nowMs - day && time <= nowMs && worksOn(comment.body))
+    const isTaken = assigneeLogins(issue).length > 0 || isLiveClaim || isTakeoverHeld || isRecentWork || linked.has(issue.number)
+    if (isReady) work.ready++
+    if (isReady && !isBlocked && !isTaken) work.reallyFree++
+    if (!latestCheck) {
+      const since = raw.milestonedAt?.[issue.number] ?? Date.parse(issue.created_at)
+      const days = Number.isFinite(since) ? (nowMs - since) / day : NaN
+      work.unchecked.push({ number: issue.number, title: issue.title ?? '', since, days: Number.isFinite(days) ? Number(days.toFixed(1)) : null })
+    }
+    // An expired claim is free to take over only with no pull request, no takeover and no recent work comment.
+    if (live && live.until < nowMs && !linked.has(issue.number) && !isTakeoverHeld && !isRecentWork) {
+      work.expiredClaims.push({ number: issue.number, login: live.login })
+    }
+    if (labels.includes('claimed') && !isLiveClaim && !isTakeoverHeld) work.staleClaimed.push({ number: issue.number })
+    for (const login of assigneeLogins(issue)) {
+      const isActive = linked.has(issue.number) || comments.some(({ comment, time }) =>
+        time > nowMs - day && time <= nowMs && (comment.user?.login ?? '').toLowerCase() === login.toLowerCase())
+      if (!isActive) work.idleAssignees.push({ number: issue.number, login })
+    }
+    if (verdict === 'not ready') {
+      const first = firstOf(latestCheck.comment.body)
+      if (first && raw.firstStates?.[first] === 'closed') work.staleFirst.push({ number: issue.number, first })
+    }
+  }
+  work.unchecked.sort((a, b) => (a.since ?? Infinity) - (b.since ?? Infinity) || a.number - b.number)
+  work.expiredClaims.sort((a, b) => a.number - b.number)
+  work.staleClaimed.sort((a, b) => a.number - b.number)
+  work.idleAssignees.sort((a, b) => a.number - b.number || a.login.localeCompare(b.login))
+  work.staleFirst.sort((a, b) => a.number - b.number)
+  if (notes.length) work.uncertain = notes
+  return work
+}
+
+export const formatMilestoneWork = work => {
+  if (!work?.milestone) return ''
+  const lines = [`Milestone ${work.milestone.title} (#${work.milestone.number}): open ${work.open}, ready ${work.ready}, really free ${work.reallyFree}`]
+  if (work.unchecked.length) {
+    lines.push(`No Ready check (${work.unchecked.length}, oldest first)`)
+    for (const item of work.unchecked) lines.push(`#${item.number}  ${item.days === null ? 'age unknown' : `${item.days.toFixed(1)} d`}  ${item.title.slice(0, 70)}`)
+  }
+  if (work.expiredClaims.length) {
+    lines.push(`Claims past their time, no pull request (${work.expiredClaims.length})`)
+    for (const item of work.expiredClaims) lines.push(`#${item.number} ${item.login} — claim ran out, no pull request`)
+  }
+  if (work.staleClaimed.length) {
+    lines.push(`Claimed labels with no live claim (${work.staleClaimed.length})`)
+    for (const item of work.staleClaimed) lines.push(`#${item.number} — claimed label with no live claim`)
+  }
+  if (work.idleAssignees.length) {
+    lines.push(`Assignees with no activity for over 24 hours (${work.idleAssignees.length})`)
+    for (const item of work.idleAssignees) lines.push(`#${item.number} ${item.login} — no activity for over 24 hours (listed, never removed)`)
+  }
+  if (work.staleFirst.length) {
+    lines.push(`NOT READY with a closed First: (${work.staleFirst.length})`)
+    for (const item of work.staleFirst) lines.push(`#${item.number} — First: #${item.first} closed, due a new check`)
+  }
+  for (const note of work.uncertain ?? []) lines.push(`uncertain: ${note}`)
+  return lines.map(safeLine).join('\n')
 }
 
 const bundleNote = 'bundle sources could not be read, so only the generated bundle files count toward the one at a time order'
@@ -554,14 +752,17 @@ export const main = (argv = process.argv.slice(2), { fetch = fetchQueue, context
     // listed from it. A fetch that does not report completeness keeps the old reading.
     const prListNote = prListComplete === false ? 'Pull request list may be truncated (at its 100-item limit, or a pull request body could not be read), so expired claims are not listed.' : null
     const expiredClaims = extra.claimed && prListComplete !== false ? readClaims(extra.claimed, prs, current) : []
+    // The milestone section needs the fetched raw data; an injected context without it (a stub) prints none.
+    const milestoneWork = extra.milestoneRaw ? summarizeMilestoneWork(extra.milestoneRaw, { prs, prListComplete, now: current }) : null
+    const showMilestone = milestoneWork?.milestone ? milestoneWork : null
     let staleLanes
     try { staleLanes = lanes(options, { now }) } catch { staleLanes = { stale: [], notes: ['lane check skipped: lookup failed'] } }
     const notes = [suggestions.note, sources.note, ...(extra.notes ?? []), ...away.notes, prListNote].filter(Boolean)
-    if (options.isJson) log(JSON.stringify(safeData({ ...queue, staleLanes, away: away.active, expiredClaims, ...(notes.length ? { notes } : {}) }), null, 2))
+    if (options.isJson) log(JSON.stringify(safeData({ ...queue, staleLanes, away: away.active, expiredClaims, ...(showMilestone ? { milestoneWork: showMilestone } : {}), ...(notes.length ? { notes } : {}) }), null, 2))
     else {
       const awayLines = away.active.map(item => safeLine(`Away: ${item.login} until ${item.until}`))
       const claimLines = expiredClaims.map(item => safeLine(`claim expired: #${item.number} ${item.login} — relabel to ready (CONTRIBUTING rule 3)`))
-      log([formatQueue(queue), ...awayLines, ...claimLines, formatLanes(staleLanes), ...notes.map(note => safeLine(`Note: ${note}`))].filter(Boolean).join('\n'))
+      log([formatQueue(queue), ...awayLines, ...claimLines, formatLanes(staleLanes), showMilestone ? formatMilestoneWork(showMilestone) : '', ...notes.map(note => safeLine(`Note: ${note}`))].filter(Boolean).join('\n'))
     }
     return 0
   } catch {

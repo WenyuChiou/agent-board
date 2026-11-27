@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  classify, collaboratorLogins, fetchContext, fetchQueue, findStaleLanes, formatLanes, formatQueue, loadBundleSources, loadReviewers,
-  main, parseArgs, parseReviewers, parseWorktrees, readAway, readClaims,
+  classify, collaboratorLogins, fetchContext, fetchMilestoneRaw, fetchQueue, findStaleLanes, formatLanes, formatMilestoneWork, formatQueue,
+  loadBundleSources, loadReviewers, main, parseArgs, parseReviewers, parseWorktrees, pickMilestone, readAway, readClaims, readyCheckOf,
+  summarizeMilestoneWork,
 } from '../scripts/review-queue.mjs'
 
 const head = 'abcdef0123456789abcdef0123456789abcdef01'
@@ -880,7 +881,7 @@ test('the roadmap issue defaults to 209 and --roadmap changes it', () => {
   assert.equal(seen.roadmap, 312)
 })
 
-test('the extra lookups are three GitHub calls through the injected runner and read their answers', () => {
+test('the extra lookups are GitHub calls through the injected runner and read their answers', () => {
   const calls = []
   const run = (program, args) => {
     calls.push({ program, args })
@@ -889,32 +890,34 @@ test('the extra lookups are three GitHub calls through the injected runner and r
     return JSON.stringify(by('bob', comment('Away: until 2026-10-22'))) + '\n'
   }
   const extra = fetchContext({ repo: 'alice/board', roadmap: 312 }, { run })
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 4)
   assert.ok(calls.every(call => call.program === 'gh'))
   assert.equal(calls[0].args.at(-1), 'repos/alice/board/issues/312/comments?per_page=100')
   assert.equal(calls[1].args.at(-1), 'repos/alice/board/collaborators?per_page=100')
   assert.ok(calls[1].args.includes('.[] | select(.permissions.push or .permissions.admin) | .login'))
   assert.deepEqual(calls[2].args.slice(0, 6), ['issue', 'list', '--label', 'claimed', '--state', 'open'])
   assert.ok(calls[2].args.includes('number,title,comments'))
+  assert.equal(calls[3].args.at(-1), 'repos/alice/board/milestones?state=open&per_page=100')
   assert.equal(extra.roadmapComments.length, 1)
   assert.deepEqual(extra.collaborators, ['Alice', 'bob', 'carol'])
   assert.deepEqual(extra.claimed.map(issue => issue.number), [7])
+  assert.equal(extra.milestoneRaw.milestone, null)
   assert.deepEqual(extra.notes, [])
   // The repository owner is not counted, and each login counts once.
   assert.deepEqual(collaboratorLogins(['Alice', 'bob', 'Bob', 'carol'], 'alice/board'), ['bob', 'carol'])
 })
 
-test('a failed lookup of away notices, collaborators or claims adds one note each and the queue still prints', () => {
+test('a failed lookup of away notices, collaborators, claims or milestone work adds one note each and the queue still prints', () => {
   const extra = fetchContext({ repo: 'alice/board', roadmap: 209 }, { run: () => { throw new Error('ghp_abc123 C:\\private\\gh.exe') } })
-  assert.deepEqual([extra.roadmapComments, extra.collaborators, extra.claimed], [null, null, null])
-  assert.equal(extra.notes.length, 3)
+  assert.deepEqual([extra.roadmapComments, extra.collaborators, extra.claimed, extra.milestoneRaw], [null, null, null, null])
+  assert.equal(extra.notes.length, 4)
   // Without the roadmap comments a Back cannot be seen, and the note says a waiting or due notice may be stale.
   assert.match(extra.notes[0], /^away notices could not be read.* a Back cannot be seen: a waiting or due notice may be stale$/)
   const fetch = () => ({ prs: [pull(1)], commentsByNumber: { 1: [ready()] } })
   const lanes = () => ({ stale: [], notes: [] })
   const output = []
   assert.equal(main([], { fetch, context: () => extra, bundle: noBundle, lanes, now: () => now, log: text => output.push(text), error: text => assert.fail(text) }), 0)
-  assert.equal(output[0].split('\n').filter(line => line.startsWith('Note:')).length, 3)
+  assert.equal(output[0].split('\n').filter(line => line.startsWith('Note:')).length, 4)
   assert.match(output[0], /\n#1 /)
   assert.ok(!/ghp_abc123|private|Away:|claim expired/.test(output[0]))
   // A lookup that throws as a whole is one note too.
@@ -1119,3 +1122,320 @@ test('a reviewers file that starts with a byte order mark is read', () => {
   assert.equal(loaded.map.maxOpenReviews, 2)
 })
 
+
+const milestone = (number, title, created_at, state = 'open') => ({ number, title, state, created_at })
+const milestoneIssue = (number, fields = {}) => ({
+  number, title: `Synthetic task ${number}`, state: 'open', labels: [], assignees: [], created_at: '2026-10-19T00:00:00Z', ...fields,
+})
+const label = name => ({ name })
+const assignee = login => ({ login })
+const issueComment = (body, created_at, login = 'alice', id = 1) => ({ body, created_at, id, user: { login } })
+const readyCheck = (verdict, at = '2026-10-19T09:00:00Z', extra = '') => issueComment(`Ready check: ${verdict} by checker, lane AB03${extra ? `\n${extra}` : ''}`, at)
+const milestoneRaw = (issues, commentsByNumber, fields = {}) => ({
+  milestone: { number: 15, title: '0.26.0 The mainstream AIs end to end' },
+  issues, commentsByNumber, milestonedAt: {}, firstStates: {}, notes: [], isUncertain: false, ...fields,
+})
+const summarize = (raw, prs = [], prListComplete = true) => summarizeMilestoneWork(raw, { prs, prListComplete, now })
+
+test('the newest open milestone is the latest created that is not Backlog', () => {
+  const open = [
+    milestone(2, 'Phase 2', '2026-10-20T03:36:25Z'),
+    milestone(15, '0.26.0', '2026-11-18T11:41:04Z'),
+    milestone(16, 'Backlog', '2026-11-18T11:41:05Z'),
+    milestone(18, '0.27.0', '2026-11-25T03:09:16Z'),
+  ]
+  assert.equal(pickMilestone(open).number, 18)
+  assert.equal(pickMilestone([...open, milestone(19, 'Backlog', '2026-11-26T00:00:00Z')]).number, 18)
+  assert.equal(pickMilestone(open.map(item => item.number === 18 ? { ...item, state: 'closed' } : item)).number, 15)
+  assert.equal(pickMilestone([milestone(20, 'backlog ', '2026-11-26T00:00:00Z'), milestone(15, '0.26.0', '2026-11-18T11:41:04Z')]).number, 15)
+  assert.equal(pickMilestone([milestone(21, 'Same day', '2026-11-25T03:09:16Z'), milestone(18, '0.27.0', '2026-11-25T03:09:16Z')]).number, 21)
+  assert.equal(pickMilestone([]), null)
+  assert.equal(pickMilestone(), null)
+})
+
+test('a Ready check verdict comes from the first line only', () => {
+  assert.equal(readyCheckOf('Ready check: READY by muse, lane AB03'), 'ready')
+  assert.equal(readyCheckOf('Ready check: NOT READY by muse, lane AB03'), 'not ready')
+  assert.equal(readyCheckOf('Ready check: needs-owner by codex, lane codex'), 'needs-owner')
+  assert.equal(readyCheckOf('  Ready check: READY by muse'), 'ready')
+  assert.equal(readyCheckOf('Ready check: READY by muse\n1. Goal clear: yes.\nFirst: #12'), 'ready')
+  assert.equal(readyCheckOf('Quoting an old one:\nReady check: READY by muse'), null)
+  assert.equal(readyCheckOf('> Ready check: READY by muse'), null)
+  assert.equal(readyCheckOf('Ready check: the goal is clear'), 'unknown')
+  assert.equal(readyCheckOf(''), null)
+  assert.equal(readyCheckOf(null), null)
+})
+
+test('really free counts ready issues with no assignee, live claim, pull request, recent work comment or blocked label', () => {
+  const issues = [
+    milestoneIssue(1, { labels: [label('ready')] }),
+    milestoneIssue(2, { labels: [label('ready')], assignees: [assignee('alice')] }),
+    milestoneIssue(3, { labels: [label('ready')] }),
+    milestoneIssue(4, { labels: [label('ready')] }),
+    milestoneIssue(5, { labels: [label('ready')] }),
+    milestoneIssue(6, { labels: [label('ready')] }),
+    milestoneIssue(7, { labels: [label('ready'), label('blocked')] }),
+    milestoneIssue(8, { labels: [label('ready'), label('claimed')] }),
+    milestoneIssue(9, { labels: [label('ready')] }),
+    milestoneIssue(10, { labels: [label('for-agent')] }),
+    milestoneIssue(11, { labels: [label('ready')] }),
+  ]
+  const comments = {
+    // A live timed claim takes the issue.
+    3: [issueComment('Claim: codex, fix/c, until 2026-10-21 09:00 UTC', '2026-10-19T09:00:00Z', 'bob')],
+    // A claim waiting for a slot posted less than 7 days ago is live; one 8 days old has run out.
+    4: [issueComment('Claim: codex, fix/d, waiting for a slot', '2026-10-15T09:00:00Z', 'bob')],
+    5: [issueComment('Claim: codex, fix/e, waiting for a slot', '2026-10-12T09:00:00Z', 'bob')],
+    // A work comment in the last 24 hours takes the issue; one a day older does not.
+    6: [issueComment('Working on this now', '2026-10-20T11:00:00Z', 'carol')],
+    9: [issueComment('Working on this now', '2026-10-19T11:00:00Z', 'carol')],
+    // A claimed label alone does not take the issue.
+    11: [issueComment('Claim taken over: codex, fix/k', '2026-10-20T11:00:00Z', 'bob')],
+  }
+  const prs = [pull(1, { body: 'Fixes #9\nAuthor: codex, fix/i' })]
+  const work = summarize(milestoneRaw(issues, comments), prs)
+  assert.equal(work.open, 11)
+  assert.equal(work.ready, 10)
+  // Free: #1, #5 (slot wait ran out) and #8 (label alone). #10 is not ready; #11 is taken by the takeover line in the last 24 hours.
+  assert.equal(work.reallyFree, 3)
+  assert.deepEqual(work.unchecked.map(item => item.number), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])
+})
+
+test('unchecked issues list oldest first with their time in the milestone', () => {
+  const issues = [
+    milestoneIssue(1, { created_at: '2026-10-19T00:00:00Z' }),
+    milestoneIssue(2, { created_at: '2026-10-18T00:00:00Z' }),
+    milestoneIssue(3, { created_at: '2026-10-17T00:00:00Z' }),
+    milestoneIssue(4, { created_at: '2026-10-16T00:00:00Z' }),
+  ]
+  const comments = { 4: [readyCheck('READY')] }
+  const raw = milestoneRaw(issues, comments, { milestonedAt: { 1: Date.parse('2026-10-19T12:00:00Z'), 2: Date.parse('2026-10-10T12:00:00Z') } })
+  const work = summarize(raw)
+  assert.deepEqual(work.unchecked.map(item => item.number), [2, 3, 1])
+  assert.deepEqual(work.unchecked.map(item => item.days), [10.0, 3.5, 1.0])
+  // A checked issue is not listed even when its check has no verdict.
+  const checked = summarize(milestoneRaw([milestoneIssue(5)], { 5: [issueComment('Ready check: looking into it', '2026-10-19T09:00:00Z')] }))
+  assert.deepEqual(checked.unchecked, [])
+})
+
+test('expired claims list only when no pull request, takeover or recent work comment stands behind them', () => {
+  const claim = (until, at) => issueComment(`Claim: codex, fix/x, until ${until} UTC`, at, 'bob')
+  const issues = [1, 2, 3, 4, 5].map(number => milestoneIssue(number, { labels: [label('claimed')] }))
+  const comments = {
+    1: [claim('2026-10-19 09:00', '2026-10-18T09:00:00Z')],
+    2: [claim('2026-10-19 09:00', '2026-10-18T09:00:00Z')],
+    3: [claim('2026-10-19 09:00', '2026-10-18T09:00:00Z'), issueComment('Claim taken over: codex, fix/y', '2026-10-20T08:00:00Z', 'carol')],
+    4: [claim('2026-10-19 09:00', '2026-10-18T09:00:00Z'), issueComment('Working on this now', '2026-10-20T11:00:00Z', 'carol')],
+    5: [claim('2026-10-21 09:00', '2026-10-19T09:00:00Z')],
+  }
+  const prs = [pull(1, { body: 'Fixes #2\nAuthor: codex, fix/b' })]
+  const work = summarize(milestoneRaw(issues, comments), prs)
+  assert.deepEqual(work.expiredClaims, [{ number: 1, login: 'bob' }])
+  // A renewed claim is live, so it is neither expired nor stale-labelled.
+  const renewed = summarize(milestoneRaw([milestoneIssue(6, { labels: [label('claimed')] })], {
+    6: [claim('2026-10-19 09:00', '2026-10-18T09:00:00Z'), claim('2026-10-25 09:00', '2026-10-19T10:00:00Z')],
+  }))
+  assert.deepEqual(renewed.expiredClaims, [])
+  assert.deepEqual(renewed.staleClaimed, [])
+})
+
+test('a claimed label with no live claim behind it is listed, a live or taken-over one is not', () => {
+  const issues = [
+    milestoneIssue(1, { labels: [label('claimed')] }),
+    milestoneIssue(2, { labels: [label('claimed')] }),
+    milestoneIssue(3, { labels: [label('claimed')] }),
+    milestoneIssue(4, { labels: [label('ready')] }),
+  ]
+  const comments = {
+    1: [issueComment('Claim: codex, fix/a, until 2026-10-19 09:00 UTC', '2026-10-18T09:00:00Z', 'bob')],
+    2: [issueComment('Claim: codex, fix/b, until 2026-10-21 09:00 UTC', '2026-10-19T09:00:00Z', 'bob')],
+    3: [
+      issueComment('Claim: codex, fix/c, until 2026-10-19 09:00 UTC', '2026-10-18T09:00:00Z', 'bob'),
+      issueComment('Claim taken over: codex, fix/c2', '2026-10-20T08:00:00Z', 'carol'),
+    ],
+  }
+  const work = summarize(milestoneRaw(issues, comments))
+  assert.deepEqual(work.staleClaimed, [{ number: 1 }])
+})
+
+test('assignees with no activity for over 24 hours are listed and never removed', () => {
+  const issues = [
+    milestoneIssue(1, { assignees: [assignee('Alice')] }),
+    milestoneIssue(2, { assignees: [assignee('bob')] }),
+    milestoneIssue(3, { assignees: [assignee('carol')] }),
+    milestoneIssue(4, { assignees: [assignee('dave'), assignee('erin')] }),
+  ]
+  const comments = {
+    1: [issueComment('A note from the assignee', '2026-10-20T11:00:00Z', 'alice')],
+    // Exactly 24 hours ago is not within the last 24 hours.
+    2: [issueComment('A note from the assignee', '2026-10-19T12:00:00Z', 'bob')],
+    4: [issueComment('A note from one assignee', '2026-10-20T11:00:00Z', 'dave')],
+  }
+  const prs = [pull(1, { body: 'Fixes #3\nAuthor: codex, fix/c' })]
+  const work = summarize(milestoneRaw(issues, comments), prs)
+  assert.deepEqual(work.idleAssignees, [{ number: 2, login: 'bob' }, { number: 4, login: 'erin' }])
+})
+
+test('a NOT READY issue whose First: issue has closed is due a new check', () => {
+  const issues = [
+    milestoneIssue(1),
+    milestoneIssue(2),
+    milestoneIssue(3),
+    milestoneIssue(4),
+    milestoneIssue(5),
+  ]
+  const comments = {
+    1: [readyCheck('NOT READY', '2026-10-19T09:00:00Z', 'First: #90')],
+    2: [readyCheck('NOT READY', '2026-10-19T09:00:00Z', 'First: #91')],
+    3: [readyCheck('READY', '2026-10-19T09:00:00Z', 'First: #90')],
+    4: [readyCheck('NOT READY', '2026-10-19T09:00:00Z', 'First: answer the question')],
+    5: [
+      readyCheck('NOT READY', '2026-10-18T09:00:00Z', 'First: #90'),
+      readyCheck('NOT READY', '2026-10-19T09:00:00Z', 'First: #91, then the tests'),
+    ],
+  }
+  const raw = milestoneRaw(issues, comments, { firstStates: { 90: 'closed', 91: 'open' } })
+  const work = summarize(raw)
+  assert.deepEqual(work.staleFirst, [{ number: 1, first: 90 }])
+  // An unreadable First: target marks the section uncertain and lists nothing for it.
+  const unknown = summarize(milestoneRaw([milestoneIssue(1)], { 1: [readyCheck('NOT READY', '2026-10-19T09:00:00Z', 'First: #92')] }, { firstStates: {}, isUncertain: true, notes: ['issue #92 named by a First: line could not be read, so its state is unknown'] }))
+  assert.deepEqual(unknown.staleFirst, [])
+  assert.equal(unknown.isUncertain, true)
+  assert.deepEqual(unknown.uncertain, ['issue #92 named by a First: line could not be read, so its state is unknown'])
+})
+
+test('a truncated pull request list marks the free counts uncertain', () => {
+  const issues = [milestoneIssue(1, { labels: [label('ready')] })]
+  const work = summarize(milestoneRaw(issues, {}), [], false)
+  assert.equal(work.reallyFree, 1)
+  assert.equal(work.isUncertain, true)
+  assert.match(work.uncertain[0], /Pull request list may be truncated/)
+  const complete = summarize(milestoneRaw(issues, {}), [])
+  assert.equal(complete.isUncertain, false)
+  assert.equal('uncertain' in complete, false)
+  assert.throws(() => summarizeMilestoneWork(milestoneRaw(issues, {}), { prs: [], prListComplete: true, now: 'not a date' }), /invalid current time/)
+  assert.equal(summarizeMilestoneWork(null, { prs: [], prListComplete: true, now }).milestone, null)
+})
+
+test('the milestone section prints every list, and nothing when there is no milestone', () => {
+  const work = {
+    milestone: { number: 15, title: '0.26.0 The mainstream AIs end to end' },
+    open: 5, ready: 3, reallyFree: 1,
+    unchecked: [{ number: 2, title: 'Old task', since: 0, days: 10.0 }, { number: 1, title: 'New task', since: 0, days: 1.0 }],
+    expiredClaims: [{ number: 3, login: 'bob' }],
+    staleClaimed: [{ number: 4 }],
+    idleAssignees: [{ number: 5, login: 'carol' }],
+    staleFirst: [{ number: 6, first: 90 }],
+    isUncertain: true, uncertain: ['comments for #7 could not be read, so its Ready check and claim state are unknown'],
+  }
+  assert.equal(formatMilestoneWork(work), [
+    'Milestone 0.26.0 The mainstream AIs end to end (#15): open 5, ready 3, really free 1',
+    'No Ready check (2, oldest first)',
+    '#2  10.0 d  Old task',
+    '#1  1.0 d  New task',
+    'Claims past their time, no pull request (1)',
+    '#3 bob — claim ran out, no pull request',
+    'Claimed labels with no live claim (1)',
+    '#4 — claimed label with no live claim',
+    'Assignees with no activity for over 24 hours (1)',
+    '#5 carol — no activity for over 24 hours (listed, never removed)',
+    'NOT READY with a closed First: (1)',
+    '#6 — First: #90 closed, due a new check',
+    'uncertain: comments for #7 could not be read, so its Ready check and claim state are unknown',
+  ].join('\n'))
+  const empty = { ...work, unchecked: [], expiredClaims: [], staleClaimed: [], idleAssignees: [], staleFirst: [], isUncertain: false, uncertain: [] }
+  assert.equal(formatMilestoneWork(empty), 'Milestone 0.26.0 The mainstream AIs end to end (#15): open 5, ready 3, really free 1')
+  assert.equal(formatMilestoneWork({ milestone: null }), '')
+  assert.equal(formatMilestoneWork(null), '')
+})
+
+test('the queue prints the milestone section in text and JSON when the context fetched it', () => {
+  const extra = {
+    roadmapComments: [], collaborators: [], claimed: [],
+    milestoneRaw: milestoneRaw(
+      [milestoneIssue(1, { labels: [label('ready')] }), milestoneIssue(2, { labels: [label('ready')] })],
+      { 2: [readyCheck('READY')] },
+    ),
+    notes: [],
+  }
+  const run = argv => {
+    const output = []
+    const status = main(argv, {
+      fetch: () => ({ prs: [pull(1)], commentsByNumber: { 1: [ready()] } }), context: () => extra, bundle: noBundle,
+      lanes: () => ({ stale: [], notes: [] }), now: () => now, log: text => output.push(text), error: text => assert.fail(text),
+    })
+    assert.equal(status, 0)
+    return output[0]
+  }
+  const text = run(['--repo', 'owner1/board'])
+  assert.match(text, /Milestone 0\.26\.0 The mainstream AIs end to end \(#15\): open 2, ready 2, really free 2/)
+  assert.match(text, /No Ready check \(1, oldest first\)\n#1  1\.5 d  Synthetic task 1/)
+  const queue = JSON.parse(run(['--repo', 'owner1/board', '--json']))
+  assert.equal(queue.milestoneWork.open, 2)
+  assert.equal(queue.milestoneWork.reallyFree, 2)
+  assert.deepEqual(queue.milestoneWork.unchecked.map(item => item.number), [1])
+  // A context without milestone data keeps the old shape: no section, no key.
+  const plainExtra = { roadmapComments: [], collaborators: [], claimed: [], notes: [] }
+  const plainOutput = []
+  const plainStatus = main(['--json'], {
+    fetch: () => ({ prs: [pull(1)], commentsByNumber: { 1: [ready()] } }), context: () => plainExtra, bundle: noBundle,
+    lanes: () => ({ stale: [], notes: [] }), now: () => now, log: text => plainOutput.push(text), error: text => assert.fail(text),
+  })
+  assert.equal(plainStatus, 0)
+  assert.equal('milestoneWork' in JSON.parse(plainOutput[0]), false)
+  assert.ok(!plainOutput[0].includes('Milestone '))
+})
+
+test('fetching the milestone reads milestones, issues, comments, timelines and First: states', () => {
+  const calls = []
+  const json = value => JSON.stringify(value)
+  const run = (program, args) => {
+    calls.push(args.at(-1))
+    const path = args.at(-1)
+    if (path.includes('/milestones')) return [milestone(15, '0.26.0', '2026-11-18T11:41:04Z'), milestone(16, 'Backlog', '2026-11-18T11:41:05Z')].map(json).join('\n')
+    if (path.includes('/issues?milestone=')) {
+      return [milestoneIssue(1), { ...milestoneIssue(2), pull_request: {} }, milestoneIssue(3)].map(json).join('\n')
+    }
+    if (path.includes('/issues/1/comments')) return [issueComment('Ready check: NOT READY by checker', '2026-10-19T09:00:00Z')].map(json).join('\n')
+    if (path.includes('/issues/3/comments')) throw new Error('gh failed')
+    if (path.includes('/issues/3/timeline')) return [
+      json({ event: 'milestoned', created_at: '2026-10-18T00:00:00Z', milestone: { title: '0.26.0' } }),
+      json({ event: 'milestoned', created_at: '2026-10-19T00:00:00Z', milestone: { title: 'Another milestone' } }),
+    ].join('\n')
+    if (path.includes('/issues/90')) return 'closed'
+    return ''
+  }
+  // Issue 1 is checked with a First: line naming #90, which is closed; issue 3 has no check and its
+  // comments fail, so its time falls back to when it was opened and the result is uncertain.
+  const commentsFor1 = [readyCheck('NOT READY', '2026-10-19T09:00:00Z', 'First: #90')]
+  const runWithFirst = (program, args) => {
+    if (args.at(-1).includes('/issues/1/comments')) {
+      calls.push(args.at(-1))
+      return commentsFor1.map(json).join('\n')
+    }
+    return run(program, args)
+  }
+  const raw = fetchMilestoneRaw({ repo: 'alice/board' }, { run: runWithFirst })
+  assert.equal(raw.milestone.number, 15)
+  assert.deepEqual(raw.issues.map(item => item.number), [1, 3])
+  assert.deepEqual(Object.keys(raw.commentsByNumber).map(Number).sort((a, b) => a - b), [1, 3])
+  assert.deepEqual(raw.commentsByNumber[3], [])
+  assert.equal(raw.milestonedAt[3], Date.parse('2026-10-18T00:00:00Z'))
+  assert.deepEqual(raw.firstStates, { 90: 'closed' })
+  assert.equal(raw.isUncertain, true)
+  assert.deepEqual(raw.notes, ['comments for #3 could not be read, so its Ready check and claim state are unknown'])
+  assert.deepEqual(calls, [
+    'repos/alice/board/milestones?state=open&per_page=100',
+    'repos/alice/board/issues?milestone=15&state=open&per_page=100',
+    'repos/alice/board/issues/1/comments?per_page=100',
+    'repos/alice/board/issues/3/comments?per_page=100',
+    'repos/alice/board/issues/3/timeline?per_page=100',
+    'repos/alice/board/issues/90',
+  ])
+  // No open milestone that is not Backlog means no further reads.
+  const noMilestone = fetchMilestoneRaw({ repo: 'alice/board' }, { run: () => '[]\n' })
+  assert.equal(noMilestone.milestone, null)
+  assert.deepEqual(noMilestone.issues, [])
+  // A milestones list that cannot be read throws, so the caller notes it and lists nothing.
+  assert.throws(() => fetchMilestoneRaw({ repo: 'alice/board' }, { run: () => { throw new Error('gh failed') } }), /gh failed/)
+})

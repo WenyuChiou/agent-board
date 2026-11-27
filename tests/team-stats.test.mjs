@@ -110,6 +110,20 @@ test('team stats scorecard groups merged pull requests by the Author line, with 
   assert.deepEqual({ issues, pullRequests }, before)
 })
 
+test('team stats daily line appends the milestone counts when the milestone read ran', () => {
+  const work = (fields = {}) => ({
+    milestone: { number: 15, title: '0.26.0 The mainstream AIs end to end' },
+    open: 96, ready: 41, reallyFree: 9, unchecked: [], expiredClaims: [], staleClaimed: [],
+    idleAssignees: [], staleFirst: [], isUncertain: false, ...fields,
+  })
+  const data = { issues: [issue(1)], pullRequests: [] }
+  assert.match(dailyLine({ ...data, milestoneWork: work() }, date), /milestone 0\.26\.0: open 96, ready 41, really free 9$/)
+  assert.match(dailyLine({ ...data, milestoneWork: work({ isUncertain: true }) }, date), /really free 9 \(uncertain\)$/)
+  assert.match(dailyLine({ ...data, milestoneWork: null }, date), /milestone work uncertain$/)
+  assert.ok(!dailyLine({ ...data, milestoneWork: work({ milestone: null }) }, date).includes('milestone'))
+  assert.ok(!dailyLine(data, date).includes('milestone'))
+})
+
 test('team stats rejects an unknown flag and a malformed date', () => {
   for (const argv of [['--unknown'], ['--date', '2026-02-30'], ['--date', '2026-2-01'], ['--date', 'invalid'], ['--date'], ['--repo'], ['--week', '--week'], ['--repo', '../bad'], ['--repo', 'owner/..']]) assert.throws(() => parseArgs(argv))
   assert.deepEqual(parseArgs([], new Date('2026-10-20T23:00:00Z')), { date, repo: 'WenyuChiou/agent-board', isWeek: false, isHelp: false })
