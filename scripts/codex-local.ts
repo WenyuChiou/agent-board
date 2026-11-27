@@ -44,7 +44,7 @@ import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
 import { currentPart } from '../hooks/retention'
 import { lastQuestion } from '../hooks/digest'
-import { antigravityMarkedLines, antigravityProcessClaim, ANTIGRAVITY_TRANSCRIPTS, MARK_PREFIX, resolveAntigravityTitle } from './antigravity-meta'
+import { antigravityMarkedLines, antigravityProcessClaim, isSessionAntigravityTranscript, MARK_PREFIX, resolveAntigravityTitle } from './antigravity-meta'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -134,8 +134,9 @@ export const isPlain = (bytes: Buffer): boolean => Buffer.from(bytes.toString('u
 
 // Antigravity hooks name their own transcript but do not carry the reply text.
 // agy 1.5.2 names transcript_full.jsonl, which has the same line shape as transcript.jsonl.
-const antigravityQuestion = (path: unknown): string | null => {
-  if (typeof path !== 'string' || !isAbsolute(path) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(path))) return null
+// Bind the read strictly to this hook's own conversation folder (#1467).
+const antigravityQuestion = (path: unknown, conversationId: string, home: string): string | null => {
+  if (!isSessionAntigravityTranscript(path, conversationId, home)) return null
   try {
     if (!lstatSync(path).isFile()) return null
     const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
@@ -1133,7 +1134,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const question = mode === '--codex-event' && agent === 'codex' && raw.hook_event_name === 'Stop' ? lastQuestion(String(raw.last_assistant_message ?? ''))
         : mode === '--codex-event' && agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' ? lastQuestion(String(raw.text ?? ''))
           : mode === '--agent-status' && status === 'waiting' && (agent === 'grok' || agent === 'opencode' || agent === 'hermes') ? lastQuestion(message)
-            : mode === '--agent-status' && status === 'waiting' && agent === 'antigravity' && (event === undefined || event === 'Stop') ? antigravityQuestion(raw.transcriptPath) : null
+            : mode === '--agent-status' && status === 'waiting' && agent === 'antigravity' && (event === undefined || event === 'Stop') ? antigravityQuestion(raw.transcriptPath, session, home) : null
       const antigravityTitle = mode === '--agent-status' && agent === 'antigravity'
         ? resolveAntigravityTitle(session, raw.transcriptPath, raw.artifactDirectoryPath, home)
         : null

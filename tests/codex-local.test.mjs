@@ -9000,14 +9000,18 @@ test('local status preserves cached session and step validation after owned-slot
 
 test('Antigravity reads only a current closing question from a bounded transcript tail', () => fixture(f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
-  const file = join(f.home, 'conversation', 'transcript.jsonl')
+  const fileOf = (id, name = 'transcript.jsonl') => join(f.home, '.gemini', 'antigravity', 'brain', id, name)
   const user = { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Closing question check\nSYNTHETIC-PRIVATE-PROMPT-BODY' }
   const model = content => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', content })
-  const save = entries => f.save(file, entries.map(entry => typeof entry === 'string' ? entry : JSON.stringify(entry)).join('\n') + '\n')
-  const send = (id, state, event, transcriptPath = file) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId: id, transcriptPath })
+  const save = (id, entries, name = 'transcript.jsonl') => {
+    const file = fileOf(id, name)
+    f.save(file, entries.map(entry => typeof entry === 'string' ? entry : JSON.stringify(entry)).join('\n') + '\n')
+    return file
+  }
+  const send = (id, state, event, transcriptPath = fileOf(id)) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId: id, transcriptPath })
   const record = id => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`antigravity:${id}`).digest('hex') + '.json'), 'utf8'))
   const id = 'synthetic-agy-current-question'
-  save([user, model('SYNTHETIC-PRIVATE-REPLY\n\nReady to proceed?')])
+  save(id, [user, model('SYNTHETIC-PRIVATE-REPLY\n\nReady to proceed?')])
   assert.equal(send(id, 'waiting', 'Stop').status, 0)
   assert.ok(record(id).steps.includes('- [?] Ready to proceed?'))
   assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Ready to proceed\?/)
@@ -9015,19 +9019,19 @@ test('Antigravity reads only a current closing question from a bounded transcrip
   assert.ok(record(id).steps.includes('- [x] Ready to proceed?'))
   assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Ready to proceed\?/)
   assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-PRIVATE'))
-  save([user, model('Old question?'), user])
+  save('synthetic-agy-new-prompt', [user, model('Old question?'), user])
   assert.equal(send('synthetic-agy-new-prompt', 'waiting', 'Stop').status, 0)
   assert.equal(record('synthetic-agy-new-prompt').asked, undefined)
-  save([user, model('No question in this reply.')])
+  save('synthetic-agy-no-question', [user, model('No question in this reply.')])
   assert.equal(send('synthetic-agy-no-question', 'waiting', 'Stop').status, 0)
   assert.equal(record('synthetic-agy-no-question').asked, undefined)
-  save([user, 'not JSON', model('Do not retain this?')])
+  save('synthetic-agy-garbage', [user, 'not JSON', model('Do not retain this?')])
   assert.equal(send('synthetic-agy-garbage', 'waiting', 'Stop').status, 0)
   assert.equal(record('synthetic-agy-garbage').asked, undefined)
-  save([user, 42, model('Invalid shape?')])
+  save('synthetic-agy-bad-shape', [user, 42, model('Invalid shape?')])
   assert.equal(send('synthetic-agy-bad-shape', 'waiting', 'Stop').status, 0)
   assert.equal(record('synthetic-agy-bad-shape').asked, undefined)
-  save([user, model('Old question?'), { source: 'MODEL', type: 'PLANNER_RESPONSE', content: { text: 'Invalid reply shape' } }])
+  save('synthetic-agy-bad-reply', [user, model('Old question?'), { source: 'MODEL', type: 'PLANNER_RESPONSE', content: { text: 'Invalid reply shape' } }])
   assert.equal(send('synthetic-agy-bad-reply', 'waiting', 'Stop').status, 0)
   assert.equal(record('synthetic-agy-bad-reply').asked, undefined)
   const folder = join(f.home, 'directory', 'transcript.jsonl')
@@ -9038,14 +9042,14 @@ test('Antigravity reads only a current closing question from a bounded transcrip
     assert.equal(record(session).state, 'waiting')
     assert.equal(record(session).asked, undefined)
   }
-  save([model('a'.repeat(300000)), user, model('A long transcript.\n\nUse the blue one?')])
-  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting'], { conversationId: 'synthetic-agy-long-tail', transcriptPath: file }).status, 0)
+  const longFile = save('synthetic-agy-long-tail', [model('a'.repeat(300000)), user, model('A long transcript.\n\nUse the blue one?')])
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting'], { conversationId: 'synthetic-agy-long-tail', transcriptPath: longFile }).status, 0)
   assert.ok(record('synthetic-agy-long-tail').steps.includes('- [?] Use the blue one?'))
   // agy 1.5.2 hooks name transcript_full.jsonl, with the same line shape.
-  const full = join(f.home, 'conversation', 'transcript_full.jsonl')
-  f.save(full, [user, model('SYNTHETIC-PRIVATE-REPLY\n\nShould I pick a third name?')].map(entry => JSON.stringify(entry)).join('\n') + '\n')
-  assert.equal(send('synthetic-agy-full-transcript', 'waiting', 'Stop', full).status, 0)
-  assert.ok(record('synthetic-agy-full-transcript').steps.includes('- [?] Should I pick a third name?'))
+  const fullId = 'synthetic-agy-full-transcript'
+  const full = save(fullId, [user, model('SYNTHETIC-PRIVATE-REPLY\n\nShould I pick a third name?')], 'transcript_full.jsonl')
+  assert.equal(send(fullId, 'waiting', 'Stop', full).status, 0)
+  assert.ok(record(fullId).steps.includes('- [?] Should I pick a third name?'))
   assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-PRIVATE'))
 }))
 
