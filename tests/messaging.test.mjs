@@ -6154,6 +6154,18 @@ test('a reply queued for the app keeps its leave stamp and its limit when the re
   assert.equal(messageIn(disconnectMessages(left, app.id, now + 120_000, true), 'left-one').leftAt, now + 60_000, 'left again, it keeps the first time')
 })
 
+// The clock a give-back test reads a claim's time on (#1878). It stands at 0, a time before any claim, so the claim can neither run
+// short nor run out however long the runner pauses, until the test moves it to a time it counts from the board's own claim time.
+const codexClaimClock = () => { let at = 0; return { now: () => at, set: value => { at = value } } }
+const codexReads = daemon => daemon.calls().filter(one => one.method === 'thread/read').length
+// Waits for the message's status; on a timeout it says what the receiver saw, so a lost or refused give-back names itself.
+const codexWaitStatus = async (board, daemon, status, errors) => {
+  try { return await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === status) } catch (error) {
+    const message = await codexMessage(board, 'AB-CX-001')
+    const seen = { errors, status: message?.status, error: message?.error, claimed: message?.claimed, sinceClaim: message?.claimed > 0 ? Date.now() - message.claimed : null, methods: codexMethods(daemon).slice(-8) }
+    throw new Error(`${error.message} waiting for ${status}: ${JSON.stringify(seen)}`)
+  }
+}
 // The claim meets the person's turn, which ends right after the receiver leaves again. A whole wait is 2 s here and the claim's time
 // 4 s, so the receiver gives the claim back while it watches the idle thread again (with less than 2.2 s left, about 1.8 s in), and the
 // thread reads as a person's about 2 s after the turn ended, well inside the claim's time.
@@ -6224,13 +6236,18 @@ test("a Codex claim whose give-back met a busy message store (503, nothing saved
 // The person's turn runs on past the first give-back: the turn ends about 1.4 s after it (minute 24 of 30 for real), when a whole
 // wait no longer fits in the claim's time. The first three give-backs meet a busy store (503), a tick apart; the fourth reaches the board.
 test("a Codex claim whose give-back met a busy message store and whose thread stays busy is given back a tick later, and is delivered once after (#1625)", () => codexFixture(async (board, dir) => {
-  const errors = []
-  const { daemon, proxy, close } = await codexGiveBackCase(board, dir, 'unsent-busy-thrice', { onError: error => errors.push(error.message), endTurn: async ({ proxy, daemon }) => {
+  const errors = [], clock = codexClaimClock()
+  const { daemon, proxy, close } = await codexGiveBackCase(board, dir, 'unsent-busy-thrice', { onError: error => errors.push(error.message), receiverOptions: { claimNow: clock.now }, endTurn: async ({ proxy, daemon }) => {
+    // The claim's time stood still until the receiver left; now less than a whole wait and two ticks is left of it (2200 ms of
+    // 4000), and stays so, however long the runner takes over the three busy answers (#1878).
+    clock.set((await codexMessage(board, 'AB-CX-001')).claimed + 1801)
     await waitFor(async () => proxy.faults() > 0)
     // The store was busy and saved nothing; the give-back asked again puts the message back in the queue with its text, before the
     // turn ends. A receiver that held the claim instead would let it run out here.
-    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'queued')
+    await codexWaitStatus(board, daemon, 'queued', errors)
     assert.equal(codexStarts(daemon), 0)
+    // The next claim has its whole time.
+    clock.set(0)
     await pause(1400)
   } })
   try {
@@ -6299,20 +6316,60 @@ test('a Codex claim that meets a busy thread goes back to the queue with its tex
   writeFileSync(person, '')
   // The person's turn begins as the claim joins, so the receiver leaves again. The claim's own time is 3 s here (30 minutes for
   // real) and a whole wait is 400 ms: with less than that and two ticks left, nothing was sent for the claim, so it goes back.
+  // The claim's time is read on a clock the test holds (#1878): on the wall clock the receiver had to look and get the board's
+  // answer inside a fixed 600 ms, and a runner that paused past it let the claim run out, so the test timed out.
   const daemon = codexDaemon(dir, { readActive: true, endFlag, person })
-  const receiver = codexReceiver(board, daemon, { ackMs: 3000 })
+  const clock = codexClaimClock(), errors = []
+  const receiver = codexReceiver(board, daemon, { ackMs: 3000, claimNow: clock.now, onError: error => errors.push(error.message) })
   try {
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
     await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
-    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'queued')
+    const { claimed } = await codexMessage(board, 'AB-CX-001')
+    assert.ok(claimed > 0)
+    // A whole wait and two ticks (600 ms) are still left: the claim stays the receiver's over three more looks.
+    clock.set(claimed + 2400)
+    const reads = codexReads(daemon)
+    await waitFor(async () => codexReads(daemon) >= reads + 3)
+    assert.deepEqual([(await codexMessage(board, 'AB-CX-001')).status, codexStarts(daemon)], ['uncertain', 0])
+    // One millisecond less is left: the claim goes back to the queue, with nothing started.
+    clock.set(claimed + 2401)
+    await codexWaitStatus(board, daemon, 'queued', errors)
     assert.equal(codexStarts(daemon), 0)
-    // The turn ends: the message is taken again and started once, with the text it was sent with.
+    // The turn ends: the message is taken again, with its whole time, and started once, with the text it was sent with.
+    clock.set(0)
     writeFileSync(endFlag, '')
-    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    await codexWaitStatus(board, daemon, 'acknowledged', errors)
     const starts = daemon.calls().filter(one => one.method === 'turn/start')
     assert.equal(starts.length, 1)
     assert.ok(JSON.stringify(starts[0].params).includes('Check the build and tell me what failed.'))
+  } finally { await receiver.close() }
+}))
+
+test('a Codex claim that meets a busy thread still goes back to the queue after a pause longer than the time left for it (#1878)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), endFlag = join(dir, 'end-turn'), hold = join(dir, 'read-hold')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { readActive: true, endFlag, person, readHold: hold })
+  const clock = codexClaimClock(), errors = []
+  const receiver = codexReceiver(board, daemon, { ackMs: 3000, claimNow: clock.now, onError: error => errors.push(error.message) })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    const { claimed } = await codexMessage(board, 'AB-CX-001')
+    // A runner's pause: the receiver's looks get no answer until more than the claim's whole 3 s have passed since the board's
+    // claim. On the wall clock the claim ran out meanwhile, nothing was given back, and the message was never delivered.
+    writeFileSync(hold, '')
+    while (Date.now() <= claimed + 3100) await pause(50)
+    unlinkSync(hold)
+    assert.equal(codexStarts(daemon), 0)
+    clock.set(claimed + 2401)
+    await codexWaitStatus(board, daemon, 'queued', errors)
+    assert.equal(codexStarts(daemon), 0)
+    clock.set(0)
+    writeFileSync(endFlag, '')
+    await codexWaitStatus(board, daemon, 'acknowledged', errors)
+    assert.equal(codexStarts(daemon), 1)
   } finally { await receiver.close() }
 }))
 

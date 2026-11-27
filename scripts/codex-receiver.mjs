@@ -230,6 +230,9 @@ export const startCodexReceiver = ({
   // The tick that the watch's gap rule counts in on `now`'s clock (two looks more than two of these apart end the stretch). It
   // is tickMs, the timer's own period, except in a test that runs `now` faster than the wall clock to watch a whole wait (#1578).
   watchTickMs = tickMs,
+  // The wall clock a claim's time is read on, against the board's own claim time. A test holds it, so a runner that pauses cannot
+  // run a claim short or out before the test says so (#1878).
+  claimNow = () => Date.now(),
 }) => {
   if (typeof threads !== 'function' || !isAbsolute(executable ?? '')) throw new Error('EXPLICIT_EXECUTABLE_REQUIRED')
   const client = boardClient(boardUrl)
@@ -778,8 +781,8 @@ export const startCodexReceiver = ({
           // here, or goes back to the board's queue (below). A connection that is lost meanwhile, or a wait past the board's limit, ends this with no
           // receipt: the board settles a claim it lost the connection of (`uncertain`, `DISCONNECTED`) or expired itself.
           // Measured from the board's own claim time, which is what it expires from, so nothing starts for a claim the card already shows as expired.
-          const waitsSince = Number.isFinite(message.claimed) && message.claimed > 0 ? message.claimed : Date.now()
-          const isDone = () => !isHeld() || Date.now() - waitsSince >= ackMs
+          const waitsSince = Number.isFinite(message.claimed) && message.claimed > 0 ? message.claimed : claimNow()
+          const isDone = () => !isHeld() || claimNow() - waitsSince >= ackMs
           // A claim that waits (the thread was busy, or a join was refused or got no answer, and each starts the wait again) goes back
           // to the board's queue, text and all, once too little of its time is left for a whole wait and two ticks: nothing was asked
           // of Codex for it, since turn/start comes only after this loop. The board then hands it out again when the thread reads as a
@@ -793,7 +796,7 @@ export const startCodexReceiver = ({
           // turn/start and never asks again: the board hands the message out again if it took the give-back, and expires the claim if
           // it did not.
           let canGiveBack = typeof unsent === 'function', giveBackAt = 0, wasBusy = false
-          const isShort = () => ackMs - (Date.now() - waitsSince) < Math.max(unloadMs, (quiet.get(thread)?.delay ?? 0) + unloadMarginMs) + 2 * tickMs
+          const isShort = () => ackMs - (claimNow() - waitsSince) < Math.max(unloadMs, (quiet.get(thread)?.delay ?? 0) + unloadMarginMs) + 2 * tickMs
           // 'back': the board took it; 'held': the board saved nothing, so the claim is still this delivery's; 'unknown': either may be so.
           const giveBack = async () => {
             if (!canGiveBack || Date.now() < giveBackAt) return 'held'
