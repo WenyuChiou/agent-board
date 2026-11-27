@@ -113,11 +113,14 @@ const pairedLast = (first: string, last: string): string => /^[^\s㐀-鿿]+$/.te
 // A question frame left on the first option (`Should the export keep 24 hours` for `Should the
 // export keep 24 hours or 7 days of history?`) would send the question's own words as an answer
 // (#1640). When the last option opens with a number, the options are parallel amounts: the first
-// starts at the lead's last number, and the last loses the shared context after the same number of
-// words and a preposition (`7 days`). A lead with no such number keeps its words, as before.
-const SHARED_PREPOSITION = /^(?:for|in|on|with|to|at|as|from|into|via|of)$/i
+// starts at the lead's last number (`24 hours`). The last option stays whole (`7 days of history`):
+// words after it may be shared context or its own qualifier (`4 hours with a sandbox`), and the
+// button must not drop a qualifier. A lead with no such number keeps its words, as before.
 const NUMBER = /^\d/
-const BOUND = /^(?:and|or|plus|\+|-|–|~|than|least|most|under|over|below|above|about|around|approximately|roughly|nearly|almost|max|min|maximum|minimum|between|from|within)$/i
+// Words that join the last number to an earlier one (`3 to 5`, `1 day and 12 hours`, `3 - 5`).
+const RANGE_JOIN = /^(?:and|or|to|through|thru|plus|\+|-|–|~)$/i
+// Words that bound the number (`at least 2`, `more than 3`, `between 3`, `up to 2`).
+const QUALIFIER = /^(?:than|least|most|under|over|below|above|about|around|approximately|roughly|nearly|almost|max|min|maximum|minimum|between|from|within)$/i
 const UNIT = /^(?:ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|months?|y|yrs?|years?|[kmgt]i?b|bytes?|%)$/i
 const parallelAmounts = (first: string, last: string): [string, string] | null => {
   if (!CLAUSE_OPENING.test(first) || CJK.test(first) || CJK.test(last)) return null
@@ -126,19 +129,18 @@ const parallelAmounts = (first: string, last: string): [string, string] | null =
   const firstWords = first.split(/\s+/)
   const from = firstWords.findLastIndex(word => NUMBER.test(word))
   if (from <= 0) return null
-  // An amount and its unit just before it (`1 day 12 hours`, `1 day, 12 hours`, `1 day and 12 hours`)
-  // make one compound amount whose start is unclear: the words then stay whole rather than send a
-  // shorter amount. A number in the subject (`worker 2 keep 24 hours`) is followed by no unit.
-  const unitAt = (index: number): boolean => UNIT.test((firstWords[index] ?? '').replace(/,$/, '')) && NUMBER.test(firstWords[index - 1] ?? '')
-  if (unitAt(from - 1)) return null
-  // A range or a bound (`between 3 and 5`, `up to 2 GB`, `at least 2 GB`, `more than 3`) is one amount
-  // too: cutting at its last number would drop the bound, so the words stay whole.
-  const before = (firstWords[from - 1] ?? '').toLowerCase()
-  if (BOUND.test(before) || (before === 'to' && /^(?:up|down|from)$/i.test(firstWords[from - 2] ?? ''))) return null
+  // When the last number is part of a longer amount, its start is unclear, so the words stay whole
+  // rather than send a shorter or unbounded amount: a compound amount (`1h 30m`, `1 day 12 hours`,
+  // `1 day and 12 hours`), a range (`3 to 5 days`) or a bound (`at least 2 GB`, `up to 2 GB`).
+  // A number in the subject (`worker 2 keep 24 hours`) is followed by no unit and joins nothing.
+  const word = (index: number): string => (firstWords[index] ?? '').replace(/,$/, '')
+  const amountEndsAt = (index: number): boolean => NUMBER.test(word(index)) || (UNIT.test(word(index)) && NUMBER.test(word(index - 1)))
+  const before = word(from - 1)
+  if (amountEndsAt(from - 1) || QUALIFIER.test(before)) return null
+  if (RANGE_JOIN.test(before) && (amountEndsAt(from - 2) || /^(?:up|down|from)$/i.test(word(from - 2)))) return null
   const amount = firstWords.slice(from)
   if (amount.length > lastWords.length) return null
-  const shared = lastWords.length > amount.length && SHARED_PREPOSITION.test(lastWords[amount.length] ?? '')
-  return [amount.join(' '), shared ? lastWords.slice(0, amount.length).join(' ') : last]
+  return [amount.join(' '), last]
 }
 
 const lastOption = (text: string): string => {

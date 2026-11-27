@@ -1269,8 +1269,8 @@ test('an English "Should X be A or B?" question offers A and B as the answers, w
 })
 
 test('an inline "A or B?" choice of amounts offers the amounts, not the question words (#1640)', () => {
-  expect(askOf('Should the export keep 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days'] })
-  expect(askOf('History', 'Should the export keep 24 hours or 7 days of history?')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days'] })
+  expect(askOf('Should the export keep 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days of history'] })
+  expect(askOf('History', 'Should the export keep 24 hours or 7 days of history?')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days of history'] })
   expect(askOf('Should I set the retry limit to 3 or 5?', '')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
   expect(askOf('Should the cache hold 2 GB or 4 GB?', '')).toMatchObject({ kind: 'choose', options: ['2 GB', '4 GB'] })
   // A short choice with no question frame stays as it was.
@@ -1282,8 +1282,12 @@ test('an inline "A or B?" choice of amounts offers the amounts, not the question
   expect(askOf('Should I set the retry limit to between 3 and 5 or 10?', '').options[0]).toBe('Should I set the retry limit to between 3 and 5')
   expect(askOf('Should the cache hold up to 2 GB or 4 GB?', '').options[0]).toBe('Should the cache hold up to 2 GB')
   expect(askOf('Should the cache hold at least 2 GB or 4 GB?', '').options[0]).toBe('Should the cache hold at least 2 GB')
+  expect(askOf('Should the export keep 3 to 5 days or 10 days of history?', '').options[0]).toBe('Should the export keep 3 to 5 days')
+  expect(askOf('Should the service wait 1h 30m or 2h?', '').options[0]).toBe('Should the service wait 1h 30m')
+  // The last option keeps its own words: they may qualify it alone.
+  expect(askOf('Should the job run 2 hours or 4 hours with a sandbox?', '')).toMatchObject({ kind: 'choose', options: ['2 hours', '4 hours with a sandbox'] })
   // A number in the subject is not part of the amount.
-  expect(askOf('Should worker 2 keep 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days'] })
+  expect(askOf('Should worker 2 keep 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days of history'] })
   // A number inside the subject is not one of the amounts: the words stay whole, as before.
   expect(askOf('Should the 2 workers keep running or stop?', '')).toMatchObject({ kind: 'choose', options: ['Should the 2 workers keep running', 'stop'] })
 })
