@@ -37,7 +37,7 @@ npx @wenyuchiou/agent-board@next
 - **在本機、純文字。** 一個你可以自己看、自己改的 Markdown 檔，只在 127.0.0.1 的網頁，看板本身不呼叫模型。
 - **一個指令裝、一個指令移除。** `setup` 寫入前先列出要改什麼；`remove` 拿掉 setup 寫的東西，不動你自己的設定。
 
-[T3 Code](https://github.com/pingdotgg/t3code) 把 agent 放在它自己的 app 裡跑：session 由它開，過去的對話也能匯入成副本，在 T3 裡接著做。Agent Board 跟著的是還開在各家終端機或桌面 app 裡的那個 session：顯示它在等什麼，並在「支援的 agent」表格標明可以的地方，把你的回答送回那個 session。想在同一個 app 裡開新的 session、用 worktree 和手機 app，就用 T3 Code；已經開在各家 app 裡的 session，就用 Agent Board。
+[T3 Code](https://github.com/pingdotgg/t3code) 把 agent 放在它自己的 app 裡跑：session 由它開，過去的對話也能匯入，從 T3 接手那個 session 接著做。Agent Board 跟著的是還開在各家終端機或桌面 app 裡的那個 session：顯示它在等什麼，並在「支援的 agent」表格標明可以的地方，把你的回答送回那個 session。想在同一個 app 裡開新的 session、用 worktree 和手機 app，就用 T3 Code；已經開在各家 app 裡的 session，就用 Agent Board。
 
 <img alt="看板網頁：「需要你」放著 Claude Code 的問題，附答案按鈕；「進行中」列出 Codex、Antigravity 和 OpenCode 的工作和步驟。合成資料。" src="docs/images/page-zh-TW-dark.png" width="860">
 
