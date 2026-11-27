@@ -117,6 +117,7 @@ const pairedLast = (first: string, last: string): string => /^[^\s㐀-鿿]+$/.te
 // words and a preposition (`7 days`). A lead with no such number keeps its words, as before.
 const SHARED_PREPOSITION = /^(?:for|in|on|with|to|at|as|from|into|via|of)$/i
 const NUMBER = /^\d/
+const UNIT = /^(?:ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|months?|y|yrs?|years?|[kmgt]i?b|bytes?|%)$/i
 const parallelAmounts = (first: string, last: string): [string, string] | null => {
   if (!CLAUSE_OPENING.test(first) || CJK.test(first) || CJK.test(last)) return null
   const lastWords = last.split(/\s+/)
@@ -124,9 +125,11 @@ const parallelAmounts = (first: string, last: string): [string, string] | null =
   const firstWords = first.split(/\s+/)
   const from = firstWords.findLastIndex(word => NUMBER.test(word))
   if (from <= 0) return null
-  // A number just before it (`1 day 12 hours`, `1 day and 12 hours`) makes one compound amount whose
-  // start is unclear: the words then stay whole rather than send a shorter amount.
-  if (firstWords.slice(Math.max(0, from - 3), from).some(word => NUMBER.test(word))) return null
+  // An amount and its unit just before it (`1 day 12 hours`, `1 day, 12 hours`, `1 day and 12 hours`)
+  // make one compound amount whose start is unclear: the words then stay whole rather than send a
+  // shorter amount. A number in the subject (`worker 2 keep 24 hours`) is followed by no unit.
+  const unitAt = (index: number): boolean => UNIT.test((firstWords[index] ?? '').replace(/,$/, '')) && NUMBER.test(firstWords[index - 1] ?? '')
+  if (unitAt(from - 1) || (/^(?:and|plus|\+)$/i.test(firstWords[from - 1] ?? '') && unitAt(from - 2))) return null
   const amount = firstWords.slice(from)
   if (amount.length > lastWords.length) return null
   const shared = lastWords.length > amount.length && SHARED_PREPOSITION.test(lastWords[amount.length] ?? '')

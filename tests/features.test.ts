@@ -1278,6 +1278,8 @@ test('an inline "A or B?" choice of amounts offers the amounts, not the question
   // A compound amount has no clear start: its words stay whole rather than lose the earlier units.
   expect(askOf('Should the export keep 1 day 12 hours or 2 days of history?', '').options[0]).toBe('Should the export keep 1 day 12 hours')
   expect(askOf('Should the export keep 1 day and 12 hours or 2 days?', '').options[0]).toBe('Should the export keep 1 day and 12 hours')
+  // A number in the subject is not part of the amount.
+  expect(askOf('Should worker 2 keep 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days'] })
   // A number inside the subject is not one of the amounts: the words stay whole, as before.
   expect(askOf('Should the 2 workers keep running or stop?', '')).toMatchObject({ kind: 'choose', options: ['Should the 2 workers keep running', 'stop'] })
 })
