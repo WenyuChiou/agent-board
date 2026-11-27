@@ -711,7 +711,7 @@ export const takeManualDone = (
 // null when it cannot be found for sure: a block without its end marker, a heading that is
 // gone or has a twin, a heading inside some session's block, or a session id two blocks
 // share when the row's project and each block's first heading cannot tell them apart.
-export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): Archived | null => {
+export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set(), sweepTwins = true): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
@@ -763,7 +763,10 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
     }
 
     const day = localDay(now)
-    const removed = [span, ...outrankedBy(spans, span)]
+    const visible = sweepTwins && span.resume != null ? readable(lines) : null
+    const removed = visible === null
+      ? [span]
+      : [span, ...outrankedBy(spans, span).filter(other => !isAsking(visible, other))]
     return {
       text: removeSpans(text, removed),
       entries: removed.map(one => [`## ${one.project || s.uncategorized} · ${day}`, ...lines.slice(one.start + 1, one.end)].join('\n')),

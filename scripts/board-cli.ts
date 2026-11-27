@@ -228,8 +228,10 @@ const doneBlockLines = (projects: readonly ProgressProject[], journal: string, n
   const day = localDay(now)
   const written = new Set(parseJournal(journal).filter(entry => entry.at === day).map(entry => `${entry.project}\n${entry.task}`))
   const lines: string[] = []
-  for (const project of foldRuns(projects).projects) {
+  const duplicates = new Set(foldRuns(projects).duplicates.map(one => one.task))
+  for (const project of projects) {
     for (const task of project.tasks) {
+      if (duplicates.has(task)) continue
       const updated = task.auto?.state === 'done' ? task.auto.updated : undefined
       if (updated === undefined || !Number.isFinite(updated) || updated <= 0 || updated > now || localDay(updated) !== day) continue
       const title = task.title || s.unnamed
@@ -1774,7 +1776,7 @@ const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind:
       if (fresh.asks && !keepAskedQuestions(freshProjects, fresh.ref, now, cutOffScopes(freshProjects, cutOffSpans(text, isCutSettledAt(now))))) return null
       // The gone set comes from the text this retry reads, as in the archive press.
       const gone = goneBlocksOf(freshProjects)
-      const again = takeTask(text, fresh.ref, now, s, {}, staleMs, gone)
+      const again = takeTask(text, fresh.ref, now, s, {}, staleMs, gone, false)
       if (again === null) return null
       if (isLast) return { text: again.text, entries: again.entries }
       if (read(path) !== text) return AGAIN

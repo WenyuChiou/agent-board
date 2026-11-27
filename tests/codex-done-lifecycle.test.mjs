@@ -273,6 +273,9 @@ test('a skill report and hook turns give one row (#1832)', async () => {
   assert.equal(doneDoc.counts.stopped, 0)
   assert.equal(doneDoc.stopped.length, 0)
   assert.equal(collectFinished(doneProgress, [], [], 7, baseNow).length, 1)
+
+  const withHelperRun = `${doneProgress}\n<!-- auto session=run12345 agent=codex state=done updated=${t4} origin=run parent=${resume} -->\n### Helper run task\n- [x] Subagent finished\n<!-- /auto session=run12345 -->\n`
+  assert.equal(collectFinished(withHelperRun, [], [], 7, baseNow).length, 2)
 })
 
 test('a done block shows under Done on the page, the terminal board and --json, never under Stopped (#1832)', async () => {
@@ -388,6 +391,20 @@ test('archiving a winning row or tidying removes its hidden older twin copy so i
   const tidied = takeArchivable(doneText, now, undefined, s, true)
   assert.equal(parseProgress(tidied.text).flatMap(p => p.tasks).length, 0)
   assert.equal(tidied.entries.length, 2)
+
+  // Asking older twin is NOT swept by takeTask so unretained [?] steps are never lost (#1832).
+  const askingTwinText = endedText.replace('- [~] Counting lines', '- [?] Blue or green?')
+  const askingView = buildView(parseProgress(askingTwinText), [], null, now, 0, {}, s)
+  const askingArchived = takeTask(askingTwinText, askingView.stopped[0].archive, now, s)
+  assert.ok(askingArchived)
+  assert.equal(askingArchived.entries.length, 1)
+  assert.equal(parseProgress(askingArchived.text).flatMap(p => p.tasks).length, 1)
+
+  // sweepTwins = false (used by previewTidy / bulkTidy) removes only the targeted block.
+  const singleOnly = takeTask(endedText, winnerArchive, now, s, {}, undefined, new Set(), false)
+  assert.ok(singleOnly)
+  assert.equal(singleOnly.entries.length, 1)
+  assert.equal(parseProgress(singleOnly.text).flatMap(p => p.tasks).length, 1)
 })
 
 test('non-Claude ended row without a target gets send=none and no Copy answer box (#1832)', async () => {

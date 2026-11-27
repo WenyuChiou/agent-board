@@ -139,10 +139,12 @@ export const collectFinished = (
   }
 
   if (progressText) {
-    const parsed = foldRuns(parseProgress(progressText)).projects
+    const parsed = parseProgress(progressText)
+    const duplicates = new Set(foldRuns(parsed).duplicates.map(one => one.task))
     for (const project of parsed) {
       const proj = named(project.name)
       for (const task of project.tasks) {
+        if (duplicates.has(task)) continue
         const title = clean(task.title)
         const key = keyOf(proj, title)
         if (task.auto !== null) {
