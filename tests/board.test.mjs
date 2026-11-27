@@ -6905,6 +6905,20 @@ test('the board command picks text, the terminal board or the page from where it
     assert.equal(pickSurface({ isTty: true, platform: 'win32', env: { [name]: '1' } }), 'page', `${name} should pick the page`)
     assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: { [name]: '1' } }), 'page', `${name} should pick the page`)
     assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { [name]: '1', DISPLAY: ':0' } }), 'page', `${name} should pick the page`)
+    assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { [name]: '1', SSH_CONNECTION: '192.168.1.1 1234 192.168.1.2 22' } }), 'page', `${name} inside an agent session should pick the page over SSH`)
+    assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { [name]: '1' } }), 'page', `${name} inside an agent session should pick the page without a display`)
+  }
+
+  // Config/home folder variables set in a person's own profile do not count as inside an agent (#1283).
+  for (const name of ['OPENCODE_CONFIG_DIR', 'HERMES_HOME', 'MUSE_HOME', 'OPENCLAW_STATE_DIR', 'DSH_HOME', 'DEEPSEEK_HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'GROK_HOME']) {
+    for (const platform of ['win32', 'darwin', 'linux']) {
+      assert.equal(pickSurface({ isTty: true, platform, env: { [name]: '/tmp/own-config', SSH_CONNECTION: '192.168.1.1 1234 192.168.1.2 22' } }), 'terminal', `${name} over SSH_CONNECTION should open the terminal board`)
+      assert.equal(pickSurface({ isTty: true, platform, env: { [name]: '/tmp/own-config', SSH_TTY: '/dev/pts/1' } }), 'terminal', `${name} over SSH_TTY should open the terminal board`)
+    }
+    assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { [name]: '/tmp/own-config' } }), 'terminal', `${name} on headless Linux should open the terminal board`)
+    assert.equal(pickSurface({ isTty: true, platform: 'win32', env: { [name]: '/tmp/own-config' } }), 'page', `${name} on desktop win32 should open the page`)
+    assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: { [name]: '/tmp/own-config' } }), 'page', `${name} on desktop darwin should open the page`)
+    assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { [name]: '/tmp/own-config', DISPLAY: ':0' } }), 'page', `${name} on Linux with DISPLAY should open the page`)
   }
 
   for (const platform of ['win32', 'darwin', 'linux']) {
@@ -6945,15 +6959,15 @@ test('over SSH, in a terminal with no browser, plain agent-board runs the live t
   }
 })
 
-test('over SSH with a config folder variable set, plain agent-board opens the page and says how to forward its port (#1283)', { timeout: 40_000 }, async () => {
-  for (const name of ['HERMES_HOME', 'OPENCODE_CONFIG_DIR']) {
+test('over SSH inside an agent session, plain agent-board opens the page and says how to forward its port (#1283)', { timeout: 40_000 }, async () => {
+  for (const name of ['HERMES_SESSION_ID', 'OPENCODE']) {
     const board = serveIn()
     let url = null
     try {
       const shim = join(board.dir, 'ssh-page-shim.cjs')
       writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
-      // A person's own profile can set an agent's config folder; that still picks the page.
-      const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '', [name]: join(board.dir, 'own-config') }
+      // Inside an actual agent session over SSH, plain agent-board opens the page with the forwarding hint.
+      const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '', [name]: '1' }
       for (const key of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[key]
       const out = await new Promise((done, fail) => {
         execFile(process.execPath, ['--require', shim, board.script], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
@@ -6982,6 +6996,31 @@ test('over SSH with a config folder variable set, plain agent-board opens the pa
       assert.ok(keys.stdout.includes(url), keys.stdout)
       assert.doesNotMatch(keys.stdout, /\?t=[\w-]+(?:http|Forward)/, `${name}: the address is not joined to another line`)
     } finally { await board.end([url]) }
+  }
+})
+
+test('over SSH with a config folder variable set, plain agent-board runs the live terminal board (#1283)', { timeout: 40_000 }, async () => {
+  for (const name of ['OPENCODE_CONFIG_DIR', 'HERMES_HOME']) {
+    const board = serveIn()
+    let child
+    try {
+      const shim = join(board.dir, 'ssh-terminal-config-shim.cjs')
+      writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
+      const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '', [name]: join(board.dir, 'own-config') }
+      for (const key of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[key]
+      child = spawn(process.execPath, ['--require', shim, board.script], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+      let out = ''
+      child.stdout.on('data', chunk => { out += chunk })
+      for (let tries = 0; tries < 150 && !(out.includes('\u001b[?1049h') && out.includes('Forward port')); tries++) await new Promise(done => setTimeout(done, 100))
+      assert.ok(out.startsWith('\u001b[?1049h'), `${name}: draws the live terminal board instead of printing an address: ${JSON.stringify(out.slice(0, 80))}`)
+      assert.ok(out.includes('Rate-limit the public endpoints'), `${name}: live board shows tasks`)
+      assert.ok(out.includes('Forward port to open the page'), `${name}: offers port forward hint in terminal board`)
+      assert.doesNotMatch(out, /Opened Agent Board|window opened/i)
+      assert.equal(child.exitCode, null, `${name}: live terminal board keeps running`)
+    } finally {
+      if (child && child.exitCode === null) child.kill()
+      await board.end([])
+    }
   }
 })
 
