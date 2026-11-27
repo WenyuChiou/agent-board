@@ -422,10 +422,10 @@ export const startCodexReceiver = ({
     }).finally(() => { asked.inFlight = null })
     return asked.inFlight
   }
-  // The board is told once what became of a message whose turn this receiver stopped: `uncertain`, with the reason. The delivery
-  // sends no receipt of its own for it (it ends without one when the wait runs out, and it ended without one if its board or
-  // daemon connection went first), so this is the only receipt after `accepted`. It goes through the board connection the
-  // receiver has for the session now, the one the message came on or a later one: the board takes a message's receipt from any
+  // The board is told once what became of a message whose delivery outlived its board connection or timed out waiting
+  // on an approval: `uncertain` (`APPROVAL_TIMEOUT`) or a late `acknowledged` (#1796). The delivery sends no receipt of
+  // its own for it, so this is the only receipt after `accepted`. It goes through the board connection the receiver has
+  // for the session now, the one the message came on or a later one: the board takes a message's receipt from any
   // connection of its session that is not contested. A receipt the board refuses because of the connection (contested, or let go)
   // or does not answer is kept for the next tick and the next connection, and says the same again. One it refuses because of the
   // message ends here, and so does one the board's own limit on an unanswered message has overtaken.
@@ -436,11 +436,14 @@ export const startCodexReceiver = ({
     if (Date.now() - owed.at >= ackMs) { sub.owed = null; return Promise.resolve() }
     if (!receiver || receiver.isClosed() || receiver.isContested()) return Promise.resolve()
     owed.isAsking = true
-    owed.inFlight = receiver.receipt(owed.message, 'uncertain', undefined, owed.error).then(() => { if (sub.owed === owed) sub.owed = null }, error => {
+    owed.inFlight = receiver.receipt(owed.message, owed.status, owed.reply, owed.error).then(() => { if (sub.owed === owed) sub.owed = null }, error => {
       owed.isAsking = false
       if (sub.owed === owed && SETTLED.has(error?.message)) sub.owed = null
     }).finally(() => { owed.inFlight = null })
     return owed.inFlight
+  }
+  const queueOwed = (thread, message, status, { reply, error } = {}) => {
+    subOf(thread).owed = { message, status, ...(reply === undefined ? {} : { reply }), ...(error === undefined ? {} : { error }), at: Date.now(), isAsking: false, inFlight: null }
   }
   // Which turn a watch is for, when no answer to turn/start said: the thread's newest turn, asked for with its first user message
   // (`thread/turns/list` gives the newest turn first, and its summary of a turn carries that message). A turn that began with this
@@ -500,7 +503,7 @@ export const startCodexReceiver = ({
       // The message settles first: the interrupt makes the turn end as interrupted, which would otherwise be what the card reads.
       // A delivery that already told the board how it ended (an unanswered start, say) has left no message here.
       if (watch.message !== null) {
-        sub.owed = { message: watch.message, error: 'APPROVAL_TIMEOUT', at: Date.now(), isAsking: false, inFlight: null }
+        queueOwed(thread, watch.message, 'uncertain', { error: 'APPROVAL_TIMEOUT' })
         watch.message = null
         onError(new Error('APPROVAL_TIMEOUT'))
       }
@@ -613,15 +616,32 @@ export const startCodexReceiver = ({
           else if (watch.turn === p.turnId || watch.turn === null && watch.finish === null && watch.heard === p.turnId) endWatch(sub)
         }
       }
+      else if (value.method === 'item/completed' && p.item?.type === 'agentMessage' && typeof p.turnId === 'string') {
+        const line = ackLine(String(p.item.text ?? ''), watch.nonce)
+        if (line !== null) watch.acked.set(p.turnId, line)
+      }
       else if (value.method === 'turn/completed' && p.turn?.id) {
         stopWaiting(sub)
         // Kept on the watch itself: a turn can end before turn/start has named it.
         watch.ended.add(p.turn.id)
         const wasHeard = watch.heard === p.turn.id
         if (wasHeard) watch.heard = null
+        // A watch whose delivery already ended (disconnected or contested mid-turn) still sees this turn complete:
+        // carry a completed ACK forward via `sub.owed` so the card updates once the receiver reconnects (#1796).
+        if (watch.finish === null && watch.message !== null && watch.turn === p.turn.id && p.turn.status === 'completed') {
+          const line = watch.acked.get(p.turn.id)
+          if (line !== undefined) {
+            queueOwed(thread, watch.message, 'acknowledged', { reply: line })
+            watch.message = null
+            void report(thread)
+          }
+        }
         // The watch ends with its turn, and the tick's leave follows. So does one whose delivery is over and whose only
         // possible turn, heard to start and never named, has ended.
-        if (watch.turn === p.turn.id || watch.turn === null && watch.finish === null && wasHeard) endWatch(sub)
+        if (watch.turn === p.turn.id || watch.turn === null && watch.finish === null && wasHeard) {
+          endWatch(sub)
+          if (!sub.isInUse) void leave(thread)
+        }
       }
     }
     if (!one) return
@@ -814,7 +834,7 @@ export const startCodexReceiver = ({
           // The board's answer to `starting` holds for the whole claim: once it took the receipt, a busy read and a new join lead to
           // a fresh idle read and turn/start, with no second `starting`, whose answer, if lost, would end a claim the board has
           // already marked.
-          let said = null
+          let said = null, settledAck = null, resultLine
           try {
             for (;;) {
               for (;;) {
@@ -879,7 +899,7 @@ export const startCodexReceiver = ({
               state.pending = { nonce: message.nonce, prompt: message.prompt, turn: null, begun: new Set(), firstInput: new Map(), acked: new Map(), ended: new Map(), done, reject }
               timer = setTimeout(() => reject(new Error('ACK_TIMEOUT')), ackMs)
               endWatch(sub)
-              sub.watch = watch = { message: { id: message.id, nonce: message.nonce }, nonce: message.nonce, prompt: message.prompt, turn: null, heard: null, firstInput: new Map(), ended: new Set(), timer: null, isOverdue: false, naming: null, checking: null, finish: () => done(undefined) }
+              sub.watch = watch = { message: { id: message.id, nonce: message.nonce }, nonce: message.nonce, prompt: message.prompt, turn: null, heard: null, firstInput: new Map(), acked: new Map(), ended: new Set(), timer: null, isOverdue: false, naming: null, checking: null, finish: () => done(undefined) }
             })
             void answer.catch(() => undefined)
             const prompt = deliveryPrompt(message)
@@ -911,7 +931,14 @@ export const startCodexReceiver = ({
             // None is sent once the board has been told that the turn was stopped (an approval limit shorter than this answer).
             if (watch.message !== null) await accepted().catch(onError)
             one.settle()
-            return await answer
+            const line = await answer
+            if (typeof line === 'string' && line.trim() && watch.message !== null) {
+              settledAck = { message: watch.message, line }
+              watch.message = null
+              resultLine = undefined
+            } else {
+              resultLine = line
+            }
           } catch (error) {
             // A delivery that its board connection or the daemon connection ended under a turn that is still watched sends no
             // receipt: the board settles the claim it lost the connection of, and the watch tells it if the turn has to be stopped
@@ -930,6 +957,26 @@ export const startCodexReceiver = ({
             // the thread, for an interrupt still asked of its turn or for a turn still watched, is the tick's.
             await leave(thread)
           }
+          // Send the final ACK receipt only after `leave(thread)` completes (#318, #1796), falling back to `sub.owed` if disconnected or busy.
+          if (settledAck !== null) {
+            const { message: messageToAck, line } = settledAck
+            if (!one.receiver || one.receiver.isClosed() || one.receiver.isContested()) {
+              queueOwed(thread, messageToAck, 'acknowledged', { reply: line })
+              void report(thread)
+              return undefined
+            }
+            try {
+              await one.receiver.receipt(messageToAck, 'acknowledged', line)
+            } catch (error) {
+              if (!SETTLED.has(error?.message)) {
+                queueOwed(thread, messageToAck, 'acknowledged', { reply: line })
+                void report(thread)
+              }
+              onError(error)
+            }
+            return undefined
+          }
+          return resultLine
         },
       })
     } catch (error) { attached.delete(thread); throw error }
