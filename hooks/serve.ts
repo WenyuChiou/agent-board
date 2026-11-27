@@ -1033,7 +1033,7 @@ export const lanAddress = (interfaces: Record<string, readonly NetAddress[] | un
   return found[0]?.address ?? null
 }
 
-const isSame = (a: string, b: string): boolean => {
+export const isSame = (a: string, b: string): boolean => {
   if (b === '' || a.length !== b.length) return false
   let diff = 0
   for (let index = 0; index < a.length; index += 1) diff |= a.charCodeAt(index) ^ b.charCodeAt(index)
@@ -1070,7 +1070,7 @@ const PAGE_WORDS = [
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
   'archiveNow', 'cleanUp', 'boardLarge', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
-  'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
+  'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveSessionLost', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressTimedOut', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
@@ -1538,7 +1538,7 @@ const sideView = (id: keyof typeof VIEW_ICONS, label: string, hasCount: boolean)
   `<button type="button" class="s-item v-${id}" id="view-${id}" data-view="${id}" data-local data-nav title="${esc(label)}" aria-pressed="${id === 'all'}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true">${VIEW_ICONS[id]}</svg><span class="s-txt">${esc(label)}</span>${hasCount ? `<span class="s-n${id === 'needs' ? ' hot' : ''}" id="count-${id}"></span>` : ''}</button>`
 
 // `isLan`: the page a phone opens on the local network, which closes sooner.
-export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, language: SettingsLang = 'auto', isLangOverridden = false): string => `<!doctype html>
+export const servePage = (s: Strings, nonce: string, isLan = false, idleMs = 0, language: SettingsLang = 'auto', isLangOverridden = false, pageSession = ''): string => `<!doctype html>
 <html lang="${htmlLang(s)}">
 <head>
 <meta charset="utf-8">
@@ -1593,8 +1593,8 @@ ${settingsCss}
 <template id="archive-icon"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="2.8" width="12" height="3" rx="1"/><path d="M3.2 5.8v6.4a1.2 1.2 0 0 0 1.2 1.2h7.2a1.2 1.2 0 0 0 1.2-1.2V5.8M6.5 8.8h3"/></svg></template>
 </div>
 ${settingsPanel(s, language, isLan, isLangOverridden)}
-<script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
-<script nonce="${nonce}">${PAGE_SCRIPT}</script>
+<script type="application/json" id="words">${JSON.stringify(pageWords(isLan ? { ...s, serveOffline: s.serveOfflineLan, serveSessionLost: s.serveOfflineLan } : s)).replace(/</g, '\\u003c')}</script>
+${pageSession === '' ? '' : `<script type="application/json" id="page-session">${JSON.stringify(pageSession).replace(/</g, '\\u003c')}</script>\n`}<script nonce="${nonce}">${PAGE_SCRIPT}</script>
 </body>
 </html>
 `
@@ -1603,14 +1603,33 @@ const PAGE_SCRIPT = String.raw`
 (function () {
   'use strict';
   var W = JSON.parse(document.getElementById('words').textContent);
-  var token = new URLSearchParams(location.search).get('t') || '';
+  var sessionEl = document.getElementById('page-session');
+  var pageSession = sessionEl && sessionEl.textContent ? JSON.parse(sessionEl.textContent) : '';
+  if (sessionEl && sessionEl.parentNode) sessionEl.parentNode.removeChild(sessionEl);
+  var isOpenPath = /^\/open\//.test(location.pathname || '');
+  // A one-use link the board did not take (used, expired, unknown) ends the tab's session as well:
+  // the screen that follows says to get a fresh link, whatever this tab held before (#1650).
+  var isDeadLink = isOpenPath && !pageSession;
+  var storedSession = '';
+  try {
+    if (typeof sessionStorage !== 'undefined') {
+      if (pageSession) sessionStorage.setItem('agent_board_session', pageSession);
+      else if (isDeadLink) sessionStorage.removeItem('agent_board_session');
+      else storedSession = sessionStorage.getItem('agent_board_session') || '';
+    }
+  } catch (error) {}
+  var urlToken = isDeadLink ? '' : new URLSearchParams(location.search).get('t') || '';
+  var token = pageSession || urlToken || (isDeadLink ? '' : storedSession) || '';
+  // A token from the page session (not from ?t= in the address) is the one the tab's storage holds: a
+  // page the browser shows again from its cache checks that storage again (#1650).
+  var isSessionToken = token !== '' && token !== urlToken;
   // Approvals (D3, #1318): a page the board opened itself carries a one-time key after its #. It is
   // traded once for this page's secret, which lives in this variable only: never in the tab's
   // storage, which the browser writes to disk where a program could read it. The key leaves the
   // address. A page opened any other way, or reloaded, shows the requests with no button.
   var approveSecret = '';
   var pairKey = /^#k=([\w-]+)$/.exec(location.hash || '');
-  if (pairKey) { try { history.replaceState(null, '', location.pathname + location.search); } catch (error) {} }
+  if (pairKey || isOpenPath) { try { history.replaceState(null, '', (isOpenPath ? '/' : location.pathname) + (location.search || '')); } catch (error) {} }
   var board = document.getElementById('board');
   var note = document.getElementById('note');
   var offline = document.getElementById('offline');
@@ -1905,6 +1924,11 @@ const PAGE_SCRIPT = String.raw`
       if (path === '/api/board' && res.status === 304) return { ok: true, unchanged: true };
       // isUnread: the body was cut off or was not JSON, so a send knows it got no answer it can trust (#1843).
       return res.json().catch(function () { return { isUnread: true }; }).then(function (data) {
+        // A refusal with no reason is the board no longer knowing this page's session (its link
+        // used, the board restarted, the session pushed out): whichever call meets it ends on the
+        // one screen that asks for a fresh link, and nothing after it runs (#1650). Approval
+        // refusals carry a note.
+        if (res.status === 403 && !data.note) { endSession(); return new Promise(function () {}); }
         data.ok = res.ok && data.ok !== false;
         if (requestPage === pageId && path === '/api/board') boardEtag = data.ok && data.model && res.headers ? res.headers.get('etag') || '' : '';
         return data;
@@ -1952,6 +1976,23 @@ const PAGE_SCRIPT = String.raw`
     var detailRail = document.getElementById('detail-rail');
     if (detailRail) detailRail.hidden = true;
   }
+  function endSession() {
+    token = '';
+    try { if (typeof sessionStorage !== 'undefined' && typeof sessionStorage.removeItem === 'function') sessionStorage.removeItem('agent_board_session'); } catch (error) {}
+    showSessionLost();
+  }
+  function showSessionLost() {
+    isClosed = true;
+    approveSecret = '';
+    clearTimeout(timer);
+    if (drawerOpen) setDrawer(false, true);
+    paintLight();
+    offline.textContent = '';
+    var lostMain = document.querySelector('main');
+    lostMain.textContent = '';
+    add(lostMain, el('p', '', w('serveSessionLost')));
+    document.getElementById('side').hidden = true;
+  }
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
     try { fetch('/api/page-gone', { method: 'POST', keepalive: true, headers: { 'x-board-token': token, 'x-board-page': pageId, 'content-type': 'application/json' }, body: '{}' }).catch(function () {}); } catch (error) {}
@@ -1960,6 +2001,15 @@ const PAGE_SCRIPT = String.raw`
   // and retired its secret when it left: it names itself anew, drops any approval secret and asks at once (#1028, #1378).
   if (typeof window.addEventListener === 'function') window.addEventListener('pageshow', function (event) {
     if (!event || !event.persisted || isClosed) return;
+    // The tab may have followed a used link since, which ended its session in storage: a page that
+    // came back with that session in memory must not poll with it. A page opened by ?t= has its token
+    // in its address. Storage that cannot be read cannot vouch for the session, so it ends it too, as
+    // a reload with storage blocked does.
+    if (isSessionToken) {
+      var kept = '';
+      try { kept = sessionStorage.getItem('agent_board_session') || ''; } catch (error) {}
+      if (kept !== token) { token = ''; showSessionLost(); return; }
+    }
     pageId = newPageId();
     approveSecret = '';
     boardEtag = '';
@@ -4775,6 +4825,7 @@ const PAGE_SCRIPT = String.raw`
   // isNow: the answer is wanted at once (a tab coming back), not when the board next changes.
   function refresh(isNow) {
     if (isClosed) return;
+    if (!token) { showSessionLost(); return; }
     clearTimeout(timer);
     var pollPage = pageId;
     // One open board request at a time: a refresh after a press replaces the waiting one, so held requests never

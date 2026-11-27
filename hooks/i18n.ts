@@ -935,6 +935,7 @@ export const ZH_TW = {
               : `看板無法開啟訊息資料夾（${code}）：${folder}。訊息檔可能已損壞。請把 messages.json 移出這個資料夾，再試一次。`,
   serveOffline: '連不上看板。請再執行一次 agent-board；新的頁面會自動開啟，這個分頁可以關閉。',
   serveOfflineLan: '連不上看板。請在電腦上再執行一次 agent-board --lan，再開啟新的網址。',
+  serveSessionLost: '這個分頁已沒有看板連線：連結已用過或過期、看板重新啟動過，或瀏覽器未保留儲存空間。請再執行一次 agent-board 取得新的連結。',
   // The progress bar's styles (#1085): the theme button's menu, `/progress style` and the terminal board's `s` key.
   barStyleInk: '墨',
   barStyleBlue: '藍',

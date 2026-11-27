@@ -889,6 +889,7 @@ export const ZH_CN: Strings = {
               : `看板无法打开消息文件夹（${code}）：${folder}。消息文件可能已损坏。请把 messages.json 移出这个文件夹，再试一次。`,
   serveOffline: '连不上看板。请再运行一次 agent-board；新页面会自动打开，这个标签页可以关闭。',
   serveOfflineLan: '连不上看板。请在电脑上再运行一次 agent-board --lan，再打开新地址。',
+  serveSessionLost: '这个标签页已没有看板连接：链接已用过或过期、看板重新启动过，或浏览器未保留存储空间。请再运行一次 agent-board 获取新的链接。',
   barStyleInk: '墨',
   barStyleBlue: '蓝',
   barStyleGreen: '绿',

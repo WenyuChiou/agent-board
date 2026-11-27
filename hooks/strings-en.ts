@@ -896,6 +896,7 @@ export const EN: Strings = {
               : `The board could not open its message folder (${code}): ${folder}. Its message file may be damaged. Move messages.json out of that folder, then try again.`,
   serveOffline: "Can't reach the board. Run agent-board again; it opens a new page, and you can close this one.",
   serveOfflineLan: "Can't reach the board. On the computer, run agent-board --lan again and open the new address.",
+  serveSessionLost: 'This tab is no longer connected to the board: its link was used or expired, the board restarted, or the browser kept no storage. Run agent-board again for a fresh link.',
   barStyleInk: 'Ink',
   barStyleBlue: 'Blue',
   barStyleGreen: 'Green',
