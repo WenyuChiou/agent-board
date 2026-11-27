@@ -917,6 +917,39 @@ test('a Stop whose worker cannot append hands the size it read to the board scri
   } finally { h.close() }
 })
 
+test('a turn log that is a link or has a second name is never written through, by the hook worker or the board script', async () => {
+  const h = await workerHome()
+  try {
+    mkdirSync(h.messages, { recursive: true })
+    const outside = join(h.home, 'outside.txt'), missing = join(h.home, 'made-through-a-link.txt')
+    writeFileSync(outside, 'kept')
+    const cases = [['a second name', () => fs.linkSync(outside, h.file)], ['a link', () => fs.symlinkSync(outside, h.file, 'file')], ['a link to no file yet', () => fs.symlinkSync(missing, h.file, 'file')]]
+    let tried = 0
+    for (const [index, [what, make]] of cases.entries()) {
+      rmSync(h.file, { force: true })
+      try { make() } catch (error) {
+        // Windows makes a link only in Developer Mode or for an administrator; CI's Ubuntu run covers links there.
+        if (process.platform === 'win32' && error.code === 'EPERM') continue
+        throw error
+      }
+      tried += 1
+      // The worker refuses the log for a start and hands on nothing; its Stop, and the board script's own start and Stop,
+      // refuse it too. Nothing reaches the file the log points at, and no file is made through a link.
+      assert.equal(h.hook('PreInvocation'), null, what)
+      h.hook('Stop')
+      await boardRun(h.home, `start${index}`, 'PreInvocation', 'null')
+      await boardRun(h.home, `stop${index}`, 'Stop', 'null')
+      assert.equal(readFileSync(outside, 'utf8'), 'kept', what)
+      assert.equal(existsSync(missing), false, what)
+    }
+    assert.ok(tried >= 1)
+    // A plain log in its place is appended to again.
+    rmSync(h.file, { force: true })
+    assert.equal(h.hook('PreInvocation').mark, 'start')
+    assert.match(h.text(), START_LINE)
+  } finally { h.close() }
+})
+
 test('a Stop size larger than the log is never appended, and a stop line that names a size past itself ends no turn', () => using(async w => {
   const b = await boardHome()
   try {
@@ -929,6 +962,12 @@ test('a Stop size larger than the log is never appended, and a stop line that na
     }
     assert.deepEqual(await b.run('a', 'Stop', JSON.stringify({ file: b.file, mark: 'stop', size: 10_000 })), [{ started: 1, stopped: 0 }])
     assert.equal(b.text().length, 36)
+    // A hand-on that names this log and its Stop but no usable size reads as none: the board script appends nothing, and does
+    // not read the size itself, which would come after the worker's first read (codex_788).
+    for (const [index, size] of [-1, 1.5, '36', null, undefined, {}].entries()) {
+      assert.deepEqual(await b.run(`m${index}`, 'Stop', JSON.stringify({ file: b.file, mark: 'stop', size })), [{ started: 1, stopped: 0 }], String(size))
+      assert.equal(b.text().length, 36)
+    }
     assert.equal(appendTurnStop(b.messages, 'antigravity', APP, 36), true)
     assert.deepEqual(turnsOfLog(b.text()).stopped, 1)
   } finally { b.close() }
