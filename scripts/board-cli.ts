@@ -75,7 +75,7 @@ import { runMcp } from './board-mcp'
 import { createSettingsAgents } from './settings-agents'
 
 // The line `/progress connect` puts above the bundle sets it.
-const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string } }).AGENT_BOARD ?? {}
+const BAKED = (globalThis as { AGENT_BOARD?: { path?: string; lang?: string; codexRoot?: string } }).AGENT_BOARD ?? {}
 
 const args = process.argv.slice(2)
 const isJsonBoard = args.includes('--json') && !args.some(arg => ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust'].includes(arg))
@@ -152,6 +152,7 @@ const savedLanguage = (): SettingsLang | null => {
   } catch { return null }
 }
 const langFlag = flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang'))
+const defaultLang = () => boardLanguage(null, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))
 const currentLang = () => boardLanguage(langFlag, savedLanguage(), langOf(BAKED.lang), systemLang(process.env.LANG))
 const wordsNow = () => STRINGS[currentLang()]
 let s = wordsNow()
@@ -2103,6 +2104,10 @@ const serveFile = (): string => {
   return (served = join(runFolder(name), name))
 }
 const messagesDirectory = (): string => resolve(flag('--messages-dir') ?? (args.includes('--mcp') ? defaultMessagesDirectory(path, homedir(), process.env, process.platform) : serveFile().replace(/\.json$/, '-messages')))
+const settingsDataDir = (): string => {
+  const home = resolve(flag('--home') ?? homedir())
+  return resolve(flag('--data-dir') ?? BAKED.codexRoot ?? join(home, '.agent-board'))
+}
 // Where 0.19.0 left it, beside progress.md.
 const oldServeFile = `${path.replace(/\.md$/i, '')}-serve.json`
 const script = process.argv[1] ?? ''
@@ -2359,7 +2364,7 @@ const serveChild = (): void => {
       },
       get s() { return s },
       port: requestedPort,
-      ping: { path, built: built(), get lang() { return currentLang() }, idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: isCodexSendOn(), noCodexSend: args.includes('--no-codex-send'), messagesDirectory: messagesDirectory() },
+      ping: { path, built: built(), get lang() { return defaultLang() }, dataDirectory: settingsDataDir(), idleMs: idleMs(), staleMs: staleTimeoutMs(), allowResume: args.includes('--allow-resume'), codexSend: isCodexSendOn(), noCodexSend: args.includes('--no-codex-send'), messagesDirectory: messagesDirectory() },
       // Every page request starts by reading the board.
       view: freshView,
       // An open board request is answered when progress.md or the hooks' inbox changes (#359).
@@ -2528,7 +2533,7 @@ const runningPage = async (isStarting = false, isReplacing = false, replaced?: {
   const requestedStale = staleTimeoutMs()
   // Send to Codex (#318): a plain command keeps a page whether its receiver is on or off, so `/agent-board` never ends a page the
   // person turned it off for; `--codex-send` asks for a page with it on, `--no-codex-send` for one with it off.
-  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built() && (isStopping || ((!args.includes('--port') || parseServePort(flag('--port')) === running.port) && (answer.lang === undefined || answer.lang === currentLang()) && answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
+  if (answer !== null && answer !== 'silent' && typeof answer.path === 'string' && board(answer.path) === board(path) && answer.built === built() && (isStopping || ((!args.includes('--port') || parseServePort(flag('--port')) === running.port) && (answer.lang === undefined || answer.lang === defaultLang()) && (answer.dataDirectory === undefined || (typeof answer.dataDirectory === 'string' && board(answer.dataDirectory) === board(settingsDataDir()))) && answer.allowResume === args.includes('--allow-resume') && (args.includes('--no-codex-send') ? answer.codexSend === false : !args.includes('--codex-send') || answer.codexSend === true) && (flag('--messages-dir') === undefined || answer.messagesDirectory === messagesDirectory()) && (answer.staleMs === undefined || answer.staleMs === requestedStale)))) return { page: running, isKept: false, idleMs: typeof answer.idleMs === 'number' && Number.isFinite(answer.idleMs) && answer.idleMs >= 0 ? answer.idleMs : undefined }
   if (await stays(running, serveFile(), isReplacing && replacementMove(running))) return { page: running, isKept: true }
   if (replaced !== undefined && answer !== null && answer !== 'silent' && answer.noCodexSend === true) replaced.isCodexSendOff = true
   return null

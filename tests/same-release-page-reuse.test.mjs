@@ -125,7 +125,7 @@ test('two copies of the same release with different mtimes, preludes, and line e
     const t2 = new Date('2026-11-26T01:05:00Z')
     const t3 = new Date('2026-11-26T01:10:00Z')
     const pluginCopy = board.writeCopy('plugin-copy.mjs', { path: board.boardPath, lang: 'en', hookVersion: 1 }, BOARD_SCRIPT, t1)
-    const standaloneCopy = board.writeCopy('standalone-copy.mjs', { path: board.boardPath, lang: 'en', codexRoot: board.home }, BOARD_SCRIPT, t2, true)
+    const standaloneCopy = board.writeCopy('standalone-copy.mjs', { path: board.boardPath, lang: 'en', codexRoot: join(board.home, '.agent-board') }, BOARD_SCRIPT, t2, true)
     const rawCopy = board.writeCopy('raw-copy.mjs', null, BOARD_SCRIPT, t3)
 
     const url1 = board.urlOf(await board.serve(pluginCopy, ['--quiet-board']))
@@ -179,7 +179,7 @@ test('same-release copies still replace the running page when launch options dif
   const urls = []
   try {
     const copyA = board.writeCopy('copy-a.mjs', { path: board.boardPath, lang: 'en' }, BOARD_SCRIPT, new Date('2026-11-26T03:00:00Z'))
-    const copyB = board.writeCopy('copy-b.mjs', { path: board.boardPath, lang: 'en', codexRoot: board.home }, BOARD_SCRIPT, new Date('2026-11-26T03:05:00Z'))
+    const copyB = board.writeCopy('copy-b.mjs', { path: board.boardPath, lang: 'en', codexRoot: join(board.home, '.agent-board') }, BOARD_SCRIPT, new Date('2026-11-26T03:05:00Z'))
 
     const url1 = board.urlOf(await board.serve(copyA, ['--quiet-board']))
     assert.ok(url1)
@@ -214,7 +214,7 @@ test('an explicit --port replaces a running same-release page on another port ac
   try {
     const [port1, port2] = await board.distinctPorts()
     const copyA = board.writeCopy('port-copy-a.mjs', { path: board.boardPath, lang: 'en' }, BOARD_SCRIPT, new Date('2026-11-26T04:00:00Z'))
-    const copyB = board.writeCopy('port-copy-b.mjs', { path: board.boardPath, lang: 'en', codexRoot: board.home }, BOARD_SCRIPT, new Date('2026-11-26T04:05:00Z'))
+    const copyB = board.writeCopy('port-copy-b.mjs', { path: board.boardPath, lang: 'en', codexRoot: join(board.home, '.agent-board') }, BOARD_SCRIPT, new Date('2026-11-26T04:05:00Z'))
 
     const url1 = board.urlOf(await board.serve(copyA, ['--quiet-board', '--port', String(port1)]))
     assert.ok(url1)
@@ -243,7 +243,7 @@ test('a same-release copy with a changed baked language replaces the running pag
   try {
     const copyEn = board.writeCopy('lang-en.mjs', { path: board.boardPath, lang: 'en' }, BOARD_SCRIPT, new Date('2026-11-26T05:00:00Z'))
     const copyZhCn = board.writeCopy('lang-zh-cn.mjs', { path: board.boardPath, lang: 'zh-CN' }, BOARD_SCRIPT, new Date('2026-11-26T05:05:00Z'))
-    const copyZhCn2 = board.writeCopy('lang-zh-cn-2.mjs', { path: board.boardPath, lang: 'zh-CN', codexRoot: board.home }, BOARD_SCRIPT, new Date('2026-11-26T05:10:00Z'))
+    const copyZhCn2 = board.writeCopy('lang-zh-cn-2.mjs', { path: board.boardPath, lang: 'zh-CN', codexRoot: join(board.home, '.agent-board') }, BOARD_SCRIPT, new Date('2026-11-26T05:10:00Z'))
 
     const url1 = board.urlOf(await board.serve(copyEn, ['--quiet-board']))
     assert.ok(url1)
@@ -257,7 +257,33 @@ test('a same-release copy with a changed baked language replaces the running pag
     assert.equal((await board.pingOf(url2)).lang, 'zh-CN')
     assert.equal((await board.boardPoll(url2, 'tab-lang')).json.lang, 'zh-CN')
 
+    assert.equal(board.urlOf(await board.serve(copyZhCn, ['--quiet-board', '--lang', 'en'])), url2, 'different --lang flag must keep reusing running page')
     assert.equal(board.urlOf(await board.serve(copyZhCn2, ['--quiet-board'])), url2, 'same effective language and different mtime/prelude must reuse running page')
+  } finally {
+    await board.end(urls)
+  }
+})
+
+test('a same-release copy with a different baked codexRoot replaces the running page (#1831)', { timeout: 60_000 }, async () => {
+  const board = createBoardFixture()
+  const urls = []
+  try {
+    const otherData = join(board.dir, 'other-data')
+    const copyA = board.writeCopy('data-copy-a.mjs', { path: board.boardPath, lang: 'en' }, BOARD_SCRIPT, new Date('2026-11-26T06:00:00Z'))
+    const copyB = board.writeCopy('data-copy-b.mjs', { path: board.boardPath, lang: 'en', codexRoot: otherData }, BOARD_SCRIPT, new Date('2026-11-26T06:05:00Z'))
+    const copyC = board.writeCopy('data-copy-c.mjs', { path: board.boardPath, lang: 'en', codexRoot: otherData }, BOARD_SCRIPT, new Date('2026-11-26T06:10:00Z'))
+
+    const url1 = board.urlOf(await board.serve(copyA, ['--quiet-board']))
+    assert.ok(url1)
+    urls.push(url1)
+
+    const url2 = board.urlOf(await board.serve(copyB, ['--quiet-board']))
+    assert.ok(url2)
+    assert.notEqual(url2, url1, 'different baked codexRoot must replace running page')
+    urls.push(url2)
+    assert.equal((await board.pingOf(url2)).dataDirectory, otherData)
+
+    assert.equal(board.urlOf(await board.serve(copyC, ['--quiet-board'])), url2, 'matching baked codexRoot must reuse running page')
   } finally {
     await board.end(urls)
   }
