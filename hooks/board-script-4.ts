@@ -3547,7 +3547,7 @@ export const LINES = [
 "  }",
 "  let raw;",
 "  try {",
-"    const fst = fstatSync10(fd, { bigint: true });",
+"    const fst = fstatSync11(fd, { bigint: true });",
 "    if (!fst.isFile() || fst.size > BigInt(REFUSAL_MAX_BYTES) || lst.ino !== 0n && (fst.dev !== lst.dev || fst.ino !== lst.ino))",
 "      return \"unreadable\";",
 "    const buf = Buffer.allocUnsafe(REFUSAL_MAX_BYTES + 1);",

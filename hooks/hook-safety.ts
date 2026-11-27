@@ -177,8 +177,9 @@ export const HERMES_PREFIX_SOURCE = String.raw`const hermesPrefix = text => {
 // The turn log's lines and the one write that appends one (D2, #1396), as source the hook worker carries below. Each line is
 // one write on a descriptor opened with the append flag, with a newline on each side, so a cut line is cut apart from its
 // neighbours: a start is 36 bytes and a stop at most 70. The write's return is checked, since a short one would leave a cut
-// line, and no line over 512 bytes, one sector, is ever built. It uses the worker's fs and randomUUID, and the multi-process
-// append test builds it with its own.
+// line, and no line over 512 bytes, one sector, is ever built. A log that is a link or has a second name is never written
+// through: it is refused before it is opened, and the opened file must be the one the folder names, with one name, before
+// the write (codex_788). It uses the worker's fs and randomUUID, and the multi-process append test builds it with its own.
 export const TURN_LOG_SOURCE = `const turnToken = () => randomUUID().replace(/-/g, '')
 const isTurnToken = token => typeof token === 'string' && /^[0-9a-f]{32}$/.test(token)
 const startLine = token => {
@@ -192,9 +193,15 @@ const stopLine = (size, at, token) => {
 const appendTurnLine = (file, line) => {
   const bytes = Buffer.from(line, 'latin1')
   if (bytes.length > 512) throw Error('LINE_TOO_LONG')
+  let before
+  try { before = fs.lstatSync(file, { bigint: true }) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  if (before !== undefined && (!before.isFile() || before.nlink !== 1n)) throw Error('TURN_LOG_UNSAFE')
   const fd = fs.openSync(file, 'a', 0o600)
-  try { if (fs.writeSync(fd, bytes, 0, bytes.length) !== bytes.length) throw Error('SHORT_WRITE') }
-  finally { try { fs.closeSync(fd) } catch {} }
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true }), named = fs.lstatSync(file, { bigint: true })
+    if (!opened.isFile() || !named.isFile() || opened.nlink !== 1n || opened.ino !== named.ino || opened.dev !== named.dev) throw Error('TURN_LOG_UNSAFE')
+    if (fs.writeSync(fd, bytes, 0, bytes.length) !== bytes.length) throw Error('SHORT_WRITE')
+  } finally { try { fs.closeSync(fd) } catch {} }
 }
 `
 
@@ -269,8 +276,8 @@ const markTurn = (payload, sizes) => {
   const append = makeLine => {
     for (const wait of [10, 25, undefined]) {
       const token = turnToken()
-      try { appendTurnLine(file, makeLine(token)); return token } catch {
-        if (wait === undefined) return undefined
+      try { appendTurnLine(file, makeLine(token)); return token } catch (error) {
+        if (wait === undefined || error.message === 'TURN_LOG_UNSAFE') return undefined
         pause(wait)
       }
     }

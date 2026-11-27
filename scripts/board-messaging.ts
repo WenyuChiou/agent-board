@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { closeSync, existsSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
+import { type BigIntStats, closeSync, existsSync, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmdirSync, statSync, unlinkSync, writeFileSync, writeSync } from 'node:fs'
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, markBusy, releaseMailboxMessage, shownWake, SIDECAR_ALIVE_MS, startOrdinal, takeMailboxMessage, turnsOfLog, wakeAction, type TurnLog, type TurnsOfSession } from '../hooks/hook-messages'
@@ -762,22 +762,31 @@ export const turnLogSize = (directory: string, agent: string, session: string): 
 }
 // One line appended with one write, whose return must equal the line's length, since a short write would leave a cut line.
 // Nothing is written where no board has made the messages folder, since a folder made here would not be the private one a
-// board makes.
+// board makes. A log that is a link or has a second name is never written through: it is refused before it is opened, and the
+// opened file must be the one the folder names, with one name, before the write (codex_788), as the hook worker does.
 const appendTurnLine = (directory: string, agent: string, session: string, line: string): void => {
   const bytes = Buffer.from(line, 'latin1')
   if (bytes.length > TURN_LINE_MAX) throw new Error('LINE_TOO_LONG')
   const folder = lstatSync(resolve(directory))
   if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING')
-  const fd = openSync(turnLogFile(directory, agent, session), 'a', 0o600)
-  try { if (writeSync(fd, bytes, 0, bytes.length) !== bytes.length) throw new Error('SHORT_WRITE') } finally { try { closeSync(fd) } catch {} }
+  const file = turnLogFile(directory, agent, session)
+  let before: BigIntStats | undefined
+  try { before = lstatSync(file, { bigint: true }) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  if (before !== undefined && (!before.isFile() || before.nlink !== 1n)) throw new Error('TURN_LOG_UNSAFE')
+  const fd = openSync(file, 'a', 0o600)
+  try {
+    const opened = fstatSync(fd, { bigint: true }), named = lstatSync(file, { bigint: true })
+    if (!opened.isFile() || !named.isFile() || opened.nlink !== 1n || opened.ino !== named.ino || opened.dev !== named.dev) throw new Error('TURN_LOG_UNSAFE')
+    if (writeSync(fd, bytes, 0, bytes.length) !== bytes.length) throw new Error('SHORT_WRITE')
+  } finally { try { closeSync(fd) } catch {} }
 }
 // Three tries, 10 and 25 ms apart, each with a new token, as the hook worker makes them. A cut line a failed try left reads
-// as a start. Where no board has made the folder, nothing is retried.
+// as a start. Where no board has made the folder, or the log is a link or has a second name, nothing is retried.
 const appendTurnLineTried = (directory: string, agent: string, session: string, makeLine: (token: string) => string): string | undefined => {
   for (const wait of [10, 25, undefined]) {
     const token = randomBytes(16).toString('hex')
     try { appendTurnLine(directory, agent, session, makeLine(token)); return token } catch (error) {
-      if (wait === undefined || (error as Error).message === 'BOARD_NOT_RUNNING') return undefined
+      if (wait === undefined || ['BOARD_NOT_RUNNING', 'TURN_LOG_UNSAFE'].includes((error as Error).message)) return undefined
       pauseFor(wait)
     }
   }
@@ -809,17 +818,19 @@ export const startSeq = (directory: string, agent: string, session: string, toke
 }
 // The hook worker marks the turn before it starts the board script (hooks/hook-safety.ts) and hands on what it wrote: the
 // file, the mark and the token of its line, or, for a Stop that could not append, the size it read first, or `none` when it
-// could not read a size. It counts only for the file this board would write and for the same mark; anything else is
-// undefined, and the board script then appends the turn itself, so a turn counts once. A mark from an older worker names
-// another file and is ignored.
+// could not read a size. It counts only for the file this board would write and for the same mark; a Stop mark for that file
+// with no usable size reads as `none`; anything else is undefined, and the board script then appends the turn itself, so a
+// turn counts once. A mark from an older worker names another file and is ignored.
 export type WorkerMark = { token?: string; size?: number; none?: boolean }
 export const workerTurnMark = (handed: string | undefined, directory: string, agent: string, session: string, mark: 'start' | 'stop'): WorkerMark | undefined => {
   try {
     const found = JSON.parse(handed ?? 'null') as Record<string, unknown> | null
     if (found?.file !== turnLogFile(directory, agent, session) || found.mark !== mark) return undefined
     if (isTurnToken(found.token)) return { token: found.token }
-    if (mark === 'stop' && found.none === true) return { none: true }
     if (mark === 'stop' && isCount(found.size)) return { size: found.size }
+    // A Stop the worker marked for this log with no usable size reads as none: the board script appends nothing, since a
+    // size it read now could come after the next turn's start (codex_788).
+    if (mark === 'stop') return { none: true }
     return undefined
   } catch { return undefined }
 }

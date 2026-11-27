@@ -280,8 +280,9 @@ What each side may rely on:
   offset; any other line starting with `E` is ignored, and every other non-empty line is a start, so a cut start still
   holds the wake. Each append is tried three times, 10 ms and 25 ms apart, with a new token. A start the hook worker could
   not append is appended by the board script; a `Stop` the worker could not append hands the size it read to the board
-  script, which appends it only if it is a whole number no larger than the log's size now. A `Stop` that dies before its
-  line leaves the turn open until the next `Stop`. No rule compares a date, so a clock set back or forward changes nothing.
+  script, which appends it only if it is a whole number no larger than the log's size now; a `Stop` hand-on with no usable
+  size appends nothing. A log that is a link or has a second name is never written through, by the worker or the board
+  script. A `Stop` that dies before its line leaves the turn open until the next `Stop`. No rule compares a date, so a clock set back or forward changes nothing.
 - **Not covered.** Between the board's yes and the sidecar's `send-message` call the person may start a turn; a `Stop`
   hook that starts after the next turn's start reads that turn's number and ends it while it runs (only a turn number
   in the `Stop` input, or the app waiting for its `Stop` hook, closes that); a turn whose turn-start hook never ran
