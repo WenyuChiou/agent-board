@@ -1275,26 +1275,30 @@ test('an inline "A or B?" choice of amounts offers the amounts, not the question
   expect(askOf('Should the cache hold 2 GB or 4 GB?', '')).toMatchObject({ kind: 'choose', options: ['2 GB', '4 GB'] })
   // A short choice with no question frame stays as it was.
   expect(askOf('Debug or info?', '')).toMatchObject({ kind: 'choose', options: ['Debug', 'info'] })
-  // A compound amount has no clear start: its words stay whole rather than lose the earlier units.
-  expect(askOf('Should the export keep 1 day 12 hours or 2 days of history?', '').options[0]).toBe('Should the export keep 1 day 12 hours')
-  expect(askOf('Should the export keep 1 day and 12 hours or 2 days?', '').options[0]).toBe('Should the export keep 1 day and 12 hours')
-  // A range or a bound keeps its words, so a button never drops the bound.
-  expect(askOf('Should I set the retry limit to between 3 and 5 or 10?', '').options[0]).toBe('Should I set the retry limit to between 3 and 5')
-  expect(askOf('Should the cache hold up to 2 GB or 4 GB?', '').options[0]).toBe('Should the cache hold up to 2 GB')
-  expect(askOf('Should the cache hold at least 2 GB or 4 GB?', '').options[0]).toBe('Should the cache hold at least 2 GB')
-  expect(askOf('Should the export keep 3 to 5 days or 10 days of history?', '').options[0]).toBe('Should the export keep 3 to 5 days')
-  expect(askOf('Should I set the retry limit to between three and 5 or 10?', '').options[0]).toBe('Should I set the retry limit to between three and 5')
+  // A compound amount has no clear start: no buttons rather than a button that starts with the
+  // question or loses the earlier units; the reply box stays.
+  expect(askOf('Should the export keep 1 day 12 hours or 2 days of history?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep 1 day and 12 hours or 2 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  // A range or a bound gives no buttons either, so a button never drops the bound.
+  expect(askOf('Should I set the retry limit to between 3 and 5 or 10?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the cache hold up to 2 GB or 4 GB?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the cache hold at least 2 GB or 4 GB?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep 3 to 5 days or 10 days of history?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should I set the retry limit to between three and 5 or 10?', '')).toMatchObject({ kind: 'reply', options: [] })
   expect(askOf('Should I set the maximum retry limit to 3 or 5?', '').options).toEqual(['3', '5'])
-  expect(askOf('Should the export keep the minimum of 24 hours or 7 days?', '').options[0]).toBe('Should the export keep the minimum of 24 hours')
+  expect(askOf('Should the export keep the minimum of 24 hours or 7 days?', '')).toMatchObject({ kind: 'reply', options: [] })
   expect(askOf('Should the export from staging keep 24 hours or 7 days of history?', '').options).toEqual(['24 hours', '7 days of history'])
-  expect(askOf('Should the job run for about the last 3 or 5 days?', '').options[0]).toBe('Should the job run for about the last 3')
-  expect(askOf('Should the export keep at least a full 24 hours or 7 days of history?', '').options[0]).toBe('Should the export keep at least a full 24 hours')
-  expect(askOf('Should the export keep roughly a full 24 hours or 7 days?', '').options[0]).toBe('Should the export keep roughly a full 24 hours')
-  expect(askOf('Should the export keep at least the last 24 hours or 7 days of history?', '').options[0]).toBe('Should the export keep at least the last 24 hours')
-  expect(askOf('Should I set the limit to max 3 or 5?', '').options[0]).toBe('Should I set the limit to max 3')
-  expect(askOf('Should I set the retry limit to between few and 5 or 10?', '').options[0]).toBe('Should I set the retry limit to between few and 5')
-  expect(askOf('Should the export keep three to 5 days or 10 days?', '').options[0]).toBe('Should the export keep three to 5 days')
-  expect(askOf('Should the service wait 1h 30m or 2h?', '').options[0]).toBe('Should the service wait 1h 30m')
+  expect(askOf('Should the job run for about the last 3 or 5 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep at least a full 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep roughly a full 24 hours or 7 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep at least the last 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should I set the limit to max 3 or 5?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should I set the retry limit to between few and 5 or 10?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep three to 5 days or 10 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the service wait 1h 30m or 2h?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep more than the usual 24 hours or 7 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  // A bound word in the subject, not leading into the amount, does not stop the cut.
+  expect(askOf('Should the service within the cluster wait 24 hours or 7 days?', '').options).toEqual(['24 hours', '7 days'])
   // The last option keeps its own words: they may qualify it alone.
   expect(askOf('Should the job run 2 hours or 4 hours with a sandbox?', '')).toMatchObject({ kind: 'choose', options: ['2 hours', '4 hours with a sandbox'] })
   // A number in the subject is not part of the amount.
