@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { BoardPage } from './board-page.mjs'
 import { browserFixture, writeProgress } from './fixture.mjs'
@@ -39,6 +40,8 @@ const FIXTURE_MD = () => {
 - [?] Confirm manual checklist?
 - [ ] Verify release notes
 - [ ] Check tag signature
+- [ ] Repeat check
+- [ ] Repeat check
 
 ## Zeta Project
 <!-- auto session=48490005 agent=codex state=blocked updated=${updated} -->
@@ -175,27 +178,27 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
     assert.equal(await cardBtn.evaluate(node => document.activeElement === node), true, 'closing rail should restore focus to the card detail button')
 
-    // Manual waiting card keeps its per-step Done actions targeting each step's own file line, and blocked cards keep their steps in the interactive detail rail.
-    const manualTicks = []
-    await page.route('**/api/act', async route => {
-      const body = route.request().postDataJSON()
-      if (body?.type === 'tick') manualTicks.push({ text: body.text, line: body.line })
-      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) })
-    })
+    // Manual waiting card ticks real serveAction via its owning row key/tickFp, preserves duplicate-name step focus via data-step-line, and falls back to #detail-close when an action disappears.
     const manualCard = board.question('Confirm manual checklist?')
     await manualCard.locator('.card-detail-btn').click()
     await page.locator('#detail-rail').waitFor({ state: 'visible' })
     const manualBtns = page.locator('#detail-rail .steps li button')
-    assert.equal(await manualBtns.count(), 2, 'manual card rail renders per-step Done controls')
-    await manualBtns.nth(0).click()
+    assert.equal(await manualBtns.count(), 4, 'manual card rail renders per-step Done controls')
+    const secondRepeatLine = await manualBtns.nth(3).getAttribute('data-step-line')
+    await manualBtns.nth(3).focus()
+    writeProgress(progress, FIXTURE_MD().replace('- [~] Stream rows to temporary file', '- [~] Stream rows & ping 2'))
+    await page.locator('.r-step').filter({ hasText: 'Stream rows & ping 2' }).first().waitFor({ state: 'visible', timeout: 15_000 })
+    assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('data-step-line')), secondRepeatLine, 'live redraw preserves focus on matching duplicate step by data-step-line')
     await manualBtns.nth(1).click()
-    const tickDeadline = Date.now() + 5_000
-    while (Date.now() < tickDeadline && manualTicks.length < 2) await page.waitForTimeout(50)
-    await page.unroute('**/api/act')
-    assert.deepEqual(manualTicks.map(t => t.text), ['Verify release notes', 'Check tag signature'])
-    assert.notEqual(manualTicks[0].line, manualTicks[1].line, 'each manual Done control targets its own file line')
-    assert.equal(typeof manualTicks[0].line, 'number')
-    assert.equal(typeof manualTicks[1].line, 'number')
+    const tickDeadline = Date.now() + 10_000
+    while (Date.now() < tickDeadline && !readFileSync(progress, 'utf8').includes('- [x] Check tag signature')) {
+      await page.waitForTimeout(50)
+    }
+    const afterTick = readFileSync(progress, 'utf8')
+    assert.ok(afterTick.includes('- [x] Check tag signature'), 'clicking second manual Done button marks step done on disk via real serveAction')
+    assert.ok(afterTick.includes('- [ ] Verify release notes'), 'first manual step remains untouched')
+    await page.waitForFunction(() => document.querySelectorAll('#detail-rail .steps li button').length === 3, undefined, { timeout: 10_000 })
+    assert.equal(await page.evaluate(() => document.activeElement?.id), 'detail-close', 'when focused rail action disappears after tick redraw, focus falls back to #detail-close')
     await page.keyboard.press('Escape')
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
 
@@ -241,6 +244,13 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     assert.equal(await askCard.evaluate(node => node.classList.contains('open')), false, 'closing card rail after resize removes open class')
     assert.equal(await askCard.locator('.card-fold').evaluate(node => node.inert === true), true, 'closing card rail after resize marks inline fold inert')
     assert.equal(await askCard.locator('.card-fold > .fold-in').isVisible(), false, 'closing card rail after resize collapses inline fold height to zero')
+    // Narrowing back to 1300px + live redraw after closing rail keeps card collapsed inline (write mode was reset to ask while keeping draft).
+    await page.setViewportSize({ width: 1300, height: 900 })
+    writeProgress(progress, FIXTURE_MD().replace('- [~] Stream rows to temporary file', '- [~] Stream rows & ping 3'))
+    await page.locator('.r-step').filter({ hasText: 'Stream rows & ping 3' }).first().waitFor({ state: 'visible', timeout: 15_000 })
+    assert.equal(await askCard.evaluate(node => node.classList.contains('open')), false, 'narrow live redraw after rail close keeps card collapsed')
+    assert.equal(await askCard.locator('.card-fold > .fold-in').isVisible(), false, 'narrow live redraw after rail close keeps composer hidden')
+    await page.setViewportSize({ width: 1440, height: 900 })
 
     // Shrinking from 1440px to 1300px moves the selected task inline and preserves draft, focus, and caret.
     await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
@@ -314,4 +324,29 @@ test('at 1440x900 sending a message from the detail rail clears its draft across
     await page.waitForFunction(() => document.body.textContent.includes('Build export worker'))
     assert.equal(await box.inputValue(), '')
   })
+})
+
+test('at >640px with coarse pointer the top card checkbox keeps a 44px unclipped hit target', { timeout: 180_000 }, async () => {
+  await browserFixture('coarse-chk-target', async ({ page, progress, startServer }) => {
+    writeProgress(progress, '## Solo\n### Top manual\n- [?] First top check?\n')
+    await page.setViewportSize({ width: 800, height: 900 })
+    const board = new BoardPage(page)
+    await board.open(await startServer())
+    const topChk = page.locator('article.card').first().locator('button.chk')
+    await topChk.waitFor({ state: 'visible' })
+    const hitEdges = await topChk.evaluate(chk => {
+      const r = chk.getBoundingClientRect()
+      const cx = Math.round(r.left + r.width / 2)
+      const cy = Math.round(r.top + r.height / 2)
+      const cardStyle = getComputedStyle(chk.closest('article.card'))
+      return {
+        padTop: parseFloat(cardStyle.paddingTop),
+        topHit: document.elementFromPoint(cx, cy - 20)?.closest('button.chk') === chk,
+        bottomHit: document.elementFromPoint(cx, cy + 20)?.closest('button.chk') === chk,
+      }
+    })
+    assert.ok(hitEdges.padTop >= 12, `expected coarse top padding >= 12px, got ${hitEdges.padTop}`)
+    assert.equal(hitEdges.topHit, true, 'coarse-pointer checkbox outer top edge (-20px from center) is unclipped and hittable')
+    assert.equal(hitEdges.bottomHit, true, 'coarse-pointer checkbox outer bottom edge (+20px from center) is hittable')
+  }, { hasTouch: true })
 })

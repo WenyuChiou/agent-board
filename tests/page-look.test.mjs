@@ -1243,6 +1243,9 @@ test('delivery badges, secondary copy button, coarse-pointer labels, interactive
   const chkAfter = touchRules.find(r => r.selector === 'button.chk::after')
   assert.equal(chkAfter?.declarations.find(d => d.property === 'width')?.value, '44px')
   assert.equal(chkAfter?.declarations.find(d => d.property === 'height')?.value, '44px')
+  const touchCard = touchRules.find(r => r.selector === '.card')
+  assert.equal(touchCard?.declarations.find(d => d.property === 'padding-top')?.value, 'var(--s3)')
+  assert.equal(touchCard?.declarations.find(d => d.property === 'padding-bottom')?.value, 'var(--s3)')
   assert.equal(touchRules.find(r => r.selector === '.pfoot #close::after')?.declarations.find(d => d.property === 'content')?.value, 'attr(aria-label)')
   assert.ok(touchRules.some(r => r.selector.includes('.answer-send[data-copy="1"] .sr-lbl') && r.declarations.some(d => d.property === 'position' && d.value === 'static')))
 
@@ -1323,5 +1326,26 @@ test('delivery badges, secondary copy button, coarse-pointer labels, interactive
   const compactRules = rules.filter(r => r.ancestors.some(a => a.includes('max-width:559px')))
   assert.equal(compactRules.find(r => r.selector === '.pbar')?.declarations.find(d => d.property === 'min-width')?.value, '52px')
   assert.equal(compactRules.find(r => r.selector === '.r-meta .r-proj')?.declarations.find(d => d.property === 'max-width')?.value, '13ch')
+
+  // Twin manual tasks keep distinct per-step tickKey/tickFp matching each twin's own row key (#2).
+  const twinMd = [
+    '## twin-proj',
+    '### Repeated manual task',
+    '- [?] First twin prompt?',
+    '- [ ] Twin one follow-up',
+    '',
+    '## twin-proj',
+    '### Repeated manual task',
+    '- [?] Second twin prompt?',
+    '- [ ] Twin two follow-up',
+    '',
+  ].join('\n')
+  const twinView = buildView(parseProgress(twinMd), ['twin-proj'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const twinModel = serveModel(twinView, [], s, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const twinOneAsk = twinModel.asks.find(a => a.text.includes('First twin prompt?'))
+  const twinTwoAsk = twinModel.asks.find(a => a.text.includes('Second twin prompt?'))
+  assert.ok(twinOneAsk?.steps?.[0]?.tickKey && twinTwoAsk?.steps?.[0]?.tickKey)
+  assert.notEqual(twinOneAsk.steps[0].tickKey, twinTwoAsk.steps[0].tickKey, 'twin manual ask steps bind to distinct row tickKeys')
+  assert.match(twinTwoAsk.steps[0].tickKey, /#2$/)
 })
 
