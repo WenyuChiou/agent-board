@@ -1270,7 +1270,7 @@ div.row-btn .r-chev{visibility:hidden}
 .sw{display:inline-flex;align-items:center;gap:2px;width:36px;height:8px;flex:none}
 @media (max-width:560px){.pbar{width:auto;min-width:72px}.pbar.cont{width:72px}}
 .r-right.t-alert{color:var(--alert)}
-.r-right.t-stale{color:var(--waiting-text);font-weight:600}
+.r-right.t-stale{color:var(--soon);font-weight:600}
 .r-right{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;max-width:9em;overflow:hidden;text-overflow:ellipsis}
 .row-open{background:var(--current);border-radius:0 0 var(--radius-m) var(--radius-m);padding:var(--s1) var(--s2) var(--s3) calc(var(--s2) + 36px);display:grid;gap:var(--s3);min-width:0;opacity:0;transition:opacity var(--dur-base) var(--ease-out)}
 .row.open .row-open{opacity:1}
@@ -1451,7 +1451,7 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
   .shell[data-drawer="1"] .s-toggle{display:none}
   /* Narrow right-1/4 cockpit HUD: hide idle filter bar behind #hud-filter-btn and trim top chrome padding. */
   .f-bar[data-hud-idle="1"]{display:none}
-  .head .topbar{min-height:44px}
+  .head .topbar{min-height:46px}
   .agents-in{padding-top:var(--s1);padding-bottom:var(--s1)}
 }
 @media (max-width:399px){
@@ -3816,11 +3816,12 @@ const PAGE_SCRIPT = String.raw`
       btn.focus({ preventScroll: true });
     }
   }
+  function isFreshAiRef(ref, now) {
+    return !(source(ref).isOwn || ref.isOwn) && ref.at > 0 && now - ref.at <= 15 * 60 * 1000;
+  }
   function hasFreshAiDone(view) {
     var list = view && view.all && view.all.done || [];
-    return list.some(function (ref) {
-      return !(source(ref).isOwn || ref.isOwn) && ref.at > 0 && view.now - ref.at <= 15 * 60 * 1000;
-    });
+    return list.some(function (ref) { return isFreshAiRef(ref, view.now); });
   }
   function fitSide() {
     var width = window.innerWidth;
@@ -4415,7 +4416,7 @@ const PAGE_SCRIPT = String.raw`
       // Auto-surface freshly completed AI tasks while respecting any manual collapse by the user.
       if (opened['shelf:done'] === undefined && finished.length) {
         var justFinishedAi = priorDone !== null && finished.some(function (ref) {
-          return !priorDone[ref.key] && !(source(ref).isOwn || ref.isOwn);
+          return !priorDone[ref.key] && isFreshAiRef(ref, view.now);
         });
         var narrowFreshAi = typeof window.innerWidth === 'number' && window.innerWidth > 0 && window.innerWidth < 800 && hasFreshAiDone(view);
         if (justFinishedAi || narrowFreshAi) opened['shelf:done'] = true;
@@ -4727,7 +4728,9 @@ const PAGE_SCRIPT = String.raw`
       var openGroup = filterUi.groups[pg.openMenu];
       pg.openMenu = '';
       paintFilterMenus();
-      if (openGroup && openGroup.chip) openGroup.chip.focus();
+      var collapsedNarrow = filterUi.bar.getAttribute('data-hud-idle') === '1' && typeof window.innerWidth === 'number' && window.innerWidth < 560;
+      var focusTarget = collapsedNarrow ? document.getElementById('hud-filter-btn') : (openGroup && openGroup.chip);
+      if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
       return;
     }
     if (selectedKey && isWideDetail()) {

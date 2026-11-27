@@ -1653,6 +1653,11 @@ const clip = (text: string, room: number): string => {
 // The session's active step on the line under the prompt: step count + live current step (instead of the static
 // task title or proportional-font box-drawing bars), so what is running right now stays readable in narrow strips.
 const currentPart = (current: CurrentView): string => {
+  if (current.tone === 'alert') {
+    return current.total > 0
+      ? `${current.done}/${current.total} · ${clip(current.status, 24)}`
+      : clip(current.status, 24)
+  }
   const step =
     current.currentStep ??
     current.steps.find(one => one.isCurrent)?.text ??

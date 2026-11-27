@@ -185,6 +185,14 @@ test('an agent active on both CLI and App exposes CLI · App in aria-label and p
       assert.deepEqual(hud480.out, [])
       await page.locator('#hud-filter-btn').click()
       await page.locator('#filter-bar').waitFor({ state: 'hidden' })
+      // Unchecking the last filter while an AI dropdown is open, then pressing Escape, returns focus to #hud-filter-btn.
+      await page.locator('nav#agents [data-agent="codex"]').click()
+      await page.locator('#filter-bar').waitFor({ state: 'visible' })
+      await page.locator('#filter-bar [data-filter-kind="agent"] button.f-chip').click()
+      await page.locator('#filter-bar [data-filter-kind="agent"] .f-menu').getByRole('menuitemcheckbox', { name: /Codex/ }).click()
+      await page.keyboard.press('Escape')
+      await page.locator('#filter-bar').waitFor({ state: 'hidden' })
+      assert.equal(await page.evaluate(() => document.activeElement?.id), 'hud-filter-btn', 'Escape returns focus to #hud-filter-btn when idle filter bar collapses')
 
       await page.setViewportSize({ width: 560, height: 900 })
       await page.locator('#side').waitFor({ state: 'visible' })

@@ -742,6 +742,13 @@ test('the status line leads with cross-session waiting alerts and active step te
   }
   late = applyTaskUpdate(late, { taskId: '8', status: 'in_progress' }, NOW)
   expect(statusLine(buildView([], [], { ...late, title: '長清單測試', state: 'working' }, NOW))).toBe('0/8 · 跑最後驗證')
+
+  // Blocked single-step task puts localized blocker status ahead of step text so clipping never hides the block.
+  let blocked = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
+  blocked = applyTaskCreate(blocked, { subject: 'Verify the production deployment' }, '1', NOW)
+  blocked = applyTaskUpdate(blocked, { taskId: '1', status: 'in_progress' }, NOW)
+  blocked = { ...blocked, state: 'working', tasks: [{ ...blocked.tasks[0]!, blocked: 'Deployment approval failed' }] }
+  expect(statusLine(buildView([], [], blocked, NOW, 0, {}, STRINGS.en), STRINGS.en)).toBe(`0/1 · ${clip(STRINGS.en.stuck('Deployment approval failed'), 24)}`)
 })
 
 test('two 和色 sets: the light one under a light theme, the dark one otherwise', () => {

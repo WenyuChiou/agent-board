@@ -1074,6 +1074,20 @@ test('narrow cockpit HUD promotes live working steps, toggles idle filters, and 
   const waitDom = await pageDom(html, serveModel(waitView, [], s, new Set(), false, undefined, false, group))
   const waitDoneShelf = () => walk(waitDom.node('board')).find(n => hasClass(n, 'shelf') && walk(n).some(c => c.textContent === s.pgDone))
   assert.ok(!hasClass(waitDoneShelf(), 'open'), 'desktop waiting state leaves Done shelf closed initially')
+  // Importing a two-day-old completed record does not pop open Done on desktop.
+  const twoDaysIso = new Date(now - 2 * 24 * 60 * 60_000).toISOString()
+  const oldMd = [
+    waitMd,
+    '## historic-done',
+    `<!-- auto session=cc300005 agent=codex state=done updated=${twoDaysIso} -->`,
+    '### Two-day-old completed task',
+    '- [x] Old step',
+    '<!-- /auto session=cc300005 -->',
+    '',
+  ].join('\n')
+  const oldView = buildView(parseProgress(oldMd), ['retrieval-eval', 'stale-repo', 'finished-repo', 'wait-to-done', 'historic-done'], null, now + 30_000, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  await waitDom.redraw(serveModel(oldView, [], s, new Set(), false, undefined, false, { ...group, now: now + 30_000 }))
+  assert.ok(!hasClass(waitDoneShelf(), 'open'), 'importing a two-day-old done record keeps Done shelf closed')
   const waitAfterMd = waitMd.replace('state=waiting updated=' + freshIso, 'state=done updated=' + new Date(now + 60_000).toISOString()).replace('- [?] Ship release?', '- [x] Ship release')
   const waitAfterView = buildView(parseProgress(waitAfterMd), ['retrieval-eval', 'stale-repo', 'finished-repo', 'wait-to-done'], null, now + 60_000, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
   await waitDom.redraw(serveModel(waitAfterView, [], s, new Set(), false, undefined, false, { ...group, now: now + 60_000 }))
