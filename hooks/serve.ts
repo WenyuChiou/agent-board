@@ -2792,8 +2792,9 @@ const PAGE_SCRIPT = String.raw`
     var detailIn = el('div', 'fold-in');
     var detailHost = isOlder ? body : detailIn;
     if (!isOlder) {
-      var askTitle = clean(String(ask.task || ''));
-      if (askTitle && askTitle !== text) {
+      var rawAskTask = String(ask.task || '');
+      var askTitle = clean(rawAskTask, Infinity);
+      if (askTitle && clean(rawAskTask) !== text && askTitle !== text) {
         if (Array.from(askTitle).length > 90) add(detailHost, clipped(clipShort(askTitle, 90), askTitle, 'c-task', 'ctask:' + key));
         else add(detailHost, el('p', 'c-task', askTitle));
       }
@@ -3114,8 +3115,11 @@ const PAGE_SCRIPT = String.raw`
     var lastWhole = lastStep ? (lastStep.note ? lastStep.text + ' — ' + lastStep.note : lastStep.text) : '';
     var lastFinishedRaw = lastWhole ? clean(lastWhole, Infinity) : '';
     var lastFinished = lastWhole ? compactStep(lastWhole) : '';
-    // A plan-tool block with no title takes its current step as the title; the step is then said once.
-    if (sameName(stepRaw, clean(fullTitle(ref), Infinity))) { step = ''; stepRaw = ''; }
+    var rawTitleText = fullTitle(ref);
+    var title = clean(rawTitleText);
+    var titleFull = clean(rawTitleText, Infinity);
+    // A plan-tool block with no title takes its current step as the title; only omit the step line when that title says all of it.
+    if (sameName(stepRaw, title)) { step = ''; stepRaw = ''; }
     var isAnsweredWaiting = row.status === w('answeredWaiting');
     var rawDetail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinishedRaw ? w('pgLast', lastFinishedRaw) : '') : !stepRaw ? '' : section === 'working' ? stepRaw : section === 'stopped' ? w('pgStoppedAt', stepRaw) : '';
     var detail = isAnsweredWaiting ? w('answeredWaiting') : section === 'others' ? (lastFinished ? w('pgLast', lastFinished) : '') : !step ? '' : section === 'working' ? step : section === 'stopped' ? w('pgStoppedAt', step) : '';
@@ -3123,14 +3127,13 @@ const PAGE_SCRIPT = String.raw`
     // ended keeps today's stopped wording, not the grey unsure label.
     var isUnsureRow = row.rowState === 'unsure' && row.auto !== 'ended';
     var status = isUnsureRow ? w('rowUnsure', row.when) : ref.kind === 'stuck' || row.stuck ? w('pgStuck') : row.isOwn && section !== 'done' && section !== 'stopped' ? w('pgTodo') : '';
-    var title = clean(fullTitle(ref));
     var sameTitle = (pg.titleCounts && pg.titleCounts[title] || 0) > 1 ? clean(row.contextLine || row.context) : '';
     var project = showProject ? clean(ref.repo || row.project) : '';
     if (sameName(project, title)) project = '';
     var progress = isTask && row.total > 0 && (section === 'working' || section === 'stopped' || section === 'others') ? progressNode(row.cells || '', row.done, row.total, current ? clean(current.text) : '') : null;
     var rowSurf = surfaceBadge(interfaceOf(ref), false);
     var stepNode = detail ? el('span', section === 'working' ? 'r-step' : '', detail) : null;
-    if (stepNode && rawDetail && rawDetail !== detail) stepNode.setAttribute('title', rawDetail);
+    if (stepNode && rawDetail) stepNode.setAttribute('title', rawDetail);
     var statusNode = status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null;
     var projectNode = project ? el('span', 'r-proj', project) : null;
     var sameNode = sameTitle ? el('span', '', sameTitle) : null;
@@ -3138,7 +3141,7 @@ const PAGE_SCRIPT = String.raw`
       ? add(el('span', 'r-meta'), progress, stepNode, statusNode, projectNode, sameNode, rowSurf)
       : add(el('span', 'r-meta'), progress, rowSurf, statusNode, projectNode, sameNode, stepNode);
     var titleNode = el('span', 'r-title', title);
-    titleNode.setAttribute('title', title);
+    titleNode.setAttribute('title', titleFull || title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
     li.setAttribute('data-k', ref.key);
     var fold = el('div', 'fold');

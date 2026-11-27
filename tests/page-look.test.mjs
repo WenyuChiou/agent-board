@@ -1120,8 +1120,10 @@ test('row summaries clamp cleanly, phantom gaps collapse, and chrome controls re
 
   const now = Date.UTC(2026, 10, 24, 12, 0, 0)
   const freshIso = new Date(now - 2 * 60_000).toISOString()
+  const olderWorkIso = new Date(now - 3 * 60_000).toISOString()
   const longTaskTitle = 'Synthetic overlong prompt heading repeated across telemetry slices to verify folded row clipping and expanded full preservation without blowing up narrow right quarter HUD rows'
-  const longCardTask = 'Synthetic waiting card task title intentionally longer than ninety characters so expanded details use clip'
+  const longCardTask = 'Synthetic waiting card task title intentionally longer than two hundred and twenty characters '.repeat(3).trim()
+  const wideGlyphStep = 'W'.repeat(60)
   const longWorklogStep = 'Step 1 initial ingestion completed in sandbox batch ' + 'validation shard check passed cleanly · '.repeat(32) + '-> Step 2 schema verification passed across all shards -> Step 3 final benchmark synthesis running live across long validation shards after cleanup and verification — transferred -> main-recall-2'
   const md = [
     '## synthetic-long-repo',
@@ -1143,6 +1145,17 @@ test('row summaries clamp cleanly, phantom gaps collapse, and chrome controls re
     '- [x] Verified icon button',
     '<!-- /auto session=dd100003 -->',
     '',
+    `<!-- auto session=dd100004 agent=codex state=working updated=${olderWorkIso} -->`,
+    `### ${longWorklogStep}`,
+    `- [~] ${longWorklogStep}`,
+    '- [ ] Finish untitled task',
+    '<!-- /auto session=dd100004 -->',
+    '',
+    `<!-- auto session=dd100005 agent=codex state=working updated=${olderWorkIso} -->`,
+    '### Wide glyph step test',
+    `- [~] ${wideGlyphStep}`,
+    '<!-- /auto session=dd100005 -->',
+    '',
   ].join('\n')
 
   const view = buildView(parseProgress(md), ['synthetic-long-repo'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
@@ -1162,6 +1175,18 @@ test('row summaries clamp cleanly, phantom gaps collapse, and chrome controls re
   assert.ok((stepNode.getAttribute('title') || '').endsWith('— transferred -> main-recall-2'), 'tooltip preserves full worklog tail past 1200 chars')
   const openWholes = walk(workRow).filter(n => hasClass(n, 'whole')).map(n => n.textContent)
   assert.ok(openWholes.includes(longWorklogStep), 'expanded row preserves verbatim full worklog step')
+
+  const workRows = walk(dom.node('working-now')).filter(n => n.tag === 'li' && hasClass(n, 'row'))
+  const untitledRow = workRows.find(r => walk(r).some(n => hasClass(n, 'r-title') && n.textContent.startsWith('Step 1 initial ingestion')))
+  const untitledTitle = walk(untitledRow).find(n => hasClass(n, 'r-title'))
+  const untitledStep = walk(untitledRow).find(n => hasClass(n, 'r-step'))
+  assert.ok(Array.from(untitledTitle?.textContent || '').length <= 220, 'untitled row .r-title stays <= 220 code points')
+  assert.equal(untitledTitle?.getAttribute('title'), longWorklogStep, 'untitled row .r-title tooltip preserves full >220 worklog')
+  assert.ok(untitledStep?.textContent.endsWith('→ main-recall-2'), 'untitled worklog row keeps active tail when 220-char title omits it')
+
+  const wideRow = workRows.find(r => walk(r).some(n => hasClass(n, 'r-title') && n.textContent === 'Wide glyph step test'))
+  const wideStepNode = walk(wideRow).find(n => hasClass(n, 'r-step'))
+  assert.equal(wideStepNode?.getAttribute('title'), wideGlyphStep, '40ch-clippable <=72-char step still gets tooltip')
 
   // Long waiting-card task title uses <details class="clip"> inside expanded card body.
   const waitCard = walk(dom.node('needs')).find(n => n.tag === 'article' && n.getAttribute('data-ref-key'))
