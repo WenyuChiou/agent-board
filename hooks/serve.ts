@@ -2792,8 +2792,10 @@ const PAGE_SCRIPT = String.raw`
       var isNext = step.fileLine !== undefined ? step.fileLine === row.nextFileLine : step.text === row.next;
       if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && !isNext) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
-        var tick = button('', function () { act(step.tickKey || row.key, 'tick', step.text, '', '', '', step.tickFp || row.tickFp, undefined, step.fileLine); }, 'btn');
+        var stepFp = step.tickFp || row.tickFp || '';
+        var tick = button('', function () { act(step.tickKey || row.key, 'tick', step.text, '', '', '', stepFp, undefined, step.fileLine); }, 'btn');
         if (step.fileLine !== undefined && step.fileLine !== null) tick.setAttribute('data-step-line', String(step.fileLine));
+        if (stepFp) tick.setAttribute('data-step-fp', String(stepFp));
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
         tick.title = step.text;
         add(line, tick);
@@ -4669,6 +4671,7 @@ const PAGE_SCRIPT = String.raw`
             cls: rCls,
             text: rText,
             stepLine: active.getAttribute ? (active.getAttribute('data-step-line') || '') : '',
+            stepFp: active.getAttribute ? (active.getAttribute('data-step-fp') || '') : '',
             href: rHref,
             occ: rOcc,
             dupCount: rDup,
@@ -4865,7 +4868,8 @@ const PAGE_SCRIPT = String.raw`
         }
         var occMatch = nextMatches.length === railFocus.dupCount && railFocus.occ >= 0 ? nextMatches[railFocus.occ] : null;
         var occStep = occMatch && occMatch.getAttribute ? (occMatch.getAttribute('data-step-line') || '') : '';
-        if (occMatch && occStep === railFocus.stepLine) nextRailTarget = occMatch;
+        var occFp = occMatch && occMatch.getAttribute ? (occMatch.getAttribute('data-step-fp') || '') : '';
+        if (occMatch && occStep === railFocus.stepLine && occFp === railFocus.stepFp) nextRailTarget = occMatch;
         if (!nextRailTarget) nextRailTarget = document.getElementById('detail-close');
       }
       if (nextRailTarget && typeof nextRailTarget.focus === 'function') nextRailTarget.focus({ preventScroll: true });

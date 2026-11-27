@@ -206,6 +206,19 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
       const btns = document.querySelectorAll('#detail-rail .steps li button')
       return btns.length === 4 && btns[2].getAttribute('data-step-line') === oldLine && document.activeElement?.id === 'detail-close'
     }, secondRepeatLine, { timeout: 15_000 })
+    // Even with >6 folded duplicate steps where inserting/removing a duplicate keeps the visible button count and file line identical, changed step-fp falls back to #detail-close.
+    const foldedSeven = Array.from({ length: 7 }, () => '- [ ] Repeat check').join('\n')
+    const foldedEight = Array.from({ length: 8 }, () => '- [ ] Repeat check').join('\n')
+    writeProgress(progress, FIXTURE_MD().replace('- [ ] Check tag signature\n- [ ] Repeat check\n- [ ] Repeat check', foldedSeven))
+    await page.waitForFunction(() => document.querySelectorAll('#detail-rail .steps li button').length === 5, undefined, { timeout: 15_000 })
+    await manualBtns.nth(2).focus()
+    writeProgress(progress, FIXTURE_MD().replace('- [ ] Check tag signature\n- [ ] Repeat check\n- [ ] Repeat check', foldedEight))
+    await page.waitForFunction(() => {
+      const btns = document.querySelectorAll('#detail-rail .steps li button')
+      return btns.length === 5 && document.activeElement?.id === 'detail-close'
+    }, undefined, { timeout: 15_000 })
+    writeProgress(progress, FIXTURE_MD())
+    await page.waitForFunction(() => document.querySelectorAll('#detail-rail .steps li button').length === 4, undefined, { timeout: 15_000 })
     await manualBtns.nth(1).focus()
     await manualBtns.nth(1).click()
     const tickDeadline = Date.now() + 10_000
