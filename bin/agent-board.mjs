@@ -63,7 +63,52 @@ const systemLang = env => {
   if (language !== null) return language
   try { return langOf(Intl.DateTimeFormat().resolvedOptions().locale) } catch { return null }
 }
-let language = langOf(flag('--lang')) ?? systemLang(process.env.LANG) ?? 'en'
+const home = homedir()
+const beside = path => join(dirname(resolve(path)), 'agent-board.mjs')
+const connectorProgress = (() => {
+  try {
+    const record = JSON.parse(readFileSync(join(home, '.agent-board', 'legacy-connect.json'), 'utf8'))
+    return record.version === 1 && record.disabled === false && typeof record.connectedProgress === 'string' && isAbsolute(record.connectedProgress) ? record.connectedProgress : undefined
+  } catch { return undefined }
+})()
+const candidatesFor = dataDir => [
+  ...(dataDir ? [join(resolve(dataDir), 'agent-board.mjs')] : [
+    ...(flag('--progress-file') ? [beside(flag('--progress-file'))] : []),
+    ...(process.env.CLAUDE_PROGRESS_FILE ? [beside(process.env.CLAUDE_PROGRESS_FILE)] : []),
+    ...(connectorProgress ? [beside(connectorProgress)] : []),
+    join(home, '.agent-board', 'agent-board.mjs'),
+    join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'agent-board.mjs'),
+  ]),
+]
+const isFileAt = list => list.find(path => { try { return statSync(path).isFile() } catch { return false } })
+const isSetupCommand = args[0] === 'setup' || args[0] === 'remove'
+// A language the person chose stays until they choose another (#1245), in the board's own order
+// (hooks/board-settings.ts boardLanguage): --lang (auto included), then the page's saved choice beside
+// the progress.md the board reads (localProgressPath in scripts/codex-local.ts), then the language the
+// installed board script was set up in. Automatic follows the system.
+const chosenLang = head => {
+  let saved = null
+  // A board command with --data-dir runs that board without CLAUDE_PROGRESS_FILE (below), so its words do not read it either.
+  const envProgress = isSetupCommand || !flag('--data-dir') ? process.env.CLAUDE_PROGRESS_FILE : undefined
+  const progress = flag('--progress-file') ?? (envProgress || (typeof head?.path === 'string' ? head.path : undefined))
+  if (progress !== undefined) {
+    try {
+      const lang = JSON.parse(readFileSync(`${resolve(progress).replace(/\.md$/i, '')}-settings.json`, 'utf8'))?.lang
+      saved = lang === 'auto' ? 'auto' : langOf(lang)
+    } catch {}
+  }
+  const picked = (flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang'))) ?? saved ?? langOf(head?.lang)
+  return (picked === 'auto' ? null : picked) ?? systemLang(process.env.LANG) ?? 'en'
+}
+const headOf = path => {
+  try { return JSON.parse(readFileSync(path, 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, '')) ?? {} } catch { return {} }
+}
+// Help and setup's own messages come before the board script is found, so they look for it here.
+// Setup and remove look where setup-agent.mjs does: --data-dir, else the .agent-board of --home.
+const early = isSetupCommand && (flag('--data-dir') || flag('--home'))
+  ? join(resolve(flag('--data-dir') || join(flag('--home'), '.agent-board')), 'agent-board.mjs')
+  : isFileAt(candidatesFor(flag('--data-dir')))
+let language = chosenLang(early ? headOf(early) : {})
 const at = ['en', 'zh-TW', 'zh-CN'].indexOf(language)
 const usage = [
   `agent-board ${v}: a local board for coding agents.
@@ -210,7 +255,6 @@ const isChat = args.includes('--chat')
 // the older-script guard ends JSON board reads only, as scripts/board-cli.ts isJsonBoard does (#1304).
 const managing = ['--recover-hooks', '--codex-setup', '--codex-doctor', '--codex-remove', '--remove', '--codex-trust', '--hermes-trust']
 const isJsonBoard = args.includes('--json') && !args.some(arg => managing.includes(arg))
-const home = homedir()
 const isWin = process.platform === 'win32'
 // --chat output may be pasted into a chat app, so it shows the home folder as ~, as the board's own --chat does.
 const shown = path => isChat && home && (isWin ? path.toLowerCase().startsWith(home.toLowerCase()) : path.startsWith(home)) ? `~${path.slice(home.length)}` : path
@@ -262,23 +306,8 @@ for (let i = 0; i < args.length; i++) {
   }
   dataDir = value
 }
-const beside = path => join(dirname(resolve(path)), 'agent-board.mjs')
-const connectorProgress = (() => {
-  try {
-    const record = JSON.parse(readFileSync(join(home, '.agent-board', 'legacy-connect.json'), 'utf8'))
-    return record.version === 1 && record.disabled === false && typeof record.connectedProgress === 'string' && isAbsolute(record.connectedProgress) ? record.connectedProgress : undefined
-  } catch { return undefined }
-})()
-const candidates = [
-  ...(dataDir ? [join(resolve(dataDir), 'agent-board.mjs')] : [
-    ...(flag('--progress-file') ? [beside(flag('--progress-file'))] : []),
-    ...(process.env.CLAUDE_PROGRESS_FILE ? [beside(process.env.CLAUDE_PROGRESS_FILE)] : []),
-    ...(connectorProgress ? [beside(connectorProgress)] : []),
-    join(home, '.agent-board', 'agent-board.mjs'),
-    join(process.env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'agent-board.mjs'),
-  ]),
-]
-let installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
+const candidates = candidatesFor(dataDir)
+let installed = isFileAt(candidates)
 // Setup owns the preview and the single consent question for both entry points.
 if (!installed && args.length === 0 && process.stdin.isTTY && process.stdout.isTTY) {
   const setup = [join(pkg, 'scripts/setup-agent.mjs')]
@@ -286,7 +315,7 @@ if (!installed && args.length === 0 && process.stdin.isTTY && process.stdout.isT
   const result = spawnSync(process.execPath, setup, { stdio: ['inherit', 'inherit', 'pipe'], encoding: 'utf8', env: setupEnv, windowsHide: true })
   process.stderr.write(result.stderr ?? (result.error ? `${result.error.message}\n` : ''))
   if (result.status !== 0) process.exit(result.status ?? 1)
-  installed = candidates.find(path => { try { return statSync(path).isFile() } catch { return false } })
+  installed = isFileAt(candidates)
   // A plugin-only setup opens its board in the next Claude session; a declined preview also ends here.
   if (!installed) process.exit(0)
 }
@@ -295,9 +324,8 @@ if (!installed) {
   console.error(message(`Agent Board is not set up for this account yet. No board script at:\n${list}\nSee what setup would change: npx ${name} setup\nThen apply it:               npx ${name} setup --apply`, `這個帳號還沒設定 Agent Board。以下位置都沒有看板程式：\n${list}\n先看設定會改什麼：npx ${name} setup\n再套用：          npx ${name} setup --apply`, `这个账号还没设置 Agent Board。以下位置都没有看板程序：\n${list}\n先看设置会改什么：npx ${name} setup\n再应用：          npx ${name} setup --apply`))
   process.exit(1)
 }
-let prelude = {}
-try { prelude = JSON.parse(readFileSync(installed, 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, '')) ?? {} } catch {}
-language = langOf(flag('--lang')) ?? langOf(prelude.lang) ?? systemLang(process.env.LANG) ?? 'en'
+const prelude = headOf(installed)
+language = chosenLang(prelude)
 // The first line holds account settings, so it must not affect build comparisons.
 const hash = text => createHash('sha256').update(text.includes('\n') ? text.slice(text.indexOf('\n') + 1) : '').digest('hex')
 // --chat and --status read the board through the installed script, so on their own they skip

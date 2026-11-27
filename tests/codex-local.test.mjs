@@ -2248,19 +2248,19 @@ test('after setup --lang en --apply on a zh-TW system, a plain setup says alread
       return [file.slice(directory.length), { bytes: readFileSync(file), mtimeMs: statSync(file).mtimeMs }]
     }))
   const before = snapshot(f.home)
-  // Plain setup preview without --lang
+  // Plain setup preview without --lang: it keeps the language setup was given (#1245)
   const preview = setupAgent(zhTw, '--agent', 'codex')
   assert.equal(preview.status, 0, preview.stderr)
   assert.equal(preview.stderr, '')
-  assert.match(preview.stdout, /已設定完成/)
-  assert.doesNotMatch(preview.stdout, /將更新/)
+  assert.match(preview.stdout, /already set up/)
+  assert.doesNotMatch(preview.stdout, /would update|已設定完成/)
   assert.deepEqual(snapshot(f.home), before)
   // Plain setup apply without --lang
   const second = setupAgent(zhTw, '--agent', 'codex', '--apply')
   assert.equal(second.status, 0, second.stderr)
   assert.equal(second.stderr, '')
-  assert.match(second.stdout, /已設定完成/)
-  assert.doesNotMatch(second.stdout, /已更新/)
+  assert.match(second.stdout, /already set up/)
+  assert.doesNotMatch(second.stdout, /updated|已設定完成/)
   assert.deepEqual(snapshot(f.home), before)
   // Explicit --lang zh-TW preview names the updated files
   const langChange = setupAgent(zhTw, '--agent', 'codex', '--lang', 'zh-TW')
