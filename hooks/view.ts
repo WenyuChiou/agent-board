@@ -12,7 +12,7 @@ import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
 import type { Tone } from './palette'
 import { countSteps, currentStepIndex, doneKey, FUTURE_SKEW_MS, futureTimeKey, isHereProject, isMarksComplete, isMaybeClosed, isStopped, isTaskComplete, observedTime, parseProgress, RESUME, STALE_MS, validOptions } from './parse'
-import { cellsOf, plainBar } from './progress-bar'
+import { cellsOf } from './progress-bar'
 import type { Cell } from './progress-bar'
 import { sha256 } from './sha256'
 import { inboxQuestionOrigin, observeQuestions, partsKey2, partsKey3, pendingQuestionSlot, questionScope, questionScopes, questionSlot, questionWords, sourceOptions, sourceSnapshot } from './questions'
@@ -1643,29 +1643,32 @@ const clip = (text: string, room: number): string => {
   return chars.length > room ? `${chars.slice(0, room - 1).join('')}…` : text
 }
 
-// The session's task on the line under the prompt. With two steps or more the bar takes the place
-// of the clipped status words (#1085): `建立兩個內容為 hi… ━━━━╸── 5/7`. One step keeps the words.
+// The session's active step on the line under the prompt: step count + live current step (instead of the static
+// task title or proportional-font box-drawing bars), so what is running right now stays readable in narrow strips.
 const currentPart = (current: CurrentView): string => {
-  const bar = plainBar(current.cells ?? [])
-  return bar === ''
-    ? `${clip(current.title, 14)} ${current.done}/${current.total} · ${clip(current.status, 18)}`
-    : `${clip(current.title, 14)} ${bar} ${current.done}/${current.total}`
+  const step =
+    current.steps.find(one => one.isCurrent)?.text ||
+    current.steps.find(one => one.status !== 'done' && one.status !== 'cancelled')?.text ||
+    ''
+  const focus = step !== '' && step !== current.title ? step : (current.title || current.status)
+  if (current.total > 0) return `${current.done}/${current.total} · ${clip(focus, 20)}`
+  return [clip(current.title, 16), clip(current.status, 18)].filter(Boolean).join(' · ')
 }
 
-// One line under the prompt for when the pane is not on screen: this session's task, what
-// waits on you, what is due soon, and the pull request.
+// One compact HUD line under the prompt: cross-session needs-you / due / queued alerts come first so
+// waiting sessions are never truncated behind this session's current step and PR status.
 export const statusLine = (view: View, s: Strings = ZH_TW): string | undefined => {
   const current = view.current
   const urgent = view.overview.due
   const parts = [
-    current === null || current.state === 'done' ? '' : currentPart(current),
-    view.overview.waiting > 0 ? s.statusWaiting(view.overview.waiting) : '',
-    (view.overview.queued ?? 0) > 0 ? s.boardQueuedCount(view.overview.queued ?? 0) : '',
+    view.overview.waiting > 0 ? `● ${s.statusWaiting(view.overview.waiting)}` : '',
     urgent > 0 ? s.statusDue(urgent) : '',
+    (view.overview.queued ?? 0) > 0 ? s.boardQueuedCount(view.overview.queued ?? 0) : '',
+    current === null || current.state === 'done' ? '' : currentPart(current),
     view.pr === null ? '' : view.pr.text,
   ].filter(part => part !== '')
 
-  return parts.length === 0 ? undefined : `${s.statusPrefix} · ${parts.join(' · ')}`
+  return parts.length === 0 ? undefined : parts.join(' · ')
 }
 
 // The board's view, built once for the same inputs (#373). After each change of the file the pane,

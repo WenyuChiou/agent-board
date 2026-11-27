@@ -709,16 +709,31 @@ test('an ended session offers the command that reopens it where it ran', () => {
   expect(row?.pr).toBe('PR #3 · CI 通過')
 })
 
-test('the status line says where things stand, and nothing when nothing does', () => {
+test('the status line leads with cross-session waiting alerts and active step text, without prefix or box bar', () => {
   const projects = parseProgress('## 求職\n### Google 暑期實習\n> 截止 10-18\n- [?] 推薦信\n')
   const line = statusLine(buildView(projects, [], { ...working(), pr: PR }, NOW))
-  // Two steps or more: the bar takes the place of the status words, and the title stays (#1085).
-  expect(line).toBe('進度 · 重做進度面板 ━╸ 1/2 · 1 件等你 · 1 件快到期 · PR #12 · CI 失敗 2 · 要求修改')
+  // Waiting & due alerts lead before the current session's step count + next step text.
+  expect(line).toBe('● 1 件等你 · 1 件快到期 · 1/2 · 寫 Mod · PR #12 · CI 失敗 2 · 要求修改')
   expect(statusLine(buildView([], [], null, NOW))).toBe(undefined)
-  // One step keeps its words: there is no bar to draw.
+  // One open step shows progress count + step text without duplicating statusPrefix.
   let one = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
   one = applyTaskCreate(one, { subject: '讀 API' }, '1', NOW)
-  expect(statusLine(buildView([], [], { ...one, title: '只有一步', state: 'working' }, NOW))).toBe('進度 · 只有一步 0/1 · Claude 正在做')
+  expect(statusLine(buildView([], [], { ...one, title: '只有一步', state: 'working' }, NOW))).toBe('0/1 · 讀 API')
+
+  // Multi-step cockpit regression: 6/8 done + active 7th step + 2 cross-session waiting questions.
+  let eight = emptyMirror(SESSION, 'persona_framework', NOW, '/w/repo')
+  for (let i = 1; i <= 8; i += 1) {
+    eight = applyTaskCreate(eight, { subject: i === 7 ? '跑 hybrid rerank 基準' : `步驟 ${i}`, activeForm: i === 7 ? '跑 hybrid rerank 基準' : '' }, String(i), NOW)
+    if (i <= 6) eight = applyTaskUpdate(eight, { taskId: String(i), status: 'completed' }, NOW)
+    else if (i === 7) eight = applyTaskUpdate(eight, { taskId: '7', status: 'in_progress' }, NOW)
+  }
+  const waitingTwo = parseProgress('## repo-a\n<!-- auto session=aa110011 agent=codex state=waiting updated=2026-10-16T11:55:00Z -->\n### Task A\n- [?] First question?\n<!-- /auto session=aa110011 -->\n\n## repo-b\n<!-- auto session=bb220022 agent=gemini state=waiting updated=2026-10-16T11:55:00Z -->\n### Task B\n- [?] Second question?\n<!-- /auto session=bb220022 -->\n')
+  for (const s of Object.values(STRINGS)) {
+    const hud = statusLine(buildView(waitingTwo, [], { ...eight, title: '檢索四種做法評測', state: 'working' }, NOW, 0, {}, s), s)
+    expect(hud).toBe(`● ${s.statusWaiting(2)} · 6/8 · 跑 hybrid rerank 基準`)
+    expect(hud).not.toContain(s.statusPrefix)
+    expect(hud).not.toMatch(/[━─╸]/)
+  }
 })
 
 test('two 和色 sets: the light one under a light theme, the dark one otherwise', () => {

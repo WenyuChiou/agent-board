@@ -978,3 +978,85 @@ test('Redesign 2 uses icon-only AI identity, distinct CLI/App .surf-pill badges,
   const aiLabels = walk(aiGroup).filter(n => hasClass(n, 'f-opt-lbl')).map(n => n.textContent)
   assert.ok(aiLabels.includes('Codex') && aiLabels.includes('Antigravity'))
 })
+
+test('narrow cockpit HUD promotes live working steps, toggles idle filters, and surfaces freshly finished AI work', async () => {
+  const s = STRINGS.en
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const freshIso = new Date(now - 2 * 60_000).toISOString()
+  const staleIso = new Date(now - 14 * 60_000).toISOString()
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const hasClass = (node, name) => String(node?.className ?? '').split(/\s+/).includes(name)
+  const md = [
+    '## retrieval-eval',
+    `<!-- auto session=cc300001 agent=claude state=working updated=${freshIso} -->`,
+    '### Evaluate 4 retrieval methods',
+    '- [x] Index corpus',
+    '- [~] Run hybrid rerank benchmark',
+    '- [ ] Export table',
+    '<!-- /auto session=cc300001 -->',
+    '',
+    '## stale-repo',
+    `<!-- auto session=cc300002 agent=codex state=working updated=${staleIso} -->`,
+    '### Background refactor',
+    '- [~] Verify migrations',
+    '<!-- /auto session=cc300002 -->',
+    '',
+    '## finished-repo',
+    `<!-- auto session=cc300003 agent=codex state=done updated=${freshIso} -->`,
+    '### Build release bundle',
+    '- [x] Run checks',
+    '<!-- /auto session=cc300003 -->',
+    '',
+  ].join('\n')
+  const group = { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' }
+  const view = buildView(parseProgress(md), ['retrieval-eval', 'stale-repo', 'finished-repo'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const model = serveModel(view, [], s, new Set(), false, undefined, false, group)
+  const html = servePage(s, 'n')
+
+  // Test live step order, stale heartbeat class, HUD filter toggle, and live Done shelf auto-open.
+  const dom = await pageDom(html, model)
+  const workingChildren = dom.node('working-now').querySelectorAll('li.row')
+  const evalRow = workingChildren.find(li => li.textContent.includes('Evaluate 4 retrieval methods'))
+  assert.ok(evalRow, 'working row renders')
+  const evalMeta = walk(evalRow).find(n => hasClass(n, 'r-meta'))
+  const metaClasses = evalMeta.childNodes.map(n => String(n.className || ''))
+  const progIdx = metaClasses.findIndex(cls => cls.split(' ').includes('prog'))
+  const stepIdx = metaClasses.findIndex(cls => cls.split(' ').includes('r-step'))
+  const projIdx = metaClasses.findIndex(cls => cls.split(' ').includes('r-proj'))
+  assert.ok(progIdx >= 0 && stepIdx === progIdx + 1 && projIdx > stepIdx, `expected prog -> r-step -> r-proj, got ${metaClasses.join(',')}`)
+  assert.equal(evalMeta.childNodes[stepIdx].textContent, 'Run hybrid rerank benchmark')
+
+  const staleRow = workingChildren.find(li => li.textContent.includes('Background refactor'))
+  assert.ok(staleRow, 'quiet working row renders')
+  const staleRight = walk(staleRow).find(n => hasClass(n, 'r-right'))
+  assert.ok(hasClass(staleRight, 't-stale'), `expected t-stale on quiet working row, got ${staleRight?.className}`)
+
+  // Idle filter bar starts collapsed behind #hud-filter-btn and expands on click or active filter.
+  const bar = dom.node('filter-bar')
+  const btn = dom.node('hud-filter-btn')
+  assert.equal(bar.getAttribute('data-hud-idle'), '1')
+  assert.equal(btn.getAttribute('aria-expanded'), 'false')
+  assert.equal(btn.getAttribute('data-active'), '0')
+  btn.click()
+  assert.equal(bar.getAttribute('data-hud-idle'), '0')
+  assert.equal(btn.getAttribute('aria-expanded'), 'true')
+  btn.click()
+  assert.equal(bar.getAttribute('data-hud-idle'), '1')
+  const aiChip = walk(bar).find(n => n.tag === 'button' && hasClass(n, 'f-chip'))
+  aiChip.click()
+  assert.equal(bar.getAttribute('data-hud-idle'), '0')
+
+  // Done shelf starts closed on desktop initial draw, auto-opens when a working AI finishes live, and respects manual close.
+  const doneShelf = () => walk(dom.node('board')).find(n => hasClass(n, 'shelf') && walk(n).some(c => c.textContent === s.pgDone))
+  assert.ok(!hasClass(doneShelf(), 'open'), 'desktop viewport leaves Done shelf closed initially')
+  const afterMd = md.replace('state=working updated=' + freshIso, 'state=done updated=' + new Date(now + 60_000).toISOString()).replace('- [~] Run hybrid rerank benchmark', '- [x] Run hybrid rerank benchmark').replace('- [ ] Export table', '- [x] Export table')
+  const afterView = buildView(parseProgress(afterMd), ['retrieval-eval', 'stale-repo', 'finished-repo'], null, now + 60_000, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const afterModel = serveModel(afterView, [], s, new Set(), false, undefined, false, { ...group, now: now + 60_000 })
+  await dom.redraw(afterModel)
+  assert.ok(hasClass(doneShelf(), 'open'), 'live AI transition from working to done auto-opens Done shelf')
+  const doneHead = walk(doneShelf()).find(n => n.tag === 'button' && hasClass(n, 'shelf-head'))
+  doneHead.click()
+  assert.ok(!hasClass(doneShelf(), 'open'), 'clicking Done shelf closes it')
+  await dom.redraw(afterModel)
+  assert.ok(!hasClass(doneShelf(), 'open'), 'redraw respects manual close of Done shelf')
+})
