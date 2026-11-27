@@ -1,7 +1,8 @@
-import { existsSync, unlinkSync } from 'node:fs'
+import { existsSync, readFileSync, unlinkSync } from 'node:fs'
+import { request } from 'node:http'
 import { join, posix } from 'node:path'
-import { deliveryText, SURFACE_IDS } from '../hooks/messaging.ts'
-import { isSessionEnd, isTurnStart, turnStartEnvelope } from '../hooks/hook-messages.ts'
+import { deliveryText, isHostTurn, SURFACE_IDS } from '../hooks/messaging.ts'
+import { isSessionEnd, isStepEnd, isTurnStart, STEP_END_MIN_MS, stepEndEnvelope, turnStartEnvelope } from '../hooks/hook-messages.ts'
 import { sessionPushNote } from '../hooks/others.ts'
 import { parseProgress } from '../hooks/parse.ts'
 import { STRINGS } from '../hooks/strings.ts'
@@ -27,8 +28,9 @@ type Json = Record<string, unknown>
 // one failed write does not lose an ACK. Both are read; a save writes one and removes the other.
 type AckClaim = { id: string; nonce: string; matched?: true; from?: number }
 const ACK_CLAIMS_KEEP = 8
-const ackClaimsFiles = (root: string, messages: string, owner: string): string[] =>
-  [join(root, 'antigravity-acks', `${owner}.json`), join(`${messages}-acks`, `${owner}.json`)]
+// Codex's Stop hook keeps its hand-overs the same way, in a folder of its own (#319); `owner` names the agent and session.
+const ackClaimsFiles = (root: string, messages: string, owner: string, folder = 'antigravity-acks'): string[] =>
+  [join(root, folder, `${owner}.json`), join(`${messages}-acks`, `${owner}.json`)]
 const isAckClaim = (one: unknown): one is AckClaim =>
   typeof one === 'object' && one !== null && typeof (one as Json).id === 'string' && typeof (one as Json).nonce === 'string' && /^[0-9a-f]{6}$/.test((one as Json).nonce as string)
 const readAckClaimsFile = (file: string, readLocal: (file: string) => string | null): AckClaim[] => {
@@ -182,13 +184,67 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
         }
         if (!saveAckClaims(files, kept, atomic, checkDeadline)) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
       }
+    } else if (agent === 'codex' && event === 'Stop') {
+      // A step end (#319). First the reply: its first line acknowledges a message an earlier Stop handed over. It is read at
+      // every Stop, one that hands nothing over too, and only its code is kept, never the rest of the reply. A claim is spent
+      // at the first Stop after its hand-over, matched or not; only an acknowledgement the board did not take is kept, as matched.
+      const owner = hash(`${agent}:${session}`)
+      const files = ackClaimsFiles(root, messages, owner, 'codex-acks')
+      const claims = readAckClaims(files, readLocal)
+      if (claims.length > 0) {
+        const reply = raw.last_assistant_message
+        const first = typeof reply === 'string' ? reply.split(/\r?\n/).find(line => line.trim() !== '')?.trim() : undefined
+        const kept: AckClaim[] = []
+        let isAckFailed = false
+        for (const claim of claims) {
+          if (claim.matched !== true && !(first !== undefined && (first === `ACK ${claim.nonce}` || first.startsWith(`ACK ${claim.nonce} `)))) continue
+          try {
+            if (mailbox === undefined) throw new Error(setupError ?? 'MAILBOX_FAILED')
+            await mailbox.ack(agent, session, claim.id, claim.nonce, `ACK ${claim.nonce}`, Date.now())
+          } catch { kept.push({ id: claim.id, nonce: claim.nonce, matched: true }); isAckFailed = true }
+        }
+        if (isAckFailed) {
+          if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
+          else process.stderr.write(`${s.localAgentMailboxFailed(mailbox?.error ?? setupError ?? 'MAILBOX_FAILED')}\n`)
+        }
+        if (!saveAckClaims(files, kept, atomic, checkDeadline)) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
+      }
+      // Then one message, only at a Stop no hook has continued yet and with the time to take, print and accept it. This runs
+      // after the progress write, as a turn start does (#319, question 1): a hook stopped before it claims nothing.
+      if (!isStepEnd(agent, event, raw) || hookDeadline - Date.now() < STEP_END_MIN_MS || mailbox === undefined) return false
+      const transcript = raw.transcript_path
+      const surface = codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null, process.env[CODEX_CLIENT_VARIABLE], process.env[CODEX_DAEMON_VARIABLE])
+      // Only Codex in a terminal is shown to continue a turn this way; anywhere else (the desktop app, an editor, the
+      // background service, or no transcript to tell) takes nothing, even a message that names no surface.
+      if (surface !== SURFACE_IDS.cli) return false
+      const turnId = raw.turn_id
+      const message = await mailbox.turn(agent, session, surface, Date.now(), undefined, { ...(isHostTurn(turnId) ? { hostTurn: turnId } : {}), isStepEnd: true })
+      if (mailbox.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
+      else if (mailbox.error !== null) process.stderr.write(`${s.localAgentMailboxFailed(mailbox.error)}\n`)
+      if (message === null) return false
+      // Printed before anything says it was handed over: a write that fails leaves the claim unaccepted, so it reads Unsure
+      // after its lease and is never handed out again, rather than Delivered for a message Codex never got.
+      try {
+        await new Promise<void>((done, fail) => process.stdout.write(`${JSON.stringify(stepEndEnvelope(deliveryText(message, s)))}\n`, error => error ? fail(error) : done()))
+      } catch { return true }
+      // The code is kept for the next Stop before the acceptance, so a hook stopped after Codex has the message still leaves it.
+      // A handed-over message holds nothing until its ACK, as every hook's (#319, question 2).
+      let isSaved = false
+      if (/^[0-9a-f]{6}$/.test(message.nonce)) {
+        try { isSaved = saveAckClaims(files, [...readAckClaims(files, readLocal).filter(one => one.id !== message.id), { id: message.id, nonce: message.nonce }].slice(-ACK_CLAIMS_KEEP), atomic, checkDeadline) } catch {}
+      }
+      if (!isSaved) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
+      try { await mailbox.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
+      return true
     } else if (isTurnStart(agent, event)) {
       let message = null
       const transcript = raw.transcript_path
       const surface = agent === 'cursor' ? SURFACE_IDS.cursor : agent === 'antigravity' ? antigravitySurface(raw.transcriptPath, raw.artifactDirectoryPath)
         : agent === 'codex' ? codexSurface(typeof transcript === 'string' && transcript !== '' ? readSessionMeta(transcript, session) : null, process.env[CODEX_CLIENT_VARIABLE], process.env[CODEX_DAEMON_VARIABLE])
         : SURFACE_IDS.cli
-      try { message = await mailbox?.turn(agent, session, surface, Date.now()) ?? null } catch {}
+      // A Codex turn start names its turn, so an answer the board queues while it runs is bound to it (#319).
+      const turnId = raw.turn_id
+      try { message = await mailbox?.turn(agent, session, surface, Date.now(), undefined, agent === 'codex' && isHostTurn(turnId) ? { hostTurn: turnId } : undefined) ?? null } catch {}
       const failed = mailbox?.error ?? setupError
       if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
       else if (failed !== null) process.stderr.write(`${s.localAgentMailboxFailed(failed)}\n`)
@@ -221,17 +277,7 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
           hasWritten = true
         } catch {}
         if (hasWritten && message !== null && agent === 'antigravity' && /^[0-9a-f]{6}$/.test(message.nonce)) {
-          // Written before the acceptance, so a hook stopped after the model saw the message still leaves its code for the Stop hook.
-          // The message is accepted even when neither folder takes the claim (the model has it; handing it over again would send
-          // it twice), so that failure is reported: that message's ACK cannot be recorded.
-          let isSaved = false
-          try {
-            const files = ackClaimsFiles(root, messages, owner)
-            const size = antigravityTranscriptSize(raw.transcriptPath)
-            const claim = size === null ? { id: message.id, nonce: message.nonce } : { id: message.id, nonce: message.nonce, from: size }
-            isSaved = saveAckClaims(files, [...readAckClaims(files, readLocal).filter(one => one.id !== message.id), claim].slice(-ACK_CLAIMS_KEEP), atomic, checkDeadline)
-          } catch {}
-          if (!isSaved) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
+          saveAntigravityAckClaim(root, messages, owner, raw.transcriptPath, message.id, message.nonce, readLocal, atomic, checkDeadline, s)
         }
         if (hasWritten && message !== null) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
         if (hasWritten && pushResult.keys.length > 0) {
@@ -247,6 +293,171 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
         return true
       }
     }
+  }
+  return false
+}
+
+// Written before acceptance so a hook killed after the model saw the message still leaves its ACK code for Stop (#1416).
+const saveAntigravityAckClaim = (
+  root: string,
+  messages: string,
+  owner: string,
+  transcriptPath: unknown,
+  id: string,
+  nonce: string,
+  readLocal: (file: string) => string | null,
+  atomic: TurnDelivery['atomic'],
+  checkDeadline: () => void,
+  s: Strings,
+): void => {
+  let isSaved = false
+  try {
+    const files = ackClaimsFiles(root, messages, owner)
+    const size = antigravityTranscriptSize(transcriptPath)
+    const claim = size === null ? { id, nonce } : { id, nonce, from: size }
+    isSaved = saveAckClaims(files, [...readAckClaims(files, readLocal).filter(one => one.id !== id), claim].slice(-ACK_CLAIMS_KEEP), atomic, checkDeadline)
+  } catch {}
+  if (!isSaved) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
+}
+
+const STOP_WAIT_VISIBLE_MS = 30_000
+const STOP_WAIT_CAP_MS = 28_000
+const STOP_WAIT_POLL_MS = 400
+const STOP_WAIT_EXECUTION_CAP = 8
+
+// Loopback-only ping check for an open visible board page (#1841); never reads any Antigravity port, token, or sign-in.
+const boardPageAgo = async (messages: string, timeoutMs: number): Promise<number | null> => {
+  let owner: { pid?: unknown; url?: unknown }
+  try {
+    const lockRaw = readFileSync(join(messages, 'server.lock'), 'utf8')
+    if (!/^[1-9][0-9]*$/.test(lockRaw)) return null
+    const pid = Number(lockRaw)
+    try { process.kill(pid, 0) } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EPERM') return null
+    }
+    const ownerRaw = readFileSync(join(messages, 'server.owner'), 'utf8')
+    if (!ownerRaw) return null
+    owner = JSON.parse(ownerRaw) as { pid?: unknown; url?: unknown }
+    if (!owner || typeof owner !== 'object' || owner.pid !== pid || typeof owner.url !== 'string' || !/^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(owner.url)) return null
+  } catch { return null }
+  const url = new URL(owner.url as string)
+  const token = url.searchParams.get('t')
+  if (!token) return null
+  return await new Promise<number | null>(resolve => {
+    let settled = false
+    const finish = (value: number | null): void => { if (!settled) { settled = true; clearTimeout(timer); resolve(value) } }
+    const req = request(new URL('/api/ping', url), { method: 'GET', headers: { 'x-board-token': token } }, res => {
+      let text = ''
+      res.setEncoding('utf8')
+      res.on('data', chunk => { text += chunk; if (text.length > 65_536) { req.destroy(); finish(null) } })
+      res.on('end', () => {
+        if (res.statusCode !== 200) return finish(null)
+        try {
+          const parsed = JSON.parse(text) as { pageAgo?: unknown }
+          finish(typeof parsed.pageAgo === 'number' && Number.isFinite(parsed.pageAgo) ? parsed.pageAgo : null)
+        } catch { finish(null) }
+      })
+      res.on('error', () => finish(null))
+    })
+    const timer = setTimeout(() => { req.destroy(); finish(null) }, Math.max(50, timeoutMs))
+    req.on('error', () => finish(null))
+    req.end()
+  })
+}
+
+const hasWaitingQuestion = (progress: string, session: string, readLocal: (file: string) => string | null, hash: (text: string) => string): boolean => {
+  try {
+    const text = readLocal(progress)
+    if (text === null) return false
+    const shortId = hash(`antigravity:${session}`).slice(0, 8)
+    return parseProgress(text).some(project => project.tasks.some(task =>
+      task.auto?.agent === 'antigravity' && (task.auto.session === shortId || task.auto.resume === session)
+      && task.auto.state === 'waiting' && task.steps.some(step => step.status === 'waiting')))
+  } catch { return false }
+}
+
+// Route H (#1841): second sequential agy Stop handler (`StopWait`, 30 s budget).
+// Claims an already-queued board message or waits while a waiting `[?]` block and a visible board page are active,
+// returning `{"decision":"continue","reason":...}` without holding any mailbox claim during the wait.
+export const deliverAntigravityStopWait = async (
+  delivery: Omit<TurnDelivery, 'mode' | 'agent' | 'event' | 'report' | 'folder' | 'base' | 'hereNames'>,
+): Promise<boolean> => {
+  const { session, raw, progress, home, root, hookDeadline, s, hash, readLocal, atomic, checkDeadline } = delivery
+  if (antigravitySurface(raw.transcriptPath, raw.artifactDirectoryPath) !== SURFACE_IDS.antigravityTui) return false
+  const termination = raw.terminationReason
+  if (termination !== undefined && termination !== '' && termination !== 'NO_TOOL_CALL') return false
+  if (typeof raw.error === 'string' && raw.error !== '') return false
+  if (raw.fullyIdle === false) return false
+  if (typeof raw.executionNum === 'number' && raw.executionNum >= STOP_WAIT_EXECUTION_CAP) return false
+  if (hookDeadline - Date.now() < 300) return false
+
+  const messages = defaultMessagesDirectory(progress, home, process.env, process.platform)
+  const owner = hash(`antigravity:${session}`)
+
+  let lastIssue: string | null = null
+  const reportMailbox = (mailbox: ReturnType<typeof hookMailbox> | undefined, setupError: string | null = null, dedupe = true): void => {
+    const issue = mailbox?.hasDeferred ? 'DEFERRED' : (mailbox?.error ?? setupError)
+    if (issue === null || (dedupe && issue === lastIssue)) return
+    if (dedupe) lastIssue = issue
+    if (issue === 'DEFERRED') process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
+    else process.stderr.write(`${s.localAgentMailboxFailed(issue)}\n`)
+  }
+
+  const handOver = async (message: NonNullable<Awaited<ReturnType<ReturnType<typeof hookMailbox>['turn']>>>, mailbox: ReturnType<typeof hookMailbox>): Promise<boolean> => {
+    const payload = `${JSON.stringify({ decision: 'continue', reason: deliveryText(message, s) })}\n`
+    try {
+      await new Promise<void>((done, fail) => process.stdout.write(payload, error => error ? fail(error) : done()))
+    } catch { return true }
+    if (/^[0-9a-f]{6}$/.test(message.nonce)) saveAntigravityAckClaim(root, messages, owner, raw.transcriptPath, message.id, message.nonce, readLocal, atomic, checkDeadline, s)
+    let isAccepted = false
+    let acceptError: string | null = null
+    try { isAccepted = await mailbox.accept('antigravity', session, message.id, message.nonce, Date.now()) } catch (error) {
+      acceptError = error instanceof Error && error.message ? error.message : 'MAILBOX_FAILED'
+    }
+    if (!isAccepted) reportMailbox(mailbox, acceptError ?? 'MAILBOX_FAILED', false)
+    return true
+  }
+
+  let immediateBox: ReturnType<typeof hookMailbox> | undefined
+  let immediate = null
+  let immediateError: string | null = null
+  try {
+    immediateBox = hookMailbox(messages, Math.min(1500, hookDeadline - Date.now()))
+    immediate = await immediateBox.turn('antigravity', session, SURFACE_IDS.antigravityTui, Date.now()) ?? null
+  } catch (error) {
+    immediateError = error instanceof Error && error.message ? error.message : 'MAILBOX_FAILED'
+  }
+  reportMailbox(immediateBox, immediateError)
+  if (immediate !== null && immediateBox !== undefined) return await handOver(immediate, immediateBox)
+  if (immediateBox === undefined || immediateBox.hasNoFolder) return false
+
+  if (!hasWaitingQuestion(progress, session, readLocal, hash)) return false
+  const initialAgo = await boardPageAgo(messages, Math.min(250, Math.max(50, hookDeadline - Date.now())))
+  if (initialAgo === null || initialAgo > STOP_WAIT_VISIBLE_MS) return false
+
+  const waitEnd = Math.min(Date.now() + STOP_WAIT_CAP_MS, hookDeadline - 1000)
+  for (let iter = 1; Date.now() < waitEnd; iter++) {
+    const sleepMs = Math.min(STOP_WAIT_POLL_MS, waitEnd - Date.now())
+    if (sleepMs <= 0) break
+    await new Promise(done => setTimeout(done, sleepMs))
+    const left = hookDeadline - Date.now()
+    if (left < 300) break
+    if (iter % 5 === 0) {
+      if (!hasWaitingQuestion(progress, session, readLocal, hash)) break
+      const ago = await boardPageAgo(messages, Math.min(250, left))
+      if (ago === null || ago > STOP_WAIT_VISIBLE_MS) break
+    }
+    let pollBox: ReturnType<typeof hookMailbox> | undefined
+    let polled = null
+    let pollError: string | null = null
+    try {
+      pollBox = hookMailbox(messages, Math.min(1500, left))
+      polled = await pollBox.turn('antigravity', session, SURFACE_IDS.antigravityTui, Date.now()) ?? null
+    } catch (error) {
+      pollError = error instanceof Error && error.message ? error.message : 'MAILBOX_FAILED'
+    }
+    reportMailbox(pollBox, pollError)
+    if (polled !== null && pollBox !== undefined) return await handOver(polled, pollBox)
   }
   return false
 }

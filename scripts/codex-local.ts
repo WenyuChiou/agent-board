@@ -7,7 +7,7 @@ import { performance } from 'node:perf_hooks'
 import { pathToFileURL } from 'node:url'
 import { deflateRawSync, inflateRawSync } from 'node:zlib'
 import { installCommand, installContext } from './setup-command.mjs'
-import { newestUse } from './setup-discovery.mjs'
+import { isNewer, newestUse } from './setup-discovery.mjs'
 import { blockClaimOf, blockHostOf, boardConfirmedReport, claimText, cleanAntigravityIdentity, codexClaimOf, codexEvent, codexEvents, codexReport, dropCodexBlock, folderProject, isLifecycleStep, limitReport, localAgentLifecycleStep, planReport, hookParentClaim, putCodexBlock, questionSteps, resolveAntigravityIdentity, seenClaimOf, sessionTitle, validateCodexReport } from '../hooks/codex'
 import type { AntigravityIdentity, CodexReport } from '../hooks/codex'
 import { hermesHome } from '../hooks/hermes-home'
@@ -37,7 +37,7 @@ import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
-import { antigravitySurface, deliverTurnEvent } from './hook-delivery'
+import { antigravitySurface, deliverAntigravityStopWait, deliverTurnEvent } from './hook-delivery'
 import { checkStoreFile, hookMailbox } from './board-messaging'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
@@ -296,8 +296,43 @@ const sortedKeys = (value: unknown): unknown => Array.isArray(value) ? value.map
 // Hermes writes this file as ASCII and reads it in the system code page, so a raw non-ASCII byte would stop
 // every shell hook from loading: escape it the way Python's json.dumps does.
 const allowlistText = (data: Json): string => JSON.stringify(sortedKeys(data), null, 2).replace(/[^\x00-\x7f]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
-// A root that is not a mapping (a list, a flow document) is not something to add a key to.
-const isYamlMapping = (text: string): boolean => text.split(/\r?\n/).every(line => !/^\S/.test(line) || /^(?:#|---|\.\.\.)/.test(line) || /^(?:"[^"\n]*"|'[^'\n]*'|[^\s#{[!&*|>%@`"'-][^\n]*?)\s*:(?:\s|$)/.test(line))
+// A root that is not a mapping (a list, a flow document) is not something to add a key to. Hermes saves config.yaml
+// with PyYAML, which writes a list's items at the left edge right under their key (`toolsets:` then `- hermes-cli`, #1588):
+// such an item belongs to the key above it, so the root is still a mapping. Under `hooks:` it is not one the board's
+// hooks can go into. The line editor finds the hooks key only as written plain or quoted, so a double-quoted key whose
+// escapes spell `hooks` (`"ho\x6fks"`) is refused, as is one it cannot decode; PyYAML's escapes for a key that is not
+// ASCII (`"caf\xE9"`) are some other key and pass. A document end marker or a second document is refused too: hooks
+// added at the end of the file would land outside the one document Hermes reads.
+const YAML_TOP_KEY = /^(?:"([^"\n]*)"|'([^'\n]*)'|([^\s#{[!&*|>%@`"'-][^\n]*?))\s*:(?:\s|$)/
+const YAML_ESCAPES: Record<string, string> = { '0': '\0', a: '\x07', b: '\b', t: '\t', '\t': '\t', n: '\n', v: '\v', f: '\f', r: '\r', e: '\x1b', ' ': ' ', '"': '"', '/': '/', '\\': '\\', N: '\x85', _: '\xa0', L: ' ', P: ' ' }
+const yamlDoubleQuoted = (raw: string): string | undefined => {
+  let isBad = false
+  const text = raw.replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[\s\S]|$)/g, (_, escape: string) => {
+    const point = escape.length > 1 ? parseInt(escape.slice(1), 16) : undefined
+    if (point !== undefined && point <= 0x10ffff) return String.fromCodePoint(point)
+    const plain = point === undefined ? YAML_ESCAPES[escape] : undefined
+    if (plain === undefined) isBad = true
+    return plain ?? ''
+  })
+  return isBad ? undefined : text
+}
+const isYamlMapping = (text: string): boolean => {
+  let listKey: string | undefined
+  let hasContent = false
+  return text.split(/\r?\n/).every(line => {
+    if (!/^\S/.test(line) || line.startsWith('#')) return true
+    if (/^---\s*(?:#.*)?$/.test(line)) return !hasContent
+    hasContent = true
+    if (/^-(?:\s|$)/.test(line)) return listKey !== undefined && listKey !== 'hooks'
+    const key = YAML_TOP_KEY.exec(line)
+    if (key === null) return false
+    const name = key[1] === undefined ? key[2] ?? key[3] : yamlDoubleQuoted(key[1])
+    if (name === undefined || (name === 'hooks' && key[1] !== undefined && key[1] !== 'hooks')) return false
+    const rest = line.slice(key[0].length).trim()
+    listKey = rest === '' || rest.startsWith('#') ? name : undefined
+    return true
+  })
+}
 // A name that was free when setup planned (`isFresh`) is created, never written over (#1693): a rename would replace a
 // file that landed there after the last check. A hard link of the finished temporary file places it whole in one step
 // and fails when the name is taken, and setup then stops as busy. Where a link is refused for any other reason, as on a
@@ -1073,7 +1108,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const status = flag('--state') ?? payload.state
       if (mode === '--agent-status' && !['working', 'waiting', 'ended'].includes(String(status))) throw new Error('INVALID_STATE')
       const event = agent === 'antigravity' && mode === '--agent-status' ? flag('--event') : undefined
-      if (event !== undefined && statusEvents.antigravity?.[event] !== status) throw new Error('INVALID_EVENT_STATE')
+      if (event !== undefined && (event === 'StopWait' ? 'waiting' : statusEvents.antigravity?.[event]) !== status) throw new Error('INVALID_EVENT_STATE')
       // Classify before Cursor's adapter drops prompt text; retain lifecycle
       // ordering without treating a board lookup as an answer to the question.
       const isPromptLike = isPromptEvent(raw) || raw.prompt_submitted === true
@@ -1519,6 +1554,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         mkdirSync(dirname(offsetFile), { recursive: true })
         atomic(offsetFile, `${JSON.stringify({ version: 1, file: resolve(path as string), offset: read.end })}\n`, checkDeadline)
       } catch {}
+    }
+    if (mode === '--agent-status' && agent === 'antigravity' && current?.event === 'StopWait') {
+      const delivered = await deliverAntigravityStopWait({
+        session: current.session, raw, progress, home, root, hookDeadline, s, hash, readLocal, atomic, checkDeadline,
+      })
+      if (!delivered) output({})
+      return true
     }
     if (mode === '--agent-status' && agent === 'antigravity' && planInput === undefined && current !== undefined) await bringMarkedReport(current.session)
     let delay = 50
@@ -2176,8 +2218,12 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   const isApproved = loaded.approved === true || args.includes('--hooks-approved') || trustNow === true
   const approval = agent !== 'codex' && agent !== 'hermes' ? {} : isApproved ? { approved: true } : loaded.approved === false || initial(manifestFile) === null && flag('--setup-version') !== undefined ? { approved: false } : {}
   // A new record keeps the newest use's version however it was set up (Settings, or this script's own setup), as setup
-  // writes it, so an update does not ask about a use the install has had from the start. An older record without one keeps none.
-  const setupVersion = flag('--setup-version') ?? (typeof loaded.version === 'string' ? loaded.version : initial(manifestFile) === null ? newestUse : undefined)
+  // writes it, so an update does not ask about a use the install has had from the start. An existing higher record
+  // version stays put (#1812), and an older record without one keeps none.
+  const suppliedVersion = flag('--setup-version')
+  const setupVersion = suppliedVersion !== undefined
+    ? (typeof loaded.version === 'string' && isNewer(loaded.version, suppliedVersion) ? loaded.version : suppliedVersion)
+    : (typeof loaded.version === 'string' ? loaded.version : initial(manifestFile) === null ? newestUse : undefined)
   // A kept /board file keeps its record entry, so it still goes as setup wrote it once the script is taken (#1698).
   const nextManifest = `${JSON.stringify({ files: Object.fromEntries([...Object.entries(files).flatMap(([file, text]) => !keptFiles.has(file) ? [[file, hash(text)]] : manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]]), ...keptBoards.flatMap(file => manifest.files[file] === undefined ? [] : [[file, manifest.files[file]]])]), groups, foreignGroups, progress, ...(config === '' ? {} : { config }), ...(createdConfig ? { createdConfig: true } : {}), ...(createdDirs.size ? { createdDirs: [...createdDirs].sort() } : {}), ...(setupVersion === undefined ? {} : { version: setupVersion }), ...approval }, null, 2)}\n`
   if (remove ? initial(manifestFile) !== null : initial(manifestFile) !== nextManifest) changes.push({ file: manifestFile, action: remove ? 'remove' : initial(manifestFile) === null ? 'create' : 'update' })

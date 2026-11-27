@@ -4,7 +4,7 @@ import { themeControls } from './page-look'
 
 const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 
-export const settingsToggle = (s: Strings): string => `<button type="button" class="icon-btn" id="settings-toggle" data-local data-settings-toggle aria-haspopup="dialog" aria-expanded="false" aria-controls="settings"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 1.5h3l.5 2 1 .6 2-.6 1.5 2.6-1.5 1.4v1l1.5 1.4-1.5 2.6-2-.6-1 .6-.5 2h-3l-.5-2-1-.6-2 .6L1.5 10 3 8.5v-1L1.5 6 3 3.5l2 .6 1-.6z"/><circle cx="8" cy="8" r="2.2"/></svg><span>${esc(s.settingsTitle)}</span></button>`
+export const settingsToggle = (s: Strings): string => `<button type="button" class="icon-btn" id="settings-toggle" data-local data-settings-toggle aria-haspopup="dialog" aria-expanded="false" aria-controls="settings" title="${esc(s.settingsTitle)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 1.5h3l.5 2 1 .6 2-.6 1.5 2.6-1.5 1.4v1l1.5 1.4-1.5 2.6-2-.6-1 .6-.5 2h-3l-.5-2-1-.6-2 .6L1.5 10 3 8.5v-1L1.5 6 3 3.5l2 .6 1-.6z"/><circle cx="8" cy="8" r="2.2"/></svg><span>${esc(s.settingsTitle)}</span></button>`
 
 export const settingsPanel = (s: Strings, language: SettingsLang, isLan = false, isLangOverridden = false): string =>
   `<div id="settings" class="settings-overlay" data-lan="${isLan}" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden><div class="settings-panel">` +
@@ -16,6 +16,7 @@ export const settingsPanel = (s: Strings, language: SettingsLang, isLan = false,
   (isLan ? '' : `<section id="settings-approvals"><h3>${esc(s.settingsApprovals)}</h3><button type="button" id="settings-approvals-toggle" role="switch" aria-checked="true" aria-label="${esc(s.settingsApprovals)}">${esc(s.settingsOn)}</button></section>`) +
   `<section id="settings-agents"><h3 id="settings-agents-title">${esc(s.settingsAgents)}</h3><ul id="settings-agent-list" aria-labelledby="settings-agents-title"></ul>` +
   (isLan ? '' : `<div id="settings-agent-confirm" hidden><p id="settings-agent-question"></p><div class="settings-choices"><button type="button" id="settings-agent-yes">${esc(s.settingsAgentConfirm)}</button><button type="button" id="settings-agent-cancel">${esc(s.settingsAgentCancel)}</button></div></div>`) + `</section>` +
+  `<section id="settings-storage" hidden><h3>${esc(s.settingsStorage)}</h3><p class="settings-label" id="settings-storage-line"></p><div class="acts" id="settings-storage-acts"></div></section>` +
   `<p id="settings-result" role="status" aria-live="polite" aria-atomic="true"></p></div></div>`
 
 export const settingsCss = `
@@ -78,6 +79,7 @@ export const settingsScript = String.raw`
     settings.hidden = true;
     settingsButton.setAttribute('aria-expanded', 'false');
     document.getElementById('shell').inert = false;
+    if (typeof onSettingsClose === 'function') onSettingsClose();
     settingsButton.focus();
   }
   settingsButton.addEventListener('click', openSettings);

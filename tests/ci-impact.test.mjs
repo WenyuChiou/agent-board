@@ -659,18 +659,22 @@ test('in every number of Windows board parts each part starts from its share of 
   }
 })
 
-test('the setup files #1356 added keep their measured weights, so the two slowest are not in one Windows board part (#1757, #1762)', async () => {
-  const { partFiles } = await import('../scripts/ci-impact.mjs')
+test('the setup files #1356 added keep their measured weights, so a Windows board part that holds the two slowest fits its time budget (#1757, #1762, #1912)', async () => {
+  const { partFiles, partLoads, BOARD_PART_BUDGET_MS } = await import('../scripts/ci-impact.mjs')
   const table = await readTimes()
   // setup-repair-guidance took 28.2 and 29.9 s in Windows board part 6/7 of main's run 44881995497, which took that part to
   // 491.5 and 498.7 s of its 480 s (#1757); setup-repair-trust 20.8 s locally (19.5 s in the table's run).
   const slow = ['tests/setup-repair-guidance.test.mjs', 'tests/setup-repair-trust.test.mjs']
   for (const path of slow) assert.ok(table.files[path] >= 15_000 && table.files[path] <= 40_000, path + ': ' + table.files[path])
   const files = (await boardTestFiles())
-  for (const total of [7, 10]) {
-    const parts = Array.from({ length: total }, (_, i) => partFiles(files, (i + 1) + '/' + total))
-    assert.equal(parts.filter(part => slow.every(path => part.includes(path))).length, 0, total + ' parts')
-  }
+  // What #1757 guards is that part's time, not the pairing: since the table deals every part an even share of the
+  // self-parted files (#1762, #1912), the two may share a part, which must still fit on a runner 1.6 times slower.
+  const total = await windowsBoardParts()
+  const { loads } = partLoads(files, total)
+  const parts = Array.from({ length: total }, (_, i) => partFiles(files, (i + 1) + '/' + total))
+  parts.forEach((part, index) => {
+    if (slow.every(path => part.includes(path))) assert.ok(loads[index] * 1.6 <= BOARD_PART_BUDGET_MS, 'part ' + (index + 1) + ' of ' + total + ' holds both at ' + Math.round(loads[index] / 1000) + ' s by the table')
+  })
 })
 
 test('the heaviest Windows board part, on a runner 1.6 times slower than the table, fits its time budget (#1762)', async () => {
@@ -744,21 +748,30 @@ test('a log of a run of several files cut off before its summary is refused, so 
   assert.throws(() => readJob(text, { name: 'cut', partFiles: files => files, selfPartedTests: ['tests/messaging.test.mjs'], readSource: () => "test('a message reaches its reader')" }), /cut: 0 complete test runs in the log/)
 })
 
-test('every Windows and Ubuntu board part runs a share of legacy-connect, so no part holds the whole file beside its share of codex-local (#1741)', async () => {
+test('every Windows and Ubuntu board part runs a share of legacy-connect and host-upgrade, so no part holds either whole file beside its share of codex-local (#1741, #1912)', async () => {
   const { partFiles, selfPartedTests } = await import('../scripts/ci-impact.mjs')
   // Whole, legacy-connect took 101-179 s on Windows; the part that held it ran 483.2-505.0 s of its 480 s on main's
   // runs 44642014114 and 44651103054 (part 1) and 44697238483 (part 4, twice), while the other parts stayed under.
   assert.ok(selfPartedTests.includes('tests/legacy-connect.test.mjs'))
+  assert.ok(selfPartedTests.includes('tests/host-upgrade.test.mjs'))
   const files = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/host-upgrade.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/prompt-hooks.test.mjs']
-  for (const total of [2, 3, 7, 10]) for (let index = 1; index <= total; index++) assert.ok(partFiles(files, index + '/' + total).includes('tests/legacy-connect.test.mjs'), index + '/' + total)
+  for (const file of ['tests/legacy-connect.test.mjs', 'tests/host-upgrade.test.mjs']) {
+    for (const total of [2, 3, 7, 10]) for (let index = 1; index <= total; index++) assert.ok(partFiles(files, index + '/' + total).includes(file), file + ': ' + index + '/' + total)
+  }
   // And the deal gives each part some of its tests, at any number of parts.
   const { partTest } = await import('../scripts/ci-impact.mjs')
-  const titles = Object.keys((await readTimes()).tests['tests/legacy-connect.test.mjs'])
-  for (const total of [2, 3, 7, 10]) for (let index = 1; index <= total; index++) {
-    let ran = 0
-    const run = partTest(() => ran++, index + '/' + total, 'tests/legacy-connect.test.mjs')
-    for (const title of titles) run(title)
-    assert.ok(ran > 0, 'legacy-connect runs no test in part ' + index + '/' + total)
+  for (const file of ['tests/legacy-connect.test.mjs', 'tests/host-upgrade.test.mjs']) {
+    const titles = Object.keys((await readTimes()).tests[file])
+    for (const total of [2, 3, 7, 10]) {
+      const ran = []
+      for (let index = 1; index <= total; index++) {
+        const before = ran.length
+        const run = partTest(title => ran.push(title), index + '/' + total, file)
+        for (const title of titles) run(title)
+        assert.ok(ran.length > before, file + ' runs no test in part ' + index + '/' + total)
+      }
+      assert.deepEqual([...ran].sort(), [...titles].sort(), file + ': ' + total + ' parts run each test once')
+    }
   }
 })
 
@@ -1006,10 +1019,143 @@ test('the time check command fails on over-budget timings and passes on green on
     assert.equal(red.status, 1)
     assert.match(red.stdout, /tests\/board\.test\.mjs took 200s, over 70% of its 200s budget \(140s\)/)
     assert.match(red.stdout, /board part 1\/4 took 500s, over its 480s budget; slowest files: tests\/board\.test\.mjs 200s, tests\/codex-local\.test\.mjs 180s/)
-    const missing = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI_TEST_TIMINGS: join(dir, 'missing.json') } })
+    const localEnv = { ...process.env, CI_TEST_TIMINGS: join(dir, 'missing.json') }
+    delete localEnv.CI
+    const missing = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: localEnv })
     assert.equal(missing.status, 0)
     assert.match(missing.stdout, /no test timings recorded/)
   } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('the time check command fails on CI when no test timings were recorded (#1720)', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-'))
+  const script = fileURLToPath(new URL('../scripts/ci-impact.mjs', import.meta.url))
+  const serial = process.env.CI_TEST_SERIAL
+  const timings = process.env.CI_TEST_TIMINGS
+  const ci = process.env.CI
+  try {
+    const missing = join(dir, 'missing.json')
+    const ciEnv = { ...process.env, CI: 'true', CI_TEST_TIMINGS: missing }
+    const onCi = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: ciEnv })
+    assert.ifError(onCi.error)
+    assert.equal(onCi.status, 1, onCi.stdout + onCi.stderr)
+    assert.match(onCi.stdout, /time budget: no test timings recorded on CI/)
+
+    const unsetEnv = { ...process.env, CI_TEST_TIMINGS: missing }
+    delete unsetEnv.CI
+    for (const env of [unsetEnv, { ...process.env, CI: 'false', CI_TEST_TIMINGS: missing }]) {
+      const local = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env })
+      assert.ifError(local.error)
+      assert.equal(local.status, 0, local.stdout + local.stderr)
+      assert.match(local.stdout, /no test timings recorded; nothing to check/)
+    }
+
+    const unwritable = join(dir, 'no-such-dir', 'timings.json')
+    delete process.env.CI_TEST_SERIAL
+    process.env.CI = 'true'
+    process.env.CI_TEST_TIMINGS = unwritable
+    runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 0 }), 'linux')
+    const afterWriteFailure = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI: 'true', CI_TEST_TIMINGS: unwritable } })
+    assert.ifError(afterWriteFailure.error)
+    assert.equal(afterWriteFailure.status, 1, afterWriteFailure.stdout + afterWriteFailure.stderr)
+    assert.match(afterWriteFailure.stdout, /time budget: no test timings recorded on CI/)
+
+    const stale = join(dir, 'stale-timings.json')
+    await writeFile(stale, JSON.stringify({ version: 1, part: '1/4', serial: true, totalMs: 100_000, files: [{ path: 'tests/board.test.mjs', ms: 10_000 }] }))
+    process.env.CI_TEST_TIMINGS = stale
+    runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 0 }), 'linux', () => {
+      throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })
+    })
+    await assert.rejects(readFile(stale, 'utf8'), { code: 'ENOENT' })
+    const afterStaleCleanup = spawnSync(process.execPath, [script, 'check'], { encoding: 'utf8', env: { ...process.env, CI: 'true', CI_TEST_TIMINGS: stale } })
+    assert.ifError(afterStaleCleanup.error)
+    assert.equal(afterStaleCleanup.status, 1, afterStaleCleanup.stdout + afterStaleCleanup.stderr)
+    assert.match(afterStaleCleanup.stdout, /time budget: no test timings recorded on CI/)
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+    if (timings === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timings
+    if (ci === undefined) delete process.env.CI
+    else process.env.CI = ci
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('runTestFiles fails with both errors when removing a stale timings file throws EPERM (#1720)', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-eperm-'))
+  const serial = process.env.CI_TEST_SERIAL
+  const timings = process.env.CI_TEST_TIMINGS
+  const ci = process.env.CI
+  try {
+    const stale = join(dir, 'stale-timings.json')
+    await writeFile(stale, JSON.stringify({ version: 1, part: '1/4', serial: true, totalMs: 100_000, files: [{ path: 'tests/board.test.mjs', ms: 10_000 }] }))
+    delete process.env.CI_TEST_SERIAL
+    process.env.CI = 'true'
+    process.env.CI_TEST_TIMINGS = stale
+    const failingWrite = () => { throw Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' }) }
+    const failingRemove = () => { throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' }) }
+    assert.throws(
+      () => runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 0 }), 'linux', failingWrite, failingRemove),
+      error => /ENOSPC/.test(error.message) && /EPERM/.test(error.message),
+    )
+    assert.ok((await readFile(stale, 'utf8')).includes('tests/board.test.mjs'))
+    assert.throws(
+      () => runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 1 }), 'linux', failingWrite, failingRemove),
+      error => /selected tests failed: 1/.test(error.message) && /ENOSPC/.test(error.message) && /EPERM/.test(error.message),
+    )
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+    if (timings === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timings
+    if (ci === undefined) delete process.env.CI
+    else process.env.CI = ci
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('runTestFiles leaves a directory or symlink at the timings path in place and fails the run (#1720)', async () => {
+  const { runTestFiles } = await import('../scripts/ci-impact.mjs')
+  const dir = await mkdtemp(join(tmpdir(), 'agent-board-timings-nonfile-'))
+  const serial = process.env.CI_TEST_SERIAL
+  const timings = process.env.CI_TEST_TIMINGS
+  const ci = process.env.CI
+  try {
+    delete process.env.CI_TEST_SERIAL
+    process.env.CI = 'true'
+    const dirPath = join(dir, 'timings-dir')
+    await mkdir(dirPath, { recursive: true })
+    await writeFile(join(dirPath, 'keep.txt'), 'keep\n')
+    process.env.CI_TEST_TIMINGS = dirPath
+    let removed = false
+    const trackRemove = () => { removed = true }
+    assert.throws(
+      () => runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 0 }), 'linux', () => { throw Object.assign(new Error('EISDIR: illegal operation on a directory'), { code: 'EISDIR' }) }, trackRemove),
+      error => /EISDIR/.test(error.message) && /not a regular file/.test(error.message),
+    )
+    assert.equal(removed, false)
+    assert.equal(await readFile(join(dirPath, 'keep.txt'), 'utf8'), 'keep\n')
+
+    const linkPath = join(dir, 'symlink-timings.json')
+    process.env.CI_TEST_TIMINGS = linkPath
+    removed = false
+    assert.throws(
+      () => runTestFiles(['tests/ws-stdio.test.mjs'], '', () => ({ status: 0 }), 'linux', () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }) }, trackRemove, () => ({ isFile: () => false, isSymbolicLink: () => true })),
+      error => /EACCES/.test(error.message) && /not a regular file/.test(error.message),
+    )
+    assert.equal(removed, false)
+  } finally {
+    if (serial === undefined) delete process.env.CI_TEST_SERIAL
+    else process.env.CI_TEST_SERIAL = serial
+    if (timings === undefined) delete process.env.CI_TEST_TIMINGS
+    else process.env.CI_TEST_TIMINGS = timings
+    if (ci === undefined) delete process.env.CI
+    else process.env.CI = ci
     await rm(dir, { recursive: true, force: true })
   }
 })

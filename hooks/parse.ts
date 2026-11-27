@@ -39,6 +39,9 @@ export const QUESTION = /^<!--\s*question=([a-f0-9]{64}:[1-9]\d*)\s*-->\s*$/
 // Any line of this shape is read as the annotation, so a malformed one is dropped and never turns into text.
 export const NATIVE = /^<!--\s*native=(\S*)(?:\s+options=(.*?))?\s*-->\s*$/
 export const OPTIONS = /^<!--\s*options=(.*?)\s*-->\s*$/
+// `### title <!-- session=<id> -->`: the block (its `session=`) of the AI that wrote this hand-kept task (#1866).
+// Only a plain id is kept, the shape `RESUME` takes; any other comment on the line is ordinary text.
+const WRITER = /<!--\s*session=([0-9a-zA-Z][0-9a-zA-Z_-]{5,63})\s*-->\s*$/
 const NATIVE_AGENTS: readonly string[] = ['claude', 'codex']
 
 // One list of choices, kept whole or refused whole (null). A character is a Unicode code point, as
@@ -364,7 +367,8 @@ export const parseProgress = (markdown: string): ProgressProject[] => {
 
     const taskMatch = TASK.exec(line)
     if (taskMatch?.[1] !== undefined) {
-      task = { title: taskMatch[1], line: lineIndex, notes: [], steps: [], auto: pendingAuto, due: null }
+      const writer = pendingAuto === null && openSession === null ? WRITER.exec(raw)?.[1] : undefined
+      task = { title: taskMatch[1], line: lineIndex, notes: [], steps: [], auto: pendingAuto, due: null, ...(writer === undefined ? {} : { writer }) }
       pendingAuto = null
       ensureProject().tasks.push(task)
       return
@@ -469,11 +473,11 @@ export const isStopped = (auto: ProgressAuto | null, now: number, updated = auto
   isStale(auto, now, updated, staleMs) || (auto !== null && (auto.state === 'working' || auto.state === 'waiting') && gone.has(blockKey(auto)))
 
 // How long a Codex card with no process record waits, with no new event, before it
-// says the window may be closed (#1092, M7). Windows and the shared server give the
-// board no process to check; there SessionEnd arrived 61.4 s and 61.5 s after a close
-// (docs/validation/2026-11-18-c1-codex-terminal-process.md), so two minutes is past
-// the time a closed window normally takes to end its card by itself.
-export const CODEX_MAY_BE_CLOSED_MS = 120_000
+// says the window may be closed (#1092, #1813, M7). Windows and the shared server give
+// the board no process to check, so 2 minutes flagged open idle windows (#1813); wait
+// 30 minutes (matching WORKING_MS) before showing the line, while sessions with a
+// process record still rely on the process check immediately (#1092).
+export const CODEX_MAY_BE_CLOSED_MS = 30 * 60_000
 
 // A waiting Codex block with a question that names no process and has been quiet
 // past CODEX_MAY_BE_CLOSED_MS (#1092). Its card stays in Needs you and only adds the

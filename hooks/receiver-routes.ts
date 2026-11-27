@@ -18,11 +18,11 @@ const fromRecord = (one: RecordShape): ReceiverRoutes => {
 // The routes the board knows, one per receiver record in hooks/. The adapters in scripts/ (the Codex owner
 // connectors, the Codex daemon receiver, the Codex desktop app receiver and the Antigravity stream) cannot be imported
 // here, so their routes are copied below, and a test pins each copy to the record it came from. Three Codex adapters are
-// live receivers: their entry is shared, and each note and line covers only the surfaces it names (the desktop app's idle
-// line is its own, `reopen`, #557). An agent not listed has no route: its card shows Copy.
+// live receivers: their entry is shared, and each note and line covers only the surfaces it names (the Codex
+// daemon's idle line is `afterWait`, #1814; the desktop app's idle line is `reopen`, #557). An agent not listed has no route: its card shows Copy.
 export const RECEIVER_ROUTES: readonly ReceiverRoutes[] = [
   fromRecord(claude), fromRecord(deepseek), fromRecord(antigravity), fromRecord(codex), fromRecord(cursor), fromRecord(muse), fromRecord(opencode),
-  { agent: 'codex', kind: 'live', routes: { idle: { line: 'now', record: 'docs/validation/2026-11-13-codex-cli-wake-live.md', surfaces: [SURFACE_IDS.codexDaemon, SURFACE_IDS.codexApp], surfaceRecords: { [SURFACE_IDS.codexApp]: 'docs/validation/2026-11-22-codex-app-reopen-live.md' }, surfaceLines: { [SURFACE_IDS.codexApp]: 'reopen' } }, working: { line: 'stepEnd', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } },
+  { agent: 'codex', kind: 'live', routes: { idle: { line: 'now', record: 'docs/validation/2026-11-13-codex-cli-wake-live.md', surfaces: [SURFACE_IDS.codexDaemon, SURFACE_IDS.codexApp], surfaceRecords: { [SURFACE_IDS.codexApp]: 'docs/validation/2026-11-22-codex-app-reopen-live.md' }, surfaceLines: { [SURFACE_IDS.codexDaemon]: 'afterWait', [SURFACE_IDS.codexApp]: 'reopen' } }, working: { line: 'stepEnd', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } },
   { agent: 'codex', kind: 'turn', routes: { idle: { line: 'none', record: null, surfaces: [] }, working: { line: 'now', record: 'docs/validation/2026-11-04-codex-cli-proxy-live.md', surfaces: [SURFACE_IDS.codexProxy] }, ended: { line: 'none', record: null, surfaces: [] } } },
   { agent: 'antigravity', kind: 'live', routes: { idle: { line: 'now', record: null, surfaces: [] }, working: { line: 'stepEnd', record: null, surfaces: [] }, ended: { line: 'none', record: null, surfaces: [] } } },
 ]

@@ -3600,7 +3600,7 @@ test('with explicit legacy opt-in a reply goes into a closed Grok session once, 
     }
     assert.equal(replies.length, 1, JSON.stringify(replies))
     assert.equal(replies[0].ok, true)
-    assert.equal(replies[0].note, 'Sent to Grok Build · Pick the cache. It replied: Redis it is; wiring it up now.')
+    assert.equal(replies[0].note, 'Sent. Reply: Redis it is; wiring it up now.')
     assert.equal((await rows()).find(row => row.key === key)?.isSending, false)
     const ran = JSON.parse(readFileSync(join(board.dir, 'grok-ran.json'), 'utf8'))
     assert.deepEqual(ran.args, ['-r', GROK_ID, '--single=About "Redis or Memcached?": Redis'])
@@ -3714,12 +3714,11 @@ test('a second press on the page for the first of two hand-kept tasks with the s
 
 // The page draws from the model's `view` (what the server groups by agent). A model written by hand, with
 // asks, groups and the shelves only, gets the same view the server would give it: every non-own item
-// belongs to Claude Code unless it names an agent, nothing has worked in the last 30 minutes, and the
-// person's own items are their own.
+// belongs to Claude Code unless it names an agent, and hand-kept items carry their writing AI if named.
 const viewed = model => {
   if (!model || model.view) return model
-  const agentOf = item => String(item.agent || 'claude').toLowerCase()
-  const ref = (kind, item, project) => ({ key: item.key, kind, agent: item.isOwn ? '' : agentOf(item), project: project ?? item.project ?? '', repo: project ?? item.project ?? '', at: 0 })
+  const agentOf = item => item.isOwn ? (item.agent ? String(item.agent).toLowerCase() : '') : String(item.agent || 'claude').toLowerCase()
+  const ref = (kind, item, project) => ({ key: item.key, kind, agent: agentOf(item), project: project ?? item.project ?? '', repo: project ?? item.project ?? '', at: 0 })
   const asks = (model.asks ?? []).map(item => ({ item, ref: ref('question', item) }))
   const older = [...(model.reminder ?? []), ...(model.older ?? [])].map(item => ({ item, ref: ref('question', item) }))
   const open = (model.groups ?? []).flatMap(group => group.rows.map(item => ({ item, ref: ref('task', item, group.project) })))
@@ -3731,10 +3730,9 @@ const viewed = model => {
     const [cards, rows, shelf, back, done] = [asks, open, stopped, older, finished].map(list => list.filter(one => pick(one.item)).map(one => one.ref))
     return { counts: { open: rows.length, needs: cards.length, stopped: shelf.length, done: done.length, older: back.length }, cards, open: rows, stopped: shelf, done, older: back }
   }
-  const ids = [...new Set([...asks, ...open, ...stopped, ...older, ...finished].filter(one => !one.item.isOwn).map(one => agentOf(one.item)))]
-  const agents = ids.map(id => ({ agent: id, name: id, icon: id, last: 0, isUnreadable: false, ...bucket(item => !item.isOwn && agentOf(item) === id) }))
-  const all = bucket(item => !item.isOwn)
-  const own = bucket(item => item.isOwn === true)
+  const ids = [...new Set([...asks, ...open, ...stopped, ...older, ...finished].map(one => agentOf(one.item)).filter(Boolean))]
+  const agents = ids.map(id => ({ agent: id, name: id, icon: id, last: 0, isUnreadable: false, ...bucket(item => agentOf(item) === id) }))
+  const all = bucket(() => true)
   const cards = asks.map(one => one.ref)
   return {
     ...model,
@@ -3743,7 +3741,7 @@ const viewed = model => {
       now: 0, n: cards.length, questions: cards.length, stuck: 0, versions: { board: '0.0.0', package: null }, agents,
       // The server lists the cards whose answer is on its way (sent, or queued) and not refused or timed out (#1296).
       needs: { n: cards.length, questions: cards.length, stuck: 0, cards, older: older.map(one => one.ref), handled: asks.filter(one => one.item.isSending === true && !(one.item.receipt && (one.item.receipt.status === 'rejected' || one.item.receipt.status === 'uncertain' && one.item.receipt.hasAccepted !== true && /TIMEOUT/.test(one.item.receipt.error || '')))).map(one => one.ref.key) },
-      working: [], all: { ...all, isHidden: agents.length < 2 }, own, projects: [],
+      working: [], all: { ...all, isHidden: agents.length < 2 }, projects: [],
     },
   }
 }
@@ -3928,6 +3926,9 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
   let clockNow = now === undefined ? Date.now() : now
   let scheduled, pollMs
   const delays = []
+  const timedOut = []
+  // A send to a connected session that gets no answer is tried again every 2 s (#1843); a test fires the next try.
+  const retries = []
   const windowEvents = {}
   const win = {
     confirm, isSecureContext: !!clipboard,
@@ -3957,6 +3958,9 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
       delays.push(delay)
       // Identify the shipped refresh callback, independently of its delay or motion timers.
       if (run.name === 'refresh') { scheduled = run; pollMs = delay }
+      // A press that gets no answer sets its own timer (#1830); a test fires it by name.
+      if (run.name === 'actTimedOut') timedOut.push(run)
+      if (run.name === 'retrySend') retries.push(run)
       return 1
     },
     clearTimeout: () => {},
@@ -4018,6 +4022,8 @@ const pageDom = async (html, first, { post, confirm, messaging, copyAllowed = fa
     active: () => document.activeElement,
     title: () => document.title,
     delays,
+    timePress: () => { timedOut.splice(0).forEach(run => run()) },
+    retrySend: () => { retries.splice(0).forEach(run => run()) },
     get pollMs() { return pollMs },
     resize: next => { win.innerWidth = next; windowEvents.resize?.() },
     leave: event => windowEvents.pagehide?.(event),
@@ -4198,12 +4204,13 @@ test('the serve page and the terminal board answer every action with a visible l
       idle: [], stopped: [], turns: [], recent: [{ project: 'Demo', title: 'Finished card', when: 'Just now' }],
     }
     const first = await pageDom(html, model)
-    const labels = first.buttons().map(button => button.textContent)
+    const firstButtons = first.buttons()
+    const labels = firstButtons.map(button => button.textContent)
     // A button inside a block that is not shown yet (the line after a copy, the box behind Write your own) is not pressed here.
     const isWaiting = node => { for (let one = node; one; one = one.parentNode) if (String(one.className ?? '').split(' ').includes('gone')) return true; return false }
-    const shown = first.buttons().map(button => !isWaiting(button))
+    const shown = firstButtons.map(button => !isWaiting(button))
     for (const [index, label] of labels.entries()) {
-      if (label === words.serveMore || !shown[index]) continue
+      if (label === words.serveMore || String(firstButtons[index]?.className ?? '').split(' ').includes('q-toggle') || !shown[index]) continue
       const dom = await pageDom(html, model, { post: async () => { throw new Error('synthetic offline') } })
       dom.boxes().forEach(box => { box.value = 'A synthetic reply' })
       const button = dom.buttons()[index]
@@ -4599,7 +4606,7 @@ test('every serve page action on every card kind from every agent answers with a
         } })
         // Copy again lives inside .state and only appears once something was copied; it is not an offered action.
         const afterLine = [runtime.s.serveMore, runtime.s.pgCopyAgain]
-        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent)).flatMap(button =>
+        const actionButtons = dom.buttons().filter(button => !afterLine.includes(button.textContent) && !String(button.className ?? '').split(' ').includes('q-toggle')).flatMap(button =>
           button.className === 'answer-send'
             ? pressWalk(pageCard(button)).filter(node => node.className === 'choice').map(choice => ({ button, choice }))
             : [{ button, choice: null }],
@@ -5481,6 +5488,114 @@ test('every press on a page whose server restarted with a new key shows the offl
   } finally { await board.close() }
 })
 
+// #1830: "Answered, hide" stayed at "Working…" with no result and no reason, in every language.
+for (const lang of ['en', 'zh-TW', 'zh-CN']) {
+  const hideCase = () => {
+    const ask = { key: 'hide-card', task: 'Synthetic task', project: 'Demo', text: 'Keep it, OK?', kind: 'confirm', answers: [], canTick: false, canHide: true, unhideKey: 'hidden:hide-card', command: null, reopen: null, link: null, send: 'copy', fp: 'before' }
+    const base = { counts: { waiting: 1, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [ask] }
+    const hidden = { ...base, counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [{ key: 'hidden:hide-card', task: 'Synthetic task', text: ask.text, project: 'Demo' }] }
+    return { ask, base, hidden }
+  }
+  test(`#1830 (${lang}): a hide the board never answers says why on the card instead of staying at Working…`, async () => {
+    const board = await page('', {}, ['--lang', lang])
+    try {
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+      const { ask, base } = hideCase()
+      const dom = await pageDom(html, base, { post: () => new Promise(() => {}) })
+      dom.buttons().find(button => button.textContent === words.answeredHide).click()
+      await dom.flush()
+      assert.equal(pageCardResults(dom, ask.key)[0].textContent, words.pressPending)
+      dom.timePress()
+      await dom.flush()
+      const line = pageCardResults(dom, ask.key)[0]
+      assert.equal(line.textContent, words.pressTimedOut)
+      assert.notEqual(words.pressTimedOut, undefined)
+      assert.match(line.className, /alert/)
+    } finally { await board.close() }
+  })
+  test(`#1830 (${lang}): a hide the board wrote leaves Needs you on the next draw and leaves no Working… behind`, async () => {
+    const board = await page('', {}, ['--lang', lang])
+    try {
+      const html = (await board.call('GET', `/?t=${board.token}`)).body
+      const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+      const { base, hidden } = hideCase()
+      const dom = await pageDom(html, base, { post: () => new Promise(() => {}) })
+      dom.buttons().find(button => button.textContent === words.answeredHide).click()
+      await dom.flush()
+      await dom.redraw(hidden)
+      assert.equal(pressWalk(dom.node('board')).filter(node => node.getAttribute('data-card-key') === 'hide-card').length, 0)
+      assert.ok(!dom.node('board').textContent.includes(words.pressPending), dom.node('board').textContent)
+      // The timer firing after the hidden draw adds no warning.
+      dom.timePress()
+      await dom.flush()
+      assert.ok(!dom.node('board').textContent.includes(words.pressTimedOut), dom.node('board').textContent)
+    } finally { await board.close() }
+  })
+}
+
+test('#1830: a hide that times out and is then written leaves no timed-out warning once the hidden shelf shows it', async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const ask = { key: 'hide-card', task: 'Synthetic task', project: 'Demo', text: 'Keep it, OK?', kind: 'confirm', answers: [], canTick: false, canHide: true, unhideKey: 'hidden:hide-card', command: null, reopen: null, link: null, send: 'copy', fp: 'before' }
+    const base = { counts: { waiting: 1, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [ask] }
+    const hidden = { ...base, counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [{ key: 'hidden:hide-card', task: 'Synthetic task', text: ask.text, project: 'Demo' }] }
+    const dom = await pageDom(html, base, { post: () => new Promise(() => {}) })
+    dom.buttons().find(button => button.textContent === words.answeredHide).click()
+    await dom.flush()
+    dom.timePress()
+    await dom.flush()
+    assert.equal(pageCardResults(dom, ask.key)[0].textContent, words.pressTimedOut)
+    await dom.redraw(hidden)
+    assert.ok(!dom.node('board').textContent.includes(words.pressTimedOut), dom.node('board').textContent)
+    assert.ok(!dom.node('board').textContent.includes(words.pressPending), dom.node('board').textContent)
+  } finally { await board.close() }
+})
+
+// #1786: the board's next draw can take the hidden card away before the hide's own answer comes back. The
+// answer is then drawn as a lost result, and it must carry Show again: the hidden shelf leaves its own
+// button out while that notice is up, so without it the question has no way back.
+test('#1786: a hide whose card is drawn away before its answer still offers Show again on the lost result', async () => {
+  const { servePage } = await sourceBoard()
+  const html = servePage(EN, 'synthetic')
+  const ask = { key: 'hide-race', task: 'Synthetic task', project: 'Demo', text: 'Blue or green?', kind: 'choose', answers: ['Blue', 'green'], canTick: false, canHide: true, unhideKey: 'hidden:hide-race', command: null, reopen: null, link: null, send: 'copy', fp: 'before' }
+  const base = { counts: { waiting: 1, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [ask] }
+  const hidden = { ...base, counts: { waiting: 0, active: 0, due: 0, today: 0 }, asks: [], hidden: [{ key: 'hidden:hide-race', project: 'Demo', agent: 'codex', task: 'Synthetic task', text: ask.text }] }
+  let answer
+  const answered = new Promise(done => { answer = done })
+  const calls = []
+  const dom = await pageDom(html, base, { post: async request => { calls.push(request.body); return request.body.type === 'hide' ? answered : { ok: true, json: async () => ({ ok: true, note: 'Shown again' }) } } })
+  dom.buttons().find(button => button.textContent === EN.answeredHide).click()
+  await dom.flush()
+  // The draw that shows the hide written comes first; the hide's answer only after it.
+  await dom.redraw(hidden)
+  answer({ ok: true, json: async () => ({ ok: true, note: 'Hidden: "Blue or green?"' }) })
+  await dom.settle()
+  const lost = pressWalk(dom.node('board')).filter(node => node.tag === 'article' && String(node.className || '').split(' ').includes('lost') && node.textContent.includes('Hidden:'))
+  assert.equal(lost.length, 1, dom.node('board').textContent)
+  const again = pressWalk(lost[0]).filter(node => node.tag === 'button' && node.textContent === EN.showAgain)
+  assert.equal(again.length, 1, 'the lost Hidden notice has its own Show again')
+  again[0].click()
+  await dom.settle()
+  assert.deepEqual(calls.map(body => ({ key: body.key, type: body.type })), [{ key: 'hide-race', type: 'hide' }, { key: 'hidden:hide-race', type: 'unhide' }])
+})
+
+test('#1830: a hide the board refuses says the reason on the card', async () => {
+  const board = await page()
+  try {
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
+    const ask = { key: 'refuse-card', task: 'Synthetic task', project: 'Demo', text: 'Keep it, OK?', kind: 'confirm', answers: [], canTick: false, canHide: true, unhideKey: 'hidden:refuse-card', command: null, reopen: null, link: null, send: 'copy', fp: 'before' }
+    const base = { counts: { waiting: 1, active: 0, due: 0, today: 0 }, groups: [], hidden: [], idle: [], stopped: [], turns: [], recent: [], asks: [ask] }
+    const dom = await pageDom(html, base, { post: async () => ({ ok: false, json: async () => ({ note: 'Could not save that it was answered.' }) }) })
+    dom.buttons().find(button => button.textContent === words.answeredHide).click()
+    await dom.settle()
+    assert.equal(pageCardResults(dom, ask.key)[0].textContent, 'Could not save that it was answered.')
+  } finally { await board.close() }
+})
+
 test('the page helper flush leaves a pending press available to resolve', async () => {
   const source = `${BOARD_SCRIPT}\nprocess.stdout.write(servePage(STRINGS.en, 'synthetic'))\n`
   const html = run('en', ['--chat'], {}, FILE, source)
@@ -5668,22 +5783,32 @@ test('a press that finds the board gone keeps the typed reply', async () => {
       dom.boxes()[0].value = draft
       dom.send().click()
       await dom.settle()
+      // A send to a connected session tries again every 2 s under the same id, for 30 s, before it says it cannot reach the board (#1843, B3.1, B4).
+      const tries = mode === 'connected' ? 15 : 1
+      if (mode === 'connected') {
+        assert.equal(dom.node('offline').textContent, '', mode)
+        for (let left = tries - 1; left > 0; left--) { dom.retrySend(); await dom.settle() }
+        assert.equal(dom.requests.length, tries)
+        assert.equal(new Set(dom.requests.map(one => one.body.id)).size, 1)
+        dom.retrySend()
+        await dom.settle()
+      }
       assert.equal(dom.boxes()[0].value, draft, mode)
       assert.equal(dom.node('note').textContent, '', mode)
       // The failed press also says so beside its own card, in words the page was given.
       const words = JSON.parse(html.match(/<script[^>]*id="words"[^>]*>([\s\S]*?)<\/script>/)[1])
       // A message that did not go carries Send again and Copy message under its line.
-      assert.ok(pageCardResults(dom, model.asks[0].key).some(node => node.textContent.startsWith(mode === 'connected' ? words.messagesFailed : words.serveOffline)), mode)
+      assert.ok(pageCardResults(dom, model.asks[0].key).some(node => node.textContent.startsWith(mode === 'connected' ? words.statusUnreachable : words.serveOffline)), mode)
       assert.ok(dom.node('offline').textContent.includes('agent-board'))
-      assert.equal(dom.requests.length, 1)
+      assert.equal(dom.requests.length, tries)
       isReachable = true
       await dom.redraw(model)
       await dom.settle()
       assert.equal(dom.boxes()[0].value, draft)
-      assert.equal(dom.requests.length, 1, 'recovery never replays the failed reply')
+      assert.equal(dom.requests.length, tries, 'recovery never replays the failed reply')
       dom.send().click()
       await dom.settle()
-      assert.equal(dom.requests.length, 2, 'an explicit retry is allowed')
+      assert.equal(dom.requests.length, tries + 1, 'an explicit retry is allowed')
     }
     for (const ok of [false, true]) {
       model.asks[0].send = 'send'
@@ -5693,6 +5818,58 @@ test('a press that finds the board gone keeps the typed reply', async () => {
       await dom.settle()
       assert.equal(dom.boxes()[0].value, ok ? '' : 'Only clear an accepted reply')
     }
+  } finally { await board.close() }
+})
+
+test('a typed answer stays when the same session and question get a new connection, and never moves to another session', async () => {
+  const board = await page(LIVE_QUESTION)
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const withDelivery = (id, turn, session) => ({
+      ...model,
+      asks: [{ ...model.asks[0], send: 'connected', session: session || model.asks[0].session, delivery: { id, turn, agent: 'grok' } }],
+    })
+    const dom = await pageDom(html, withDelivery('synthetic-connection-1', 'synthetic-turn-1'))
+    dom.boxes()[0].value = 'blue'
+    // The receiver went away and registered again: same session, same question, new connection id and turn.
+    await dom.redraw(withDelivery('synthetic-connection-2', 'synthetic-turn-2'))
+    assert.equal(dom.boxes()[0].value, 'blue', 'the same session and question keep the draft')
+    // The same title under another session starts an empty box, so the text cannot go to that session.
+    await dom.redraw(withDelivery('synthetic-connection-3', 'synthetic-turn-3', 'synthetic-other-session'))
+    assert.equal(dom.boxes()[0].value, '', 'another session never gets the draft')
+  } finally { await board.close() }
+})
+
+test('a send still pending when the receiver reconnects clears only the text it sent, and the next send uses the new connection', async () => {
+  const board = await page(LIVE_QUESTION)
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const withDelivery = (id, turn) => ({
+      ...model,
+      asks: [{ ...model.asks[0], send: 'connected', delivery: { id, turn, agent: 'grok' } }],
+    })
+    let answer
+    const gate = new Promise(resolve => { answer = resolve })
+    const dom = await pageDom(html, withDelivery('synthetic-connection-1', 'synthetic-turn-1'), {
+      post: async () => { await gate; return { ok: true, json: async () => ({ ok: true, note: 'Synthetic queued' }) } },
+    })
+    dom.boxes()[0].value = 'blue'
+    dom.send().click()
+    await dom.flush()
+    await dom.redraw(withDelivery('synthetic-connection-2', 'synthetic-turn-2'))
+    assert.equal(dom.boxes()[0].value, 'blue')
+    dom.boxes()[0].value = 'green'
+    answer()
+    await dom.settle()
+    assert.equal(dom.boxes()[0].value, 'green', 'words typed after the press are not cleared by the earlier send')
+    // The kept words go to the connection drawn now, not the one the box had before.
+    dom.send().click()
+    await dom.settle()
+    assert.equal(dom.requests.at(-1).body.connection, 'synthetic-connection-2')
+    assert.equal(dom.requests.at(-1).body.turn, 'synthetic-turn-2')
+    assert.equal(dom.requests.at(-1).body.text, 'green')
   } finally { await board.close() }
 })
 
@@ -5753,7 +5930,12 @@ test('the page keeps actionable progress delays without connection inventory or 
         ['ACK ' + id + 'x', 'ACK ' + id + 'x'],
         ['Review ready.', 'Review ready.'],
       ]) {
-        const receipt = { id, status: 'acknowledged', reply, error: '' }
+        const STRINGS = { en: EN, 'zh-TW': ZH_TW, 'zh-CN': ZH_CN }
+        const { rowReceipt } = await sourceBoard()
+        const words = STRINGS[lang]
+        const { receipt } = rowReceipt('codex', 's1', [{ id, to: 'codex:s1', target: 'synthetic-connection', turn: 'turn-1', from: 'board', text: '', origin: 'local', status: 'acknowledged', reply, error: '', hops: 0, updated: 1, claimed: 1 }], 1, words)
+        const read = words.statusRead(expected.replace(/\s+/g, ' ').trim())
+        assert.equal(receipt.shown.line, read)
         await dom.redraw({
           ...model,
           asks: [{ key: 'question', project: 'Synthetic', agent: 'codex', text: 'Review the route?', answers: [], canTick: true, receipt }],
@@ -5761,11 +5943,11 @@ test('the page keeps actionable progress delays without connection inventory or 
         })
         const lines = []
         const collect = node => {
-          if (node.tag === 'p' && node.textContent.startsWith(s.messagesAcknowledged)) lines.push(node.textContent)
+          if (node.tag === 'p' && String(node.className).split(' ').includes('receipt')) lines.push(node.textContent)
           node.childNodes.forEach(collect)
         }
         collect(dom.node('board'))
-        assert.deepEqual(lines, Array(2).fill(s.messagesAcknowledged + (expected ? ' · ' + expected : '')))
+        assert.deepEqual(lines, Array(2).fill(read))
         if (!expected.includes(id)) assert.ok(!dom.node('board').textContent.includes(id), dom.node('board').textContent)
         if (reply.startsWith('ACK ' + id) && !expected.startsWith('ACK ')) assert.ok(!dom.node('board').textContent.includes('ACK'), dom.node('board').textContent)
         assert.equal(receipt.reply, reply)
@@ -6936,7 +7118,9 @@ test('agent-board stop with a Send to Codex switch stops this file\'s page whate
 test('stop says the board page did not stop and exits 1 when the page refuses to close', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const requests = []
-  const built = String(statSync(board.script).mtimeMs)
+  const rawScript = readFileSync(board.script, 'utf8')
+  const cut = rawScript.indexOf('\n')
+  const built = createHash('sha256').update((rawScript.startsWith('globalThis.AGENT_BOARD = ') ? (cut >= 0 ? rawScript.slice(cut + 1) : '') : rawScript).replace(/\r\n/g, '\n')).digest('hex')
   const fake = createServer((req, res) => {
     requests.push([req.method, req.url, req.headers['x-board-token']])
     if (req.url === '/api/ping') {
@@ -8751,10 +8935,9 @@ const timer = setInterval(() => {
     board,
     ran,
     started: () => until(() => ran().length > 0),
-    // A new copy of the script, as after an update: another build time, so --serve means to replace the page.
+    // A new copy of the script, as after an update: different release bytes, so --serve means to replace the page.
     update: () => {
-      const { atime, mtimeMs } = statSync(script)
-      utimesSync(script, atime, new Date(mtimeMs + 5000))
+      writeFileSync(script, `${readFileSync(script, 'utf8')}\n// synthetic-newer-release\n`)
     },
     serve: () => new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', '--allow-resume'], { env, encoding: 'utf8', timeout: 30_000 }, (error, out) => (error ? fail(error) : done(out)))),
     // Lets the reply go, waits until the page has none in flight, and closes it if it is still there.
@@ -8874,6 +9057,151 @@ test('an answer key the page refuses shows the page note, sends nothing and neve
   } finally {
     writeFileSync(board.served, served)
     await new Promise(done => front.close(done))
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+// A page in front of the real one loses the first answer press's answer after the board stored it: 'drop' closes the
+// connection before any answer, 'cut' sends the answer's head and half its body, then closes (#1843, B3.1).
+const terminalLostAnswer = async lose => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, ROUTES_ENV, ['--messages-dir', messages])
+  // A page in front of the real one: the first answer press reaches the board, and its answer is lost on the way back.
+  const ids = []
+  const forward = (req, res, body, isLost) => {
+    const back = request({ host: '127.0.0.1', port: board.port, method: req.method, path: req.url, headers: { ...req.headers, host: `127.0.0.1:${board.port}` }, agent: false }, answer => {
+      if (isLost && lose === 'drop') return answer.resume().on('end', () => req.socket.destroy())
+      if (isLost) {
+        const parts = []
+        return answer.on('data', part => parts.push(part)).on('end', () => {
+          const whole = Buffer.concat(parts)
+          res.writeHead(answer.statusCode ?? 502, { ...answer.headers, 'content-length': String(whole.length) })
+          res.write(whole.subarray(0, Math.floor(whole.length / 2)), () => setTimeout(() => req.socket.destroy(), 50))
+        })
+      }
+      res.writeHead(answer.statusCode ?? 502, answer.headers)
+      answer.pipe(res)
+    })
+    back.end(body)
+  }
+  const front = createServer((req, res) => {
+    const chunks = []
+    req.on('data', chunk => chunks.push(chunk)).on('end', () => {
+      const body = Buffer.concat(chunks)
+      if (req.url === '/api/act') ids.push(JSON.parse(body.toString('utf8')).id)
+      forward(req, res, body, req.url === '/api/act' && ids.length === 1)
+    })
+  })
+  await new Promise(done => front.listen(0, '127.0.0.1', done))
+  const served = readFileSync(board.served, 'utf8')
+  const address = JSON.parse(served)
+  const url = new URL(address.url)
+  url.port = String(front.address().port)
+  writeFileSync(board.served, JSON.stringify({ ...address, url: url.href, ...('port' in address ? { port: Number(url.port) } : {}) }))
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  // Not spawnSync: the page in front answers from this process.
+  const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
+  try {
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
+    // The same key twice: the first answer gets no reply, the second is the same message again.
+    const out = await play('y y')
+    assert.equal(ids.length, 2, out)
+    assert.equal(ids[1], ids[0])
+    assert.ok(out.includes('You answered “Yes, go ahead”.'), out)
+    const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
+    assert.deepEqual(polled.messages.map(message => message.text), ['Yes, go ahead'])
+  } finally {
+    writeFileSync(board.served, served)
+    await new Promise(done => front.close(done))
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+}
+
+test('the terminal board resends a lost answer under the same id', { timeout: 60_000 }, () => terminalLostAnswer('drop'))
+
+test("the terminal board keeps the answer's id when its reply is cut off", { timeout: 60_000 }, () => terminalLostAnswer('cut'))
+
+test('an answer key whose page cannot be reached says it cannot reach the board after its one try, and never that it answered', { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, ROUTES_ENV, ['--messages-dir', messages])
+  // A page in front of the real one that drops every press before it reaches the board.
+  let presses = 0
+  const front = createServer((req, res) => {
+    if (req.url === '/api/act') {
+      presses += 1
+      return req.resume().on('end', () => req.socket.destroy())
+    }
+    const back = request({ host: '127.0.0.1', port: board.port, method: req.method, path: req.url, headers: { ...req.headers, host: `127.0.0.1:${board.port}` }, agent: false }, answer => {
+      res.writeHead(answer.statusCode ?? 502, answer.headers)
+      answer.pipe(res)
+    })
+    req.pipe(back)
+  })
+  await new Promise(done => front.listen(0, '127.0.0.1', done))
+  const served = readFileSync(board.served, 'utf8')
+  const address = JSON.parse(served)
+  const url = new URL(address.url)
+  url.port = String(front.address().port)
+  writeFileSync(board.served, JSON.stringify({ ...address, url: url.href, ...('port' in address ? { port: Number(url.port) } : {}) }))
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  // Not spawnSync: the page in front answers from this process.
+  const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
+  try {
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
+    const out = await play('y')
+    // One try, then the owner's words for it (#1843, B4 answer 3): the board was not reached, and the answer is kept.
+    assert.equal(presses, 1, out)
+    assert.ok(out.includes(EN.statusUnreachable), out)
+    assert.ok(!out.includes('You answered'), out)
+    const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
+    assert.deepEqual(polled.messages, [])
+  } finally {
+    writeFileSync(board.served, served)
+    await new Promise(done => front.close(done))
+    await board.close()
+    rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+  }
+})
+
+test("a terminal answer to a question whose page answer is still open is refused with the first one's status", { timeout: 60_000 }, async () => {
+  const messages = mkdtempSync(join(tmpdir(), 'board-keys-'))
+  const board = await page(`
+## Demo
+<!-- auto session=e5f6a7b8 agent=codex state=waiting updated=RECENT -->
+### Ship the docs
+- [?] Publish them, OK?
+<!-- /auto session=e5f6a7b8 -->
+`, ROUTES_ENV, ['--messages-dir', messages])
+  const env = { ...process.env, CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run') }
+  const play = keys => new Promise(done => execFile(process.execPath, [join(board.dir, 'agent-board.mjs'), '--keys', keys], { env, encoding: 'utf8', timeout: 30_000 }, (_, stdout) => done(stdout)))
+  try {
+    const registered = (await board.call('POST', '/api/messages/register', { body: { agent: 'codex', session: 'e5f6a7b8', surface: 'CLI', turn: 'turn1' } })).json()
+    const ask = (await board.call('GET', '/api/board')).json().model.asks[0]
+    const press = { key: ask.key, type: 'message', id: 'AB-PAGE-1', text: 'Yes, from the page', session: ask.session, asked: ask.text, fp: ask.fp, connection: ask.delivery.id, turn: ask.delivery.turn }
+    assert.equal((await board.call('POST', '/api/act', { body: press })).status, 200)
+    // The receiver takes the page's answer and has said nothing of it yet (#1843, B3.2).
+    const polled = (await board.call('POST', '/api/messages/poll', { body: { connection: registered.id, secret: registered.secret, turn: 'turn1', receive: true } })).json()
+    assert.deepEqual(polled.messages.map(message => message.id), ['AB-PAGE-1'])
+    const out = await play('y')
+    // The refusal says another answer went first, with that answer's own status line (#1843, B4).
+    assert.ok(out.includes(EN.statusAnswerOpen(EN.statusQueued(EN.statusWhenNow))), out)
+    const stored = (await board.call('GET', '/api/board')).json().messaging.messages
+    assert.deepEqual(stored.map(one => one.id), ['AB-PAGE-1'])
+  } finally {
     await board.close()
     rmSync(messages, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
   }
@@ -10878,21 +11206,19 @@ test('the size warning is one sentence with one Clean up button and its numbers 
           return { ok: response.status === 200, json: async () => response.json() }
         },
       })
-      const paragraphs = dom.node('board').childNodes.filter(node => node.tag === 'p')
-      assert.equal(paragraphs.filter(node => node.textContent === s.boardLarge).length, 1)
-      const warning = paragraphs.find(node => node.textContent === s.boardLarge)
-      // The numbers sit in the quiet details line of the notices block, which comes after the warning.
-      const notices = dom.node('board').childNodes.find(node => node.className === 'notices')
-      const details = pressWalk(notices).find(node => node.tag === 'p' && node.textContent === model.details)
-      assert.ok(details && details.className.includes('t-quiet'))
-      assert.ok(dom.node('board').childNodes.indexOf(notices) > dom.node('board').childNodes.indexOf(warning))
-      assert.doesNotMatch(warning.textContent, /\d/)
-      const buttons = dom.buttons().filter(button => button.textContent === s.cleanUp)
+      const boardText = dom.node('board').textContent
+      assert.ok(!boardText.includes(s.boardLarge))
+      assert.ok(!boardText.includes(model.details))
+      const storage = dom.node('settings-storage')
+      const storageActs = dom.node('settings-storage-acts')
+      assert.equal(storage.hidden, false)
+      assert.equal(dom.node('settings-storage-line').textContent, model.details)
+      const buttons = pressWalk(storageActs).filter(node => node.tag === 'button' && node.textContent === s.cleanUp)
       assert.equal(buttons.length, 1)
       buttons[0].click()
       await dom.settle()
       assert.deepEqual(dom.requests.map(request => request.path), ['/api/clean'])
-      assert.ok(dom.node('board').textContent.includes(s.tidyMoved(3)))
+      assert.ok(storageActs.textContent.includes(s.tidyMoved(3)))
       assert.equal(readFileSync(board.path, 'utf8'), source.replace('### Finished one\n- [x] Last step\n### Finished two\n- [x] Last step\n', ''))
       const archive = readFileSync(join(board.dir, 'progress-archive-2026-10.md'), 'utf8')
       assert.ok(archive.includes('### Finished agent block'))
@@ -10933,11 +11259,13 @@ test('Clean up archives the finished hand-kept tasks it counted and nothing open
           return { ok: response.status === 200, json: async () => response.json() }
         },
       })
-      assert.equal(dom.buttons().filter(button => button.textContent === s.cleanUp).length, 1)
-      dom.buttons().find(button => button.textContent === s.cleanUp).click()
+      const storageActs = dom.node('settings-storage-acts')
+      const cleanButtons = () => pressWalk(storageActs).filter(node => node.tag === 'button' && node.textContent === s.cleanUp)
+      assert.equal(cleanButtons().length, 1)
+      cleanButtons()[0].click()
       await dom.settle()
       assert.deepEqual(dom.requests.map(request => request.path), ['/api/clean'])
-      assert.ok(dom.node('board').textContent.includes(s.tidyMoved(3)))
+      assert.ok(storageActs.textContent.includes(s.tidyMoved(3)))
       assert.equal(readFileSync(board.path, 'utf8'), `## Synthetic\n${remaining}`)
       const archive = readFileSync(join(board.dir, 'progress-archive-2026-10.md'), 'utf8')
       const done = new Date(TIDY_NOW - 4 * day)
@@ -10948,9 +11276,9 @@ test('Clean up archives the finished hand-kept tasks it counted and nothing open
       assert.ok(!model.details.includes(s.canArchive(1)) && !model.details.includes(s.canArchive(2)), model.details)
       const snapshot = () => Object.fromEntries(readdirSync(board.dir).filter(name => statSync(join(board.dir, name)).isFile()).map(name => [name, readFileSync(join(board.dir, name))]))
       const before = snapshot()
-      dom.buttons().find(button => button.textContent === s.cleanUp).click()
+      cleanButtons()[0].click()
       await dom.settle()
-      assert.ok(dom.node('board').textContent.includes(s.tidyScheduledNothing))
+      assert.ok(storageActs.textContent.includes(s.tidyScheduledNothing))
       assert.deepEqual(snapshot(), before)
     } finally { await board.close() }
   }
@@ -11008,6 +11336,48 @@ test('a small page offers Clean up for its archive count and keeps the result af
     assert.equal(model.details, undefined)
     assert.equal(dom.buttons().filter(button => button.textContent === EN.cleanUp).length, 0)
     assert.ok(dom.node('board').textContent.includes(EN.tidyMoved(2)))
+  } finally { await board.close() }
+})
+
+test('Settings cleanup keeps button focus across redraws and keeps its result when crossing below the size limit', { timeout: 15_000 }, async () => {
+  const { seen } = largeManualBoard()
+  const bigFinished = `## Synthetic\n### Finished one\n> Context: ${'synthetic '.repeat(60_000)}\n- [x] Last step\n### Finished two\n- [x] Last step\n### Still open\n- [ ] Next step\n`
+  const board = await page('', {}, [], TIDY_NOW)
+  try {
+    writeFileSync(board.path, bigFinished)
+    writeFileSync(join(board.dir, 'progress-seen.json'), seen)
+    let model = (await board.call('GET', '/api/board')).json().model
+    assert.equal(model.isLarge, true)
+    assert.equal(model.isCleanable, true)
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const dom = await pageDom(html, model, {
+      currentModel: () => model,
+      post: async ({ path, body }) => {
+        if (path !== '/api/clean') return { ok: true, json: async () => ({ ok: true, agents: [] }) }
+        const response = await board.call('POST', path, { body })
+        model = (await board.call('GET', '/api/board')).json().model
+        return { ok: response.status === 200, json: async () => response.json() }
+      },
+    })
+    dom.node('settings-toggle').click()
+    const storageActs = dom.node('settings-storage-acts')
+    const button = pressWalk(storageActs).find(node => node.tag === 'button' && node.textContent === EN.cleanUp)
+    assert.ok(button)
+    button.focus()
+    assert.equal(dom.active(), button)
+    await dom.redraw({ ...model })
+    assert.equal(dom.active(), button, 'Clean up button keeps focus across board redraws')
+    const sameButton = pressWalk(storageActs).find(node => node.tag === 'button' && node.textContent === EN.cleanUp)
+    assert.equal(sameButton, button)
+
+    button.click()
+    await dom.settle()
+    assert.equal(model.isLarge, undefined)
+    assert.equal(dom.node('settings-storage').hidden, false, 'Settings keeps cleanup result visible after crossing below size limit')
+    assert.ok(storageActs.textContent.includes(EN.tidyMoved(2)))
+    assert.ok(!dom.node('board').textContent.includes(EN.tidyMoved(2)))
+    dom.node('settings-close').click()
+    assert.equal(dom.node('settings-storage').hidden, true)
   } finally { await board.close() }
 })
 
@@ -11589,18 +11959,19 @@ const isPageVisible = node => {
 const cardActionNodes = card => pressWalk(card).filter(node =>
   (node.tag === 'button' || node.tag === 'a') && node.getAttribute('data-nav') === null && ['answers', 'acts'].includes(node.parentNode?.className),
 )
-const cardMore = card => pressWalk(card).filter(node => node.tag === 'button' && node.textContent === EN.serveMore)
+const cardMore = card => pressWalk(card).filter(node => node.tag === 'button' && node.className === 'q-toggle')
 
 test('the page names each agent by its brand name on questions, older questions, the hidden shelf and the agent row', async () => {
   for (const lang of ['en', 'zh-TW', 'zh-CN']) {
     const html = await sourcePage(lang)
     for (const [agent, name] of Object.entries(EN.agentNames)) {
       const dom = await pageDom(html, cardsModel(agent))
-      const whoOf = key => pressWalk(cardWithKey(dom, key)).find(node => node.className === 'who').textContent
-      assert.equal(whoOf('ask'), name)
-      assert.equal(whoOf('retained'), name)
-      assert.equal(whoOf('reminder'), name)
-      assert.equal(pressWalk(cardWithKey(dom, 'hidden')).find(node => node.className === 'c-meta').textContent, `Demo · ${name} › Hidden plan`)
+      const markTitleOf = key => pressWalk(cardRoot(cardWithKey(dom, key))).find(node => node.className?.startsWith('ag '))?.getAttribute('title')
+      assert.equal(markTitleOf('ask'), name)
+      assert.equal(markTitleOf('retained'), name)
+      assert.equal(markTitleOf('reminder'), name)
+      assert.equal(pressWalk(cardWithKey(dom, 'hidden')).find(node => node.className?.startsWith('ag '))?.getAttribute('title'), name)
+      assert.equal(pressWalk(cardWithKey(dom, 'hidden')).find(node => node.className === 'c-meta').childNodes.find(node => !String(node.className).includes('ag')).textContent, 'Demo › Hidden plan')
       const chip = dom.node('chips').childNodes.find(node => node.getAttribute('data-agent') === agent)
       assert.ok(chip, `${lang}: ${name}`)
       assert.ok(chip.getAttribute('title').startsWith(name), chip.getAttribute('title'))
@@ -11612,16 +11983,30 @@ test('the page names each agent by its brand name on questions, older questions,
   }
 })
 
-test('a Claude Code card says Claude Code and a hand-kept task names no agent', async () => {
+test('a Claude Code card says Claude Code, a hand-kept card shows a round check and its writing AI mark with no 你的待辦 group', async () => {
   const model = cardsModel('')
-  model.asks.push({ ...model.asks[0], key: 'own-ask', task: 'My checklist', isOwn: true, canTick: true, answers: [] })
-  model.groups[0].rows.push({ ...model.groups[0].rows[0], key: 'own-row', title: 'My task', isOwn: true })
+  model.asks.push({ ...model.asks[0], key: 'own-ask', project: 'Home', task: 'My checklist', text: 'Check the valve', agent: '', isOwn: true, canTick: true, tickFp: 'fp-own-ask', fileLine: 12, answers: [] })
+  model.asks.push({ ...model.asks[0], key: 'own-codex-ask', project: 'reservoir-paper', task: 'Paper sync', text: 'Reconnect the board', agent: 'codex', isOwn: true, canTick: true, tickFp: 'fp-codex-ask', fileLine: 25, answers: [] })
+  model.groups[0].rows.push({ ...model.groups[0].rows[0], key: 'own-row', title: 'My task', agent: '', isOwn: true })
   const dom = await pageDom(await sourcePage(), model)
-  const whoOf = key => pressWalk(cardWithKey(dom, key)).find(node => node.className === 'who').textContent
-  assert.equal(whoOf('ask'), 'Claude Code')
-  assert.equal(whoOf('own-ask'), EN.pgOwnTodo)
-  assert.ok(!cardRoot(cardWithKey(dom, 'own-ask')).textContent.includes('Claude Code'))
-  // A row carries its agent's mark, and a hand-kept one the person's own.
+  const markTitleOf = key => pressWalk(cardRoot(cardWithKey(dom, key))).find(node => node.className?.startsWith('ag '))?.getAttribute('title')
+  assert.equal(markTitleOf('ask'), 'Claude Code')
+  assert.equal(pressWalk(cardRoot(cardWithKey(dom, 'ask'))).some(node => node.className === 'who'), false)
+  const ownCard = cardRoot(cardWithKey(dom, 'own-ask'))
+  assert.ok(!ownCard.textContent.includes('Claude Code'))
+  assert.ok(!ownCard.textContent.includes('Your own') && !ownCard.textContent.includes('你的待辦'))
+  assert.equal(pressWalk(ownCard).filter(node => node.className === 'chk').length, 1)
+  const codexOwnCard = cardRoot(cardWithKey(dom, 'own-codex-ask'))
+  const codexCheck = pressWalk(codexOwnCard).find(node => node.className === 'chk')
+  assert.ok(codexCheck)
+  const codexBody = pressWalk(codexOwnCard).find(node => node.className === 'c-body')
+  assert.equal(codexBody.childNodes[0].className, 'q-toggle')
+  assert.equal(codexBody.childNodes[1].className, 'c-line2')
+  assert.ok(pressWalk(codexBody.childNodes[1]).some(node => String(node.className).includes('ag-codex')))
+  codexCheck.click()
+  await dom.flush()
+  assert.ok(dom.requests.some(req => req.body.type === 'tick' && req.body.key === 'own-codex-ask' && req.body.line === 25))
+  // A row carries its agent's mark, and an anonymous hand-kept one the person's own.
   const rowMark = key => pressWalk(cardRoot(cardWithKey(dom, key))).find(node => node.className?.startsWith('ag ')).className
   assert.equal(rowMark('row'), 'ag ag-claude-code')
   assert.equal(rowMark('own-row'), 'ag ag-own')
@@ -11629,7 +12014,18 @@ test('a Claude Code card says Claude Code and a hand-kept task names no agent', 
   assert.ok(!rowText('own-row').includes('Claude Code'))
   const chips = dom.node('chips').childNodes.map(node => [node.getAttribute('data-agent'), pressWalk(node).find(one => one.className === 'c-name').textContent])
   assert.ok(chips.some(([id, name]) => id === 'claude' && name.startsWith('Claude Code')), JSON.stringify(chips))
-  assert.ok(chips.some(([id, name]) => id === 'own' && name === EN.pgOwn), JSON.stringify(chips))
+  assert.ok(!chips.some(([id]) => id === 'own'), JSON.stringify(chips))
+  assert.ok(!dom.node('side-agents').childNodes.some(node => node.getAttribute('data-agent') === 'own'))
+  const hiddenModel = cardsModel('')
+  hiddenModel.hidden = [
+    { key: 'hid-claude', project: 'demo', agent: '', task: 'Claude task', text: 'Hidden Claude question?' },
+    { key: 'hid-own', project: 'Home', agent: '', isOwn: true, task: 'Own task', text: 'Hidden own item' },
+  ]
+  const hiddenDom = await pageDom(await sourcePage(), hiddenModel)
+  const hiddenNodes = pressWalk(hiddenDom.node('board')).filter(node => node.className === 'hid')
+  const hiddenLines = hiddenNodes.map(node => node.textContent)
+  assert.ok(hiddenNodes.some(node => node.textContent.includes('Hidden Claude question?') && pressWalk(node).some(one => String(one.className).includes('ag-claude-code') && one.getAttribute('title') === 'Claude Code')), JSON.stringify(hiddenLines))
+  assert.ok(hiddenNodes.some(node => node.textContent.includes('Hidden own item') && !node.textContent.includes('Claude Code') && !node.textContent.includes('Your own') && pressWalk(node).some(one => String(one.className).includes('ag-own'))), JSON.stringify(hiddenLines))
 })
 
 test('an agent without a brand name keeps its own name', async () => {
@@ -11638,15 +12034,15 @@ test('an agent without a brand name keeps its own name', async () => {
   for (const agent of ['My-agent', 'constructor', 'toString']) {
     const shown = agent.toLowerCase()
     const dom = await pageDom(html, cardsModel(agent))
-    assert.equal(pressWalk(cardWithKey(dom, 'ask')).find(node => node.className === 'who').textContent, shown)
+    const mark = pressWalk(cardRoot(cardWithKey(dom, 'ask'))).find(node => node.className === 'ag ag-other')
+    assert.equal(mark.getAttribute('title'), shown)
     const chip = dom.node('chips').childNodes.find(node => node.getAttribute('data-agent') === shown)
     assert.ok(chip, shown)
     assert.ok(pressWalk(chip).find(node => node.className === 'c-name').textContent.startsWith(shown))
-    const mark = pressWalk(cardRoot(cardWithKey(dom, 'ask'))).find(node => node.className === 'ag ag-other')
     assert.equal(mark.textContent, shown[0].toUpperCase())
   }
   const dom = await pageDom(html, cardsModel('CODEX'))
-  assert.equal(pressWalk(cardWithKey(dom, 'ask')).find(node => node.className === 'who').textContent, 'Codex')
+  assert.equal(pressWalk(cardRoot(cardWithKey(dom, 'ask'))).find(node => node.className?.startsWith('ag '))?.getAttribute('title'), 'Codex')
 })
 
 test("every card kind on the page carries its agent's mark", async () => {
@@ -11656,10 +12052,10 @@ test("every card kind on the page carries its agent's mark", async () => {
     const root = cardRoot(cardWithKey(dom, key))
     assert.equal(pressWalk(root).filter(node => node.className === 'ag ag-codex').length, 1, key)
   }
-  // A line on the hidden shelf has no mark; it names its agent in words.
+  // A line on the hidden shelf carries its agent's mark and keeps its visible meta vendor-free.
   const hidden = cardWithKey(dom, 'hidden')
-  assert.equal(pressWalk(hidden).filter(node => node.className?.startsWith('ag')).length, 0)
-  assert.ok(pressWalk(hidden).find(node => node.className === 'c-meta').textContent.includes('Codex'))
+  assert.equal(pressWalk(hidden).filter(node => String(node.className).startsWith('ag ag-codex')).length, 1)
+  assert.equal(pressWalk(hidden).find(node => node.className === 'c-meta').textContent.trim(), 'Demo › Hidden plan')
 })
 
 test('a question card puts choices before its copy button and the hide button last', async () => {
@@ -11671,12 +12067,37 @@ test('a question card puts choices before its copy button and the hide button la
   assert.deepEqual(answers.childNodes[0].childNodes.slice(0, 2).map(node => node.textContent), ['Yes', 'No'])
   assert.equal(answers.childNodes.at(-1).getAttribute('aria-label'), EN.pgCopyChoice)
   // The box for the person's own words comes after the answers, and the line after a copy last.
-  const kinds = card.childNodes.map(node => pressWalk(node).find(one => ['answers', 'composer', 'state'].includes(one.className))?.className)
-  assert.deepEqual(kinds.filter(Boolean), ['answers', 'composer', 'state'])
+  const kinds = pressWalk(card).filter(one => ['answers', 'composer', 'state'].includes(one.className)).map(one => one.className)
+  assert.deepEqual(kinds, ['answers', 'composer', 'state'])
   // A task row opens on its message box, then its buttons: the resume command, Archive and Confirm done.
   const row = cardWithKey(dom, 'row')
   assert.ok(row.childNodes.findIndex(node => node.className === 'composer') < row.childNodes.findIndex(node => node.className === 'acts'))
   assert.deepEqual(cardActionNodes(row).map(node => node.textContent), [EN.serveCopyResume, EN.serveArchive, EN.confirmDone])
+})
+
+test('a "#" followed by a number stays as written in card text, notes, folded steps, and current-step lines (#1836)', async () => {
+  const stepText = '等 Alex 決定：W48#1–#4、W47#1 撤回、W47#2/#3'
+  const base = cardsModel('codex')
+  base.asks[0] = { ...base.asks[0], text: stepText, note: stepText, noteLine: stepText }
+  base.groups[0].rows[0] = {
+    ...base.groups[0].rows[0],
+    at: Date.now(),
+    next: stepText,
+    steps: [{ text: stepText, note: '', status: 'todo', isCurrent: true, line: stepText }],
+  }
+  const model = viewed(base)
+  model.view.working = model.view.all.open
+  const dom = await pageDom(await sourcePage(), model)
+  const askCard = cardWithKey(dom, 'ask')
+  const question = pressWalk(askCard).find(node => node.className === 'q')
+  const note = pressWalk(askCard).find(node => String(node.className).includes('note'))
+  assert.equal(question.textContent, stepText)
+  assert.ok(note.textContent.includes(stepText), note.textContent)
+  const row = cardRoot(cardWithKey(dom, 'row'))
+  const stepNode = pressWalk(row).find(node => String(node.className).includes('steps'))
+  const metaNode = pressWalk(row).find(node => String(node.className).includes('r-meta'))
+  assert.ok(stepNode.textContent.includes(stepText), stepNode.textContent)
+  assert.ok(metaNode.textContent.includes(stepText), metaNode.textContent)
 })
 
 test('each choice button and each listed native option shows its choice as it is sent, so two choices never read the same (#1629)', async () => {
@@ -11691,23 +12112,23 @@ test('each choice button and each listed native option shows its choice as it is
   assert.deepEqual(listed.childNodes.map(node => node.textContent), answers)
 })
 
-test('a card with more than three actions shows three and the rest behind More', async () => {
+test('a card with more than three actions shows two choices plus Copy/Send and the rest when opened', async () => {
   const model = cardsModel()
   model.asks[0] = { ...model.asks[0], answers: ['Yes', 'No', 'Maybe'] }
   const dom = await pageDom(await sourcePage(), model)
   const card = cardWithKey(dom, 'ask')
   const actions = cardActionNodes(card)
-  // Three answers show; the command, the link, the resume command and Already answered, hide wait behind More.
+  // Two choices + Copy choice show on line 2 (at most 3 controls); remaining choices, command, link, resume and hide wait behind the fold.
   assert.deepEqual(actions.filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
-  assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No', 'Maybe'])
+  assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No'])
   const more = cardMore(card)
   assert.equal(more.length, 1)
   assert.equal(more[0].getAttribute('aria-expanded'), 'false')
-  const panel = pressWalk(card).find(node => node.className === 'more')
+  const panel = pressWalk(card).find(node => node.className?.split(' ').includes('card-fold'))
   assert.ok(panel)
   assert.deepEqual(actions.filter(node => !isPageVisible(node)).map(node => node.textContent), [EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
   assert.ok(actions.filter(node => !isPageVisible(node)).every(node => pressWalk(panel).includes(node)))
-  // A task row lists all its buttons and has no More.
+  // A task row lists all its buttons and has no card toggle.
   assert.ok(cardMore(cardWithKey(dom, 'row')).length === 0)
   assert.ok(cardActionNodes(cardWithKey(dom, 'row')).length > 0)
 })
@@ -11772,10 +12193,9 @@ test('a card with nothing behind More shows no More button', async () => {
     model.groups[0].rows[0] = { ...model.groups[0].rows[0], resume: null, canConfirm: canHide }
     const dom = await pageDom(html, model)
     const card = cardWithKey(dom, 'ask')
-    // Already answered, hide alone still goes behind More.
-    assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice').map(node => node.textContent), ['Yes', 'No'])
+    assert.deepEqual(pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent), ['Yes', 'No'])
     assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
-    assert.equal(cardMore(card).length, canHide ? 1 : 0)
+    assert.equal(cardMore(card).length, 1)
     assert.equal(cardActionNodes(card).length, canHide ? 2 : 1)
     const row = cardWithKey(dom, 'row')
     assert.equal(cardActionNodes(row).length, canHide ? 2 : 1)
@@ -11784,13 +12204,13 @@ test('a card with nothing behind More shows no More button', async () => {
   }
 })
 
-test('a question with four answers shows three and keeps the fourth behind More', async () => {
+test('a question with four answers shows two choices and Copy/Send when folded, and reveals the rest on open', async () => {
   const model = cardsModel()
   model.asks[0] = { ...model.asks[0], kind: 'choose', answers: ['A', 'B', 'C', 'D'] }
   const dom = await pageDom(await sourcePage(), model)
   const card = cardWithKey(dom, 'ask')
   const visibleChoices = () => pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent)
-  assert.deepEqual(visibleChoices(), ['A', 'B', 'C'])
+  assert.deepEqual(visibleChoices(), ['A', 'B'])
   assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice])
   const more = cardMore(card)[0]
   assert.ok(more)
@@ -11800,15 +12220,99 @@ test('a question with four answers shows three and keeps the fourth behind More'
   assert.deepEqual(cardActionNodes(card).filter(isPageVisible).map(node => node.textContent), [EN.pgCopyChoice, EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
 })
 
+test('overflow choices and Write your own hide in write and copied modes while detail actions stay visible', async () => {
+  const model = cardsModel()
+  model.asks[0] = { ...model.asks[0], kind: 'choose', answers: ['A', 'B', 'C', 'D'] }
+  const dom = await pageDom(await sourcePage(), model, { copyAllowed: true })
+  const card = cardWithKey(dom, 'ask')
+  const visibleChoices = () => pressWalk(card).filter(node => node.className === 'choice' && isPageVisible(node)).map(node => node.textContent)
+  const visibleButton = label => pressWalk(card).find(node => node.tag === 'button' && node.textContent === label && isPageVisible(node))
+  const visibleActions = () => cardActionNodes(card).filter(isPageVisible).map(node => node.textContent)
+  cardMore(card)[0].click()
+  assert.deepEqual(visibleChoices(), ['A', 'B', 'C', 'D'])
+  const writeBtn = visibleButton(EN.pgWriteOwn)
+  assert.ok(writeBtn)
+  writeBtn.click()
+  assert.deepEqual(visibleChoices(), [])
+  assert.equal(visibleButton(EN.pgWriteOwn), undefined)
+  assert.deepEqual(visibleActions(), [EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume, EN.answeredHide])
+  const cancelBtn = visibleButton(EN.pgCancel)
+  assert.ok(cancelBtn)
+  cancelBtn.click()
+  assert.deepEqual(visibleChoices(), ['A', 'B', 'C', 'D'])
+  assert.ok(visibleButton(EN.pgWriteOwn))
+  pressWalk(card).find(node => node.className === 'choice' && node.textContent === 'A').click()
+  visibleButton(EN.pgCopyChoice).click()
+  await dom.flush()
+  assert.deepEqual(visibleChoices(), [])
+  assert.equal(visibleButton(EN.pgWriteOwn), undefined)
+  assert.deepEqual(visibleActions(), [EN.serveCopyCommand, EN.serveOpenLink, EN.serveCopyResume])
+  assert.ok(visibleButton(EN.answeredHide))
+})
+
+test('retained question does not borrow steps from another agent or session with the same project and task', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const progress = [
+    '## shared-repo',
+    '<!-- auto session=s-live-codex agent=codex state=working updated=' + new Date(now).toISOString() + ' -->',
+    '### Deploy API',
+    '- [~] Codex wrong plan step',
+    '<!-- /auto session=s-live-codex -->',
+    '',
+    '## shared-repo',
+    '<!-- auto session=s-other agent=claude state=working updated=' + new Date(now).toISOString() + ' -->',
+    '### Deploy API',
+    '- [~] Other session wrong plan step',
+    '<!-- /auto session=s-other -->',
+  ].join('\n')
+  const view = runtime.buildView(runtime.parseProgress(progress), [], null, now, 0, {}, EN)
+  const makeRetained = (id, agent, nativeSession) => ({
+    key: `retained::${id}`,
+    questionId: id,
+    dir: null,
+    ageStage: 'fresh',
+    project: 'shared-repo',
+    task: 'Deploy API',
+    context: '',
+    text: `Retained ${id}?`,
+    note: '',
+    when: '2 min ago',
+    at: now - 120_000,
+    kind: 'confirm',
+    answers: ['Yes', 'No'],
+    command: '',
+    link: '',
+    where: 'other',
+    agent,
+    ...(nativeSession === undefined ? {} : { nativeSession }),
+    session: '',
+    sessionId: null,
+    resumeVia: null,
+    reopen: null,
+    hideKey: id,
+    canHide: true,
+    step: null,
+    target: null,
+  })
+  view.waiting.push(makeRetained('q1', '', 's-old'), makeRetained('q2', 'codex', undefined))
+  const model = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, { now, repoOf: () => null, versions: { board: '0.26.0', package: null } })
+  const ask1 = model.asks.find(one => one.questionId === 'q1')
+  const ask2 = model.asks.find(one => one.questionId === 'q2')
+  assert.ok(ask1 && ask2)
+  assert.equal(ask1.steps, undefined)
+  assert.equal(ask2.steps, undefined)
+})
+
 test('More opens and closes by keyboard and keeps its state across a refresh', async () => {
   const model = cardsModel()
   model.asks.push({ ...model.asks[0], key: 'ask2', text: 'Ship it, OK?' })
   const html = await sourcePage()
   const dom = await pageDom(html, model, { copyAllowed: true })
   const moreFor = key => cardMore(cardWithKey(dom, key))[0]
-  const panelFor = key => pressWalk(cardWithKey(dom, key)).find(node => node.className?.startsWith('more'))
-  // Open: the panel says so, and what it holds is no longer inert.
-  const isOpen = key => panelFor(key).className.split(' ').includes('open') && isPageVisible(panelFor(key).childNodes[0])
+  const panelFor = key => pressWalk(cardWithKey(dom, key)).find(node => node.className?.split(' ').includes('card-fold'))
+  // Open: the card says so, and what it holds is no longer inert.
+  const isOpen = key => cardRoot(cardWithKey(dom, key)).className.split(' ').includes('open') && isPageVisible(panelFor(key).childNodes[0])
   let more = moreFor('ask')
   assert.equal(more.type, 'button')
   assert.notEqual(more.getAttribute('data-local'), null)
@@ -11822,14 +12326,14 @@ test('More opens and closes by keyboard and keeps its state across a refresh', a
   assert.equal(isOpen('ask'), false)
   more.click()
   moreFor('ask2').click()
-  // Escape closes the panel the focus is in and sends the focus back to its More button.
+  // Escape closes the card fold the focus is in and sends the focus back to its toggle button.
   pressWalk(panelFor('ask')).find(node => node.tag === 'button').focus()
   dom.key({ key: 'Escape' })
   assert.equal(dom.active(), more)
   assert.equal(more.getAttribute('aria-expanded'), 'false')
   assert.equal(moreFor('ask2').getAttribute('aria-expanded'), 'true')
-  // A reply being typed elsewhere keeps the open panels; with no focus anywhere, Escape closes them.
-  dom.boxes()[0].focus()
+  // A reply being typed elsewhere keeps the open folds; with no focus anywhere, Escape closes them.
+  pressWalk(panelFor('ask2')).find(node => node.tag === 'textarea').focus()
   dom.key({ key: 'Escape' })
   assert.equal(moreFor('ask2').getAttribute('aria-expanded'), 'true')
   dom.active().blur()
@@ -12011,14 +12515,15 @@ test("the page opens on Needs you, then Working now, then projects, with each ca
 })
 
 test("the agent row shows each agent's counts and filters the page to that agent", async () => {
-  const { board, model, html } = await groupedPage()
+  const quietClaude = groupedBlock('47700300', 'claude', 'working', 'shared-repo', 'Claude open task', ['- [~] Working on it'], 10)
+  const { board, model, html } = await groupedPage(`${groupedSource()}\n${quietClaude}`)
   try {
     const dom = await pageDom(html, model)
-    assert.deepEqual(dom.node('chips').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
-    // Each icon names its agent, its state and how many questions wait; the badge carries the number.
-    assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label'), `${EN.agentNames.codex} · ${EN.pgTipWorking}: ${EN.pgTipNeedsOne}`)
+    assert.deepEqual(dom.node('chips').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['codex', 'gemini', 'cursor', 'claude'])
+    // Each icon names its agent, its interface(s), its state and how many questions wait; the badge carries the number.
+    assert.equal(rowAgent(dom, 'codex').getAttribute('aria-label'), `${EN.agentNames.codex} · ${EN.pgInterfaceCli} · ${EN.pgTipWorking}: ${EN.pgTipNeedsOne}`)
     // Gemini wrote its waiting block 3 minutes ago, so it is open (not heard from: the reply test).
-    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgStateOpen}: ${EN.pgTipNeedsOne}`)
+    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgInterfaceCli} · ${EN.pgStateOpen}: ${EN.pgTipNeedsOne}`)
     assert.equal(badgeOf(rowAgent(dom, 'codex')).textContent, '1')
     assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
     // Pressing Codex leaves its cards and rows and takes the other agents' away; the sidebar copy agrees.
@@ -12031,13 +12536,13 @@ test("the agent row shows each agent's counts and filters the page to that agent
     assert.equal(dom.node('count-needs').textContent, '1')
     assert.ok(!sectionWords(dom, 'working').includes('Unblock'), sectionWords(dom, 'working'))
     // An agent with nothing waiting says so; pressing the icon again shows every agent again.
-    rowAgent(dom, 'own').click()
-    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestionsElsewhere(EN.pgOwn, model.view.needs.n)), shownWords(dom.node('needs')))
-    rowAgent(dom, 'own').click()
+    rowAgent(dom, 'claude').click()
+    assert.ok(shownWords(dom.node('needs')).includes(EN.pgNoQuestionsElsewhere(EN.agentNames.claude, model.view.needs.n)), shownWords(dom.node('needs')))
+    rowAgent(dom, 'claude').click()
     const all = shownWords(dom.node('needs'))
     assert.ok(all.includes('Blue or green?') && all.includes('Short or detailed?'), all)
     assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
-    assert.equal(rowAgent(dom, 'own').getAttribute('aria-pressed'), 'false')
+    assert.equal(rowAgent(dom, 'claude').getAttribute('aria-pressed'), 'false')
   } finally { await board.close() }
 })
 
@@ -12132,7 +12637,7 @@ test('an agent not heard from for 30 minutes keeps its icon colours, and its sta
     const dom = await pageDom(html, model, { width: 1280 })
     for (const node of [rowAgent(dom, 'gemini'), sideAgent(dom, 'gemini')]) {
       assert.equal(node.getAttribute('data-presence'), 'notseen')
-      assert.equal(node.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
+      assert.equal(node.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgInterfaceCli} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
       assert.ok(shownWords(node).includes(EN.pgNotSeen), shownWords(node))
     }
     assert.equal(badgeOf(rowAgent(dom, 'gemini')).textContent, '1')
@@ -12155,7 +12660,7 @@ test('the agent list says closed for an agent whose sessions ended, with no ques
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   const gemini = sideAgent(dom, 'gemini')
   assert.equal(gemini.getAttribute('data-presence'), 'offline')
-  assert.equal(gemini.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgOffline}: ${EN.pgChipEmpty}`)
+  assert.equal(gemini.getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgInterfaceCli} · ${EN.pgOffline}: ${EN.pgChipEmpty}`)
   assert.ok(shownWords(gemini).includes(EN.pgOffline))
 })
 
@@ -12165,7 +12670,7 @@ test('a reply button on an unconnected question says it copies and the card then
   const { board, model, html } = await groupedPage(groupedSource().replace(geminiBlock(3), geminiBlock(45)))
   try {
     const dom = await pageDom(html, model, { copyAllowed: true })
-    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
+    assert.equal(rowAgent(dom, 'gemini').getAttribute('aria-label'), `${EN.agentNames.gemini} · ${EN.pgInterfaceCli} · ${EN.pgNotSeen}: ${EN.pgTipNeedsOne}`)
     const card = key => dom.node('needs').querySelectorAll('[data-ref-key]').find(one => shownWords(one).includes(key))
     // A question the board cannot send to has one Copy button for its choices.
     const labels = dom.buttons().map(button => button.getAttribute('aria-label'))
@@ -12430,9 +12935,9 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   await dom.settle()
   assert.ok(shownWords(card(dom)).includes(EN.pgSentTo(EN.agentNames.codex, 'Yes')), shownWords(card(dom)))
   const replied = redesignModel()
-  replied.asks = [{ ...model.asks[0], receipt: { id: 'm1', status: 'acknowledged', reply: 'ACK m1 Shipped' } }]
+  replied.asks = [{ ...model.asks[0], receipt: { id: 'm1', status: 'acknowledged', reply: 'ACK m1 Shipped', shown: { state: 'read', line: EN.statusRead('Shipped'), tone: 'done' } } }]
   await dom.redraw(replied)
-  assert.ok(shownWords(card(dom)).includes(`${EN.messagesAcknowledged} · Shipped`), shownWords(card(dom)))
+  assert.ok(shownWords(card(dom)).includes(EN.statusRead('Shipped')), shownWords(card(dom)))
   // A message the board refused: the line says so and the card offers Send again and Copy message.
   const refused = await pageDom(html, model, { post: async () => ({ ok: false, json: async () => ({ note: 'Synthetic refusal' }) }) })
   selectAnswer(card(refused), 'No').click()
@@ -12446,10 +12951,10 @@ test('a sent message shows sending, then the reply or a failure with Send again'
   assert.deepEqual(refused.requests.map(request => request.body.text), ['No', 'No'])
   // And a reply that arrives as a rejected receipt waits for the person again, with the same two buttons.
   const rejected = redesignModel()
-  rejected.asks = [{ ...model.asks[0], receipt: { id: 'm2', status: 'rejected', reply: '' } }]
+  rejected.asks = [{ ...model.asks[0], receipt: { id: 'm2', status: 'rejected', reply: '', shown: { state: 'notDelivered', line: EN.statusNotDelivered(EN.statusWhyRefused), tone: 'alert' } } }]
   await refused.redraw(rejected)
   const line = descendants(card(refused)).find(node => node.className === 'receipt t-alert')
-  assert.equal(line.textContent, EN.messagesRejected)
+  assert.equal(line.textContent, EN.statusNotDelivered(EN.statusWhyRefused))
   assert.deepEqual(descendants(line.parentNode).filter(node => node.tag === 'button').map(node => node.textContent), [EN.serveRetry, EN.serveCopyMessage])
 })
 
@@ -12475,44 +12980,51 @@ test('words sent again after a Claude message went nowhere are a new message, no
   assert.equal(new Set(ids).size, 4, ids.join())
 })
 
-test("a Claude card's line and buttons follow its message, and Take back and Dismiss end it", async () => {
+test("a Claude card draws the line the board sends, its buttons follow its message, and Take back and Dismiss end it", async () => {
   const html = await sourcePage()
   const model = redesignModel()
   const ask = { ...model.asks[0], key: 'ask-claude', agent: 'claude', send: 'connected', delivery: { id: 'c1', turn: 'session', agent: 'claude' }, session: 'session1' }
-  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', error: '', text: 'the words', when: '2 min ago', ...receipt } }]; return next }
-  const dom = await pageDom(html, withReceipt({ status: 'accepted' }), { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
+  // The board words the line (`shown`, from hooks/message-status.ts); the page only draws it and picks the buttons.
+  const withReceipt = (receipt, shown) => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', error: '', text: 'the words', when: '2 min ago', ...receipt, ...(shown === undefined ? {} : { shown }) } }]; return next }
+  const delivered = { state: 'delivered', line: EN.statusDelivered('2 min ago'), tone: 'done' }
+  const noAnswer = { state: 'unsure', line: EN.statusUnsure(EN.statusWhyNoAnswer), tone: 'alert' }
+  const dom = await pageDom(html, withReceipt({ status: 'accepted' }, delivered), { post: async () => ({ ok: true, json: async () => ({ ok: true }) }) })
   const box = () => dom.node('needs').querySelectorAll('[data-ref-key]')[0]
   const receipt = () => descendants(box()).find(node => (node.className || '').split(' ').includes('receipt'))
   const buttons = () => descendants(receipt().parentNode).filter(node => node.tag === 'button').map(node => node.textContent)
-  assert.equal(receipt().textContent, `${EN.claudeDelivered} · 2 min ago`)
+  assert.equal(receipt().textContent, delivered.line)
   assert.deepEqual(buttons(), [EN.messageDismiss])
-  await dom.redraw(withReceipt({ status: 'queued' }))
-  assert.equal(receipt().textContent, EN.claudeSendWorking)
+  await dom.redraw(withReceipt({ status: 'queued' }, { state: 'queued', line: EN.statusQueued(EN.statusWhenNow), tone: 'wait' }))
+  assert.equal(receipt().textContent, EN.statusQueued(EN.statusWhenNow))
   assert.deepEqual(buttons(), [EN.messageTakeBack])
   descendants(receipt().parentNode).find(node => node.textContent === EN.messageTakeBack && node.tag === 'button').click()
   await dom.settle()
   assert.deepEqual(dom.requests.at(-1).body, { id: 'm1' })
-  await dom.redraw(withReceipt({ status: 'uncertain', error: 'ACK_MISSING' }))
-  assert.equal(receipt().textContent, EN.claudeUnconfirmed)
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'ACK_MISSING' }, noAnswer))
+  assert.equal(receipt().textContent, noAnswer.line)
   assert.deepEqual(buttons(), [EN.serveCopyMessage, EN.messageDismiss])
   // A claim whose delivery never got going is not called delivered.
-  await dom.redraw(withReceipt({ status: 'uncertain' }))
-  assert.equal(receipt().textContent, EN.claudeUnconfirmed)
+  await dom.redraw(withReceipt({ status: 'uncertain' }, noAnswer))
+  assert.equal(receipt().textContent, noAnswer.line)
   // The hub has let go of an expired message: no Dismiss that could only fail. No attempt id stays
   // either, or the same words sent again would answer with this dead message.
-  await dom.redraw(withReceipt({ status: 'uncertain', error: 'EXPIRED' }))
+  await dom.redraw(withReceipt({ status: 'uncertain', error: 'EXPIRED' }, { state: 'unsure', line: EN.statusUnsure(EN.statusWhyExpired), tone: 'alert' }))
   assert.deepEqual(buttons(), [EN.serveCopyMessage])
-  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED' }))
-  assert.equal(receipt().textContent, EN.claudeStopped)
+  const stopped = { state: 'notDelivered', line: EN.statusNotDelivered(EN.statusWhyStopped), tone: 'alert' }
+  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED' }, stopped))
+  assert.equal(receipt().textContent, stopped.line)
   assert.ok(buttons().includes(EN.serveCopyMessage))
   // The hub lets go of a finished message's words: with none to copy, no Copy button.
-  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED', text: '' }))
+  await dom.redraw(withReceipt({ status: 'rejected', error: 'STOPPED', text: '' }, stopped))
   assert.ok(!buttons().includes(EN.serveCopyMessage))
-  await dom.redraw(withReceipt({ status: 'acknowledged', reply: 'on it' }))
-  assert.equal(receipt().textContent, EN.claudeReplied('on it'))
-  await dom.redraw(withReceipt({ status: 'acknowledged' }))
-  assert.equal(receipt().textContent, EN.claudeGotIt)
+  await dom.redraw(withReceipt({ status: 'acknowledged', reply: 'on it' }, { state: 'read', line: EN.statusRead('on it'), tone: 'done' }))
+  assert.equal(receipt().textContent, EN.statusRead('on it'))
+  await dom.redraw(withReceipt({ status: 'acknowledged' }, { state: 'read', line: EN.statusRead(''), tone: 'done' }))
+  assert.equal(receipt().textContent, EN.statusRead(''))
   await dom.redraw(withReceipt({ status: 'uncertain', error: 'DISMISSED' }))
+  assert.equal(receipt(), undefined)
+  // With no line from the board the page draws none: it never words a line itself.
+  await dom.redraw(withReceipt({ status: 'accepted' }))
   assert.equal(receipt(), undefined)
 })
 
@@ -12520,19 +13032,20 @@ test('an OpenCode message that reads sent, not confirmed offers Copy, and the pr
   const html = await sourcePage()
   const model = redesignModel()
   const ask = { ...model.asks[0], key: 'ask-opencode', agent: 'opencode', send: 'connected', delivery: { id: 'o1', turn: 'session', agent: 'opencode' }, session: 'session1' }
-  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', text: 'the words to copy', when: '', isMailbox: true, status: 'uncertain', error: 'UNCONFIRMED', ...receipt } }]; return next }
+  const shown = { state: 'unsure', line: EN.statusUnsure(EN.statusWhyUnconfirmed), tone: 'alert' }
+  const withReceipt = receipt => { const next = redesignModel(); next.asks = [{ ...ask, receipt: { id: 'm1', reply: '', text: 'the words to copy', when: '', isMailbox: true, status: 'uncertain', error: 'UNCONFIRMED', shown, ...receipt } }]; return next }
   const dom = await pageDom(html, withReceipt({}), { copyAllowed: true })
   const box = () => dom.node('needs').querySelectorAll('[data-ref-key]')[0]
   const receipt = () => descendants(box()).find(node => (node.className || '').split(' ').includes('receipt'))
   const buttons = () => descendants(receipt().parentNode).filter(node => node.tag === 'button')
-  assert.equal(receipt().textContent, EN.messagesSentUnconfirmed)
+  assert.equal(receipt().textContent, shown.line)
   assert.deepEqual(buttons().map(node => node.textContent), [EN.serveCopyMessage])
   buttons()[0].click()
   await dom.settle()
   assert.deepEqual(dom.copies, ['the words to copy'], 'the press copied the message the person typed')
   // Its words are gone from the board (kept only a day): the line stays and there is nothing to copy.
   await dom.redraw(withReceipt({ text: '' }))
-  assert.equal(receipt().textContent, EN.messagesSentUnconfirmed)
+  assert.equal(receipt().textContent, shown.line)
   assert.ok(!buttons().some(node => node.textContent === EN.serveCopyMessage))
 })
 
@@ -12544,7 +13057,7 @@ test('an agent with no open session shows as offline and its answers copy', asyn
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   for (const node of [rowAgent(dom, 'gemini'), sideAgent(dom, 'gemini')]) {
     assert.equal(node.getAttribute('data-presence'), 'offline')
-    assert.ok(node.getAttribute('aria-label').startsWith(`${EN.agentNames.gemini} · ${EN.pgOffline}:`), node.getAttribute('aria-label'))
+    assert.ok(node.getAttribute('aria-label').startsWith(`${EN.agentNames.gemini} · ${EN.pgInterfaceCli} · ${EN.pgOffline}:`), node.getAttribute('aria-label'))
   }
   // Codex has a task open in its window, so it carries no such word.
   assert.equal(rowAgent(dom, 'codex').getAttribute('data-presence'), 'open')
@@ -12667,10 +13180,10 @@ test('an agent with a recently finished task and no closed session shows as open
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
   const node = rowAgent(dom, 'codex')
   assert.equal(node.getAttribute('data-presence'), 'open')
-  assert.equal(node.getAttribute('aria-label'), `Codex · ${EN.pgStateOpen}: No work yet`)
+  assert.equal(node.getAttribute('aria-label'), `Codex · ${EN.pgInterfaceCli} · ${EN.pgStateOpen}: No work yet`)
 })
 
-test('the own tasks chip label shows open task counts instead of empty when to-dos are open', async () => {
+test('no own tasks chip is shown when hand-kept to-dos exist, and AI-authored hand-kept questions count under that AI', async () => {
   const model = redesignModel()
   // A hand-kept task with open steps (isOwn: true)
   model.groups = [{
@@ -12680,12 +13193,10 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
     ],
   }]
   const dom = await pageDom(await sourcePage(), model, { width: 1280 })
-  const ownNode = rowAgent(dom, 'own')
-  assert.ok(ownNode, 'own chip exists')
-  assert.equal(ownNode.getAttribute('aria-label'), 'Your own tasks: 1 open')
-  assert.equal(ownNode.getAttribute('title'), 'Your own tasks: 1 open')
+  assert.equal(rowAgent(dom, 'own'), undefined)
+  assert.equal(sideAgent(dom, 'own'), undefined)
 
-  // Multiple open tasks show the plural count
+  // Multiple open hand-kept tasks still create no own chip
   const multiModel = redesignModel()
   multiModel.groups = [{
     project: 'compost-rota',
@@ -12695,11 +13206,9 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
     ],
   }]
   const multiDom = await pageDom(await sourcePage(), multiModel, { width: 1280 })
-  const multiOwn = rowAgent(multiDom, 'own')
-  assert.equal(multiOwn.getAttribute('aria-label'), 'Your own tasks: 2 open')
-  assert.equal(multiOwn.getAttribute('title'), 'Your own tasks: 2 open')
+  assert.equal(rowAgent(multiDom, 'own'), undefined)
 
-  // A hand-kept task with a question shows needs you, not open count (finding 4: view.own.open.length avoids double-counting)
+  // A hand-kept task written by Codex counts under Codex's badge (`needs you`, not `open`) and creates no own chip.
   const questionModel = {
     ...redesignModel(),
     asks: [{
@@ -12707,6 +13216,7 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
       project: 'compost-rota',
       task: 'Turn the compost heap',
       text: 'Which bin, OK?',
+      agent: 'codex',
       isOwn: true,
     }],
     groups: [],
@@ -12716,25 +13226,38 @@ test('the own tasks chip label shows open task counts instead of empty when to-d
       questions: 1,
       stuck: 0,
       versions: { board: '0.0.0', package: null },
-      agents: [],
-      needs: { n: 1, questions: 1, stuck: 0, cards: [{ key: 'ask:own:1', kind: 'question', agent: '', project: 'compost-rota', repo: 'compost-rota', at: 0 }], older: [] },
-      working: [],
-      all: { counts: { open: 1, needs: 1, stopped: 0, done: 0, older: 0 }, cards: [], open: [], stopped: [], done: [], older: [], isHidden: true },
-      own: {
+      agents: [{
+        agent: 'codex',
+        name: 'Codex',
+        icon: 'codex',
+        last: 0,
+        isUnreadable: false,
         counts: { open: 1, needs: 1, stopped: 0, done: 0, older: 0 },
-        cards: [{ key: 'ask:own:1', kind: 'question', agent: '', project: 'compost-rota', repo: 'compost-rota', at: 0 }],
+        cards: [{ key: 'ask:own:1', kind: 'question', agent: 'codex', project: 'compost-rota', repo: 'compost-rota', at: 0 }],
         open: [],
         stopped: [],
         done: [],
         older: [],
+      }],
+      needs: { n: 1, questions: 1, stuck: 0, cards: [{ key: 'ask:own:1', kind: 'question', agent: 'codex', project: 'compost-rota', repo: 'compost-rota', at: 0 }], older: [] },
+      working: [],
+      all: {
+        counts: { open: 1, needs: 1, stopped: 0, done: 0, older: 0 },
+        cards: [{ key: 'ask:own:1', kind: 'question', agent: 'codex', project: 'compost-rota', repo: 'compost-rota', at: 0 }],
+        open: [],
+        stopped: [],
+        done: [],
+        older: [],
+        isHidden: true,
       },
       projects: [],
     },
   }
   const questionDom = await pageDom(await sourcePage(), questionModel, { width: 1280 })
-  const questionOwn = rowAgent(questionDom, 'own')
-  assert.equal(questionOwn.getAttribute('aria-label'), 'Your own tasks: 1 needs you')
-  assert.equal(questionOwn.getAttribute('title'), 'Your own tasks: 1 needs you')
+  assert.equal(rowAgent(questionDom, 'own'), undefined)
+  const codexChip = rowAgent(questionDom, 'codex')
+  assert.equal(badgeOf(codexChip).textContent, '1')
+  assert.match(codexChip.getAttribute('aria-label'), /1 needs you/)
 })
 
 test('a hand-written own task with one unfinished step shows no Last: for it and one Done button per step', async () => {
@@ -13067,8 +13590,8 @@ test('on a wide screen the sidebar lists views, agents and projects', async () =
     assert.equal(dom.node('count-working').textContent, heading('working-now'))
     assert.ok(Number(dom.node('count-others').textContent) > 0)
     // The agents of the icon row, with the same labels and numbers, and the projects that have something open.
-    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
-    for (const id of ['own', 'codex', 'gemini', 'cursor']) assert.equal(sideAgent(dom, id).getAttribute('aria-label'), rowAgent(dom, id).getAttribute('aria-label'), id)
+    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['codex', 'gemini', 'cursor'])
+    for (const id of ['codex', 'gemini', 'cursor']) assert.equal(sideAgent(dom, id).getAttribute('aria-label'), rowAgent(dom, id).getAttribute('aria-label'), id)
     assert.equal(badgeOf(sideAgent(dom, 'codex')).textContent, '1')
     assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => node.getAttribute('data-project')), ['client-repo', 'deep-project', 'docs-repo', 'shared-repo'])
     assert.equal(projectCount(dom, 'docs-repo'), '1')
@@ -13154,6 +13677,174 @@ test('a project and an agent filter combine', async () => {
   } finally { await board.close() }
 })
 
+test('filter bar keeps done-only and zero-count selected projects and leaves shared Cursor surface unclassified', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const progress = [
+    '## done-only-repo',
+    '<!-- auto session=s1848d1 agent=codex state=done updated=' + new Date(now).toISOString() + ' -->',
+    '### Shipped feature',
+    '- [x] Merged release',
+    '<!-- /auto session=s1848d1 -->',
+    '',
+    '## active-claude-repo',
+    '<!-- auto session=s1848c1 agent=claude state=waiting updated=' + new Date(now).toISOString() + ' -->',
+    '### Review diff',
+    '- [?] Deploy now?',
+    '<!-- /auto session=s1848c1 -->',
+    '',
+    '## cursor-work',
+    '<!-- auto session=s1848u1 agent=cursor state=waiting updated=' + new Date(now).toISOString() + ' -->',
+    '### Cursor shared session',
+    '- [?] Shared Cursor surface?',
+    '<!-- /auto session=s1848u1 -->',
+    '',
+    '## cursor-cli-work',
+    '<!-- auto session=s1848u2 agent=cursor state=waiting updated=' + new Date(now).toISOString() + ' -->',
+    '### Cursor CLI session',
+    '- [?] Explicit CLI surface?',
+    '<!-- /auto session=s1848u2 -->',
+  ].join('\n')
+  const parsed = runtime.parseProgress(progress)
+  const view = runtime.buildView(parsed, [], null, now, 0, {}, EN)
+  const model = runtime.serveModel(
+    view,
+    [],
+    EN,
+    new Set(),
+    false,
+    {
+      connections: [],
+      mailboxes: [
+        { id: 'c1', agent: 'cursor', session: 's1848u1', turn: 't1', scope: 'mailbox', surface: 'IDE (Composer)', updated: now },
+        { id: 'c2', agent: 'cursor', session: 's1848u2', turn: 't2', scope: 'mailbox', surface: 'cursor-agent CLI', updated: now },
+      ],
+      messages: [],
+    },
+    false,
+    { now, repoOf: () => null, versions: { board: '1.2.3', package: null } },
+  )
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const projOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  const agentOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  const ifaceOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  const projChip = () => dom.node('filter-bar').childNodes.find(n => n.getAttribute('data-filter-kind') === 'project').childNodes[0]
+  // Done-only project stays selected in the Project menu (not cleared by drawSide).
+  projOpt('done-only-repo').click()
+  assert.equal(projOpt('done-only-repo').getAttribute('aria-checked'), 'true')
+  assert.equal(projChip().getAttribute('data-active'), '1')
+  // Choosing an AI with zero items in done-only-repo keeps done-only-repo visible and checked at count 0.
+  agentOpt('Claude Code').click()
+  const stillThere = projOpt('done-only-repo')
+  assert.ok(stillThere)
+  assert.equal(stillThere.getAttribute('aria-checked'), 'true')
+  assert.equal(stillThere.childNodes[1].textContent, '0')
+  stillThere.click()
+  assert.equal(projChip().getAttribute('data-active'), '0')
+  assert.equal(projOpt('done-only-repo'), undefined)
+  dom.node('filter-clear').click()
+  // Cursor IDE (Composer) is shared with cursor-agent CLI and stays out of App; explicit cursor-agent CLI counts under CLI (3 total).
+  assert.equal(ifaceOpt(EN.pgInterfaceApp).childNodes[1].textContent, '0')
+  assert.equal(ifaceOpt(EN.pgInterfaceCli).childNodes[1].textContent, '3')
+  ifaceOpt(EN.pgInterfaceApp).click()
+  assert.ok(!shownWords(dom.node('needs')).includes('Shared Cursor surface?'))
+  ifaceOpt(EN.pgInterfaceApp).click()
+  ifaceOpt(EN.pgInterfaceCli).click()
+  assert.ok(shownWords(dom.node('needs')).includes('Explicit CLI surface?'))
+  assert.ok(!shownWords(dom.node('needs')).includes('Shared Cursor surface?'))
+})
+
+test('stale saved agent filter clears cleanly and LAN models preserve interface classification', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const progress = [
+    '## app-repo',
+    '<!-- auto session=s1848lan1 agent=codex state=waiting updated=' + new Date(now).toISOString() + ' -->',
+    '### Codex desktop task',
+    '- [?] Approve desktop edit?',
+    '<!-- /auto session=s1848lan1 -->',
+    '',
+    '## app-row-repo',
+    '<!-- auto session=s1848lan2 agent=codex state=working updated=' + new Date(now).toISOString() + ' -->',
+    '### Running desktop build',
+    '- [~] Bundle assets',
+    '<!-- /auto session=s1848lan2 -->',
+  ].join('\n')
+  const parsed = runtime.parseProgress(progress)
+  const view = runtime.buildView(parsed, [], null, now, 0, {}, EN)
+  const messaging = {
+    connections: [
+      { id: 'd1', agent: 'codex', session: 's1848lan1', turn: 't1', scope: 'live', surface: 'Codex desktop app', updated: now },
+      { id: 'd2', agent: 'codex', session: 's1848lan2', turn: 't2', scope: 'live', surface: 'Codex desktop app', updated: now },
+    ],
+    mailboxes: [],
+    messages: [],
+  }
+  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, runtime.handledOnly(messaging), false, { now, repoOf: () => null, versions: { board: '1.2.3', package: null } })
+  assert.equal(lanModel.asks[0].surface, 'Codex desktop app')
+  assert.equal(lanModel.groups[0].rows[0].surface, 'Codex desktop app')
+  const dom = await pageDom(await sourcePage(), lanModel, { width: 1280, storage: new Map([['agent-board.filter', 'gemini']]) })
+  // Absent stored agent 'gemini' is cleared from pg.filters.agents so Codex questions still show.
+  assert.ok(shownWords(dom.node('needs')).includes('Approve desktop edit?'))
+  assert.equal(dom.node('filter-clear').hidden, true)
+  // On LAN, Codex desktop app session still counts under App (2 items: 1 question + 1 working row).
+  const ifaceOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  assert.equal(ifaceOpt(EN.pgInterfaceApp).childNodes[1].textContent, '2')
+  assert.equal(ifaceOpt(EN.pgInterfaceCli).childNodes[1].textContent, '0')
+  ifaceOpt(EN.pgInterfaceApp).click()
+  assert.ok(shownWords(dom.node('needs')).includes('Approve desktop edit?'))
+})
+
+test('completed Codex desktop task keeps App classification in Done shelf', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const session = '019a0000-0000-7000-8000-000000001848'
+  const session2 = '019a0000-0000-7000-8000-000000001849'
+  const progress = [
+    '## desktop-done-repo',
+    `<!-- auto session=s1848app1 resume=${session} agent=codex state=done updated=${new Date(now).toISOString()} -->`,
+    '### Desktop refactor finished',
+    '- [x] Ship UI update',
+    `<!-- /auto session=s1848app1 -->`,
+    '',
+    '## desktop-stopped-repo',
+    `<!-- auto session=s1848app2 resume=${session2} agent=codex state=ended updated=${new Date(now - 60_000).toISOString()} -->`,
+    '### Earlier ended desktop task',
+    '- [~] Wait for check',
+    `<!-- /auto session=s1848app2 -->`,
+  ].join('\n')
+  const parsed = runtime.parseProgress(progress)
+  const view = runtime.buildView(parsed, [], null, now, 0, {}, EN)
+  assert.equal(runtime.sessionState(view, 'codex', session2), 'ended')
+  const messaging = {
+    connections: [
+      { id: 'd1848', agent: 'codex', session, turn: 't1', scope: 'live', surface: 'Codex desktop app', updated: now },
+      { id: 'd1849', agent: 'codex', session: session2, turn: 't2', scope: 'live', surface: 'Codex desktop app', updated: now },
+    ],
+    mailboxes: [
+      { id: 'm1848', agent: 'codex', session, turn: 't0', scope: 'mailbox', surface: 'Codex desktop app', updated: now },
+    ],
+    messages: [],
+  }
+  const opts = { now, repoOf: () => null, versions: { board: '1.2.3', package: null } }
+  const model = runtime.serveModel(view, [], EN, new Set(), false, messaging, false, opts)
+  const lanModel = runtime.serveModel(view, [], EN, new Set(), true, runtime.handledOnly(messaging), false, opts)
+  for (const m of [model, lanModel]) {
+    assert.equal(m.finished.length, 1)
+    assert.equal(m.finished[0].surface, 'Codex desktop app')
+    assert.equal('sessionId' in m.finished[0], false)
+    assert.equal(m.recent[0].surface, 'Codex desktop app')
+  }
+  assert.equal('dir' in lanModel.finished[0], false)
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const ifaceOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  assert.equal(ifaceOpt(EN.pgInterfaceApp).childNodes[1].textContent, '2')
+  assert.equal(ifaceOpt(EN.pgInterfaceCli).childNodes[1].textContent, '0')
+  ifaceOpt(EN.pgInterfaceApp).click()
+  assert.equal(dom.node('count-done').textContent, '1')
+  assert.ok(sectionWords(dom, 'done').includes('Desktop refactor finished'))
+})
+
 test('a project in the sidebar counts its questions, working tasks and other work, and leaves its stopped and finished tasks out', async () => {
   const { board, model, html } = await projectBoard()
   try {
@@ -13161,7 +13852,7 @@ test('a project in the sidebar counts its questions, working tasks and other wor
     // shared-fix-project: two questions and one stuck task wait on the person (3), one task is working, one is hand-kept
     // (the stopped task is not open); other-fix-project has one working task.
     assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => `${node.getAttribute('data-project')}:${projectCount(dom, node.getAttribute('data-project'))}`), ['other-fix-project:1', 'shared-fix-project:5'])
-    assert.equal(model.view.all.stopped.length + model.view.own.stopped.length, 1)
+    assert.equal(model.view.all.stopped.length, 1)
     // The Other work view counts the stopped task apart from its open one.
     assert.equal(dom.node('count-others').textContent, '2')
     // A stopped task with a question: the question is a card on the sheet, counted once as waiting, and the task is not also a row.
@@ -13171,8 +13862,8 @@ test('a project in the sidebar counts its questions, working tasks and other wor
     const seen = { [runtime.taskFingerprint(project, projects[0].tasks[0])]: groupedNow - runtime.IDLE_MS - 1 }
     const view = runtime.buildView(projects, [], null, groupedNow, 0, {}, EN, [], seen)
     const idle = runtime.serveModel(view, [], EN, new Set(), false, undefined, false, { now: groupedNow, repoOf: () => null, versions: { board: '1.2.3', package: null } })
-    assert.equal(idle.view.own.stopped.length, 1)
-    assert.equal(idle.view.own.open.length, 0)
+    assert.equal(idle.view.all.stopped.length, 1)
+    assert.equal(idle.view.all.open.length, 0)
     const stopped = await pageDom(runtime.servePage(EN, 'synthetic', false, 0, true), idle, { width: 1280 })
     assert.equal(projectCount(stopped, project), '1')
     assert.equal(stopped.node('count-needs').textContent, '1')
@@ -13189,7 +13880,7 @@ test('the tab title, the Needs you flag, the agent badges and the sidebar show t
     assert.equal(dom.node('count-needs').textContent, String(expected))
     const flags = dom.node('board').querySelectorAll('[data-needs-count]')
     assert.ok(flags.length > 0 && flags.every(flag => Number(flag.getAttribute('data-needs-count')) === expected))
-    const badges = ['own', 'codex', 'gemini', 'cursor'].map(id => Number(badgeOf(rowAgent(dom, id))?.textContent ?? 0))
+    const badges = ['codex', 'gemini', 'cursor'].map(id => Number(badgeOf(rowAgent(dom, id))?.textContent ?? 0))
     assert.equal(badges.reduce((sum, one) => sum + one, 0), expected)
     // Nothing waiting: the title goes back to the plain name, the sidebar number and the badges leave, and the icons keep their order.
     const next = structuredClone(model)
@@ -13199,8 +13890,6 @@ test('the tab title, the Needs you flag, the agent badges and the sidebar show t
     next.view.needs.stuck = 0
     next.view.needs.cards = []
     next.view.agents.forEach(agent => { agent.counts.needs = 0; agent.cards = [] })
-    next.view.own.counts.needs = 0
-    next.view.own.cards = []
     await dom.redraw(next)
     await dom.settle()
     assert.equal(dom.title(), 'Agent Board')
@@ -13232,6 +13921,179 @@ test('the Other work view shows its rows or says there are none', async () => {
   const sec = full.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes('Due plan'))
   assert.ok(sec)
   assert.ok(!shownWords(sec).includes(EN.pgNoOthers))
+})
+
+// #1023: the first screen says at a glance whether anything needs you, and whether the page is current.
+const pulseWalk = node => node.childNodes.flatMap(child => [child, ...pulseWalk(child)])
+const hasClassName = (node, name) => String(node.className ?? '').split(' ').includes(name)
+
+test('an empty Needs you says nothing needs you and when it last checked', async () => {
+  const model = redesignModel()
+  model.asks = []
+  const now = 1_000_000_000_000
+  const dom = await pageDom(await sourcePage(), model, { now, width: 1280 })
+  const needs = dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'needs')
+  assert.ok(shownWords(needs).includes(EN.pgNothing), shownWords(needs))
+  assert.equal(EN.pgNothing, 'Nothing needs you')
+  // The freshness button beside the filters says when the page last heard from the board.
+  const sync = dom.node('sync')
+  assert.equal(sync.textContent, EN.justNow)
+  assert.equal(sync.getAttribute('aria-label'), EN.pgSyncHint(EN.justNow))
+  // Nothing waits, so there is no Needs you count to press.
+  assert.equal(dom.node('jump-needs').hidden, true)
+  // A minute and a half later, before the next answer, the line says so.
+  dom.setNow(now + 90_000)
+  dom.node('view-all').click()
+  assert.equal(sync.textContent, EN.minutesAgo(1))
+  assert.equal(hasClassName(sync, 'is-stale'), false)
+  // The next answer from the board makes it current again.
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(sync.textContent, EN.justNow)
+})
+
+test('a page whose poll has failed for 10 s says its data may be stale', async () => {
+  const now = 1_000_000_000_000
+  let polls = 0
+  const model = redesignModel()
+  const dom = await pageDom(await sourcePage(), model, { now, width: 1280, getBoard: async () => {
+    polls += 1
+    if (polls === 2 || polls === 3) throw new Error('Synthetic offline')
+    return { ok: true, json: async () => ({ model, now: 1 }) }
+  } })
+  const sync = dom.node('sync')
+  const isStale = () => hasClassName(dom.node('board'), 'stale')
+  assert.equal(sync.textContent, EN.justNow)
+  assert.equal(isStale(), false)
+  // One failed poll is not yet stale: the page says it is offline, and keeps its rows.
+  dom.setNow(now + 4_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), false)
+  assert.equal(hasClassName(sync, 'is-stale'), false)
+  // Ten seconds without an answer: the button turns into the stale pill, and the rows dim.
+  dom.setNow(now + 11_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), true)
+  assert.equal(hasClassName(sync, 'is-stale'), true)
+  assert.equal(sync.textContent, EN.pgStaleShort('11s'))
+  assert.equal(sync.getAttribute('aria-label'), EN.pgStaleHint('11s'))
+  // The next good poll says so again and undims the rows.
+  dom.setNow(now + 12_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), false)
+  assert.equal(hasClassName(sync, 'is-stale'), false)
+  assert.equal(sync.textContent, EN.justNow)
+  // A held request that never comes back is stale too, after two minutes with no answer at all.
+  dom.setNow(now + 12_000 + 120_000)
+  dom.node('view-all').click()
+  assert.equal(isStale(), true)
+  assert.equal(sync.textContent, EN.pgStaleShort('2m'))
+})
+
+test('a page whose board answers only with a note for 10 s says its data may be stale', async () => {
+  const now = 1_000_000_000_000
+  let polls = 0
+  const model = redesignModel()
+  const dom = await pageDom(await sourcePage(), model, { now, width: 1280, getBoard: async () => {
+    polls += 1
+    // An unreadable progress.md: the board answers, with a note and no board.
+    if (polls >= 2 && polls <= 3) return { ok: false, json: async () => ({ ok: false, note: 'Synthetic unreadable board' }) }
+    return { ok: true, json: async () => ({ model, now: 1 }) }
+  } })
+  const sync = dom.node('sync')
+  const isStale = () => hasClassName(dom.node('board'), 'stale')
+  dom.setNow(now + 4_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), false)
+  dom.setNow(now + 11_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), true)
+  assert.equal(sync.textContent, EN.pgStaleShort('11s'))
+  dom.setNow(now + 12_000)
+  await dom.redraw(model)
+  await dom.settle()
+  assert.equal(isStale(), false)
+  assert.equal(sync.textContent, EN.justNow)
+})
+
+test('the summary line counts what the tabs count', async () => {
+  const model = viewed(redesignModel())
+  const due = model.view.all.open.find(ref => ref.key === 'Due plan')
+  model.view.working = [due]
+  model.view.all.open = model.view.all.open.filter(ref => ref.key !== 'Due plan')
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const pill = id => dom.node(id).textContent
+  assert.equal(pill('jump-needs'), dom.node('count-needs').textContent)
+  assert.equal(pill('jump-needs'), '2')
+  assert.equal(dom.node('jump-needs').getAttribute('aria-label'), EN.pgPulseNeeds(2))
+  assert.equal(pill('jump-run'), dom.node('count-working').textContent)
+  assert.equal(pill('jump-run'), '1')
+  assert.equal(pill('jump-stop'), '1')
+  assert.equal(dom.node('jump-stop').getAttribute('aria-label'), EN.pgPulseStopped(1))
+  assert.equal(pill('jump-done'), '1')
+  assert.equal(dom.node('jump-done').getAttribute('aria-label'), EN.pgPulseDone(1))
+  // Each count is one press from its list; on Needs you itself, its own count steps aside.
+  dom.node('jump-run').click()
+  assert.equal(dom.node('shell').getAttribute('data-view'), 'working')
+  assert.equal(dom.node('jump-run').getAttribute('aria-pressed'), 'true')
+  dom.node('jump-needs').click()
+  assert.equal(dom.node('shell').getAttribute('data-view'), 'needs')
+  assert.equal(dom.node('jump-needs').hidden, true)
+  // Under an agent filter the counts follow the same filter as the tabs.
+  const filtered = await pageDom(await sourcePage(), model, { width: 1280, storage: new Map([['agent-board.filter', 'gemini']]) })
+  assert.equal(filtered.node('jump-needs').textContent, filtered.node('count-needs').textContent)
+  assert.equal(filtered.node('jump-needs').textContent, '1')
+  assert.equal(filtered.node('jump-run').textContent, '0')
+  assert.equal(filtered.node('jump-done').textContent, '0')
+})
+
+test('idle and stopped sessions fold under a count and one press opens them', async () => {
+  const dom = await pageDom(await sourcePage(), redesignModel(), { width: 1280 })
+  const shelfOf = node => [node, ...pulseWalk(node)].find(one => hasClassName(one, 'shelf'))
+  const headOf = node => pulseWalk(node).find(one => hasClassName(one, 'shelf-head'))
+  const foldOf = node => pulseWalk(node).find(one => hasClassName(one, 'fold'))
+  // On the Overview, only Needs you and Working are open: idle work folds under its count, closed.
+  const idle = shelfOf(dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes(EN.pgOthers)))
+  assert.ok(idle)
+  assert.equal(headOf(idle).textContent, EN.pgOthers + '1')
+  assert.equal(hasClassName(idle, 'open'), false)
+  assert.equal(foldOf(idle).inert, true)
+  assert.equal(headOf(idle).getAttribute('aria-expanded'), 'false')
+  // One press opens it, and the choice survives the next poll.
+  headOf(idle).click()
+  assert.equal(hasClassName(idle, 'open'), true)
+  assert.equal(foldOf(idle).inert, false)
+  await dom.redraw(redesignModel())
+  await dom.settle()
+  const idleAgain = shelfOf(dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes(EN.pgOthers)))
+  assert.equal(hasClassName(idleAgain, 'open'), true)
+  // Stopped sessions keep their own closed fold; the first line's Stopped count opens it and brings it into view.
+  const stopped = () => shelfOf(dom.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes(EN.pgStopped)))
+  assert.equal(hasClassName(stopped(), 'open'), false)
+  dom.node('jump-run').click()
+  dom.node('jump-stop').click()
+  assert.equal(dom.node('shell').getAttribute('data-view'), 'all')
+  assert.equal(hasClassName(stopped(), 'open'), true)
+  assert.equal(stopped().scrolled, true)
+  assert.ok(shownWords(stopped()).includes('Stopped plan'))
+  // The Other work view opens its fold by itself.
+  const fresh = await pageDom(await sourcePage(), redesignModel(), { width: 1280 })
+  fresh.node('view-others').click()
+  const othersFold = () => shelfOf(fresh.node('board').childNodes.find(node => node.getAttribute('data-sec') === 'others' && shownWords(node).includes(EN.pgOthers)))
+  assert.equal(hasClassName(othersFold(), 'open'), true)
+  // Closed there by hand, it stays closed after the next poll.
+  headOf(othersFold()).click()
+  assert.equal(hasClassName(othersFold(), 'open'), false)
+  const changed = redesignModel()
+  changed.recent = [...changed.recent, { project: 'Alpha', agent: 'codex', title: 'Second finished plan', when: 'Today', questions: [] }]
+  await fresh.redraw(changed)
+  await fresh.settle()
+  assert.equal(hasClassName(othersFold(), 'open'), false)
 })
 
 test('opening a view leaves the own-tasks filter as it was', async () => {
@@ -13339,7 +14201,7 @@ test("one press on an agent shows only that agent's work, and a refresh keeps it
     const box = dom.boxes()[0]
     assert.ok(box)
     box.value = 'Keep this draft across refresh'
-    const row = dom.node('board').querySelectorAll('[data-k]')[0]
+    const row = dom.node('board').querySelectorAll('[data-k]').find(one => String(one.className ?? '').split(' ').includes('row'))
     const press = row.querySelector('button')
     assert.ok(press)
     press.click()
@@ -13399,8 +14261,9 @@ test('the page uses ink for actions and amber only for what needs you', async ()
   assert.ok(html.includes('--act:var(--ink)') && html.includes('--on-act:var(--surface)') && html.includes('--btn-line:'))
   const primary = rules.find(([selector]) => selector === 'button.primary')[1]
   assert.ok(primary.includes('var(--act)') && primary.includes('var(--on-act)'), primary)
-  // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words, the Needs you view, and a progress-bar cell for a step that waits on the person (#1085).
-  assert.deepEqual(using('waiting'), ['.badge', '.flag', '.pbar .c-w', '.pbar.cont u.c-w', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
+  // Amber marks only what needs the person: the badge, the Needs you flag and tab, the waiting words, the Needs you view, a progress-bar cell for a step that waits on the person (#1085),
+  // and on the first line the Needs you count and the stale pill that asks for a refresh (#1023).
+  assert.deepEqual(using('waiting'), ['.badge', '.flag', '.pbar .c-w', '.pbar.cont u.c-w', '.pulse-bar .p-need', '.pulse-bar .sync-btn.is-stale', '.s-n.hot,.side .badge', '.s-waiting,.k-confirm,.k-choose,.n-waiting', '.v-needs>svg.i'].sort())
   // The blue accent is on the live page only when the person picks the Blue progress-bar style (#1085), and on its swatch in the look menu.
   assert.deepEqual(using('accent'), ['[data-bar="blue"] .pbar .c-x,[data-bar="blue"] .pbar .c-c,[data-bar="blue"] .pbar.cont b,[data-bar="blue"] .pbar.cont u.c-c,[data-sw="blue"] .sw .c-x,[data-sw="blue"] .sw .c-c'], 'the blue accent is only the Blue bar style')
   // The question card's send arrow is an action, so it is ink on the page colour, like a primary button (#1107).
@@ -13564,7 +14427,7 @@ test('under 560 px the sidebar opens as a drawer from the button at the top left
     assert.equal(dom.node('pfoot').parentNode, dom.node('side-foot'))
     // The drawer shows the same views, agents and projects as the wide sidebar, with the same counts.
     assert.equal(dom.node('count-needs').textContent, String(model.view.needs.n))
-    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['own', 'codex', 'gemini', 'cursor'])
+    assert.deepEqual(dom.node('side-agents').querySelectorAll('[data-agent]').map(node => node.getAttribute('data-agent')), ['codex', 'gemini', 'cursor'])
     assert.deepEqual(dom.node('side-projects').querySelectorAll('[data-project]').map(node => node.getAttribute('data-project')), ['client-repo', 'deep-project', 'docs-repo', 'shared-repo'])
     // The button again shuts it, and focus goes back to the button.
     btn.click()
@@ -13629,9 +14492,20 @@ test('Esc and the backdrop close the drawer and focus goes back to its button', 
     dom.node('drawer-close').click()
     assert.equal(shell.getAttribute('data-drawer'), '')
     assert.equal(dom.active(), btn)
-    // Tab stays inside: from the last control it wraps to the first, and back again.
+    // Tab stays inside: from the last control it wraps to the first, and back again; #side-search neither wraps nor traps Tab.
     btn.click()
     assert.equal(dom.active(), dom.node('drawer-close'))
+    const search = dom.node('side-search')
+    assert.ok(search)
+    search.focus()
+    let searchTabPrevented = false
+    dom.key({ key: 'Tab', preventDefault: () => { searchTabPrevented = true } })
+    assert.equal(searchTabPrevented, false)
+    assert.equal(dom.active(), search)
+    let searchShiftPrevented = false
+    dom.key({ key: 'Tab', shiftKey: true, preventDefault: () => { searchShiftPrevented = true } })
+    assert.equal(searchShiftPrevented, false)
+    assert.equal(dom.active(), search)
     const last = dom.node('side-projects').querySelectorAll('[data-project]').at(-1)
     last.focus()
     dom.key({ key: 'Tab' })
@@ -14137,9 +15011,10 @@ test('the page of a grouped board draws each question once, copies an answer and
       // With nothing connected the empty board names no agent and tells how to start.
       assert.ok(fresh.node('board').textContent.includes(words.pgStartAny))
       // (The version label and the project's name on GitHub are the same in every language.)
+      // The owner's tags AI, CLI and App stay as written in Chinese too (#1884): the page names no AI and marks CLI or App.
       const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ')
       if (words === EN) assert.doesNotMatch(labels, /\p{Script=Han}/u)
-      else assert.doesNotMatch(labels.replaceAll('Agent Board', '').replaceAll('GitHub', '').replaceAll('Claude Code', '').replaceAll('Codex', ''), /[A-Za-z]/)
+      else assert.doesNotMatch(labels.replaceAll('Agent Board', '').replaceAll('GitHub', '').replaceAll('Claude Code', '').replaceAll('Codex', '').replace(/\b(?:AI|CLI|App)\b/g, ''), /[A-Za-z]/)
     }
   } finally { await board.close() }
 })
@@ -14812,15 +15687,15 @@ test('#1085: a style picked on the page is written to the settings file with its
   } finally { await board.close() }
 })
 
-test('Settings has one labelled button and five accessible sections in every language and keeps focus inside until closed', async () => {
+test('Settings has one labelled button and six accessible sections in every language and keeps focus inside until closed', async () => {
   for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
     const html = await sourcePage(lang)
     assert.equal((html.match(/data-settings-toggle\b/g) ?? []).length, 2, 'one markup button and one head-script selector')
     assert.doesNotMatch(html, /data-theme-toggle|data-look-menu/)
     assert.match(html, /role="dialog" aria-modal="true" aria-labelledby="settings-title"/)
     const panel = html.match(/<div id="settings"[\s\S]*?(?=<script type="application\/json")/)[0]
-    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsApprovals, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
-    assert.equal((panel.match(/<section\b/g) ?? []).length, 5)
+    for (const label of [words.settingsTitle, words.settingsLanguage, words.themeMenu, words.settingsNotifications, words.settingsApprovals, words.settingsStorage, words.settingsClose, 'English', '繁體中文', '简体中文']) assert.ok(panel.includes(label), label)
+    assert.equal((panel.match(/<section\b/g) ?? []).length, 6)
     const dom = await pageDom(html, redesignModel(), { width: 375 })
     assert.equal(dom.node('settings').hidden, true)
     dom.node('settings-toggle').click()
@@ -15126,7 +16001,7 @@ test('#1363: a waiting card keeps one hide button named answeredHide across Copy
         assert.equal(hides.length, 1, `${label}: exactly one hide button`)
         assert.equal(btns.some(btn => btn.textContent === s.pgAnswered), false, `${label}: never pgAnswered`)
         assert.equal(insideClass(hides[0], 'state'), expectInState, `${label}: inside .state === ${expectInState}`)
-        assert.equal(insideClass(hides[0], 'more'), !expectInState, `${label}: inside .more === ${!expectInState}`)
+        assert.equal(insideClass(hides[0], 'card-fold'), !expectInState, `${label}: inside .card-fold === ${!expectInState}`)
       }
       checkHideState(false, `${variant.key} initial`)
       const writeBtn = cardButtons(dom, variant.key).find(btn => btn.textContent === s.pgWriteOwn)
@@ -15244,7 +16119,8 @@ test('busy or connected card shows one honest message status after Send instead 
       post: async request => {
         if (request.path === '/api/act' && request.body.type === 'message') {
           lastMsgId = request.body.id
-          return { ok: true, json: async () => ({ ok: true, note: s.messagesQueued }) }
+          // The board answers a press with the message's own status line.
+          return { ok: true, json: async () => ({ ok: true, note: s.statusQueued(s.statusWhenNow) }) }
         }
         if (request.path === '/api/messages/dismiss') {
           currentClaude = { ...base, asks: [claudeAsk] }
@@ -15261,20 +16137,21 @@ test('busy or connected card shows one honest message status after Send instead 
     await claudeDom.settle()
 
     const afterSendWords = shownWords(findCard(claudeDom, claudeAsk.key))
-    assert.equal(countMatches(afterSendWords, s.messagesQueued), 1, `right after Send: single queued status (${afterSendWords})`)
+    assert.equal(countMatches(afterSendWords, s.statusQueued(s.statusWhenNow)), 1, `right after Send: single queued status (${afterSendWords})`)
     assert.equal(afterSendWords.includes(s.claudeSendNow), false, 'pre-send line hides after Send')
     assert.equal(afterSendWords.includes(s.pgSentTo(claudeName, replyText)), false, 'never pgSentTo on connected card')
 
     currentClaude = {
       ...base,
-      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, isSending: true, receipt: { id: lastMsgId, status: 'queued', text: replyText, when: '' } }],
+      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, isSending: true, receipt: { id: lastMsgId, status: 'queued', text: replyText, when: '', shown: { state: 'queued', line: s.statusQueued(s.statusWhenStepEnd), tone: 'wait' } } }],
     }
     await claudeDom.redraw(currentClaude)
     const queuedWords = shownWords(findCard(claudeDom, claudeAsk.key))
-    assert.equal(countMatches(queuedWords, s.claudeSendWorking), 1, `queued receipt: single claudeSendWorking (${queuedWords})`)
+    assert.equal(countMatches(queuedWords, s.statusQueued(s.statusWhenStepEnd)), 1, `queued receipt: one status line (${queuedWords})`)
+    // The press's own Queued note is gone once the board's line is drawn: no second Queued beside it.
+    assert.equal(countMatches(queuedWords, s.statusQueued(s.statusWhenNow)), 0, `queued receipt: no second Queued beside it (${queuedWords})`)
     assert.equal(queuedWords.includes(s.pgSentTo(claudeName, replyText)), false, 'no pgSentTo above queued receipt')
     assert.equal(queuedWords.includes(s.claudeSendNow), false, 'no stale claudeSendNow')
-    assert.equal(queuedWords.includes(s.messagesQueued), false, 'no duplicate messagesQueued alongside receipt')
     assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
 
     // Take back restores the card back to ask mode cleanly.
@@ -15287,23 +16164,23 @@ test('busy or connected card shows one honest message status after Send instead 
     await claudeDom.settle()
     currentClaude = {
       ...base,
-      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, receipt: { id: lastMsgId, status: 'accepted', text: 'Proceed', when: 'just now' } }],
+      asks: [{ ...claudeAsk, line: 'stepEnd', lineText: s.claudeSendWorking, receipt: { id: lastMsgId, status: 'accepted', text: 'Proceed', when: 'just now', shown: { state: 'delivered', line: s.statusDelivered('just now'), tone: 'done' } } }],
     }
     await claudeDom.redraw(currentClaude)
     const acceptedWords = shownWords(findCard(claudeDom, claudeAsk.key))
-    assert.equal(countMatches(acceptedWords, s.claudeDelivered), 1, `delivered once (${acceptedWords})`)
+    assert.equal(countMatches(acceptedWords, s.statusDelivered('just now')), 1, `delivered once (${acceptedWords})`)
     assert.equal(acceptedWords.includes(s.claudeSendWorking), false, 'route note stays hidden on delivered receipt')
     assert.equal(acceptedWords.includes(s.pgSentTo(claudeName, 'Proceed')), false)
     assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
 
     currentClaude = {
       ...base,
-      asks: [{ ...claudeAsk, line: 'now', lineText: s.claudeSendNow, receipt: { id: lastMsgId, status: 'acknowledged', reply: 'Done', text: 'Proceed', when: '' } }],
+      asks: [{ ...claudeAsk, line: 'now', lineText: s.claudeSendNow, receipt: { id: lastMsgId, status: 'acknowledged', reply: 'Done', text: 'Proceed', when: '', shown: { state: 'read', line: s.statusRead('Done'), tone: 'done' } } }],
     }
     await claudeDom.redraw(currentClaude)
     const repliedWords = shownWords(findCard(claudeDom, claudeAsk.key))
-    assert.equal(countMatches(repliedWords, s.claudeReplied('Done')), 1, `replied once (${repliedWords})`)
-    assert.equal(repliedWords.includes(s.claudeDelivered), false)
+    assert.equal(countMatches(repliedWords, s.statusRead('Done')), 1, `replied once (${repliedWords})`)
+    assert.equal(repliedWords.includes(s.statusDelivered('just now')), false)
     assert.equal(repliedWords.includes(s.claudeSendNow), false)
     assert.equal(repliedWords.includes(s.pgSentTo(claudeName, 'Proceed')), false)
     assert.equal(pressWalk(findCard(claudeDom, claudeAsk.key)).filter(n => n.tag === 'button' && n.textContent === s.answeredHide).length, 1)
@@ -15327,23 +16204,25 @@ test('busy or connected card shows one honest message status after Send instead 
       currentModel: () => currentCodex,
       post: async request => {
         lastMsgId = request.body.id
-        return { ok: true, json: async () => ({ ok: true, note: s.messagesQueued }) }
+        return { ok: true, json: async () => ({ ok: true, note: s.statusQueued(`${s.statusWhenStepEnd} · ${s.justNow}`) }) }
       },
     })
     selectAnswer(findCard(codexDom, codexAsk.key), 'Ship it').click()
     await codexDom.settle()
     const codexAfterSend = shownWords(findCard(codexDom, codexAsk.key))
-    assert.equal(countMatches(codexAfterSend, s.serveLineStepEnd(codexName)), 1, `busy codex after Send (${codexAfterSend})`)
+    // One status after Send, the board's note; the route's own hint is not drawn beside it.
+    assert.equal(countMatches(codexAfterSend, s.statusQueued(`${s.statusWhenStepEnd} · ${s.justNow}`)), 1, `busy codex after Send (${codexAfterSend})`)
+    assert.equal(codexAfterSend.includes(s.serveLineStepEnd(codexName)), false, `no route hint beside the note (${codexAfterSend})`)
     assert.equal(codexAfterSend.includes(s.pgSentTo(codexName, 'Ship it')), false, 'never pgSentTo on busy stepEnd codex card')
-    assert.equal(codexAfterSend.includes(s.messagesQueued), false, 'no redundant Queued line beside serveLineStepEnd')
+    assert.equal(codexAfterSend.split(s.statusQueued(`${s.statusWhenStepEnd} · ${s.justNow}`)).join('').includes(s.messagesQueued), false, 'no redundant Queued line beside the note')
 
     currentCodex = {
       ...base,
-      asks: [{ ...codexAsk, receipt: { id: lastMsgId, status: 'queued', line: 'stepEnd', isMailbox: true } }],
+      asks: [{ ...codexAsk, receipt: { id: lastMsgId, status: 'queued', line: 'stepEnd', isMailbox: true, shown: { state: 'queued', line: s.statusQueued(s.statusWhenStepEnd), tone: 'wait' } } }],
     }
     await codexDom.redraw(currentCodex)
     const codexReceiptWords = shownWords(findCard(codexDom, codexAsk.key))
-    assert.equal(countMatches(codexReceiptWords, s.serveLineStepEnd(codexName)), 1, `busy codex queued receipt (${codexReceiptWords})`)
+    assert.equal(countMatches(codexReceiptWords, s.statusQueued(s.statusWhenStepEnd)), 1, `busy codex queued receipt (${codexReceiptWords})`)
     assert.equal(codexReceiptWords.includes(s.pgSentTo(codexName, 'Ship it')), false)
   }
 })
@@ -15379,8 +16258,8 @@ test('a finished message seen only under a held press still frees its id, so the
   assert.notEqual(ids[1], ids[0])
 })
 
-test('serveModel projects a live in-flight receiver claim as queued instead of flickering uncertain (#1335)', async () => {
-  const { serveModel, buildView, parseProgress, CLAIM_HANDOFF_MS } = await sourceBoard()
+test('serveModel reads a receiver claim from its stored receipt alone, live connection or not (#1335)', async () => {
+  const { serveModel, buildView, parseProgress } = await sourceBoard()
   const now = Date.parse('2026-11-14T12:00:00Z')
   const text = [
     '## Work',
@@ -15415,20 +16294,18 @@ test('serveModel projects a live in-flight receiver claim as queued instead of f
   const askMessage = { ...baseMessage, id: 'm2', target: 'conn-2', to: 'codex:thread-2', ...(view.waiting[0]?.questionId ? { answers: view.waiting[0].questionId } : {}) }
   const liveConnection = { id: 'conn-1', agent: 'codex', session: 'thread-1', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
   const askConnection = { id: 'conn-2', agent: 'codex', session: 'thread-2', surface: 'codex-app-server', turn: 'turn-1', expires: now + 60_000 }
-  for (const probe of [now, now + CLAIM_HANDOFF_MS - 1]) {
-    const inFlight = serveModel(view, [], EN, new Set(), false, { connections: [{ ...liveConnection, expires: probe + 60_000 }, { ...askConnection, expires: probe + 60_000 }], messages: [baseMessage, askMessage] }, false, { now: probe, repoOf: () => null, versions: { board: '1.0.0', package: null } })
-    assert.equal(firstRow(inFlight)?.receipt?.status, 'queued', `at +${probe - now}ms`)
-    assert.equal(inFlight.asks[0]?.receipt?.status, 'queued', `ask at +${probe - now}ms`)
+  // A fresh claim reads Queued for 20 s after its last event (NOW_ROUTE_MS in hooks/message-status.ts), then Unsure, from
+  // its stored receipt alone (#1843 answer 2): no live connection keeps it queued, so a lost /api/messages/poll response
+  // whose receiver keeps renewing the same connection reads Unsure at 20 s, not queued until OPEN_LIMIT_MS.
+  for (const connections of [[liveConnection, askConnection], []]) {
+    for (const [probe, state] of [[now, 'queued'], [now + 16_000, 'queued'], [now + 20_000, 'unsure']]) {
+      const model = serveModel(view, [], EN, new Set(), false, { connections: connections.map(one => ({ ...one, expires: probe + 60_000 })), messages: [baseMessage, askMessage] }, false, { now: probe, repoOf: () => null, versions: { board: '1.0.0', package: null } })
+      const where = `at +${probe - now}ms, ${connections.length} connections`
+      assert.equal(firstRow(model)?.receipt?.status, 'uncertain', where)
+      assert.equal(firstRow(model)?.receipt?.shown?.state, state, where)
+      assert.equal(model.asks[0]?.receipt?.shown?.state, state, `ask ${where}`)
+    }
   }
-
-  // Lost /api/messages/poll response: the receiver retries and keeps renewing the same connection without ever receiving or accepting the claim;
-  // once CLAIM_HANDOFF_MS elapses, the board must surface uncertain rather than keeping queued until OPEN_LIMIT_MS.
-  const later = now + CLAIM_HANDOFF_MS
-  const renewedRowConn = { ...liveConnection, expires: later + 60_000 }
-  const renewedAskConn = { ...askConnection, expires: later + 60_000 }
-  const expiredHandoff = serveModel(view, [], EN, new Set(), false, { connections: [renewedRowConn, renewedAskConn], messages: [baseMessage, askMessage] }, false, { now: later, repoOf: () => null, versions: { board: '1.0.0', package: null } })
-  assert.equal(firstRow(expiredHandoff)?.receipt?.status, 'uncertain', 'lost poll response after handoff window')
-  assert.equal(expiredHandoff.asks[0]?.receipt?.status, 'uncertain', 'lost poll response ask after handoff window')
 
   const cases = [
     { name: 'error', connections: [liveConnection], message: { ...baseMessage, error: 'ACK_MISSING' } },

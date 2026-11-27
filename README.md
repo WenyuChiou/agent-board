@@ -32,10 +32,12 @@ npx @wenyuchiou/agent-board@next
 
 ## What you get
 
-- **Questions first.** A question an agent is waiting on goes to the top, with a button for each option it can read, or you write your own answer.
-- **Every agent stays where it is.** Agents keep running in their own terminals; the board reads what their hooks report.
+- **Questions first.** A question an agent is waiting on goes to the top, whichever agent asked, with a button for each option it can read, or you write your own answer.
+- **Every agent stays where it is.** Agents keep running in their own terminals and in the Codex and Antigravity desktop apps, with your sign-in and billing unchanged; the board reads what their hooks report, and closing it stops no session.
 - **Local and plain.** One Markdown file you can read and edit, a page on 127.0.0.1 only, and no model calls by the board.
 - **One command to install, one to remove.** `setup` shows what it will change before it writes; `remove` takes out what setup wrote and leaves your own settings alone.
+
+[T3 Code](https://github.com/pingdotgg/t3code) runs agents inside its own app: it starts sessions there, and it can import a past conversation and resume that same session from T3. Agent Board stays with the session that is still open in each vendor's own terminal or desktop app: it shows what that session is waiting on and, where the Supported agents table says so, sends your answer back into it. Use T3 Code to run new sessions in one app, with worktrees and a phone app; use Agent Board for the sessions you keep open in the vendors' own apps.
 
 <img alt="The board's page: Needs you shows a question from Claude Code with answer buttons; Working now lists tasks from Codex, Antigravity and OpenCode with their steps. Synthetic data." src="docs/images/page-en-dark.png" width="860">
 
@@ -130,4 +132,4 @@ To check Claude Code's setup, run `claude plugin list` and `/progress connect st
 
 [MIT](LICENSE). Agent logos are from [Simple Icons](https://simpleicons.org) (CC0) and [Lobe Icons](https://github.com/lobehub/lobe-icons) (MIT) and belong to their owners; an agent without a logo is shown by its initial.
 
-<p align="center"><a href="CHANGELOG.md"><img alt="Source version 0.25.0" src="https://img.shields.io/badge/source-0.25.0-blue"></a><br><sub>Latest stable version: 0.25.0 · <a href="CHANGELOG.md">Changelog</a>.</sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="Source version 0.25.1" src="https://img.shields.io/badge/source-0.25.1-blue"></a><br><sub>Latest stable version: 0.25.1 · <a href="CHANGELOG.md">Changelog</a>.</sub></p>

@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, appendFileSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, readFileSync, readdirSync, realpathSync, appendFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -168,6 +168,7 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // 44681768984), over the 105 s line of 150 s. By the rule of #1715: 109.1 x 1.3 / 0.7, rounded up to five seconds.
   // Grew with #1778's `setup --update` tests (#1314): 24 tests, 50.0 s of test time in its part. 170.8 s on Windows Node 24
   // (run 45073388887, attempt 2), over the 143.5 s line of 205 s. By the rule of #1715: 170.8 x 1.3 / 0.7, rounded up to five seconds.
+  // Since #1912 each part runs a share; as for legacy-connect, keep the whole-file budget until main measures its shares.
   'tests/host-upgrade.test.mjs': 320_000, // slowest 170.8 s
   // Re-derived by the same rule (#1715): 60.6-73.4 s on Windows Node 24 on #1709, which adds terminal setup tests here.
   'tests/setup-terminal.test.mjs': 140_000, // slowest 73.4 s
@@ -188,6 +189,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // New with #1769 (M8a, #1650): 53.2 s on Windows Node 24 (run 45295627290) once round 4 added the case table's
   // tests, over the 42 s line of the 60 s default. By the rule of #1715: 53.2 x 1.3 / 0.7, rounded up to five seconds.
   'tests/page-one-use-open.test.mjs': 100_000, // slowest 53.2 s
+  // Grew with #1881's test of the 20 s clock (#1843), which waits the real 20 s: 56.6 s on Windows Node 24 (run
+  // 45763999753), over the 42 s line of the 60 s default. By the rule of #1715: 56.6 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/serve-watch.test.mjs': 110_000, // slowest 56.6 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
@@ -420,7 +424,9 @@ const parsePart = part => {
 // 164.0 s, and the Windows board part that held it to 448.6 s of its 480 s (#1366, runs 43641832826, 43644841624).
 // legacy-connect joined when, whole, it took 162.2 and 167.0 s in Windows Node 22 part 4 of 7 beside that part's share
 // of codex-local, and the part ran 487.9 and 494.4 s of its 480 s on main e977c727 (#1741, run 44697238483).
-export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
+// host-upgrade joined at 182.9 s in the refreshed table: Windows board part 6/10 ran 394.8 and 438.8 s of its 480 s
+// on main 6881827b (#1912, run 45920668633).
+export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/host-upgrade.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
 
 // The table of times that deals both the files and the tests out to the parts (#1762): the time of each test file, and of each
 // top-level test of a self-parted file, from a main run's job logs. `node scripts/ci-test-times.mjs <job logs>` writes it; see
@@ -458,7 +464,7 @@ const callerFile = () => {
 }
 
 // Which part runs each test of a self-parted file that the table holds: the tests of the files that share jobs (the same
-// group: the four board files, or messaging alone) go out together, slowest first, each to the part with the least time so
+// group: the five board files, or messaging alone) go out together, slowest first, each to the part with the least time so
 // far, so the parts of a job get the same time from all of them. It depends only on the table and the number of parts, so
 // every job works out the same split and the parts together run each test once.
 const dealCache = new WeakMap()
@@ -561,7 +567,33 @@ export const testRuns = (files, { isSerial = false, isWindows = false, part = ''
   return share.length ? [testArgs(share, { isSerial, isWindows })] : []
 }
 
-export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform) => {
+const cleanupStaleTimings = (target, writeError, remove, stat) => {
+  let cleanupProblem = null
+  let entry
+  try {
+    entry = stat(target)
+  } catch (statError) {
+    if (statError?.code !== 'ENOENT' && statError?.code !== 'ENOTDIR') {
+      cleanupProblem = 'could not inspect timings path: ' + statError.message
+    }
+  }
+  if (entry !== undefined) {
+    if (!entry.isFile()) {
+      cleanupProblem = 'timings path is not a regular file'
+    } else {
+      try {
+        remove(target)
+      } catch (removeError) {
+        if (removeError?.code !== 'ENOENT') {
+          cleanupProblem = 'could not remove stale timings file: ' + removeError.message
+        }
+      }
+    }
+  }
+  return cleanupProblem === null ? null : 'could not record test timings (' + writeError.message + '); ' + cleanupProblem
+}
+
+export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn = spawnSync, platform = process.platform, write = writeFileSync, remove = unlinkSync, stat = lstatSync) => {
   if (!Array.isArray(files) || !files.length || files.some(path => !/^tests\/(?:[\w-]+\/)*[\w.-]+\.test\.mjs$/.test(path) || !existsSync(path))) throw new Error('selected tests are empty, invalid or missing')
   // A self-parted file reads its part from CI_TEST_PART, so the child gets the part this run was given,
   // not whatever part the environment holds.
@@ -586,14 +618,23 @@ export const runTestFiles = (files, part = process.env.CI_TEST_PART ?? '', spawn
     if (result.status !== 0) failures.push(result.status ?? result.signal)
   }
   const totalMs = Date.now() - started
+  let timingsFailure = null
   if (process.env.CI_TEST_TIMINGS || process.env.CI === 'true') {
+    const target = timingsPath()
     try {
-      writeFileSync(timingsPath(), JSON.stringify({ version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }, null, 2) + '\n')
+      write(target, JSON.stringify({ version: 1, part, serial: isSerial, totalMs, files: isSerial ? timed : partFiles(files, part).map(path => ({ path, ms: null })) }, null, 2) + '\n')
     } catch (error) {
       console.error('agent-board: could not record test timings: ' + error.message)
+      // Remove any stale regular timings file via lstat so check cannot pass on earlier data and symlinks/dirs stay intact (#1720).
+      timingsFailure = cleanupStaleTimings(target, error, remove, stat)
     }
   }
-  if (failures.length) throw new Error('selected tests failed: ' + failures.join(', '))
+  if (failures.length || timingsFailure !== null) {
+    const parts = []
+    if (failures.length) parts.push('selected tests failed: ' + failures.join(', '))
+    if (timingsFailure !== null) parts.push(timingsFailure)
+    throw new Error(parts.join('; '))
+  }
 }
 
 const main = async () => {
@@ -604,6 +645,11 @@ const main = async () => {
       timings = readBoardTimings()
     } catch (error) {
       if (error.code === 'ENOENT') {
+        if (process.env.CI === 'true') {
+          console.log('time budget: no test timings recorded on CI; cannot check board time budgets (the run step could not write them)')
+          process.exitCode = 1
+          return
+        }
         console.log('no test timings recorded; nothing to check')
         return
       }

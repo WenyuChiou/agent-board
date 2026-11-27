@@ -48,7 +48,10 @@ the mailbox's own route in place, on the card too. An unrecorded route returns
 `NO_RECORDED_ROUTE`, unless the target is refused first as gone or expired
 (`OFFLINE`) or contested (`CONTESTED`). Retrying an existing message id returns that message
 when its contents match, even if the route has since changed. The server records the route
-line itself; callers cannot supply `line`.
+line itself; callers cannot supply `line`. The message store keeps `line` to the lines 0.25.1
+reads, so a typed install of 0.25.1 still opens it: a newer line, such as the Codex daemon's
+`afterWait`, is stored as the older line it replaces (`now`) with the line itself in `routeLine`,
+which 0.25.1 keeps and does not read (#1860).
 
 ## Next-turn mailbox
 
@@ -65,14 +68,30 @@ a message queued for it then is saved for `IDE`, and from its next turn the hook
 without a surface, by an older board or from another agent's session, is not held to one.
 A turn-start hook marks a message `accepted` only after it has written the message to its output
 for the host; that does not prove the model read it, and the hook collects no ACK. A hook that
-stops waiting can hand its claim back, and a claim handed back is queued again. A claim the hook
-named that is still uncertain with no error can be handed out again after 30 seconds, with the
-same ACK code and a line saying it may be a repeat: at most three times for one message (a claim
-after a hand-back does not count), and not while it has an error (`EXPIRED` and `DISMISSED` are
-final; a later receipt from the session can clear a disconnected mark). That includes a message a
-hook accepted if a later receipt from its session made it uncertain with no error, and such a
-message can also be handed back; the board's own receivers send `uncertain` only with an error, so
-this takes another client (#1407). While a claim stays open as uncertain (not yet `EXPIRED` or
+stops waiting can hand its claim back within its 30-second lease, and a claim handed back is queued
+again. A claim the hook named that nobody accepted or handed back in those 30 seconds becomes
+`uncertain` / `HOLDER_LOST` and is never handed out or handed back again: the hook that took it may
+still have shown it to its host, so the board does not risk showing it twice (#1843). It keeps its
+text and takes a late accept or ACK; until then it holds the session as any open uncertain claim
+does (below), so a new send to that session gets `PAIR_BUSY` and nothing queued goes out until it
+is dismissed or its 30 minutes pass. The page shows it as no reply confirmed. A later receipt from
+the session, even one with no error, keeps `HOLDER_LOST`. DeepSeek's claims are the one exception,
+until its plugin can give a held claim back (#1870): a DeepSeek claim that is still uncertain with
+no error can be handed out again after 30 seconds, with the same ACK code and a line saying it may
+be a repeat: at most three times for one message (a claim after a hand-back does not count), and
+not while it has an error (`EXPIRED` and `DISMISSED` are final; a later receipt from the session
+can clear a disconnected mark). A message its host accepted
+is never handed out or handed back again, even after a later receipt from its session makes it
+uncertain with no error, and dismissing it keeps the mark (#1407). At a board start, a claim a hook
+named that is still uncertain with no error, and a message a hook handed back with its ACK code,
+become `uncertain` / `BOARD_RESTARTED` with their text, and every claim a hook named that is still
+uncertain loses its name (one with an error keeps the error): nothing a hook was handed before a
+board start is handed out after it, whatever receipts its session sends later, and the page shows
+them as no reply confirmed. The rule holds from the next board start: with no board running, a hook
+takes from the store itself, and a DeepSeek claim an earlier board run made is handed out again once
+its lease passes, until a board starts (#1868); any other hook's claim is not taken or handed back
+past its lease there either, and the next save marks it `HOLDER_LOST`. OpenCode's claims keep
+their own rules (below). While a claim stays open as uncertain (not yet `EXPIRED` or
 `DISMISSED`), none of the session's queued messages is handed out. A claim is taken again only when
 every message that holds the session (the condition is under "stdio MCP") is one of this mailbox's
 claims that can be handed out again (above); then a
@@ -125,7 +144,7 @@ A started wake the host never confirms (the model's `agent_board_ack`), and one 
 model never acknowledged, read "sent, not confirmed" on the card after 30 minutes and keep their text, so you can copy it;
 an accept or an ack that comes later is still taken. From then on the message no longer holds the session's next message,
 and a day later it expires like any other open message and its text goes. A repeated `attempt` is answered ok only while the message is
-still an active started wake. Each workspace the host loads the plugin for has its own receiver. `release` answers
+still an active started wake; once its host accepted it, an attempt answers `CLAIM_LOST`, even after a later receipt (#1407). Each workspace the host loads the plugin for has its own receiver. `release` answers
 `NOT_HELD` for a ref the board does not hold and `WAKE_STARTED` for a marked one without `--unsent`; `end` answers
 `ok: false` with a code when its write fails, and the tick asks again, a few times. The plugin reads no message of the
 conversation to decide any of this.
@@ -141,6 +160,10 @@ ignores, so a Cursor message waits until that chat opens again and its card says
 are `SessionEnd` for Codex and Muse, and `sessionEnd` for Cursor.
 
 Antigravity's `Stop` hook (the end of every turn, in the app and in agy TUI) reads the model's ACK (#1416). The turn-start hook keeps the id and the `ACK` code of each message it hands over (in the board's data folder, or beside the message store when that write fails; no text); the `Stop` hook reads the first line of each reply the model gave in the turn from the conversation's own transcript, because the hook does not carry the reply. A line that is `ACK <code>` of a message handed over in that turn acknowledges it, and only that line is kept as the reply. A reply with no such line, or with another message's code, changes nothing, and neither does a turn that handed over no message. The kept code is spent at the first `Stop` after the hand-over; one the board did not take (busy or stopped) is tried again at the next `Stop`, and so is one a `Stop` could not read (no transcript path, or a transcript it cannot open), which the next `Stop` still reads only in the turn of its hand-over.
+
+Codex CLI's `Stop` hook hands over one queued message when a step of a turn ends (#319). Only a `Stop` that says `stop_hook_active` is `false` takes one, and only with at least 1.3 seconds of the hook's time left; it takes only a message stored for the terminal (`CLI`), never one for the session's daemon connection or for Codex outside the terminal. The hook first writes the session's progress, as every Codex hook does; when that write is queued behind another process, nothing is taken. It then prints one JSON object, `{"decision":"block","reason":…}`, whose reason is the same text a turn start hands over, and Codex runs it as the next step of the same turn. It keeps the message's id and `ACK` code (no text) in `codex-acks` in the board's data folder, or beside the message store when that write fails, and only then marks the message accepted; a print that fails accepts nothing, so the claim reads Unsure once its 30-second lease runs out. Every `Stop` reads the first non-empty line of `last_assistant_message`: `ACK <code>` of a message handed over acknowledges it and only that line is kept, as for Antigravity above; a reply without it leaves the message Delivered. A `Stop` that a hook already continued (`stop_hook_active` `true`) reads the ACK and hands nothing over.
+
+An answer to a question waits for the turn that asked it. Each Codex turn start names its turn id on the session's mailbox, and an answer queued while that turn ran carries the id. At a step end, an answer that carries the id of an earlier turn is refused (`rejected`, `MOVED_ON`) and reads Not delivered · the conversation moved on; a message that answers no question goes in at any step end, and a turn start still hands over either. A board started before step-end takes refuses their fields; the `Stop` hook then takes nothing, while a turn start asks such a board again without them. A live run on 2026-11-26 sent a message from the page while a Codex CLI turn ran: it went in at the step end within the same turn, and the next `Stop` recorded its ACK ([docs/validation/2026-11-26-codex-cli-stop-live.md](validation/2026-11-26-codex-cli-stop-live.md)). So a working Codex CLI card offers Send with the step-end line; the desktop app, the editor and the background service keep Copy while working.
 
 The separate legacy `--allow-resume` option deliberately allows a local reply to
 start an ended Codex or Grok Build session. It is disabled by default, never enabled by
@@ -314,7 +337,7 @@ activity timer, so polling cannot prevent an opted-in idle shutdown.
 
 | State | Evidence |
 | --- | --- |
-| queued | Stored locally and not handed out since. A message an automatic Codex receiver left behind stays queued with the time it was left (see Codex daemon receiver), and one whose claim the Codex daemon receiver gave back with an `unsent` receipt before asking Codex for anything is queued again with its text (#1578), as is one whose claim it never said `starting` for when its connection ended (#1507). One whose claim the Codex desktop app's receiver gave back with a `held` receipt (Codex refused a second writer while the app holds the conversation) is queued again with the time of the first such refusal, and from 30 minutes after it is never handed out again and is refused as not sent (`APP_STILL_OPEN`); a receiver of another surface that takes it over starts no such time (#557). A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain (#1407) |
+| queued | Stored locally and not handed out since. A message an automatic Codex receiver left behind stays queued with the time it was left (see Codex daemon receiver), and one whose claim the Codex daemon receiver gave back with an `unsent` receipt before asking Codex for anything is queued again with its text (#1578), as is one whose claim it never said `starting` for when its connection ended (#1507). One whose claim the Codex desktop app's receiver gave back with a `held` receipt (Codex refused a second writer while the app holds the conversation) is queued again with the time of the first such refusal, and from 30 minutes after it is never handed out again and is refused as not sent (`APP_STILL_OPEN`); a receiver of another surface that takes it over starts no such time (#557). A message a hook handed back may already have been shown to its host: an earlier hook may have written it without its acceptance being recorded, or a later receipt may have made an accepted one uncertain; a board start makes it `uncertain` / `BOARD_RESTARTED` (#1407) |
 | uncertain | Claimed durably with no acceptance on record: before delivery, or after a disconnect or timeout. Also an accepted message that a later receipt reports uncertain (for a hook's message, #1407), or that expired or was dismissed |
 | accepted | Adapter reports transport acceptance; no session ACK yet. Stays accepted across a disconnect (marked disconnected) and is not sent again while it stays accepted |
 | acknowledged | Adapter supplies the current session's actual `ACK <nonce>` line |
@@ -333,6 +356,34 @@ An ordinary disconnect does not undo acceptance. When an accepted message expire
 stored receipt keeps that evidence, including after restart. Its retained question stays
 out of Needs you; the receipt still distinguishes delivery from a confirmed model reply.
 
+### The status line
+
+The page, the terminal board (`--watch`), `--print` and `--json` give the last message the board sent to
+a session one status line, read from its stored receipt alone (`hooks/message-status.ts`, #1843). Every
+agent gets the same words, and the server words the page's line, so two pages show the same one. A kept
+question shows only the answer sent to it, never another message to its session.
+
+| Line | When |
+| --- | --- |
+| Sending | The page's own line while a send has no answer yet, on every route; never read from a store |
+| Sending · not confirmed, trying again | The page's line once a send had no answer in 2 seconds and goes again under the same id |
+| Cannot reach the board · your words are kept | The page after 30 seconds with no answer, and the terminal board after its one try; the typed words stay, and the message's own line replaces this one if the board stored it |
+| Queued · when | Stored and not handed out, with when it goes in: now, when its step ends, at its next turn (a mailbox with no route says this too), when its wait ends, when its chat next opens, or once the app quits. A route other than now adds the message's age. A claim handed out less than 20 seconds ago also reads Queued · now |
+| Delivered · age | `accepted`, with no error since |
+| Read · reply | `acknowledged`, with the reply the session gave (a version 1 store's `ACK <id>` is left out) |
+| Answered · on the board | An answer to a question, handed over (`accepted`, `acknowledged`, or accepted before), whose session reported after its last receipt |
+| Unsure · why · check its window | A message on a route that goes in now, or a claim, with no event for 20 seconds; any `uncertain` receipt; and a message that was accepted once whose holder went away (`delivered, reply not confirmed`) |
+| Not delivered · why | `rejected` (refused, stopped, the app stayed open, the conversation moved on, taken back); a queued mailbox message whose session now reads another surface; one given up at the open limit before anything took it |
+
+The 20 seconds count from the receipt's last change, so the line reads the same with or without a live
+connection, and reading it changes nothing in the store. The one exception is a Codex app turn the receiver
+still holds: the page reads it as delivered while the receiver keeps its connection. A route that waits on a step, a turn or the
+app has no such clock. A message taken back after it was handed out shows no line. When a message on that clock turns
+Unsure with no event of its own, the server wakes every page waiting on the board, so each shows the line as it turns.
+
+The board's answer to a press is the message's status line. A second answer to a question whose first answer is still
+open is refused with "Another answer went first" and the first answer's line.
+
 ### Message ids
 
 - The client mints every message id: `AB-` followed by a random UUID, as the board page
@@ -343,6 +394,22 @@ out of Needs you; the receipt still distinguishes delivery from a confirmed mode
   message was handed out does not learn it either. Once the receiver acknowledges, the reply
   a send or the board returns is what follows `ACK <nonce>`, without that ACK line's prefix.
 - Reusing an id with a different text, source, binding or turn fails with `ID_CONFLICT`.
+- A press on the page or an answer key on the terminal board keeps its id for the same words to
+  the same question of the same session, whatever connection the card names by then. A press
+  that gets no answer is sent again under that id: the page tries every 2 s for 30 s, and the
+  terminal board when the key is pressed again. An answer whose body is cut off counts as no
+  answer. On the page, a try still waiting does not hold back the next one, the first answer
+  wins, and a press made again while the send still tries joins it; other words stop it. The
+  board answers a press with an id it already stored with that message, before it checks the
+  card, so a receiver that connected again under a new connection gets no second message. The
+  same id on another session's card, or on another agent's, is refused; a press whose card has
+  left the board since gets the stored message (#1843).
+- A question has one open answer at a time. A second answer to it under another id, from another
+  page or the terminal board, is refused (`409`) with the first answer's receipt, so it shows
+  what came of the first one, while the first still holds the session: queued, handed out,
+  uncertain with no final error, or accepted and waiting for the turn. An answer a hook already
+  wrote for its host stops counting once the session reports again after it. Once the first is
+  refused, given back, expired or dismissed, a new answer goes out as a new message (#1843).
 
 IDs are scoped to this message store. A claim is never automatically replayed, except a hook's
 mailbox claim as above. Before each action or snapshot, finished messages older than 24 hours
@@ -358,8 +425,8 @@ it waits for the turn; after disconnect, the 30-minute limit applies. The page c
 to show expired messages as no reply confirmed. The one exception is a wake the OpenCode
 plugin started: at 30 minutes it reads "sent, not confirmed" (`uncertain` / `UNCONFIRMED`)
 instead, keeps its text and takes a late accept or ACK, and becomes `EXPIRED` a day later.
-Only the board writes `UNCONFIRMED`; a receipt that sends it, like one that sends `EXPIRED`
-or `DISMISSED`, fails with `INVALID_RECEIPT`.
+Only the board writes `UNCONFIRMED`, `BOARD_RESTARTED` and `HOLDER_LOST`; a receipt that sends one, like one
+that sends `EXPIRED` or `DISMISSED`, fails with `INVALID_RECEIPT`.
 
 The store holds at most 1,000 open messages (`MESSAGE_LIMIT`); finished ones do not count,
 so a store full of finished messages still accepts new ones, short of the 2,000-record
@@ -452,7 +519,8 @@ hub's reserved `EXPIRED` or `DISMISSED` errors. Send and claim still require the
 A restart hands out nothing by itself; a later hook can still claim, as "Next-turn mailbox" says.
 It applies the age limit, and it marks disconnected, as a disconnect would, the open messages whose
 target is gone: a live receiver's connection, or a mailbox whose session ended or which expired.
-Messages of a mailbox that is still enrolled get no mark. A restart or a disconnect gives an
+Messages of a mailbox that is still enrolled get no disconnected mark; what a hook was handed before
+the start reads Unsure, as "Next-turn mailbox" says. A restart or a disconnect gives an
 uncertain message no extra time. After expiry or dismissal that message no longer stops the card from sending.
 Stores are saved as version 2, which earlier releases cannot read: before going back to one,
 move both `messages.json` and `server.lock` out of the folder, since 0.24.0 and earlier take
@@ -506,7 +574,7 @@ restored on restart. They never send, retry, approve or create a progress block.
 
 <!-- messaging-matrix:start -->
 
-Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface. Idle, Working and Ended give the route for a session in that state: `now`, `stepEnd` (when its step ends), `nextTurn`, `chatOpen` (when the chat opens again), `reopen` or `none`, with the live note that showed it; the board offers Send only on a route with a note.
+Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. Progress reporting is separate. Verified requires a `<date>-<host>-live.md` file for that surface; synthetic tests only establish Implemented. Unconnected targets use Tier 4 / [P5] Copy fallback, not a native receiver. Unknown means the roadmap names no primitive for this surface. Idle, Working and Ended give the route for a session in that state: `now`, `afterWait` (after a wait of about 10 minutes), `stepEnd` (when its step ends), `nextTurn`, `chatOpen` (when the chat opens again), `reopen` or `none`, with the live note that showed it; the board offers Send only on a route with a note.
 
 | Host | Surface | Tier | Primitive | Status | Live run | Receiver | Idle | Working | Ended |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -514,11 +582,11 @@ Generated from receiver records by `node scripts/messaging-matrix.mjs --write`. 
 | Antigravity | agy TUI | 3 | Unknown | Verified | [docs/validation/2026-11-12-antigravity-tui-mailbox-live.md](../docs/validation/2026-11-12-antigravity-tui-mailbox-live.md) | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-12-antigravity-tui-mailbox-live.md](../docs/validation/2026-11-12-antigravity-tui-mailbox-live.md) | nextTurn · no live note | none · no live note |
 | Antigravity | Exclusive-owner Stream CLI (stdin) | 1 | Unknown | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/antigravity-session-connector.mjs](../scripts/antigravity-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
 | Antigravity | IDE | 3 | Unknown | Implemented | Not tested | [hooks/receivers/hook-mailbox-antigravity.ts](../hooks/receivers/hook-mailbox-antigravity.ts) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | nextTurn · [docs/validation/2026-11-13-antigravity-app-mailbox-live.md](../docs/validation/2026-11-13-antigravity-app-mailbox-live.md) | none · no live note |
-| Claude Code | CLI | 1 | &#91;P1&#93; | Implemented | Not tested | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | stepEnd · [docs/validation/2026-11-03-send-to-claude.md](../docs/validation/2026-11-03-send-to-claude.md) | none · no live note |
+| Claude Code | CLI | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | [hooks/receiver-record.ts](../hooks/receiver-record.ts) | now · [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | stepEnd · [docs/validation/2026-11-16-send-to-claude-live.md](../docs/validation/2026-11-16-send-to-claude-live.md) | none · no live note |
 | Claude Code | Desktop Code | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
 | Claude Desktop | Chat | 4 | &#91;P5&#93; | Proposed | Not tested | None | None | None | None |
-| Codex | CLI | 3 | Unknown | Verified | [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | nextTurn · no live note | none · no live note |
-| Codex | Daemon | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | [scripts/codex-receiver.mjs](../scripts/codex-receiver.mjs) | now · [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | stepEnd · no live note | none · no live note |
+| Codex | CLI | 3 | Unknown | Verified | [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | [hooks/receivers/hook-mailbox-codex.ts](../hooks/receivers/hook-mailbox-codex.ts) | nextTurn · [docs/validation/2026-11-12-codex-cli-mailbox-live.md](../docs/validation/2026-11-12-codex-cli-mailbox-live.md) | stepEnd · [docs/validation/2026-11-26-codex-cli-stop-live.md](../docs/validation/2026-11-26-codex-cli-stop-live.md) | none · no live note |
+| Codex | Daemon | 1 | &#91;P1&#93; | Verified | [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | [scripts/codex-receiver.mjs](../scripts/codex-receiver.mjs) | afterWait · [docs/validation/2026-11-13-codex-cli-wake-live.md](../docs/validation/2026-11-13-codex-cli-wake-live.md) | stepEnd · no live note | none · no live note |
 | Codex | Desktop App | 2 | Unknown | Verified | [docs/validation/2026-11-22-codex-app-reopen-live.md](../docs/validation/2026-11-22-codex-app-reopen-live.md) | [hooks/receivers/codex-app.ts](../hooks/receivers/codex-app.ts) | reopen · [docs/validation/2026-11-22-codex-app-reopen-live.md](../docs/validation/2026-11-22-codex-app-reopen-live.md) | stepEnd · no live note | none · no live note |
 | Codex | Exclusive-owner app-server | 1 | &#91;P1&#93; | Implemented | Earlier run, not counted: [docs/validation/2026-10-19-native-hooks.md](../docs/validation/2026-10-19-native-hooks.md) | [scripts/codex-session-connector.mjs](../scripts/codex-session-connector.mjs) | now · no live note | stepEnd · no live note | none · no live note |
 | Codex | Existing-owner proxy (active turn only) | 2 | Unknown | Verified | [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | [scripts/codex-message-connector.mjs](../scripts/codex-message-connector.mjs) | none · no live note | now · [docs/validation/2026-11-04-codex-cli-proxy-live.md](../docs/validation/2026-11-04-codex-cli-proxy-live.md) | none · no live note |
@@ -729,7 +797,7 @@ mock Codex proxy. A real `AB-TEST-001` ACK must be verified separately with cons
 
 ## Codex daemon receiver (Send to Codex)
 
-`scripts/codex-receiver.mjs` is run by the board's page server, not by the person. It is on by default: every page runs it, whether `agent-board`, `/agent-board` or the npm command started the page. `--no-codex-send` turns it off for that page; `--codex-send`, the switch from before, is still accepted and changes nothing. A plain command keeps a running page whether its receiver is on or off, so `/agent-board` does not turn it back on. When a plain command replaces a page for another reason (a newer build, another setting such as `--allow-resume`), a page started with `--no-codex-send` is replaced by one with it off as well; a page of a build before this default had no such switch, so the page that replaces it has the receiver on. `--codex-send` and `--no-codex-send` each replace a page with the other setting. It joins as the surface `Codex daemon`. Its idle route is recorded by [validation/2026-11-13-codex-cli-wake-live.md](validation/2026-11-13-codex-cli-wake-live.md): the card of an idle Codex session the receiver has joined offers Send, line `now`. Its busy route has no note, so under the recorded-route rule above a working Codex card keeps the choice it has without the receiver (Queue for next turn or Copy), never Send, and the hub refuses a send through the receiver while the session works (`NO_RECORDED_ROUTE`). Sending into a running turn is #1409. The tests hand the board a table that shows the busy route live too. Every 3 seconds it reads the Codex sessions the board knows. If the Codex program is on `PATH` (or `AGENT_BOARD_CODEX_BIN` names it by full path; set to anything else it turns the receiver off), it starts `codex app-server proxy` once and asks `thread/loaded/list` which threads the running daemon has loaded.
+`scripts/codex-receiver.mjs` is run by the board's page server, not by the person. It is on by default: every page runs it, whether `agent-board`, `/agent-board` or the npm command started the page. `--no-codex-send` turns it off for that page; `--codex-send`, the switch from before, is still accepted and changes nothing. A plain command keeps a running page whether its receiver is on or off, so `/agent-board` does not turn it back on. When a plain command replaces a page for another reason (a newer build, another setting such as `--allow-resume`), a page started with `--no-codex-send` is replaced by one with it off as well; a page of a build before this default had no such switch, so the page that replaces it has the receiver on. `--codex-send` and `--no-codex-send` each replace a page with the other setting. It joins as the surface `Codex daemon`. Its idle route is recorded by [validation/2026-11-13-codex-cli-wake-live.md](validation/2026-11-13-codex-cli-wake-live.md): the card of an idle Codex session the receiver has joined offers Send, line `afterWait` (after a wait of about 10 minutes). Its busy route has no note, so under the recorded-route rule above a working Codex card keeps the choice it has without the receiver (Queue for next turn or Copy), never Send, and the hub refuses a send through the receiver while the session works (`NO_RECORDED_ROUTE`). Sending into a running turn is #1409. The tests hand the board a table that shows the busy route live too. Every 3 seconds it reads the Codex sessions the board knows. If the Codex program is on `PATH` (or `AGENT_BOARD_CODEX_BIN` names it by full path; set to anything else it turns the receiver off), it starts `codex app-server proxy` once and asks `thread/loaded/list` which threads the running daemon has loaded.
 
 - **Why it is on by default** (owner, 2026-11-15; #318). #318 asked for proof, on a real Codex CLI, that a command needing approval still reaches the person while the board is joined. The live run of 2026-11-15 ([validation/2026-11-15-codex-send-default-live.md](validation/2026-11-15-codex-send-default-live.md), Windows, Codex CLI 0.167.0 with a 0.169.0 daemon, delivered model turns) showed it: with the person's Codex open, an idle session got the message as a turn and acknowledged it; an approval in a delivered turn showed in the person's own window, and approving it finished the turn; an approval nobody answered was interrupted after 120 seconds and settled `uncertain` (`APPROVAL_TIMEOUT`), with the message sent once; with the window closed, no turn started. Two findings of that run held the default until they were fixed: a timed-out message kept the card from sending again (#1486) and the card promised a start while the receiver held the message (#1506). Open when it was turned on: a session reopened with `codex resume` is not reached until the person types a prompt there (#1505); in one delivery a stall after the claim settled the message `uncertain` (`DISCONNECTED`) with nothing delivered (#1507); a person who quits during the receiver's watch can be read as still there for up to one unload delay after the quit (#1504, "A person who quits" below); a page stopped or replaced during a Codex delivery neither waits for it nor interrupts a turn waiting on an approval (#1516); a person's turn that starts between the receiver's last read and `turn/start` takes the message, which settles `uncertain` (`TURN_JOINED`) when the receiver hears the join, and can read `accepted` when it does not (#1370, "A turn that starts at the same moment" below). With `--no-codex-send` a Codex card keeps its Copy and "Queue for next turn" choices.
 - **Only a loaded thread, only while a person has it open.** For each known thread the daemon has loaded, it registers a `session`-scope connection and reads the thread's status with `thread/read`. It does not join the thread (`thread/resume`) while it waits. The daemon keeps a thread loaded while any client is subscribed or a turn runs, and unloads it one unload delay (60 seconds unless Codex's config sets another) after the later of the last subscriber leaving and the last turn ending. So a thread that is still listed by `thread/loaded/list` after the receiver itself has watched it from outside, listed and idle, without a break for longer than any unload delay up to 10 minutes and any delay the config sets (10 minutes and 5 seconds, or the config's delay and 5 seconds when that is longer; see "The daemon's own unload delay" and "Not covered" (1)) has someone else's client on it: that is the one sign of a person's own Codex the daemon gives. Only then does the receiver take a message ("How long it watches first", below). It joins to deliver one (`thread/resume` with `excludeTurns: true`, which only subscribes the connection), reads the status once more, starts the turn, and leaves (`thread/unsubscribe`) when the turn has ended, when `turn/start` was refused, and when the connection was lost. A thread the daemon has not loaded is never resumed from disk, and a thread with no saved history yet is refused by the daemon at the join: the claim waits and tries again. `thread/closed` for a thread drops it at once. A daemon older than 0.169.0, or one that does not name its version in its answer to `initialize`, may not unload a thread by itself, so it is read as nobody attached.

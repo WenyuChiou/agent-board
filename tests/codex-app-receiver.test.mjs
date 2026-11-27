@@ -2,6 +2,7 @@
 // turn in the background with Codex's own resume command, once the app no longer holds it. Synthetic data only: a stand-in
 // board client and a stand-in run, so no Codex program, Codex home or board server is touched.
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { registerHooks } from 'node:module'
 import { test } from 'node:test'
 
@@ -96,14 +97,14 @@ const receiver = (over = {}) => {
   return { app, client, runs, state, advance: ms => { clock += ms } }
 }
 
-test('the Codex desktop app has its own surface, and its idle route reopens the conversation while the daemon\'s stays "now" (#557)', () => {
+test('the Codex desktop app has its own surface, and its idle route reopens the conversation while the daemon\'s uses "afterWait" (#557, #1814)', () => {
   assert.equal(SURFACE_IDS.codexApp, 'Codex desktop app')
   assert.equal(CODEX_APP_ORIGINATOR, 'Codex Desktop')
   const live = RECEIVER_ROUTES.find(one => one.agent === 'codex' && one.kind === 'live')
   assert.equal(routeLine(live.routes.idle, SURFACE_IDS.codexApp), 'reopen')
-  assert.equal(routeLine(live.routes.idle, SURFACE_IDS.codexDaemon), 'now')
+  assert.equal(routeLine(live.routes.idle, SURFACE_IDS.codexDaemon), 'afterWait')
   const connection = surface => ({ id: 'c-' + surface, agent: 'codex', session: THREAD, surface, turn: 'session', scope: 'session', expires: Date.now() + 60_000 })
-  for (const [surface, line] of [[SURFACE_IDS.codexApp, 'reopen'], [SURFACE_IDS.codexDaemon, 'now']]) {
+  for (const [surface, line] of [[SURFACE_IDS.codexApp, 'reopen'], [SURFACE_IDS.codexDaemon, 'afterWait']]) {
     const one = connection(surface)
     const idle = sendDecision(one.id, [one], [], () => 'idle', RECEIVER_ROUTES, Date.now())
     assert.equal(idle.canSend, true, surface)
@@ -168,16 +169,19 @@ test('a Codex app card says a sent reply waits here until the app is fully quit,
     press.inputs(press.cards()[0])[0].value = 'Teal'
     press.cards().flatMap(card => press.buttons(card)).find(one => one.textContent.startsWith(s.serveSend('Codex'))).click()
     await new Promise(done => setImmediate(done))
-    assert.ok(press.text().includes(s.serveReopenWaitingCodexApp), press.text())
+    // In flight it reads Sending, as every route does (#1843, B4); never that the turn already runs.
+    assert.ok(press.text().includes(s.statusSending), press.text())
     assert.ok(!press.text().includes(s.serveReopenRunning('Codex')), press.text())
     release({ ok: true, json: async () => ({ ok: true, receipt: { id: 'AB-APP-2', status: 'queued', line: 'reopen', isMailbox: false } }) })
     await press.flush()
     assert.ok(press.text().includes(s.serveReopenWaitingCodexApp), press.text())
-    // The receipt after a redraw: queued waits for the app; taken (accepted) runs in the background.
+    // The receipt after a redraw, in the board's words (hooks/message-status.ts): queued waits for the app to quit; taken (accepted) reads delivered.
     const queued = (await pageDom(servePage(s, 'synthetic-nonce'), model(sent('queued')), ok)).text()
-    assert.ok(queued.includes(s.serveReopenWaitingCodexApp), queued)
+    assert.ok(queued.includes(s.statusQueued(s.statusWhenReopen)), queued)
     assert.ok(!queued.includes(s.serveReopenRunning('Codex')), queued)
-    assert.ok((await pageDom(servePage(s, 'synthetic-nonce'), model(sent('accepted')), ok)).text().includes(s.serveReopenRunning('Codex')))
+    const accepted = (await pageDom(servePage(s, 'synthetic-nonce'), model(sent('accepted')), ok)).text()
+    assert.ok(accepted.includes(s.statusDelivered('')), accepted)
+    assert.ok(!accepted.includes(s.statusQueued('')), accepted)
     assert.ok(s.serveReopenWaitingCodexApp.length > 20)
     // The message's own limit: an app left open does not keep the reply waiting for ever.
     assert.match(s.serveReopenWaitingCodexApp, /30/)
@@ -185,10 +189,10 @@ test('a Codex app card says a sent reply waits here until the app is fully quit,
   assert.match(EN.serveReopenWaitingCodexApp, /quit/i)
 })
 
-test('while the receiver runs a Codex app turn past the handoff window, the card says it runs, not that no reply was confirmed, until the receiver lets go', async () => {
+test('while the receiver runs a Codex app turn past the 20-second clock, the card reads Delivered, not Unsure, until the receiver lets go', async () => {
   const { buildView } = await import('../hooks/view.ts')
   const { parseProgress } = await import('../hooks/parse.ts')
-  const { serveModel, servePage, CLAIM_HANDOFF_MS } = await import('../hooks/serve.ts')
+  const { serveModel, servePage } = await import('../hooks/serve.ts')
   const { shownMessages } = await import('../hooks/queued-store.ts')
   const { pageDom } = await import('./e2e/lib/surfaces.mjs')
   const ok = async () => ({ ok: true, json: async () => ({ ok: true }) })
@@ -197,21 +201,23 @@ test('while the receiver runs a Codex app turn past the handoff window, the card
     const file = `## Synthetic\n<!-- auto session=abcdef01 agent=codex resume=${THREAD} state=waiting updated=${new Date(now).toISOString()} -->\n### App wording\n- [?] Orange or teal?\n<!-- /auto session=abcdef01 -->\n`
     const view = buildView(parseProgress(file), [], null, now, 0, {}, s)
     const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
-    // A model turn takes longer than the board's 15-second handoff window: the receiver said `starting` and runs it.
-    const claimed = now - CLAIM_HANDOFF_MS - 5_000
+    // A model turn takes longer than the board's 20-second clock (NOW_ROUTE_MS in hooks/message-status.ts): the receiver
+    // said `starting` and runs it.
+    const claimed = now - 25_000
     const taken = (over = {}) => [{ id: 'AB-APP-3', target: 'conn-app', turn: 'session', from: 'board', to: `codex:${THREAD}`, text: 'Teal', hash: '0'.repeat(64), origin: 'local', status: 'uncertain', updated: claimed, reply: '', error: '', hops: 1, claimed, line: 'reopen', surface: SURFACE_IDS.codexApp, ...over }]
     const card = async (messages, expires = now + 60_000) => {
       const connections = [{ id: 'conn-app', agent: 'codex', session: THREAD, surface: SURFACE_IDS.codexApp, turn: 'session', scope: 'session', expires }]
       const model = serveModel(view, [], s, new Set(), false, { connections, mailboxes: [], messages: shownMessages({ messages, mailboxes: [] }) }, false, group, RECEIVER_ROUTES)
-      return (await pageDom(servePage(s, 'synthetic-nonce'), model, ok)).text()
+      return { text: (await pageDom(servePage(s, 'synthetic-nonce'), model, ok)).text(), shown: model.asks[0]?.receipt?.shown }
     }
     const running = await card(taken())
-    assert.ok(running.includes(s.serveReopenRunning('Codex')), running)
-    assert.ok(!running.includes(s.messagesUncertain), running)
+    assert.equal(running.shown?.state, 'delivered')
+    assert.ok(running.text.includes(running.shown.line), running.text)
     // A claim the receiver never said `starting` for was not run here, and a receiver that let go no longer vouches for the turn.
-    for (const text of [await card(taken({ awaitsStart: true })), await card(taken(), now - 1)]) {
-      assert.ok(!text.includes(s.serveReopenRunning('Codex')), text)
-      assert.ok(text.includes(s.messagesUncertain), text)
+    for (const { text, shown } of [await card(taken({ awaitsStart: true })), await card(taken(), now - 1)]) {
+      assert.equal(shown?.state, 'unsure')
+      assert.ok(text.includes(shown.line), text)
+      assert.ok(!text.includes(running.shown.line), text)
     }
   }
 })
@@ -691,4 +697,72 @@ test('the receiver attaches only to app conversations the board lists, leaves th
 test('a board address off this computer is refused before anything is attached', () => {
   assert.throws(() => startCodexAppReceiver({ boardUrl: 'http://192.168.1.9:9/?t=synthetic', executable: EXE, sessions: () => [], stateOf: () => 'idle' }), /LOCAL_BOARD_URL_REQUIRED/)
   assert.throws(() => startCodexAppReceiver({ boardUrl: 'http://127.0.0.1:9/?t=synthetic', executable: 'codex', sessions: () => [], stateOf: () => 'idle' }), /EXPLICIT_EXECUTABLE_REQUIRED/)
+})
+
+const fakeChild = (pid, onKill = () => undefined) => Object.assign(new EventEmitter(), {
+  pid,
+  stdout: new EventEmitter(),
+  stderr: new EventEmitter(),
+  stdin: Object.assign(new EventEmitter(), { end() {} }),
+  kill: onKill,
+})
+
+test('a background run that errors after it started stays started and uncertain, never refused as SPAWN_FAILED (#1773)', async () => {
+  const syntheticProgram = { command: EXE, isShell: false, args: ['exec', 'resume', THREAD, '-'] }
+
+  // A started child (pid assigned) emits 'error' (e.g. a failed signal/kill) -> stays started: true.
+  const startedChild = fakeChild(999999)
+  setImmediate(() => startedChild.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM' })))
+  const startedResult = await runBackgroundProcess(syntheticProgram, { maxWaitMs: 20_000, spawnProcess: () => startedChild })
+  assert.equal(startedResult.started, true)
+  assert.equal(startedResult.exitCode, null)
+  assert.equal(startedResult.timedOut, false)
+  assert.equal(startedResult.spawnErrorCode, 'EPERM')
+  assert.equal(isWriterHeld(startedResult, THREAD), false)
+
+  // An unstarted child (no pid, no 'spawn' event) emits 'error' -> stays started: false.
+  const unstartedChild = fakeChild(undefined)
+  setImmediate(() => unstartedChild.emit('error', Object.assign(new Error('spawn ENOENT'), { code: 'ENOENT' })))
+  const unstartedResult = await runBackgroundProcess(syntheticProgram, { maxWaitMs: 20_000, spawnProcess: () => unstartedChild })
+  assert.equal(unstartedResult.started, false)
+  assert.equal(unstartedResult.exitCode, null)
+  assert.equal(unstartedResult.timedOut, false)
+  assert.equal(unstartedResult.spawnErrorCode, 'ENOENT')
+
+  // A child that emitted 'spawn', hit maxWaitMs timeout, and then emitted 'error' during kill -> started: true, timedOut: true.
+  // Keep pid undefined here so killTree calls child.kill() directly instead of signalling an arbitrary pid.
+  let timedOutChild
+  timedOutChild = fakeChild(undefined, () => {
+    setImmediate(() => timedOutChild.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM' })))
+  })
+  setImmediate(() => timedOutChild.emit('spawn'))
+  const timedOutResult = await runBackgroundProcess(syntheticProgram, { maxWaitMs: 20, killWaitMs: 200, spawnProcess: () => timedOutChild })
+  assert.equal(timedOutResult.started, true)
+  assert.equal(timedOutResult.timedOut, true)
+  assert.equal(timedOutResult.spawnErrorCode, 'EPERM')
+
+  // Through startCodexAppReceiver: the receiver must invoke begin() (marking uncertain, never SPAWN_FAILED/unsent).
+  const appClient = fakeClient()
+  const app = startCodexAppReceiver({
+    boardUrl: 'http://127.0.0.1:9/?t=synthetic',
+    client: appClient,
+    executable: EXE,
+    tickMs: 60_000,
+    sessions: () => [{ id: THREAD, dir: DIR }],
+    stateOf: () => 'idle',
+    env: {},
+    run: (program, options) => {
+      const child = fakeChild(999999)
+      setImmediate(() => child.emit('error', Object.assign(new Error('kill EPERM'), { code: 'EPERM' })))
+      return runBackgroundProcess(program, { ...options, maxWaitMs: 20_000, spawnProcess: () => child })
+    },
+  })
+  try {
+    await app.tick()
+    const cb = callbacks()
+    await assert.rejects(() => deliverWith(appClient.attached.get(THREAD), cb), /EXIT_FAILED/)
+    assert.deepEqual(cb.said, ['starting', 'begin'])
+  } finally {
+    app.kill()
+  }
 })

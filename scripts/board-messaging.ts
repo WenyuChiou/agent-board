@@ -3,11 +3,12 @@ import { existsSync, linkSync, lstatSync, mkdirSync, readdirSync, readFileSync, 
 import { request } from 'node:http'
 import { dirname, join, resolve } from 'node:path'
 import { acceptMailboxMessage, attemptMailboxMessage, endMailbox, enrollMailbox, enrollMcp, expireMailboxes, MAILBOX_CAP, mailboxId, releaseMailboxMessage, takeMailboxMessage } from '../hooks/hook-messages'
-import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, originOf, pruneMessages, queueMessage, rebindMessages, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
+import { address, claimMessages, deliveryText, disconnectMessages, dismissMessage, FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isHostTurn,isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageFields, messageId, messageReceipt, messageText, observeSession, OPEN_CAP, openAnswer, originOf, pruneMessages, queueMessage, rebindMessages, restartMessages, ROUTE_LINES, sendDecision, shownMessage, textHash } from '../hooks/messaging'
+import type { TakeTurn } from '../hooks/hook-messages'
 import type { ReceiverRoutes, RouteLine, RowState } from '../hooks/messaging'
 import type { Connection, Message, MessageState, ProgressBinding, SessionExpectation } from '../hooks/messaging'
 import { STALE_MS } from '../hooks/parse'
-import { isClaimRef, parseMessageStore, queuedMessagingOf, shownMessages } from '../hooks/queued-store'
+import { isClaimRef, parseMessageStore, queuedMessagingOf, shownMessages, storedMessageState } from '../hooks/queued-store'
 import { isTimeout, privateFolder, takePrivateFolderHandoff } from './private-folder'
 import { claimMessageStore } from './message-store-claim'
 import { readSettings } from './settings-file'
@@ -36,11 +37,15 @@ export const mailboxAction = (state: MessageState, action: string, body: Record<
     return { state: next, result: { contested: next.mailboxes!.find(one => one.id === mailboxId(agent, session))!.contested === true } }
   }
   if (action === 'mailbox-turn') {
-    messageFields(body, ['agent', 'session', 'surface', 'before', 'isRestricted', 'ref'])
+    messageFields(body, ['agent', 'session', 'surface', 'before', 'isRestricted', 'ref', 'hostTurn', 'stepEnd'])
     if (body.ref !== undefined && !isClaimRef(body.ref)) throw new Error('INVALID_REF')
+    // The turn a hook names and whether it takes at a step end (#319). A step-end take always names its claim.
+    if (body.hostTurn !== undefined && !isHostTurn(body.hostTurn) || body.stepEnd !== undefined && (body.stepEnd !== true || body.ref === undefined)) throw new Error('INVALID_TURN')
     if (body.isRestricted === true && (state.mailboxes?.find(one => one.id === mailboxId(agent, session))?.mcpLeaseUntil ?? 0) > now) throw new Error('NO_LEASE')
     if (body.before !== undefined && (typeof body.before !== 'number' || now > body.before)) return { state, result: { message: null } }
-    const next = takeMailboxMessage(state, agent, session, messageText(body.surface, 100), now, STALE_MS, randomBytes(3).toString('hex'), body.ref)
+    const next = takeMailboxMessage(state, agent, session, messageText(body.surface, 100), now, STALE_MS, randomBytes(3).toString('hex'), body.ref, {
+      ...(body.hostTurn === undefined ? {} : { hostTurn: body.hostTurn }), ...(body.stepEnd === true ? { isStepEnd: true } : {}),
+    })
     return { state: next.state, result: { message: next.message } }
   }
   if (action === 'mailbox-release') {
@@ -125,7 +130,8 @@ export const moveLockAside = (lock: string, recorded: string, claim: MessageStor
 
 // Only a host adapter can register a receiving session. Registrations and secrets die with
 // this server; message ids and receipts survive restart so uncertainty is never auto-retried.
-export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined }
+// reportedAt: when the session last reported, -1 for never (one answer per question, #1843).
+export type MessageGate = { routes: readonly ReceiverRoutes[]; stateOfSession: (agent: string, session: string) => RowState | undefined; reportedAt?: (agent: string, session: string) => number }
 
 const openMessaging = (directory: string, isDefault = false, gate?: MessageGate) => {
   const root = resolve(directory)
@@ -253,7 +259,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
     try {
       // A temp file an earlier save could not remove would block every save after it.
       try { unlinkSync(temp) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-      writeFileSync(temp, JSON.stringify({ version: 2, ...next }), { mode: 0o600, flag: 'wx' })
+      writeFileSync(temp, JSON.stringify({ version: 2, ...storedMessageState(next) }), { mode: 0o600, flag: 'wx' })
       replaceFile(temp, file)
       state = next
     } finally {
@@ -270,6 +276,8 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
     if (existsSync(file)) {
       if (!lstatSync(file).isFile() || lstatSync(file).isSymbolicLink()) throw new Error('UNSAFE_MESSAGE_FILE')
       state = parseMessageStore(readFileSync(file, 'utf8'), Date.now())
+      // Before a mailbox that ran out refuses what it held: a message a hook was handed reads Unsure, not undelivered (#1407).
+      state = restartMessages(state, Date.now())
       state = expireMailboxes(state, Date.now())
       // A message an automatic receiver left queued keeps its stamp across a restart of the hub; expire() refuses it on time.
       for (const id of new Set(state.messages.map(one => one.target))) {
@@ -432,6 +440,12 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
           target = decision.target
           line = decision.line
           surface = decision.target.surface
+          // One open answer per question (#1843, B3.2): a second answer, from another page or the terminal, is refused with the
+          // first one's receipt, so it shows what came of the first instead of starting the question's turn twice.
+          if (isAnswersId(input.answers)) {
+            const first = openAnswer(state, address(target.agent, target.session), input.answers, gate?.reportedAt?.(target.agent, target.session) ?? -1)
+            if (first !== undefined) throw Object.assign(new Error('ANSWER_OPEN'), { receipt: shownMessage(first) })
+          }
         }
         const queued = queueMessage(state, input, from, target, now, sender?.origin ?? 'local', undefined, line, surface)
         save(queued.state, now)
@@ -645,7 +659,7 @@ const mailboxAccess = (directory: string, budget: number, storeBudget = budget, 
           throw error
         }
         try {
-          writeFileSync(temp, JSON.stringify({ version: 2, ...pruneMessages(state, now) }), { flag: 'wx', mode: 0o600 })
+          writeFileSync(temp, JSON.stringify({ version: 2, ...storedMessageState(pruneMessages(state, now)) }), { flag: 'wx', mode: 0o600 })
           replaceFile(temp, file)
         } catch (error) {
           if (WRITE_CONTENTION_ERRNO.has(String((error as NodeJS.ErrnoException | null)?.code ?? ''))) hasDeferred = true
@@ -690,7 +704,7 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
     try { return (await access.call(action, body, now)).message as Message ?? null } catch { return null }
   }
   // The take itself; a failure is thrown, so a caller that must tell it from an empty mailbox can.
-  const takeTurn = async (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => {
+  const takeTurn = async (agent: string, session: string, surface: string, now: number, named?: string, turn: TakeTurn = {}): Promise<Message | null> => {
     isHeld = false
     const ref = named ?? randomBytes(6).toString('hex')
     // A plugin that names its claim also marks its wake (attempt) and gives it back as unsent, which a board started before
@@ -706,10 +720,13 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
         throw error
       }
     }
-    try { return (await access.call('mailbox-turn', { agent, session, surface, ref }, now)).message as Message ?? null } catch (error) {
+    const marks = { ...(turn.hostTurn === undefined ? {} : { hostTurn: turn.hostTurn }), ...(turn.isStepEnd === true ? { stepEnd: true } : {}) }
+    try { return (await access.call('mailbox-turn', { agent, session, surface, ref, ...marks }, now)).message as Message ?? null } catch (error) {
       // A board started before claims had names refuses the field until it restarts: ask it as before.
       if ((error as Error).message === 'UNKNOWN_FIELD') {
-        if (deadline - Date.now() < boardWait) throw error
+        // Except at a step end: a board that does not know step ends could hand over an answer the conversation moved on from,
+        // in a claim with no name that cannot go back, so nothing is taken there (#319, plan B3.8).
+        if (turn.isStepEnd === true || deadline - Date.now() < boardWait) throw error
         // A claim with no name cannot be handed back, so one this take may have made stays held (#1631).
         try { return (await access.call('mailbox-turn', { agent, session, surface }, Date.now())).message as Message ?? null } catch (unnamed) {
           if (access.isDeferred() || access.isCutOff()) isHeld = true
@@ -738,7 +755,8 @@ export const hookMailbox = (directory: string, budget: number, boardWait = 150, 
     // True only when the last call found nothing at the messages folder's path.
     get hasNoFolder() { return access.isAbsent() },
     // An in-process plugin may name the claim (a 12-hex ref), so it can hand the claim back with release.
-    turn: (agent: string, session: string, surface: string, now: number, named?: string): Promise<Message | null> => takeTurn(agent, session, surface, now, named).catch(() => null),
+    // A hook names its turn, and Codex's Stop hook marks its take as a step end (#319).
+    turn: (agent: string, session: string, surface: string, now: number, named?: string, turn?: TakeTurn): Promise<Message | null> => takeTurn(agent, session, surface, now, named, turn).catch(() => null),
     // The same take for a caller that must tell a failed take from an empty mailbox; a deferred claim is handed back first.
     turnOrThrow: takeTurn,
     // An in-process plugin's acceptance, explicit acknowledgement and send; a refusal keeps its code for the caller, so only a saved acceptance reads as done.

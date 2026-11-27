@@ -33,9 +33,9 @@ test('the default page scopes empty Waiting wording and preserves older-question
   const browser = await chromium.launch({ headless: true })
   try {
     for (const [lang, expected] of [
-      ['en', 'Nothing in the current Needs you list.'],
-      ['zh-TW', '目前「需要你」清單沒有項目。'],
-      ['zh-CN', '当前“需要你”列表没有项目。'],
+      ['en', 'Nothing needs you'],
+      ['zh-TW', '沒有要你回的事'],
+      ['zh-CN', '没有要你回的事'],
     ]) {
       const s = STRINGS[lang]
       const context = await browser.newContext()

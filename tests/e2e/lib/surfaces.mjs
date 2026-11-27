@@ -267,8 +267,8 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
   }
   let model = first, scheduled, pollMs
   const requests = [], copied = []
-  const pending = []
-  const script = [...source.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(match => match[1]).find(code => code.includes('(function ()'))
+  const pending = [], waiting = []
+  const script =[...source.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(match => match[1]).find(code => code.includes('(function ()'))
   const navigator = {}
   const setClipboard = available => { navigator.clipboard = available ? { writeText: async text => { copied.push(text) } } : undefined }
   setClipboard(clipboard)
@@ -299,30 +299,45 @@ export const pageDom = async (source, first, post, { clipboard = true, legacyCop
       if (callback.name === 'refresh') {
         pollMs = ms
         scheduled = callback
+      } else if (callback.name !== '') {
+        const wait = { name: callback.name, ms, run: callback }
+        waiting.push(wait)
+        return wait
       }
       return 1
     },
-    clearTimeout: () => {},
+    // A wait the page clears is no longer due.
+    clearTimeout: wait => { const at = waiting.indexOf(wait); if (at !== -1) waiting.splice(at, 1) },
     fetch: async (target, options) => {
       if (target.startsWith('/api/board')) return { ok: true, json: async () => ({ model, now: 1 }) }
       const request = { path: target, body: JSON.parse(options.body) }
       requests.push(request)
       const promise = post(request)
-      pending.push(promise)
+      // A request the test holds open (no answer, no close) is not waited for by the flush.
+      if (promise?.isHeld !== true) pending.push(promise)
       return promise
     },
   }, { timeout: 1000 })
+  // A request the test makes fail (a lost response) is the page's to handle, not the flush's.
   const flush = async () => {
     await new Promise(done => setImmediate(done))
-    await Promise.all(pending)
+    await Promise.allSettled(pending)
     await new Promise(done => setImmediate(done))
+  }
+  // Runs the page's waits of this name that are due now, as their time had passed, and what they start.
+  const runTimers = async name => {
+    const due = waiting.filter(one => one.name === name)
+    waiting.splice(0, waiting.length, ...waiting.filter(one => one.name !== name))
+    for (const one of due) one.run()
+    await flush()
+    return due.map(one => one.ms)
   }
   await flush()
   const descendants = node => [node, ...node.childNodes.flatMap(descendants)]
   // A question card, a task row, and the line a press leaves where its card has gone (lost).
   const isCard = node => { const names = String(node.className ?? '').split(' '); return names.includes('card') || names.includes('row') || names.includes('lost') }
   return {
-    node: get, requests, copied, flush, setClipboard,
+    node: get, requests, copied, flush, runTimers, setClipboard,
     get activeElement() { return document.activeElement },
     get pollMs() { return pollMs },
     inputs: node => descendants(node).filter(one => one.tag === 'textarea'),

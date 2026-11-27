@@ -172,16 +172,22 @@ describe('L4 time and scale', () => {
     }
   }
 
-  test('L4 a stale Codex card with no process record says the window may be closed past 2 min, still counts, and Archive keeps its question (#1092)', async () => {
+  test('L4 a stale Codex card with no process record does not warn at 2-3 min, says the window may be closed past 30 min, and Archive keeps its question (#1092, #1813)', async () => {
     const world = makeWorld()
     try {
       const title = 'Closed Codex window, no record'
       const ask = 'Deploy the synthetic build, OK?'
       codexAsk(world, { title, ask })
       const server = await serve.start(world)
-      // Under two minutes the card says nothing about the window.
+      // At two to three minutes an open idle window gets no may-be-closed line on any surface.
       assert.ok(!squash(await server.page()).includes(EN.windowMayBeClosed), 'no line before two minutes')
       world.jump('3m')
+      await takeJump(world, server)
+      assert.ok(!squash(await server.page()).includes(EN.windowMayBeClosed), 'no line on page at 3 minutes')
+      assert.ok(!squash(await terminal.screen(world, ['--all'])).includes(EN.windowMayBeClosed), 'no line on terminal at 3 minutes')
+      assert.ok(!squash(await print(world)).includes(EN.windowMayBeClosed), 'no line on print at 3 minutes')
+      assert.equal((await json(world)).needs.find(one => one.kind === 'question')?.mayBeClosed, false, 'json says false at 3 minutes')
+      world.jump('28m')
       const report = await takeJump(world, server)
       assert.equal(report.model.counts.waiting, 1, 'the card still counts in Needs you')
       const screens = { terminal: await terminal.screen(world, ['--all']), print: await print(world), page: await server.page() }

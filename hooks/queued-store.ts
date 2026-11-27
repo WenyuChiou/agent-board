@@ -1,6 +1,6 @@
 import { expireMailboxes, MAILBOX_CAP, mailboxId } from './hook-messages'
-import { FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageId, messageText, OPEN_CAP, pruneMessages, ROUTE_LINES, shownMessage, SURFACE_IDS, textHash } from './messaging'
-import type { Connection, MessageState } from './messaging'
+import { FINISHED_KEEP_COUNT, HOP_LIMIT, isAnswersId, isFinished, isHostTurn, isMailboxSurfaceLost, isMailboxTarget, MAILBOX_REDELIVERIES, messageId, messageText, OPEN_CAP, pruneMessages, ROUTE_LINES, shownMessage, STORED_LINE_OF, SURFACE_IDS, textHash } from './messaging'
+import type { Connection, Message, MessageState, RouteLine } from './messaging'
 import { addressKey } from './receiver'
 import { sha256 } from './sha256'
 
@@ -9,6 +9,19 @@ import { sha256 } from './sha256'
 
 // The name a hook gives its mailbox claim, so it can hand back a claim it stopped waiting for (#990).
 export const isClaimRef = (value: unknown): value is string => typeof value === 'string' && /^[0-9a-f]{12}$/.test(value)
+// The message store as it is written to disk (#1860): a route line 0.25.1 cannot read is saved as the older line it replaces,
+// with the line itself in `routeLine` (STORED_LINE_OF), so a typed install of 0.25.1 still reads the store.
+export const storedMessageState = (state: MessageState): MessageState => ({
+  ...state,
+  messages: state.messages.map(one => one.line === undefined || STORED_LINE_OF[one.line] === one.line ? one : { ...one, line: STORED_LINE_OF[one.line], routeLine: one.line } as Message),
+})
+// The line a stored message was sent with: its `routeLine` when it has one, which must be a line saved as its `line`.
+const restoredLine = <T extends { line?: unknown; routeLine?: unknown }>(one: T): T => {
+  if (one.routeLine === undefined) return one
+  const { routeLine, ...rest } = one
+  if (!ROUTE_LINES.includes(routeLine as RouteLine) || STORED_LINE_OF[routeLine as RouteLine] !== one.line) throw new Error('INVALID_MESSAGE_STORE')
+  return { ...rest, line: routeLine } as T
+}
 export const parseMessageStore = (text: string, now: number): MessageState => {
   let saved: MessageState & { version: unknown }
   try { saved = JSON.parse(text) as MessageState & { version: unknown } } catch { throw new Error('INVALID_MESSAGE_STORE') }
@@ -18,12 +31,13 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
   // A store written before origins and hashes reads as local, with the hash of the text it kept.
   const messages = saved.messages.map(one => saved.version === 1 ? { ...one, hops: 1, claimed: 0, nonce: '' } : { ...one })
     .map(one => ({ ...one, origin: one.origin ?? 'local', hash: one.hash ?? (typeof one.text === 'string' && one.text !== '' ? textHash(one.text) : '') }))
+    .map(restoredLine)
   for (const one of messages) {
     messageId(one.id)
     if (one.framingNonce !== undefined && (typeof one.framingNonce !== 'string' || !/^[0-9a-f]{32}$/.test(one.framingNonce)) || one.awaitsAck !== undefined && typeof one.awaitsAck !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
     if (one.attempted !== undefined && !(Number.isFinite(one.attempted) && one.attempted > 0)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.ref !== undefined && !isClaimRef(one.ref) || one.redelivered !== undefined && !(Number.isInteger(one.redelivered) && one.redelivered >= 1 && one.redelivered <= MAILBOX_REDELIVERIES)) throw new Error('INVALID_MESSAGE_STORE')
-    if (one.answers !== undefined && !isAnswersId(one.answers)) throw new Error('INVALID_MESSAGE_STORE')
+    if (one.answers !== undefined && !isAnswersId(one.answers) || one.boundTurn !== undefined && !isHostTurn(one.boundTurn)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.hasAccepted !== undefined && typeof one.hasAccepted !== 'boolean' || one.awaitsStart !== undefined && one.awaitsStart !== true) throw new Error('INVALID_MESSAGE_STORE')
     if (one.leftAt !== undefined && !Number.isFinite(one.leftAt) || one.heldSince !== undefined && !Number.isFinite(one.heldSince)) throw new Error('INVALID_MESSAGE_STORE')
     if (one.line !== undefined && !ROUTE_LINES.includes(one.line)) throw new Error('INVALID_MESSAGE_STORE')
@@ -45,6 +59,7 @@ export const parseMessageStore = (text: string, now: number): MessageState => {
     for (const one of saved.mailboxes) {
       if (!one || !isMailboxTarget(one.id) || one.id !== mailboxId(messageId(one.agent), messageId(one.session)) || one.scope !== 'mailbox' || one.turn !== 'session' || !Number.isFinite(one.expires)) throw new Error('INVALID_MESSAGE_STORE')
       messageText(one.surface, 100)
+      if (one.hostTurn !== undefined && !isHostTurn(one.hostTurn)) throw new Error('INVALID_MESSAGE_STORE')
       if (one.folderDigest !== undefined && (typeof one.folderDigest !== 'string' || !/^[0-9a-f]{64}$/.test(one.folderDigest)) || one.mcpOwner !== undefined && (typeof one.mcpOwner !== 'string' || !/^[1-9][0-9]*:[^\r\n\0]{1,100}$/.test(one.mcpOwner)) || one.mcpLeaseUntil !== undefined && !Number.isFinite(one.mcpLeaseUntil) || one.contested !== undefined && typeof one.contested !== 'boolean') throw new Error('INVALID_MESSAGE_STORE')
     }
     if (new Set(saved.mailboxes.map(one => one.id)).size !== saved.mailboxes.length) throw new Error('INVALID_MESSAGE_STORE')

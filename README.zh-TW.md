@@ -32,10 +32,12 @@ npx @wenyuchiou/agent-board@next
 
 ## 你會得到什麼
 
-- **問題排最前面。** agent 在等你回答的問題會排到最上面；它給的選項讀得出來，就每個選項一顆按鈕，否則自己輸入回答。
-- **每個 agent 留在原本的地方。** agent 繼續在自己的終端機裡跑，看板讀的是它們 hooks 的回報。
+- **問題排最前面。** 不管是哪個 agent 問的，在等你回答的問題都會排到最上面；它給的選項讀得出來，就每個選項一顆按鈕，否則自己輸入回答。
+- **每個 agent 留在原本的地方。** agent 繼續在自己的終端機和 Codex、Antigravity 桌面 app 裡跑，登入和計費都不變；看板讀的是它們 hooks 的回報，關掉看板也不會停掉任何 session。
 - **在本機、純文字。** 一個你可以自己看、自己改的 Markdown 檔，只在 127.0.0.1 的網頁，看板本身不呼叫模型。
 - **一個指令裝、一個指令移除。** `setup` 寫入前先列出要改什麼；`remove` 拿掉 setup 寫的東西，不動你自己的設定。
+
+[T3 Code](https://github.com/pingdotgg/t3code) 把 agent 放在它自己的 app 裡跑：session 由它開，過去的對話也能匯入，從 T3 接手那個 session 接著做。Agent Board 跟著的是還開在各家終端機或桌面 app 裡的那個 session：顯示它在等什麼，並在「支援的 agent」表格標明可以的地方，把你的回答送回那個 session。想在同一個 app 裡開新的 session、用 worktree 和手機 app，就用 T3 Code；已經開在各家 app 裡的 session，就用 Agent Board。
 
 <img alt="看板網頁：「需要你」放著 Claude Code 的問題，附答案按鈕；「進行中」列出 Codex、Antigravity 和 OpenCode 的工作和步驟。合成資料。" src="docs/images/page-zh-TW-dark.png" width="860">
 
@@ -130,4 +132,4 @@ npx @wenyuchiou/agent-board@next remove --apply
 
 [MIT](LICENSE)。agent 的圖示來自 [Simple Icons](https://simpleicons.org)（CC0）和 [Lobe Icons](https://github.com/lobehub/lobe-icons)（MIT），這些圖示屬於各自的擁有者；沒有圖示的 agent 以名字的第一個字母表示。
 
-<p align="center"><a href="CHANGELOG.md"><img alt="原始碼版本 0.25.0" src="https://img.shields.io/badge/source-0.25.0-blue"></a><br><sub>最新穩定版本 0.25.0 · <a href="CHANGELOG.md">更新紀錄</a></sub></p>
+<p align="center"><a href="CHANGELOG.md"><img alt="原始碼版本 0.25.1" src="https://img.shields.io/badge/source-0.25.1-blue"></a><br><sub>最新穩定版本 0.25.1 · <a href="CHANGELOG.md">更新紀錄</a></sub></p>

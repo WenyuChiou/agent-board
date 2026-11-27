@@ -3113,7 +3113,7 @@ test('session start survives an engine without session surfaces and shows no boa
   await clock.advance(10)
   expect(started.cwd).toBe('/work/demo')
   expect(world.paneOpenCalls).toBe(1)
-  expect(seen.status.at(-1)).toBe(`${EN.statusPrefix} · ${EN.statusWaiting(1)}`)
+  expect(seen.status.at(-1)).toBe(`● ${EN.statusWaiting(1)}`)
 })
 
 test('a terminal that binds after session start clears the board-page hint', async ($, on) => {
@@ -3121,7 +3121,7 @@ test('a terminal that binds after session start clears the board-page hint', asy
   const clock = engineBeneath(on, world)
   const seen = outside(on, world)
   await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
-  const normalStatus = `${EN.statusPrefix} · ${EN.statusWaiting(1)}`
+  const normalStatus = `● ${EN.statusWaiting(1)}`
   expect(seen.status.at(-1)).toBe(`${normalStatus} · ${EN.statusBoardPage}`)
   world.hasBrokenSurfaces = true
   await clock.advance(30000)
@@ -3143,7 +3143,7 @@ test('a terminal that binds after the pane found no surface at session start cle
   await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
   await clock.advance(10)
   expect(world.paneOpenCalls).toBe(1)
-  const normalStatus = `${EN.statusPrefix} · ${EN.statusWaiting(1)}`
+  const normalStatus = `● ${EN.statusWaiting(1)}`
   expect(seen.status.at(-1)).toBe(`${normalStatus} · ${EN.statusBoardPage}`)
   world.hasNoSurface = false
   await clock.advance(30000)
@@ -3155,7 +3155,7 @@ test('the footer status is unchanged when the pane is placed', async ($, on) => 
   engineBeneath(on, world)
   const seen = outside(on, world)
   await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
-  expect(seen.status.at(-1)).toBe(`${EN.statusPrefix} · ${EN.statusWaiting(1)}`)
+  expect(seen.status.at(-1)).toBe(`● ${EN.statusWaiting(1)}`)
   const opened = await $.command.run({ ...TIDY, args: '' })
   expect(opened.text).toBe(EN.paneOpened)
   expect(opened.text).not.toContain(FILE)
@@ -3226,7 +3226,7 @@ test('the footer status shows the waiting count and /agent-board when no surface
   for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
     const s = STRINGS[lang]
     await $.command.run({ ...TIDY, args: `lang ${lang}` })
-    const normalStatus = `${s.statusPrefix} · ${s.statusWaiting(1)}`
+    const normalStatus = `● ${s.statusWaiting(1)}`
     expect(seen.status.at(-1)).toBe(`${normalStatus} · ${s.statusBoardPage}`)
     expect(seen.status.at(-1)).toContain('/agent-board')
     expect(seen.status.at(-1)).toContain(s.statusWaiting(1))
@@ -3381,7 +3381,7 @@ test('with the pane closed, the line under the prompt carries the progress', asy
   const seen = outside(on, world)
   await start($, '幫我重做進度面板')
   await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
-  expect(seen.status.at(-1)).toMatch(/^進度 · .* 0\/1 · Claude 正在做 · 1 件等你$/)
+  expect(seen.status.at(-1)).toBe('● 1 件等你 · 0/1 · 讀 API')
 
   // Opened, the pane says it all, so the line is cleared.
   await $.command.run({ ...TIDY, args: '' })

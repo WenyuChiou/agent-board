@@ -16,14 +16,19 @@ export class BoardPage {
     return this.main.getByRole('article').filter({ hasText: words })
   }
 
-  // A task is one row; pressing it opens its steps and actions in place.
+  // A task is one row; pressing it opens its details in the side rail from 1440 px up and in place below.
   task(title) {
     return this.main.locator('li.row').filter({ hasText: title })
   }
 
   async openTask(title) {
     const task = this.task(title)
+    // Idle, stopped and done rows sit in a closed fold on the Overview (#1023): open the one that holds this row first.
+    const shelf = this.main.locator('.shelf:not(.open)').filter({ has: this.page.locator('li.row').filter({ hasText: title }) })
+    if (await shelf.count()) await shelf.first().locator(':scope > .shelf-head').click()
     await task.locator('.row-btn').first().click()
+    const rail = this.page.locator('#detail-rail')
+    if (await rail.isVisible()) return rail
     return task
   }
 
