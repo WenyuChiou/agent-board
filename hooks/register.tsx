@@ -44,6 +44,7 @@ import { HISTORY_DAYS, historyDaysOf, settingsPath, sweepHistory } from './histo
 import { barStyleFrom, barStyleName, barStyleOf, DEFAULT_BAR_STYLE, withBarStyle } from './progress-bar'
 import type { BarStyle } from './progress-bar'
 import { withRunMark } from './runs'
+import { SURFACE_IDS } from './messaging'
 import { ciFinished, GH_FIELDS, prFromGh } from './github'
 import {
   appendJournal,
@@ -1568,6 +1569,7 @@ const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; t
 }
 
 let isInteractiveSession = true
+let hasDesktopSurface = false
 
 const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean } | null; needsInstall: boolean; reason?: string }> => {
   // Use the connector's installed file so sessions and agents share the same script
@@ -4285,8 +4287,17 @@ const readAddress = async ($: EngineInterface): Promise<BoardAddress | null> => 
   return parseAddress(await $.fs.read(file), key)
 }
 
+const receiverSurface = async ($: EngineInterface): Promise<string> => {
+  if (!hasDesktopSurface) {
+    const surfaces = await surfacesOf($)
+    if (surfaces?.includes('desktop') === true) hasDesktopSurface = true
+  }
+  return hasDesktopSurface ? SURFACE_IDS.claudeDesktop : SURFACE_IDS.claude
+}
+
 const makeReceiver = ($: EngineInterface): Receiver => createReceiver({
   session: () => $.session.id(),
+  surface: () => receiverSurface($),
   address: () => readAddress($),
   call: async (address, action, body) => {
     const asked = $.http.fetch(`${address.origin}/api/messages/${action}`, {
@@ -4305,19 +4316,39 @@ const makeReceiver = ($: EngineInterface): Receiver => createReceiver({
   save: state => update($, receiverState, () => state),
 })
 
+const ensureReceiver = ($: EngineInterface): void => {
+  if (receiver !== null) return
+  const own = makeReceiver($)
+  receiver = own
+  receiverTimer?.cancel()
+  receiverTimer = $.clock.every(RECEIVER_MS, () => {
+    own.tick().catch(() => undefined)
+  })
+}
+
+// Claude Desktop Code starts SDK sessions with isInteractive: false; a desktop surface marks it as
+// the person's session even when that surface attaches after session.start (#1842).
+const checkDesktopSurface = async ($: EngineInterface, surfaces?: readonly unknown[] | null): Promise<void> => {
+  const list = surfaces === undefined ? await surfacesOf($) : surfaces
+  if (list?.includes('desktop') !== true) return
+  hasDesktopSurface = true
+  ensureReceiver($)
+  if (!isInteractiveSession) {
+    await saveMine($, one => withRunMark(one, false), true)
+    isInteractiveSession = true
+  }
+}
+
 export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
-    isInteractiveSession = e.isInteractive !== false
+    hasDesktopSurface = e.surface === 'desktop'
+    isInteractiveSession = e.isInteractive !== false || hasDesktopSurface
     // Started before anything is awaited: a slow start must not cost the session its address.
     // Each tick looks for the page itself; none of it runs inside this hook's budget.
     receiver = null
-    if (isInteractiveSession) {
-      const own = makeReceiver($)
-      receiver = own
-      receiverTimer = $.clock.every(RECEIVER_MS, () => {
-        own.tick().catch(() => undefined)
-      })
-    }
+    receiverTimer?.cancel()
+    receiverTimer = null
+    if (isInteractiveSession) ensureReceiver($)
     pendingCache = null
     progressChangedAt = null
     heldInboxQuestions.clear()
@@ -4365,7 +4396,9 @@ export const register: Register = (on, options) => {
     const hasTools = tools.length === 0 || tools.some(tool => tool.name === 'TaskCreate' || tool.name === 'TodoWrite')
     await update($, hasTaskTools, () => hasTools)
     hasPaneOpenAnswer = false
-    hasNoPaneSurface = (await surfacesOf($))?.length === 0
+    const initialSurfaces = await surfacesOf($)
+    hasNoPaneSurface = initialSurfaces?.length === 0
+    await checkDesktopSurface($, initialSurfaces)
     await isDoneWithin($, poll($), HUNG_MS)
     await isDoneWithin($, retainInboxQuestions($, [], true).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined), HUNG_MS)
     const startedAt = await $.clock.now()
@@ -4375,7 +4408,13 @@ export const register: Register = (on, options) => {
     // Work left running past a dispatch can outlive the module (a reload, the end): its
     // rejections are dropped rather than left unhandled.
     $.clock.every(POLL_MS, () => {
-      finishApproval($).then(() => poll($, true)).catch(() => undefined).then(() => retainInboxQuestions($)).catch(async () => pendingQuestionsProblem($, true)).catch(() => undefined)
+      (isInteractiveSession ? Promise.resolve() : checkDesktopSurface($))
+        .then(() => finishApproval($))
+        .then(() => poll($, true))
+        .catch(() => undefined)
+        .then(() => retainInboxQuestions($))
+        .catch(async () => pendingQuestionsProblem($, true))
+        .catch(() => undefined)
     })
     const startArchive = enqueue(() => archiveOld($)).catch(() => undefined)
     let isFirstInboxLook = true
@@ -4618,6 +4657,7 @@ export const register: Register = (on, options) => {
     nextTurnNotification = undefined
     const hasPendingBackgroundSave = pendingBackgroundSaves > 0
     if (hasBackgroundActivity) await backgroundChanges
+    if (!isInteractiveSession) await checkDesktopSurface($)
     let mirror = await read($, mine)
     if (mirror?.state === 'ended') {
       await saveMine($, one => ({ ...one, state: 'working' }))
@@ -4667,6 +4707,7 @@ export const register: Register = (on, options) => {
     isTurnRunning = false
     await dropApproval($)
     const isDelivery = (await receiver?.turnEnded(e.turnId, e.answer, e.isAborted).catch(() => false)) === true
+    if (!isInteractiveSession) await checkDesktopSurface($)
     const mirror = await read($, mine)
     const hasRunningTurnBackgroundJob = (mirror?.backgroundJobIds ?? []).some(id => turnBackgroundJobIds.has(id)) ||
       (turnBackgroundLaunchesWithoutId > 0 && (mirror?.backgroundJobs ?? 0) > (mirror?.backgroundJobIds?.length ?? 0))
@@ -4870,7 +4911,10 @@ export const register: Register = (on, options) => {
     // timer goes on and registers that id. Last, and bounded: this hook's time is short, and a
     // session that could not say goodbye is gone from the board when its lease ends.
     const isGoingOn = e.reason === 'clear' || e.reason === 'resume'
-    if (!isGoingOn) receiverTimer?.cancel()
+    if (!isGoingOn) {
+      receiverTimer?.cancel()
+      receiverTimer = null
+    }
     if (receiver !== null) await isDoneWithin($, receiver.end().catch(() => undefined), RECEIVER_END_MS)
     if (!isGoingOn) receiver = null
 

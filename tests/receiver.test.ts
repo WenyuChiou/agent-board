@@ -372,3 +372,87 @@ test('the address folder is one this account can show is its own, or none', () =
   expect(addressFolder(false, '', undefined, false)).toBe(null)
   expect(emptyReceiver().connection).toBe('')
 })
+
+test('createReceiver defaults register surface to Claude Code when surface dep is omitted', async () => {
+  const w = world()
+  await w.receiver().tick()
+  expect(of(w.sent, 'register')[0]?.body.surface).toBe('Claude Code')
+})
+
+test('createReceiver sends custom surface on initial, contested, and post-clear registrations', async () => {
+  const w = world()
+  const box = w.get()
+  const r = createReceiver({
+    session: async () => box.session,
+    surface: () => 'Claude Desktop Code',
+    address: async () => (box.hasAddress ? { origin: 'http://127.0.0.1:1', token: 't' } : null),
+    call: async (_, action, body) => {
+      box.sent.push({ action, body })
+      const answer = box.answers.get(action)
+      if (answer === null) throw new Error('unreachable')
+      if (answer !== undefined) return answer
+      if (action === 'register') return { status: 200, json: { id: `c${box.sent.length}`, secret: 's', leaseMs: 15000 } }
+      if (action === 'poll') return { status: 200, json: { messages: [], leaseMs: 15000 } }
+      return { status: 200, json: { ok: true } }
+    },
+    isBusy: () => box.busy,
+    now: async () => box.at,
+    submit: async () => ({}),
+    load: async () => box.kept,
+    save: async state => { box.kept = state },
+  })
+  await r.tick()
+  const first = box.kept
+  expect(of(w.sent, 'register')[0]?.body.surface).toBe('Claude Desktop Code')
+  box.answers.set('poll', { status: 200, json: { messages: [], leaseMs: 15000, contested: true } })
+  await r.tick()
+  expect(of(w.sent, 'register').length).toBe(2)
+  expect(of(w.sent, 'register')[1]?.body.surface).toBe('Claude Desktop Code')
+  expect(of(w.sent, 'register')[1]?.body.connection).toBe(first?.connection)
+  box.answers.delete('poll')
+  await r.end()
+  box.session = '99999999-2222-3333-4444-555555555555'
+  await r.tick()
+  expect(of(w.sent, 'register').length).toBe(3)
+  expect(of(w.sent, 'register')[2]?.body.surface).toBe('Claude Desktop Code')
+  expect(of(w.sent, 'register')[2]?.body.connection).toBeUndefined()
+})
+
+test('createReceiver re-reads surface dep on re-registration after disconnect or session change', async () => {
+  const w = world()
+  const box = w.get()
+  let currentSurface = 'Claude Code'
+  const r = createReceiver({
+    session: async () => box.session,
+    surface: async () => currentSurface,
+    address: async () => (box.hasAddress ? { origin: 'http://127.0.0.1:1', token: 't' } : null),
+    call: async (_, action, body) => {
+      box.sent.push({ action, body })
+      const answer = box.answers.get(action)
+      if (answer === null) throw new Error('unreachable')
+      if (answer !== undefined) return answer
+      if (action === 'register') return { status: 200, json: { id: `c${box.sent.length}`, secret: 's', leaseMs: 15000 } }
+      if (action === 'poll') return { status: 200, json: { messages: [], leaseMs: 15000 } }
+      return { status: 200, json: { ok: true } }
+    },
+    isBusy: () => box.busy,
+    now: async () => box.at,
+    submit: async () => ({}),
+    load: async () => box.kept,
+    save: async state => { box.kept = state },
+  })
+  await r.tick()
+  expect(of(w.sent, 'register')[0]?.body.surface).toBe('Claude Code')
+  currentSurface = 'Claude Desktop Code'
+  box.answers.set('poll', { status: 400, json: { error: 'CONNECTOR_NOT_CONNECTED' } })
+  await r.tick()
+  box.answers.delete('poll')
+  box.at += 11_000
+  await r.tick()
+  expect(of(w.sent, 'register').at(-1)?.body.surface).toBe('Claude Desktop Code')
+  box.session = '88888888-2222-3333-4444-555555555555'
+  await r.tick()
+  box.at += 11_000
+  await r.tick()
+  expect(of(w.sent, 'register').at(-1)?.body.surface).toBe('Claude Desktop Code')
+})

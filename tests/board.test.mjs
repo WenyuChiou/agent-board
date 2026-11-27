@@ -13746,6 +13746,46 @@ test('completed Codex desktop task keeps App classification in Done shelf', asyn
   assert.ok(sectionWords(dom, 'done').includes('Desktop refactor finished'))
 })
 
+test('Claude Desktop Code card classifies under App interface filter while Claude Code stays under CLI', async () => {
+  const runtime = await sourceBoard()
+  const now = Date.now()
+  const progress = [
+    '## desktop-code-repo',
+    `<!-- auto session=s1842d1 agent=claude state=waiting updated=${new Date(now).toISOString()} -->`,
+    '### Code tab question',
+    '- [?] Deploy desktop change?',
+    '<!-- /auto session=s1842d1 -->',
+    '',
+    '## cli-code-repo',
+    `<!-- auto session=s1842c1 agent=claude state=waiting updated=${new Date(now).toISOString()} -->`,
+    '### CLI question',
+    '- [?] Deploy CLI change?',
+    '<!-- /auto session=s1842c1 -->',
+  ].join('\n')
+  const parsed = runtime.parseProgress(progress)
+  const view = runtime.buildView(parsed, [], null, now, 0, {}, EN)
+  const messaging = {
+    connections: [
+      { id: 'c1842d', agent: 'claude', session: 's1842d1', turn: 'session', scope: 'session', surface: 'Claude Desktop Code', updated: now },
+      { id: 'c1842c', agent: 'claude', session: 's1842c1', turn: 'session', scope: 'session', surface: 'Claude Code', updated: now },
+    ],
+    mailboxes: [],
+    messages: [],
+  }
+  const model = runtime.serveModel(view, [], EN, new Set(), false, messaging, false, { now, repoOf: () => null, versions: { board: '1.2.3', package: null } })
+  const dom = await pageDom(await sourcePage(), model, { width: 1280 })
+  const ifaceOpt = name => pressWalk(dom.node('filter-bar')).find(n => n.tag === 'button' && n.getAttribute('role') === 'menuitemcheckbox' && n.textContent.startsWith(name))
+  assert.equal(ifaceOpt(EN.pgInterfaceApp).childNodes[1].textContent, '1')
+  assert.equal(ifaceOpt(EN.pgInterfaceCli).childNodes[1].textContent, '1')
+  ifaceOpt(EN.pgInterfaceApp).click()
+  assert.ok(shownWords(dom.node('needs')).includes('Deploy desktop change?'))
+  assert.ok(!shownWords(dom.node('needs')).includes('Deploy CLI change?'))
+  ifaceOpt(EN.pgInterfaceApp).click()
+  ifaceOpt(EN.pgInterfaceCli).click()
+  assert.ok(shownWords(dom.node('needs')).includes('Deploy CLI change?'))
+  assert.ok(!shownWords(dom.node('needs')).includes('Deploy desktop change?'))
+})
+
 test('a project in the sidebar counts its questions, working tasks and other work, and leaves its stopped and finished tasks out', async () => {
   const { board, model, html } = await projectBoard()
   try {

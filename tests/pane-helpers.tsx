@@ -75,6 +75,7 @@ type World = {
   unlistable?: Set<string>
   mtime: number
   hasTasks: boolean
+  surfaces?: readonly string[]
   hasNoSurface?: boolean
   hasBrokenSurfaces?: boolean
   surfaceCalls?: number
@@ -268,7 +269,7 @@ const engineBeneath = (on: On, world: World): MockClock => {
   on('session.surfaces', () => {
     world.surfaceCalls = (world.surfaceCalls ?? 0) + 1
     if (world.hasBrokenSurfaces) throw new TypeError('session.surfaces is not a function')
-    return { value: world.hasNoSurface ? [] : ['terminal' as const] }
+    return { value: world.surfaces ?? (world.hasNoSurface ? [] : ['terminal' as const]) }
   })
   on('session.root', () => ({ value: '/work/persona_framework' }))
   on('session.repo', () => ({

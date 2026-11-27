@@ -2,6 +2,7 @@ import { parseQuestions, questionsPath } from '../hooks/questions'
 import { addressFileName, addressKey } from '../hooks/receiver'
 import { engineBeneath, expect, FILE, outside, SESSION, start, test } from './pane-helpers'
 import type { World } from './pane-helpers'
+import type { ProgressMirror } from '../types'
 
 const NONCE = 'a1b2c3'
 const WORDS = 'the message text from the board'
@@ -193,4 +194,202 @@ test('a print-mode session does not register with the board', async ($, on) => {
   await $.session.start({ cwd: '/w/api-gateway', surface: null, isInteractive: false })
   await clock.advance(6100)
   expect(sent.length).toBe(0)
+})
+
+test('a plain -p session without desktop surface keeps isRun true, writes no block, and never registers', async ($, on) => {
+  const shared: Record<string, unknown> = { autoConnectOff: true }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, surfaces: ['terminal'], shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('tool.call', { tool: 'Edit' }, () => ({ result: 'updated' }))
+  const { sent } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: null, isInteractive: false })
+  await $.turn.start({ text: 'Run check', turnId: 'p1' })
+  await $.tool.call({ tool: 'Edit', file_path: '/w/api-gateway/a', old_string: '1', new_string: '2' })
+  await clock.advance(5000)
+  await $.turn.complete({ answer: 'Checked. Ship now?', durationMs: 1, isAborted: false, turnId: 'p1', reason: 'answer' })
+  await clock.advance(6100)
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: SESSION, resume: { sessionId: SESSION } as never })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).isRun).toBe(true)
+  expect(world.files.get(FILE) ?? '').toBe('')
+  expect(sent.length).toBe(0)
+})
+
+test('an interactive terminal session still registers as Claude Code', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, surfaces: ['terminal'] }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { sent } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: 'terminal', isInteractive: true })
+  await clock.advance(2100)
+  expect(sent.find(one => one.action === 'register')?.body.surface).toBe('Claude Code')
+})
+
+test('a Code tab desktop session starts the receiver as Claude Desktop Code and writes no-Task-list questions to the board', async ($, on) => {
+  const shared: Record<string, unknown> = { autoConnectOff: true }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, surfaces: ['desktop'], shared, reply: () => 'TITLE: Code tab task\nCONTEXT: -\nDONE: Checked code\nNEXT: -\nASK: Ship now?' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('tool.call', { tool: 'Edit' }, () => ({ result: 'updated' }))
+  const { sent } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: 'desktop', isInteractive: false })
+  await clock.advance(2100)
+  expect(sent.find(one => one.action === 'register')?.body.surface).toBe('Claude Desktop Code')
+  await $.turn.start({ text: 'Check the code', turnId: 't1' })
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).isRun).toBeUndefined()
+  await $.tool.call({ tool: 'Edit', file_path: '/w/api-gateway/a', old_string: '1', new_string: '2' })
+  await $.turn.complete({ answer: 'Done editing. Ship now?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2100)
+  const board = world.files.get(FILE) ?? ''
+  expect(board).toContain('Checked code')
+  expect(board).toContain('- [?] Ship now?')
+})
+
+test('a Code tab desktop session delivers a board message and keeps only its trailing question on a no-Task-list board', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, surfaces: ['desktop'], reply: () => 'TITLE: Code tab delivery\nCONTEXT: -\nDONE: Built module\nNEXT: -\nASK: -' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('tool.call', { tool: 'Edit' }, () => ({ result: 'updated' }))
+  const { sent, submitted } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: 'desktop', isInteractive: false })
+  await $.turn.start({ text: 'Start module', turnId: 't1' })
+  await $.tool.call({ tool: 'Edit', file_path: '/w/api-gateway/a', old_string: '1', new_string: '2' })
+  await $.turn.complete({ answer: 'done', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2100)
+  expect(submitted.length).toBe(1)
+  expect(sent.find(one => one.action === 'register')?.body.surface).toBe('Claude Desktop Code')
+  expect(sent.find(one => one.action === 'receipt')?.body.status).toBe('accepted')
+  await $.turn.start({ text: PROMPT, turnId: 'd1' })
+  await $.turn.complete({ answer: `ACK ${NONCE}\nFinished. Blue or green?`, durationMs: 1, isAborted: false, turnId: 'd1', reason: 'answer' })
+  await clock.advance(2100)
+  expect(sent.filter(one => one.action === 'receipt').map(one => one.body.status)).toEqual(['accepted', 'acknowledged'])
+  expect(sent.find(one => one.body.status === 'acknowledged')?.body.reply).toBe(`ACK ${NONCE}`)
+  const board = world.files.get(FILE) ?? ''
+  expect(board).toContain('- [?] Blue or green?')
+  for (const leak of [WORDS, NONCE, 'ACK']) expect(board).not.toContain(leak)
+})
+
+test('late desktop surface attachment before a turn promotes the session, clears isRun, and registers as Claude Desktop Code', async ($, on) => {
+  const shared: Record<string, unknown> = { autoConnectOff: true }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, surfaces: [], shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { sent } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: null, isInteractive: false })
+  await clock.advance(2100)
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror | undefined)?.isRun).not.toBe(false)
+  expect(sent.length).toBe(0)
+  world.surfaces = ['desktop']
+  await clock.advance(5100)
+  expect(shared[`mirror:${SESSION}`]).toBeDefined()
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).isRun).toBeUndefined()
+  expect(sent.find(one => one.action === 'register')?.body.surface).toBe('Claude Desktop Code')
+})
+
+test('late desktop surface attachment during a turn clears isRun without delivering mid-turn and delivers after turn.complete', async ($, on) => {
+  const shared: Record<string, unknown> = { autoConnectOff: true }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, surfaces: [], shared }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { sent, submitted } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: null, isInteractive: false })
+  await $.turn.start({ text: 'Work in progress', turnId: 't1' })
+  world.surfaces = ['desktop']
+  await clock.advance(5100)
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).isRun).toBeUndefined()
+  expect(sent.find(one => one.action === 'register')?.body.surface).toBe('Claude Desktop Code')
+  expect(sent.filter(one => one.action === 'poll').at(-1)?.body.receive).toBe(false)
+  expect(submitted.length).toBe(0)
+  await $.turn.complete({ answer: 'Done.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2100)
+  expect(submitted.length).toBe(1)
+})
+
+test('late desktop surface attachment at turn.complete clears isRun so the completed no-Task-list turn writes to the board', async ($, on) => {
+  const shared: Record<string, unknown> = { autoConnectOff: true }
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, surfaces: [], shared, reply: () => 'TITLE: Late desktop task\nCONTEXT: -\nDONE: Applied change\nNEXT: -\nASK: Continue?' }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('tool.call', { tool: 'Edit' }, () => ({ result: 'updated' }))
+  const { sent } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: null, isInteractive: false })
+  await $.turn.start({ text: 'Edit file', turnId: 't1' })
+  await $.tool.call({ tool: 'Edit', file_path: '/w/api-gateway/a', old_string: '1', new_string: '2' })
+  world.surfaces = ['desktop']
+  await $.turn.complete({ answer: 'Updated. Continue?', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(2100)
+  expect((shared[`mirror:${SESSION}`] as ProgressMirror).isRun).toBeUndefined()
+  expect(sent.find(one => one.action === 'register')?.body.surface).toBe('Claude Desktop Code')
+  const board = world.files.get(FILE) ?? ''
+  expect(board).toContain('Applied change')
+  expect(board).toContain('- [?] Continue?')
+})
+
+test('repeated desktop surface checks never start a second receiver or double-register', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, surfaces: ['desktop'] }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { sent } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: 'desktop', isInteractive: false })
+  await clock.advance(2100)
+  expect(sent.filter(one => one.action === 'register').length).toBe(1)
+  await $.turn.start({ text: 'Turn 1', turnId: 't1' })
+  await $.turn.complete({ answer: 'Ok.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(6100)
+  expect(sent.filter(one => one.action === 'register').length).toBe(1)
+  expect(sent.filter(one => one.action === 'poll').length).toBeGreaterThan(1)
+})
+
+test('after a /clear a Code tab desktop session re-registers as Claude Desktop Code, and stops after exit', async ($, on) => {
+  const world: World = { files: new Map(), mtime: 1, hasTasks: false, surfaces: ['desktop'] }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  const { sent } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: 'desktop', isInteractive: false })
+  await clock.advance(2100)
+  expect(sent.filter(one => one.action === 'register').map(one => one.body.surface)).toEqual(['Claude Desktop Code'])
+  await $.session.end({ reason: 'clear', sessionId: SESSION, resume: { sessionId: SESSION } as never })
+  await clock.advance(2100)
+  expect(sent.filter(one => one.action === 'disconnect').length).toBe(1)
+  expect(sent.filter(one => one.action === 'register').map(one => one.body.surface)).toEqual(['Claude Desktop Code', 'Claude Desktop Code'])
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: SESSION, resume: { sessionId: SESSION } as never })
+  const count = sent.length
+  await clock.advance(6100)
+  expect(sent.filter(one => one.action === 'disconnect').length).toBe(2)
+  expect(sent.length - count).toBe(0)
+})
+
+test('failed store write during late desktop promotion starts receiver and retries promotion on next poll', async ($, on) => {
+  let failNextSave = false
+  const store: Record<string, unknown> = { autoConnectOff: true }
+  const world: World = {
+    files: new Map(), mtime: 1, hasTasks: false, surfaces: [], store,
+    failStore: (op, key) => {
+      if (!failNextSave || op !== 'set' || key !== `mirror:${SESSION}`) return false
+      failNextSave = false
+      return true
+    },
+    reply: () => 'TITLE: Retried desktop task\nCONTEXT: -\nDONE: Recovered\nNEXT: -\nASK: Next step?',
+  }
+  const clock = engineBeneath(on, world)
+  outside(on, world)
+  on('tool.call', { tool: 'Edit' }, () => ({ result: 'updated' }))
+  const { sent } = hub(on, world)
+  await $.session.start({ cwd: '/w/api-gateway', surface: null, isInteractive: false })
+  await $.turn.start({ text: 'First turn', turnId: 't1' })
+  await $.turn.complete({ answer: 'Ok.', durationMs: 1, isAborted: false, turnId: 't1', reason: 'answer' })
+  // First promotion attempt writes isRun: false via store.set and fails once; receiver still starts,
+  // and the next poll retries saveMine, clears isRun, and promotes the session.
+  world.surfaces = ['desktop']
+  failNextSave = true
+  await clock.advance(2100)
+  expect((store[`mirror:${SESSION}`] as ProgressMirror | undefined)?.isRun).toBe(true)
+  await clock.advance(3100)
+  expect(sent.find(one => one.action === 'register')?.body.surface).toBe('Claude Desktop Code')
+  expect((store[`mirror:${SESSION}`] as ProgressMirror | undefined)?.isRun).toBeUndefined()
+  await $.turn.start({ text: 'Second turn', turnId: 't2' })
+  await $.tool.call({ tool: 'Edit', file_path: '/w/api-gateway/a', old_string: '1', new_string: '2' })
+  await $.turn.complete({ answer: 'Done. Next step?', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.advance(2100)
+  expect(world.files.get(FILE) ?? '').toContain('- [?] Next step?')
 })

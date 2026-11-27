@@ -509,7 +509,7 @@ describe('L0 discover and install from the README', () => {
     assert.throws(() => checkCells([...RECEIVER_ROUTES, ended('grok', 'docs/validation/synthetic-grok.md')]), /grok on /)
     const messaging = read('docs/MESSAGING.md')
     const appNote = 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md', codexAppNote = 'docs/validation/2026-11-22-codex-app-reopen-live.md'
-    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Verified', `[${codexAppNote}](../${codexAppNote})`], ['Antigravity', '2.0 Desktop App', 'Verified', `[${appNote}](../${appNote})`], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Implemented', 'Not tested']]) {
+    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Implemented', 'Not tested'], ['Codex', 'Desktop App', 'Verified', `[${codexAppNote}](../${codexAppNote})`], ['Antigravity', '2.0 Desktop App', 'Verified', `[${appNote}](../${appNote})`], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Implemented', 'Not tested']]) {
       assert.ok(messaging.split('\n').some(line => line.startsWith(`| ${host} | ${surface} | `) && line.includes(`| ${status} | ${live} |`)), `docs/MESSAGING.md: ${host} ${surface} is ${status}, ${live}`)
     }
     for (const [name, lang] of READMES) {

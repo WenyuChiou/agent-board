@@ -10299,3 +10299,41 @@ test('a Codex card the process check proved gone has no route to send on, and no
     assert.equal(routeOf(RECEIVER_ROUTES, 'codex', record.kind, 'ended', surface).canSend, false, `${record.kind} ${surface}`)
   }
 })
+
+test('sendDecision and the board refuse Claude Desktop Code with Copy until a live note covers it, while Claude Code sends', () => fixture(async (board, dir) => {
+  const desktopSession = '11111111-2222-3333-4444-555555551842'
+  const cliSession = '11111111-2222-3333-4444-555555551843'
+  const now = Date.now()
+  for (const state of ['idle', 'working', 'ended']) {
+    const conn = { id: `cd-${state}`, agent: 'claude', session: desktopSession, surface: SURFACE_IDS.claudeDesktop, turn: 'session', scope: 'session', expires: now + 60_000 }
+    const decision = sendDecision(conn.id, [conn], [], () => state, RECEIVER_ROUTES, now)
+    assert.equal(decision.canSend, false, `expected Copy refusal on ${state}`)
+    assert.equal(decision.reason, state === 'ended' ? 'NO_RECORD' : 'SURFACE_UNKNOWN')
+  }
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n<!-- auto session=abcdef11 agent=claude resume=${desktopSession} state=waiting updated=${new Date(now).toISOString()} -->\n### Code tab card\n- [?] Approve Code tab?\n<!-- /auto session=abcdef11 -->\n<!-- auto session=abcdef12 agent=claude resume=${cliSession} state=waiting updated=${new Date(now).toISOString()} -->\n### CLI card\n- [?] Approve CLI?\n<!-- /auto session=abcdef12 -->\n`)
+  const desktopConn = (await board.call('/api/messages/register', { agent: 'claude', session: desktopSession, turn: 'session', scope: 'session', surface: SURFACE_IDS.claudeDesktop })).body
+  const cliConn = (await board.call('/api/messages/register', { agent: 'claude', session: cliSession, turn: 'session', scope: 'session', surface: SURFACE_IDS.claude })).body
+  const asks = (await board.call('/api/board')).body.model.asks
+  const desktopAsk = asks.find(one => one.task === 'Code tab card')
+  const cliAsk = asks.find(one => one.task === 'CLI card')
+  assert.ok(desktopAsk && cliAsk)
+  assert.equal(desktopAsk.canSend, false)
+  assert.equal(desktopAsk.send, 'none')
+  assert.equal(desktopAsk.surface, SURFACE_IDS.claudeDesktop)
+  assert.equal(cliAsk.canSend, true)
+  assert.equal(cliAsk.send, 'connected')
+  const directRefused = await board.call('/api/messages/send', { id: 'AB-CODE-TAB-REFUSED', target: desktopConn.id, turn: 'session', text: 'Yes' })
+  assert.equal(directRefused.status, 409)
+  assert.equal(directRefused.body.error, 'NO_RECORDED_ROUTE')
+  assert.equal((await board.call('/api/act', { key: cliAsk.key, type: 'message', id: 'AB-CLI-OK', text: 'Yes', session: cliSession, asked: cliAsk.text, fp: cliAsk.fp, connection: cliConn.id, turn: 'session' })).status, 200)
+}, '', undefined, RECEIVER_ROUTES))
+
+test('messaging-matrix shows Claude Code Desktop Code as Implemented with no live note while CLI stays Verified', async () => {
+  const { readReceiverRecords, renderMatrix } = await import('../scripts/messaging-matrix.mjs')
+  const root = join(import.meta.dirname, '..')
+  const rows = renderMatrix(await readReceiverRecords(root), 'docs/MESSAGING.md', root).split('\n')
+  const cliRow = rows.find(one => one.startsWith('| Claude Code | CLI |'))
+  const desktopRow = rows.find(one => one.startsWith('| Claude Code | Desktop Code |'))
+  assert.ok(cliRow && cliRow.includes('| Verified |'), cliRow)
+  assert.ok(desktopRow && desktopRow.includes('| Implemented |') && desktopRow.includes('| Not tested |') && desktopRow.includes('no live note'), desktopRow)
+})

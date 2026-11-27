@@ -23,6 +23,7 @@ export type HubAnswer = { status: number; json: unknown }
 
 export type ReceiverDeps = {
   session: () => Promise<string>
+  surface?: () => string | Promise<string>
   address: () => Promise<BoardAddress | null>
   call: (address: BoardAddress, action: string, body: Record<string, unknown>) => Promise<HubAnswer>
   isBusy: () => boolean
@@ -130,7 +131,8 @@ export const createReceiver = (deps: ReceiverDeps): Receiver => {
     if (address === null) return
     const { connection, secret, session: was } = await state()
     const replaces = connection !== '' && was === session ? { connection, secret } : {}
-    const answer = await call('register', { agent: 'claude', session, surface: SURFACE_IDS.claude, turn: 'session', scope: 'session', ...replaces })
+    const surface = (await Promise.resolve().then(() => deps.surface?.()).catch(() => undefined)) ?? SURFACE_IDS.claude
+    const answer = await call('register', { agent: 'claude', session, surface, turn: 'session', scope: 'session', ...replaces })
     const made = answer?.json as { id?: unknown; secret?: unknown; leaseMs?: unknown } | undefined
     if (answer?.status !== 200 || typeof made?.id !== 'string' || typeof made.secret !== 'string') {
       // Credentials of a page that is gone, or of its last run, are not asked about again.
