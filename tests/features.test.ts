@@ -1283,6 +1283,8 @@ test('an inline "A or B?" choice of amounts offers the amounts, not the question
   expect(askOf('Should the cache hold up to 2 GB or 4 GB?', '').options[0]).toBe('Should the cache hold up to 2 GB')
   expect(askOf('Should the cache hold at least 2 GB or 4 GB?', '').options[0]).toBe('Should the cache hold at least 2 GB')
   expect(askOf('Should the export keep 3 to 5 days or 10 days of history?', '').options[0]).toBe('Should the export keep 3 to 5 days')
+  expect(askOf('Should I set the retry limit to between three and 5 or 10?', '').options[0]).toBe('Should I set the retry limit to between three and 5')
+  expect(askOf('Should the export keep three to 5 days or 10 days?', '').options[0]).toBe('Should the export keep three to 5 days')
   expect(askOf('Should the service wait 1h 30m or 2h?', '').options[0]).toBe('Should the service wait 1h 30m')
   // The last option keeps its own words: they may qualify it alone.
   expect(askOf('Should the job run 2 hours or 4 hours with a sandbox?', '')).toMatchObject({ kind: 'choose', options: ['2 hours', '4 hours with a sandbox'] })

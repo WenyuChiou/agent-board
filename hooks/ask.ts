@@ -121,6 +121,7 @@ const NUMBER = /^\d/
 const RANGE_JOIN = /^(?:and|or|to|through|thru|plus|\+|-|–|~)$/i
 // Words that bound the number (`at least 2`, `more than 3`, `between 3`, `up to 2`).
 const QUALIFIER = /^(?:than|least|most|under|over|below|above|about|around|approximately|roughly|nearly|almost|max|min|maximum|minimum|between|from|within)$/i
+const SPELLED = /^(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|hundred|thousand|half|a few|several|couple)$/i
 const UNIT = /^(?:ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|months?|y|yrs?|years?|[kmgt]i?b|bytes?|%)$/i
 const parallelAmounts = (first: string, last: string): [string, string] | null => {
   if (!CLAUSE_OPENING.test(first) || CJK.test(first) || CJK.test(last)) return null
@@ -136,8 +137,11 @@ const parallelAmounts = (first: string, last: string): [string, string] | null =
   const word = (index: number): string => (firstWords[index] ?? '').replace(/,$/, '')
   const amountEndsAt = (index: number): boolean => NUMBER.test(word(index)) || (UNIT.test(word(index)) && NUMBER.test(word(index - 1)))
   const before = word(from - 1)
-  if (amountEndsAt(from - 1) || QUALIFIER.test(before)) return null
-  if (RANGE_JOIN.test(before) && (amountEndsAt(from - 2) || /^(?:up|down|from)$/i.test(word(from - 2)))) return null
+  // Any bound in the lead, or a join word other than `to` right before the number (`between three
+  // and 5`), keeps the words whole. `to` joins a range only after an amount, spelled or not
+  // (`3 to 5`, `three to 5`, `up to 5`); after a noun it only names the value (`limit to 3`).
+  if (amountEndsAt(from - 1) || firstWords.some(one => QUALIFIER.test(one.replace(/,$/, '')))) return null
+  if (RANGE_JOIN.test(before) && (before.toLowerCase() !== 'to' || amountEndsAt(from - 2) || SPELLED.test(word(from - 2)) || /^(?:up|down|from)$/i.test(word(from - 2)))) return null
   const amount = firstWords.slice(from)
   if (amount.length > lastWords.length) return null
   return [amount.join(' '), last]
