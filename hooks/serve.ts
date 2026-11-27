@@ -2730,6 +2730,7 @@ const PAGE_SCRIPT = String.raw`
     if (parts.askMore) reveal(parts.askMore, state.mode === 'ask');
     reveal(parts.reply, state.mode === 'write');
     reveal(parts.routeNote, !isAfter && !parts.hasReceipt);
+    if (parts.routePill) parts.routePill.hidden = isAfter || parts.hasReceipt;
     reveal(parts.after, isAfter && !hasReceiptAfter);
     if (isAfter && parts.hideBtn) {
       var target = hasReceiptAfter && parts.receiptActs ? parts.receiptActs : parts.afterRow;
@@ -3030,6 +3031,7 @@ const PAGE_SCRIPT = String.raw`
       canHide: ask.canHide === true,
       late: lateWord(agentPresence[id]) !== '',
       routeNote: routeNote || null,
+      routePill: routePill || null,
       hideBtn: hideBtn || null,
       askMore: null,
       detailActs: null,
@@ -3097,7 +3099,7 @@ const PAGE_SCRIPT = String.raw`
       add(body, receiptEl);
     }
     paintMode(key);
-    resultSlot(body, key, ask.fp || ask.text, ask.task || ask.title || ref.repo);
+    resultSlot(isCardRailSelected ? detailIn : body, key, ask.fp || ask.text, ask.task || ask.title || ref.repo);
     add(card, body);
     if (!isOlder) {
       railItems[ref.key] = {

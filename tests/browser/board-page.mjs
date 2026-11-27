@@ -16,6 +16,15 @@ export class BoardPage {
     return this.main.getByRole('article').filter({ hasText: words })
   }
 
+  async openQuestion(words) {
+    const card = this.question(words)
+    const more = card.locator('button.q-toggle')
+    if ((await more.getAttribute('aria-expanded')) !== 'true') await more.click()
+    const rail = this.page.locator('#detail-rail')
+    if (await rail.isVisible()) return rail
+    return card
+  }
+
   // A task is one row; pressing it opens its details in the side rail from 1440 px up and in place below.
   task(title) {
     return this.main.locator('li.row').filter({ hasText: title })
