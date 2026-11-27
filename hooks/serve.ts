@@ -1247,6 +1247,7 @@ div.row-btn{cursor:default}
 div.row-btn .r-chev{visibility:hidden}
 .r-meta .st{color:var(--ink)}
 .r-meta .st.t-quiet{color:var(--muted)}
+.r-meta .r-step{color:var(--ink);font-weight:600}
 .r-meta .prog{display:inline-flex;align-items:center;gap:var(--s2);vertical-align:-1px}
 .r-meta .prog span{margin-left:0}
 .pbar{display:inline-flex;align-items:center;gap:2px;width:96px;height:8px;flex:none}
@@ -1269,6 +1270,7 @@ div.row-btn .r-chev{visibility:hidden}
 .sw{display:inline-flex;align-items:center;gap:2px;width:36px;height:8px;flex:none}
 @media (max-width:560px){.pbar{width:auto;min-width:72px}.pbar.cont{width:72px}}
 .r-right.t-alert{color:var(--alert)}
+.r-right.t-stale{color:var(--soon);font-weight:600}
 .r-right{font-size:var(--text-xs);color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap;max-width:9em;overflow:hidden;text-overflow:ellipsis}
 .row-open{background:var(--current);border-radius:0 0 var(--radius-m) var(--radius-m);padding:var(--s1) var(--s2) var(--s3) calc(var(--s2) + 36px);display:grid;gap:var(--s3);min-width:0;opacity:0;transition:opacity var(--dur-base) var(--ease-out)}
 .row.open .row-open{opacity:1}
@@ -1363,7 +1365,9 @@ ${ICON_CSS}
 .s-agent[data-presence="notseen"] .ag::after{background:linear-gradient(var(--muted),var(--muted)) center/6px 2px no-repeat var(--ground)}
 .s-agent.working .ag::after{border-color:var(--ground);border-radius:var(--radius-round);background:var(--alive)}
 .s-agent[aria-pressed="true"].working .ag::after,.s-agent[aria-pressed="true"][data-presence="offline"] .ag::after,.s-agent[aria-pressed="true"][data-presence="notseen"] .ag::after{border-color:var(--current)}
-.shell[data-empty="1"] :is(.s-views,.s-projects,.s-search,.f-bar){display:none}
+.shell[data-empty="1"] :is(.s-views,.s-projects,.s-search,.f-bar,.hud-filter-btn){display:none}
+.hud-filter-btn{margin-left:auto}
+.hud-filter-btn[data-active="1"],.hud-filter-btn[aria-expanded="true"]{background:var(--current);color:var(--ink)}
 .s-search{position:relative;display:flex;align-items:center;gap:var(--s2);min-height:var(--hit);padding:0 var(--s2);border:1px solid var(--line-strong);border-radius:var(--radius-m);background:var(--inset)}
 .s-search:focus-within{border-color:var(--ink);outline:2px solid var(--ink);outline-offset:-1px}
 .s-search svg.i{flex:none;width:16px;height:16px;color:var(--muted)}
@@ -1445,6 +1449,10 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
   .shell[data-drawer="1"] .drawer-close{display:flex}
   /* The rail toggle has nothing to fold in a drawer; the Close button is the way out. */
   .shell[data-drawer="1"] .s-toggle{display:none}
+  /* Narrow right-1/4 cockpit HUD: hide idle filter bar behind #hud-filter-btn and trim top chrome padding. */
+  .f-bar[data-hud-idle="1"]{display:none}
+  .head .topbar{min-height:46px}
+  .agents-in{padding-top:var(--s1);padding-bottom:var(--s1)}
 }
 @media (max-width:399px){
   /* The button is an icon alone where the heading would crowd its label out. */
@@ -1459,13 +1467,17 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
   .card-detail-btn:hover{background:var(--hover);color:var(--ink)}
   .card-detail-btn:active{background:var(--press)}
 }
+@media (max-width:799px){
+  .col{padding-left:max(var(--s4),env(safe-area-inset-left,0px));padding-right:max(var(--s4),env(safe-area-inset-right,0px))}
+  .page,#board{gap:var(--s4)}
+  .page{padding-top:var(--s3)}
+  .shell[data-view="all"] #tidy-bulk:not([open]){display:none}
+}
 @media (max-width:640px){
   .col{padding-left:max(var(--s3),env(safe-area-inset-left,0px));padding-right:max(var(--s3),env(safe-area-inset-right,0px))}
   .head{position:static}
   .agents{top:0}
   #offline:not(:empty){top:0}
-  .page,#board{gap:var(--s5)}
-  .page{padding-top:var(--s4)}
   .card{padding:var(--s3)}
   .c-line2{flex-wrap:wrap}
   .row-open{padding-left:var(--s2)}
@@ -1530,7 +1542,7 @@ ${settingsCss}
 </aside>
 <div class="drawer-backdrop" id="drawer-backdrop"></div>
 <div class="stage">
-<header class="head" id="head"><div class="col topbar"><button type="button" class="btn drawer-btn" id="drawer-btn" data-local aria-expanded="false" aria-controls="side" aria-label="${esc(s.sideTitle)}" title="${esc(s.sideTitle)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg><span class="drawer-label">${esc(s.sideTitle)}</span></button><div class="brand"><h1>${boardLogo(esc(s.serveLiveHint))}</h1></div></div></header>
+<header class="head" id="head"><div class="col topbar"><button type="button" class="btn drawer-btn" id="drawer-btn" data-local aria-expanded="false" aria-controls="side" aria-label="${esc(s.sideTitle)}" title="${esc(s.sideTitle)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M2.5 8h11M2.5 12h11"/></svg><span class="drawer-label">${esc(s.sideTitle)}</span></button><div class="brand"><h1>${boardLogo(esc(s.serveLiveHint))}</h1></div><button type="button" class="icon-btn hud-filter-btn" id="hud-filter-btn" data-local aria-expanded="false" aria-controls="filter-bar" aria-label="${esc(s.pgFilterBar)}" title="${esc(s.pgFilterBar)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4h11M4.5 8h7M6.5 12h3"/></svg></button></div></header>
 <template id="fresh-mark">${boardIcon(44, '', true, ' is-arriving')}</template>
 <div id="offline" role="status" aria-live="polite"></div>
 <nav class="agents" id="agents" aria-label="${esc(s.pgAgents)}" hidden><div class="col agents-in" id="chips"></div><div class="col agent-note fx gone" id="away-line" role="status" hidden><div class="fx-in" id="away-line-in"></div></div><div class="col agent-note" id="agent-note"></div></nav>
@@ -2298,7 +2310,7 @@ const PAGE_SCRIPT = String.raw`
     }
     return node;
   }
-  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, hasWaitingOthers: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {} };
+  var pg = { filter: '', project: '', query: '', filters: { agents: [], projects: [], interfaces: [] }, openMenu: '', view: 'all', chips: Object.create(null), sideChips: Object.create(null), projectNodes: Object.create(null), openShelf: {}, sentBy: Object.create(null), sentTotal: 0, ids: [], model: null, sources: {}, order: {}, lis: [], groups: [], drafts: {}, shown: {}, nodes: {}, items: {}, hasOlder: false, hasWaitingOthers: false, mores: [], cardNodes: {}, cardList: null, rowKeys: {}, doneKeys: null };
   var cardState = {};
   var cardParts = {};
   var cardChoices = Object.create(null);
@@ -2306,6 +2318,7 @@ const PAGE_SCRIPT = String.raw`
   var railItems = Object.create(null);
   function isWideDetail() { return typeof window.innerWidth === 'number' && window.innerWidth >= 1440; }
   var wasWideDetail = isWideDetail();
+  var wasNarrowHud = typeof window.innerWidth === 'number' && window.innerWidth > 0 && window.innerWidth < 800;
   var railDraftFocus = null;
   function syncRailDraftFocus() {
     var rail = document.getElementById('detail-rail');
@@ -3052,7 +3065,13 @@ const PAGE_SCRIPT = String.raw`
     if (sameName(project, title)) project = '';
     var progress = isTask && row.total > 0 && (section === 'working' || section === 'stopped' || section === 'others') ? progressNode(row.cells || '', row.done, row.total, current ? clean(current.text) : '') : null;
     var rowSurf = surfaceBadge(interfaceOf(ref), false);
-    var meta = add(el('span', 'r-meta'), progress, rowSurf, status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null, project ? el('span', '', project) : null, sameTitle ? el('span', '', sameTitle) : null, detail ? el('span', '', detail) : null);
+    var stepNode = detail ? el('span', section === 'working' ? 'r-step' : '', detail) : null;
+    var statusNode = status ? el('span', 'st' + (isUnsureRow ? ' t-quiet' : ''), status) : null;
+    var projectNode = project ? el('span', 'r-proj', project) : null;
+    var sameNode = sameTitle ? el('span', '', sameTitle) : null;
+    var meta = section === 'working'
+      ? add(el('span', 'r-meta'), progress, stepNode, statusNode, projectNode, sameNode, rowSurf)
+      : add(el('span', 'r-meta'), progress, rowSurf, statusNode, projectNode, sameNode, stepNode);
     var titleNode = el('span', 'r-title', title);
     titleNode.setAttribute('title', title);
     var li = el('li', 'row' + (isOpen && isExpandable ? ' open' : ''));
@@ -3073,7 +3092,9 @@ const PAGE_SCRIPT = String.raw`
     }) : el('div');
     head.className = 'row-btn';
     if (isExpandable) head.setAttribute('aria-expanded', String(isOpen || isRailSelected));
-    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', 'r-right' + (dueOf(ref) && source(ref).dueTone === 'alert' ? ' t-alert' : ''), dueOf(ref) || ageOf(ref)), el('span', 'r-chev'));
+    var isStaleWorking = section === 'working' && !dueOf(ref) && (isUnsureRow || (ref.at > 0 && pg.model && pg.model.view && pg.model.view.now - ref.at >= 10 * 60 * 1000));
+    var rightCls = 'r-right' + (dueOf(ref) && source(ref).dueTone === 'alert' ? ' t-alert' : isStaleWorking ? ' t-stale' : '');
+    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', rightCls, dueOf(ref) || ageOf(ref)), el('span', 'r-chev'));
     var block = el('div', 'fx');
     add(block, add(el('div', 'fx-in'), head, isExpandable ? fold : null));
     add(li, block);
@@ -3454,6 +3475,18 @@ const PAGE_SCRIPT = String.raw`
     layout();
   }
   var filterUi = null;
+  var hudFilterOpen = false;
+  function syncHudFilter() {
+    var bar = filterUi ? filterUi.bar : document.getElementById('filter-bar');
+    var btn = document.getElementById('hud-filter-btn');
+    var active = hasActiveFilters() || Boolean(pg.openMenu);
+    var shown = hudFilterOpen || active;
+    if (bar) bar.setAttribute('data-hud-idle', shown ? '0' : '1');
+    if (btn) {
+      btn.setAttribute('aria-expanded', String(shown));
+      btn.setAttribute('data-active', active ? '1' : '0');
+    }
+  }
   function ensureFilterBar() {
     var bar = document.getElementById('filter-bar');
     if (!bar) return null;
@@ -3486,6 +3519,7 @@ const PAGE_SCRIPT = String.raw`
     clearBtn.hidden = true;
     add(bar, clearBtn);
     filterUi = { bar: bar, groups: groups, clearBtn: clearBtn };
+    syncHudFilter();
     return filterUi;
   }
   function paintFilterMenus() {
@@ -3496,6 +3530,7 @@ const PAGE_SCRIPT = String.raw`
       g.menu.hidden = !isOpen;
       g.chip.setAttribute('aria-expanded', String(isOpen));
     });
+    syncHudFilter();
   }
   function drawFilterBar(tokens) {
     var ui = ensureFilterBar();
@@ -3781,6 +3816,13 @@ const PAGE_SCRIPT = String.raw`
       btn.focus({ preventScroll: true });
     }
   }
+  function isFreshAiRef(ref, now) {
+    return !(source(ref).isOwn || ref.isOwn) && ref.at > 0 && now - ref.at <= 15 * 60 * 1000;
+  }
+  function hasFreshAiDone(view) {
+    var list = view && view.all && view.all.done || [];
+    return list.some(function (ref) { return isFreshAiRef(ref, view.now); });
+  }
   function fitSide() {
     var width = window.innerWidth;
     var shell = document.getElementById('shell');
@@ -3809,6 +3851,11 @@ const PAGE_SCRIPT = String.raw`
         if (pg.model) draw(pg.model);
       }
     }
+    var narrowHudNow = typeof width === 'number' && width > 0 && width < 800;
+    if (narrowHudNow && !wasNarrowHud && opened['shelf:done'] === undefined && pg.openShelf.done && pg.model && hasFreshAiDone(pg.model.view)) {
+      pg.openShelf.done(true);
+    }
+    wasNarrowHud = narrowHudNow;
     var foot = document.getElementById('pfoot');
     // The footer lives at the foot of the sidebar when it is shown full, or in the drawer when that is open; otherwise under the work.
     var inSide = (hasSide && !isRail) || (!hasSide && drawerOpen);
@@ -4316,6 +4363,7 @@ const PAGE_SCRIPT = String.raw`
     var priorCards = pg.cardNodes;
     var priorOrder = pg.order.cards || [];
     var priorRows = pg.rowKeys;
+    var priorDone = pg.doneKeys;
     pg.lis = [];
     pg.groups = [];
     pg.sections = [];
@@ -4341,8 +4389,10 @@ const PAGE_SCRIPT = String.raw`
     if (asked) parts.push(asked);
     var hasWork = Object.keys(view.all.counts).some(function (key) { return view.all.counts[key] > 0; });
     document.getElementById('shell').setAttribute('data-empty', !view.agents.length && !hasWork ? '1' : '');
-    if (!view.agents.length && !hasWork) parts.push(freshPage(view));
-    else {
+    if (!view.agents.length && !hasWork) {
+      parts.push(freshPage(view));
+      pg.doneKeys = Object.create(null);
+    } else {
       var titleCounts = Object.create(null);
       var seenKeys = Object.create(null);
       view.needs.cards.concat(view.needs.waitingOthers || [], view.working, view.all.open, view.all.stopped, view.all.done).forEach(function (ref) {
@@ -4361,11 +4411,22 @@ const PAGE_SCRIPT = String.raw`
       var stopped = shelf('stopped', w('pgStopped'), view.all.stopped.slice().sort(byTime), 'stopped');
       if (stopped) parts.push(sectionBlock(stopped, 'stopped'));
       var finished = view.all.done.slice().sort(byTime);
+      var nextDone = Object.create(null);
+      finished.forEach(function (ref) { nextDone[ref.key] = true; });
+      // Auto-surface freshly completed AI tasks while respecting any manual collapse by the user.
+      if (opened['shelf:done'] === undefined && finished.length) {
+        var justFinishedAi = priorDone !== null && finished.some(function (ref) {
+          return !priorDone[ref.key] && isFreshAiRef(ref, view.now);
+        });
+        var narrowFreshAi = typeof window.innerWidth === 'number' && window.innerWidth > 0 && window.innerWidth < 800 && hasFreshAiDone(view);
+        if (justFinishedAi || narrowFreshAi) opened['shelf:done'] = true;
+      }
       var done = shelf('done', w('pgDone'), finished, 'done', finished.length ? doneExtra() : null);
       if (done) parts.push(sectionBlock(done, 'done'));
       var hidden = hiddenShelf(model);
       if (hidden) parts.push(hidden);
       pg.rowKeys = workingKeys;
+      pg.doneKeys = nextDone;
     }
     var storageSec = document.getElementById('settings-storage');
     var storageLine = document.getElementById('settings-storage-line');
@@ -4667,7 +4728,9 @@ const PAGE_SCRIPT = String.raw`
       var openGroup = filterUi.groups[pg.openMenu];
       pg.openMenu = '';
       paintFilterMenus();
-      if (openGroup && openGroup.chip) openGroup.chip.focus();
+      var collapsedNarrow = filterUi.bar.getAttribute('data-hud-idle') === '1' && typeof window.innerWidth === 'number' && window.innerWidth < 560;
+      var focusTarget = collapsedNarrow ? document.getElementById('hud-filter-btn') : (openGroup && openGroup.chip);
+      if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
       return;
     }
     if (selectedKey && isWideDetail()) {
@@ -4722,6 +4785,12 @@ const PAGE_SCRIPT = String.raw`
   document.getElementById('drawer-btn').addEventListener('click', function () { setDrawer(!drawerOpen); });
   document.getElementById('drawer-close').addEventListener('click', function () { setDrawer(false); });
   document.getElementById('drawer-backdrop').addEventListener('click', function () { setDrawer(false); });
+  var hudFilterBtn = document.getElementById('hud-filter-btn');
+  if (hudFilterBtn) hudFilterBtn.addEventListener('click', function () {
+    hudFilterOpen = !hudFilterOpen;
+    if (!hudFilterOpen && pg.openMenu) { pg.openMenu = ''; paintFilterMenus(); }
+    else syncHudFilter();
+  });
   if (typeof window.addEventListener === 'function') window.addEventListener('resize', fitSide);
   fitSide();
   document.getElementById('close').addEventListener('click', function () {
