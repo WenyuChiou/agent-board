@@ -748,7 +748,7 @@ test('the status line leads with cross-session waiting alerts and active step te
   blocked = applyTaskCreate(blocked, { subject: 'Verify the production deployment' }, '1', NOW)
   blocked = applyTaskUpdate(blocked, { taskId: '1', status: 'in_progress' }, NOW)
   blocked = { ...blocked, state: 'working', tasks: [{ ...blocked.tasks[0]!, blocked: 'Deployment approval failed' }] }
-  expect(statusLine(buildView([], [], blocked, NOW, 0, {}, STRINGS.en), STRINGS.en)).toBe(`0/1 · ${clip(STRINGS.en.stuck('Deployment approval failed'), 24)}`)
+  expect(statusLine(buildView([], [], blocked, NOW, 0, {}, STRINGS.en), STRINGS.en)).toBe('0/1 · stuck: Deployment appro…')
 })
 
 test('two 和色 sets: the light one under a light theme, the dark one otherwise', () => {
