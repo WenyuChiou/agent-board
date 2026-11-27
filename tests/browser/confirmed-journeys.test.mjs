@@ -444,6 +444,28 @@ ${block('a11ce023', 'gemini', 'done', 'Synthetic archive', 'Completed synthetic 
     })
   })
 
+  test('the page archives an ended session\'s task from its question under Older (#155)', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('older-question-archive', async ({ root, page, progress, startServer }) => {
+      const words = 'Ship the synthetic ended plan, OK?'
+      const title = 'Synthetic ended plan'
+      writeProgress(progress, block('a155e001', 'codex', 'ended', 'Synthetic ended', title, ['- [x] Synthetic preparation', `- [?] ${words}`]))
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+      await page.getByText('1 older question still unanswered (its chat has stopped)', { exact: true }).waitFor()
+      await page.getByRole('button', { name: 'See all', exact: true }).click()
+      await page.getByText(words, { exact: true }).first().click()
+      const archive = page.getByRole('button', { name: 'Archive', exact: true })
+      await archive.first().waitFor()
+      assert.equal(await page.getByText('Still running; archive after it stops.').count(), 0)
+      const pressed = page.waitForResponse(answer => new URL(answer.url()).pathname === '/api/act')
+      await archive.first().click()
+      assert.equal((await pressed).status(), 200)
+      await waitFor(() => !readFileSync(progress, 'utf8').includes(title))
+      assert.match(monthlyArchive(progress), /Synthetic ended plan/)
+      await assertNoIdentifiers(page, root, ['a155e001'])
+    })
+  })
+
   test('a clipped text or step fold the person closes stays closed when a redraw runs before its toggle event (#1456)', { concurrency: false, timeout: 120_000 }, async () => {
     await browserFixture('details-close-redraw-race', async ({ page, progress, startServer }) => {
       const longStep = 'Review the complete synthetic rollout plan without losing collapsed state across a concurrent board redraw. '.repeat(3).trim()

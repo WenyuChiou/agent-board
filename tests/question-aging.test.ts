@@ -539,6 +539,11 @@ test('an ended session\'s question on Older archives its task from the terminal 
     expect(serveAction(items, { key: item.key, type: 'archive', text: '', session: '', fp: fingerprint(item, items) }, s)).toEqual({ type: 'archive', ref: askingRef, title: 'Release' })
     expect(takeTask(file, askingRef, endedAt, s)).not.toBe(null)
     expect(serveModel(view, [], s).asks.some(ask => ask.archiveNote === s.archiveLive)).toBe(false)
+    // The page's Older copy offers Archive with the fingerprint the server reads its press against (scripts/board-serve.ts).
+    const shelf = serveModel(view, [], s).older.find(one => one.key === item.key)
+    expect(shelf?.canArchive).toBe(true)
+    const served = boardItems(view, [], true, true)
+    expect(serveAction(served, { key: item.key, type: 'archive', text: '', session: '', fp: shelf?.fp }, s)).toEqual({ type: 'archive', ref: askingRef, title: 'Release' })
   }
 })
 

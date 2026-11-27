@@ -324,7 +324,8 @@ export type ServeRow = {
 // A question marked answered, listed so it can be shown again.
 export type ServeHidden = { key: string; project: string; agent: string; isOwn?: true; task: string; text: string; questionId?: string }
 // key names the line in the action route; canHide is false for a retained source that is only for review.
-export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string; project: string; agent: string; isOwn?: true; surface?: string; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null; receipt?: Receipt }
+// canArchive, fp: an ended session's question archives its task from the shelf, checked against the line as drawn (#155).
+export type ServeRetained = { key: string; canHide: boolean; unhideKey?: string; canArchive?: true; fp?: string; project: string; agent: string; isOwn?: true; surface?: string; task: string; text: string; note: string; context: string; contextLine?: string; when: string; questionId?: string; at?: number; dir?: string | null; receipt?: Receipt }
 
 export type ServeTurn = { key: string; project: string; agent: string; text: string; isQuestion: boolean; info: string; at?: number }
 
@@ -563,11 +564,20 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)
   // A kept question still tells how the person's answer went: the message to its session keeps its receipt.
+  // The shelf's lines as the server reads an Archive press on one of them (scripts/board-serve.ts).
+  let shelfItems: ReturnType<typeof boardItems> | undefined
+  const shelfArchive = (item: WaitingItem): { canArchive?: true; fp?: string } => {
+    if (item.archive === undefined) return {}
+    shelfItems ??= boardItems(view, pending, true, true)
+    const line = shelfItems.find(one => one.key === olderKey(item))
+    return line === undefined ? {} : { canArchive: true, fp: fingerprint(line, shelfItems) }
+  }
   const retained = (item: WaitingItem): ServeRetained => {
     const keptSurface = item.where === 'manual' ? undefined : surfaceOf(item.agent, item.nativeSession, item.target)
     return {
       ...retainedOf(item, isLan || item.questionId === undefined ? {} : rowReceipt(item.agent, undefined, messaging?.messages ?? [], group?.now ?? 0, s, item.questionId, isMessageSurfaceLost, messaging?.connections, item.at)),
       ...(keptSurface === undefined ? {} : { surface: keptSurface }),
+      ...shelfArchive(item),
     }
   }
   const asks: ServeAsk[] = []
@@ -2859,6 +2869,8 @@ const PAGE_SCRIPT = String.raw`
     } else if (isOlder) {
       if (ask.canHide) add(answers, button(w('answeredHide'), function () { hideQuestion(key, ask.unhideKey); }));
       else add(detailHost, el('p', 'note', w('questionReviewOnly')));
+      // An ended session's question archives its task here, as its stopped row does (#155).
+      if (ask.canArchive) add(answers, button(w('serveArchive'), function () { act(key, 'archive', '', '', '', '', ask.fp); }));
     } else if (ask.native) {
       // Answered in the agent's own window: the options are only listed, so no button, reply box or copy is offered.
       if (ask.native.options.length) {
