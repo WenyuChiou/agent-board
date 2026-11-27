@@ -6919,6 +6919,21 @@ test('the board command picks text, the terminal board or the page from where it
     assert.equal(pickSurface({ isTty: true, platform: 'win32', env: { [name]: '/tmp/own-config' } }), 'page', `${name} on desktop win32 should open the page`)
     assert.equal(pickSurface({ isTty: true, platform: 'darwin', env: { [name]: '/tmp/own-config' } }), 'page', `${name} on desktop darwin should open the page`)
     assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { [name]: '/tmp/own-config', DISPLAY: ':0' } }), 'page', `${name} on Linux with DISPLAY should open the page`)
+    // Row 3: non-TTY over SSH keeps the page branch even when config-folder vars are set.
+    assert.equal(pickSurface({ isTty: false, platform: 'linux', env: { [name]: '/tmp/own-config', SSH_CONNECTION: '192.168.1.1 1234 192.168.1.2 22' } }), 'page', `${name} non-TTY over SSH should pick the page`)
+  }
+  // Row 2: active session var alongside a config-folder var over SSH still picks page.
+  assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { CLAUDECODE: '1', OPENCODE_CONFIG_DIR: '/tmp/own-config', SSH_CONNECTION: '192.168.1.1 1234 192.168.1.2 22' } }), 'page')
+  // Row 8: CI wins over SSH + session + config-folder vars.
+  assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { CI: '1', CLAUDECODE: '1', OPENCODE_CONFIG_DIR: '/tmp/own-config', SSH_CONNECTION: '192.168.1.1 1234 192.168.1.2 22' } }), 'text')
+  // Row 9: empty, '0', and 'false' values are treated as unset over SSH.
+  for (const blank of ['', '0', 'false']) {
+    assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { CLAUDECODE: blank, OPENCODE_CONFIG_DIR: blank, SSH_CONNECTION: '192.168.1.1 1234 192.168.1.2 22' } }), 'terminal')
+  }
+  // Row 10: all three README copies match the new SSH config-folder rule (#1283).
+  for (const [file, stale] of [['README.md', "unless an agent's setting"], ['README.zh-TW.md', '就開網頁'], ['README.zh-CN.md', '就开网页']]) {
+    const line = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8').split(/\r?\n/).find(one => one.includes('`npx @wenyuchiou/agent-board`') && one.startsWith('|')) ?? ''
+    assert.ok(line.includes('HERMES_HOME') && line.includes('OPENCODE_CONFIG_DIR') && !line.includes(stale), `${file} SSH terminal row should reflect #1283`)
   }
 
   for (const platform of ['win32', 'darwin', 'linux']) {
@@ -7003,9 +7018,15 @@ test('over SSH with a config folder variable set, plain agent-board runs the liv
   for (const name of ['OPENCODE_CONFIG_DIR', 'HERMES_HOME']) {
     const board = serveIn()
     let child
+    let runningUrl = null
     try {
       const shim = join(board.dir, 'ssh-terminal-config-shim.cjs')
       writeFileSync(shim, 'process.stdout.isTTY = true; process.stdin.isTTY = true; process.stdin.setRawMode = () => process.stdin;\n')
+      // Row 6: when a page is already running, bare SSH launch reuses its port in the ssh -L hint.
+      if (name === 'OPENCODE_CONFIG_DIR') {
+        runningUrl = board.urlOf(await board.serve(['--quiet-board']))
+        assert.ok(runningUrl, 'pre-started board URL exists')
+      }
       const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '', [name]: join(board.dir, 'own-config') }
       for (const key of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[key]
       child = spawn(process.execPath, ['--require', shim, board.script], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
@@ -7015,11 +7036,17 @@ test('over SSH with a config folder variable set, plain agent-board runs the liv
       assert.ok(out.startsWith('\u001b[?1049h'), `${name}: draws the live terminal board instead of printing an address: ${JSON.stringify(out.slice(0, 80))}`)
       assert.ok(out.includes('Rate-limit the public endpoints'), `${name}: live board shows tasks`)
       assert.ok(out.includes('Forward port to open the page'), `${name}: offers port forward hint in terminal board`)
+      if (runningUrl !== null) assert.ok(out.includes(`ssh -L ${new URL(runningUrl).port}:127.0.0.1:${new URL(runningUrl).port}`), `${name}: reuses running page port`)
       assert.doesNotMatch(out, /Opened Agent Board|window opened/i)
       assert.equal(child.exitCode, null, `${name}: live terminal board keeps running`)
+      // Row 7: explicit surface flags (--json) behave identically with config-folder vars set over SSH.
+      if (name === 'OPENCODE_CONFIG_DIR') {
+        const jsonOut = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--json'], { env, encoding: 'utf8', timeout: 20_000 }, (err, stdout) => (err ? fail(err) : done(stdout))))
+        assert.doesNotThrow(() => JSON.parse(jsonOut))
+      }
     } finally {
       if (child && child.exitCode === null) child.kill()
-      await board.end([])
+      await board.end(runningUrl === null ? [] : [runningUrl])
     }
   }
 })
