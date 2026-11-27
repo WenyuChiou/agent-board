@@ -154,6 +154,39 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
     assert.equal(await cardBtn.evaluate(node => document.activeElement === node), true, 'closing rail should restore focus to the card detail button')
 
+    // Pressing the card question toggle at 1440px opens an interactive #detail-rail (suppressing inline fold) and keeps reply draft across resize to 1300px.
+    const askCard = board.question('Retry upload with backoff')
+    const qToggle = askCard.locator('.q-toggle')
+    await qToggle.click()
+    await page.locator('#detail-rail').waitFor({ state: 'visible' })
+    assert.equal(await askCard.evaluate(node => node.classList.contains('open')), false, 'card stays collapsed inline while open in detail rail')
+    await page.locator('#detail-rail').getByRole('button', { name: 'Write your own' }).click()
+    const cardDraftBox = page.locator('#detail-rail textarea[data-key]')
+    await cardDraftBox.waitFor({ state: 'visible' })
+    await cardDraftBox.fill('Card rail draft')
+    await page.evaluate(() => {
+      const box = document.querySelector('#detail-rail textarea[data-key]')
+      box.focus()
+      box.setSelectionRange(4, 4)
+    })
+    await page.setViewportSize({ width: 1300, height: 900 })
+    await page.locator('#detail-rail').waitFor({ state: 'hidden' })
+    await askCard.locator('.card-fold .composer textarea[data-key]').waitFor({ state: 'visible' })
+    const preservedCard = await page.evaluate(() => {
+      const box = document.querySelector('article.card.open .composer textarea[data-key]')
+      return {
+        value: box?.value,
+        isFocused: document.activeElement === box,
+        start: box?.selectionStart,
+        end: box?.selectionEnd,
+      }
+    })
+    assert.deepEqual(preservedCard, { value: 'Card rail draft', isFocused: true, start: 4, end: 4 })
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.locator('#detail-rail').waitFor({ state: 'visible' })
+    await page.keyboard.press('Escape')
+    await page.locator('#detail-rail').waitFor({ state: 'hidden' })
+
     // Shrinking from 1440px to 1300px moves the selected task inline and preserves draft, focus, and caret.
     await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
     await board.openTask('Verify stopped draft persistence')
