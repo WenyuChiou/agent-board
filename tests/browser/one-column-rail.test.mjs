@@ -33,6 +33,19 @@ const FIXTURE_MD = () => {
 ### Audit archived format
 - [?] Keep legacy archive format?
 <!-- /auto session=48490004 -->
+
+## Epsilon Project
+### Hand-kept checklist
+- [?] Confirm manual checklist?
+- [ ] Verify release notes
+- [ ] Check tag signature
+
+## Zeta Project
+<!-- auto session=48490005 agent=codex state=blocked updated=${updated} -->
+### Blocked token sync
+- [!] Waiting on upstream token
+- [ ] Retry token sync
+<!-- /auto session=48490005 -->
 `
 }
 
@@ -93,8 +106,7 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
 
     const row = board.task('Build export worker')
     const rowBtn = row.locator('.row-btn')
-    await rowBtn.focus()
-    await page.keyboard.press('Enter')
+    await rowBtn.press('Enter')
     await page.locator('#detail-rail').waitFor({ state: 'visible' })
     assert.equal(await page.evaluate(() => document.activeElement?.id), 'detail-close', 'opening row detail rail via keyboard should focus close button')
 
@@ -138,8 +150,7 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
 
     // Card detail trigger is keyboard-accessible and restores focus on close without manual rail focus.
     const cardBtn = board.question('Retry upload with backoff').locator('.card-detail-btn')
-    await cardBtn.focus()
-    await page.keyboard.press('Enter')
+    await cardBtn.press('Enter')
     await page.locator('#detail-rail').waitFor({ state: 'visible' })
     assert.equal(await page.evaluate(() => document.activeElement?.id), 'detail-close', 'opening card detail rail via keyboard should focus close button')
     const cardRail = await page.evaluate(() => {
@@ -150,9 +161,50 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     assert.match(cardRail.text, /Retry upload with backoff/)
     assert.equal(await page.locator('#detail-rail .d-head .surf-pill.surf-cli').count(), 1, 'card detail rail head renders CLI .surf-pill')
     assert.equal((await page.locator('#detail-rail .d-head .d-meta').innerText()).includes('Claude'), false, 'card detail rail meta omits visible AI vendor name')
+    assert.ok(await page.locator('#detail-rail .steps').count() >= 1, 'card detail rail renders card steps')
+    const writeOwnInRail = page.locator('#detail-rail').getByRole('button', { name: 'Write your own' })
+    await writeOwnInRail.focus()
+    const beforeRedrawFocus = await writeOwnInRail.evaluate(node => document.activeElement === node)
+    assert.equal(beforeRedrawFocus, true)
+    // Advancing progress triggers a live redraw without dropping focus from the focused rail action button.
+    const movedMd = FIXTURE_MD().replace('- [~] Stream rows to temporary file', '- [~] Stream rows & ping')
+    writeProgress(progress, movedMd)
+    await page.locator('.r-step').filter({ hasText: 'Stream rows & ping' }).first().waitFor({ state: 'visible', timeout: 15_000 })
+    assert.equal(await page.evaluate(() => document.activeElement?.textContent?.trim()), 'Write your own', 'live redraw preserves focus on the active rail button')
     await page.keyboard.press('Escape')
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
     assert.equal(await cardBtn.evaluate(node => document.activeElement === node), true, 'closing rail should restore focus to the card detail button')
+
+    // Manual waiting card keeps its per-step Done actions targeting each step's own file line, and blocked cards keep their steps in the interactive detail rail.
+    const manualTicks = []
+    await page.route('**/api/act', async route => {
+      const body = route.request().postDataJSON()
+      if (body?.type === 'tick') manualTicks.push({ text: body.text, line: body.line })
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ ok: true }) })
+    })
+    const manualCard = board.question('Confirm manual checklist?')
+    await manualCard.locator('.card-detail-btn').click()
+    await page.locator('#detail-rail').waitFor({ state: 'visible' })
+    const manualBtns = page.locator('#detail-rail .steps li button')
+    assert.equal(await manualBtns.count(), 2, 'manual card rail renders per-step Done controls')
+    await manualBtns.nth(0).click()
+    await manualBtns.nth(1).click()
+    const tickDeadline = Date.now() + 5_000
+    while (Date.now() < tickDeadline && manualTicks.length < 2) await page.waitForTimeout(50)
+    await page.unroute('**/api/act')
+    assert.deepEqual(manualTicks.map(t => t.text), ['Verify release notes', 'Check tag signature'])
+    assert.notEqual(manualTicks[0].line, manualTicks[1].line, 'each manual Done control targets its own file line')
+    assert.equal(typeof manualTicks[0].line, 'number')
+    assert.equal(typeof manualTicks[1].line, 'number')
+    await page.keyboard.press('Escape')
+    await page.locator('#detail-rail').waitFor({ state: 'hidden' })
+
+    const blockedCard = board.question('Waiting on upstream token')
+    await blockedCard.locator('.card-detail-btn').click()
+    await page.locator('#detail-rail').waitFor({ state: 'visible' })
+    assert.match(await page.locator('#detail-rail .steps').innerText(), /Retry token sync/, 'blocked card detail rail renders follow-up step list')
+    await page.keyboard.press('Escape')
+    await page.locator('#detail-rail').waitFor({ state: 'hidden' })
 
     // Pressing the card question toggle at 1440px opens an interactive #detail-rail (suppressing inline fold) and keeps reply draft across resize to 1300px.
     const askCard = board.question('Retry upload with backoff')
@@ -186,6 +238,9 @@ test('at 1440x900 a selected item opens in the rail', { timeout: 180_000 }, asyn
     await page.locator('#detail-rail').waitFor({ state: 'visible' })
     await page.keyboard.press('Escape')
     await page.locator('#detail-rail').waitFor({ state: 'hidden' })
+    assert.equal(await askCard.evaluate(node => node.classList.contains('open')), false, 'closing card rail after resize removes open class')
+    assert.equal(await askCard.locator('.card-fold').evaluate(node => node.inert === true), true, 'closing card rail after resize marks inline fold inert')
+    assert.equal(await askCard.locator('.card-fold > .fold-in').isVisible(), false, 'closing card rail after resize collapses inline fold height to zero')
 
     // Shrinking from 1440px to 1300px moves the selected task inline and preserves draft, focus, and caret.
     await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()

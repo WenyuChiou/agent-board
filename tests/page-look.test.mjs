@@ -1230,15 +1230,19 @@ test('delivery badges, secondary copy button, coarse-pointer labels, interactive
   const ruleFor = sel => rules.find(r => r.selector === sel)
 
   const copyRule = ruleFor('.answers button.answer-send[data-copy="1"]')
+  const copyHoverRule = ruleFor('.answers button.answer-send[data-copy="1"]:hover:not(:disabled)')
   assert.equal(copyRule?.declarations.find(d => d.property === 'background')?.value, 'var(--surface)')
   assert.equal(copyRule?.declarations.find(d => d.property === 'border-color')?.value, 'var(--btn-line)')
   assert.equal(copyRule?.declarations.find(d => d.property === 'color')?.value, 'var(--ink)')
+  assert.equal(copyHoverRule?.declarations.find(d => d.property === 'border-color')?.value, 'var(--btn-line)')
   assert.ok(ruleFor('.q-toggle::after'), 'card question toggle renders disclosure chevron')
   assert.ok(ruleFor('.fold-in>.fx.gone,.row-open>.fx.gone'), 'hidden slots inside folds leave zero grid gap')
   assert.match(html, new RegExp(`<button[^>]*id="settings-toggle"[^>]*aria-label="${s.settingsTitle}"`))
 
   const touchRules = rules.filter(r => r.ancestors.some(a => a.includes('pointer:coarse')))
-  assert.equal(touchRules.find(r => r.selector === 'button.chk::after')?.declarations.find(d => d.property === 'inset')?.value, '-12px')
+  const chkAfter = touchRules.find(r => r.selector === 'button.chk::after')
+  assert.equal(chkAfter?.declarations.find(d => d.property === 'width')?.value, '44px')
+  assert.equal(chkAfter?.declarations.find(d => d.property === 'height')?.value, '44px')
   assert.equal(touchRules.find(r => r.selector === '.pfoot #close::after')?.declarations.find(d => d.property === 'content')?.value, 'attr(aria-label)')
   assert.ok(touchRules.some(r => r.selector.includes('.answer-send[data-copy="1"] .sr-lbl') && r.declarations.some(d => d.property === 'position' && d.value === 'static')))
 
@@ -1252,6 +1256,12 @@ test('delivery badges, secondary copy button, coarse-pointer labels, interactive
     '- [?] Proceed with live rollout?',
     '<!-- options=["Go live","Hold off"] -->',
     '<!-- /auto session=ee100001 -->',
+    '',
+    `<!-- auto session=ee100006 agent=opencode state=waiting updated=${freshIso} -->`,
+    '### Immediate mailbox ask card',
+    '- [?] Use immediate mailbox route?',
+    '<!-- options=["Yes","No"] -->',
+    '<!-- /auto session=ee100006 -->',
     '',
     `<!-- auto session=ee100002 agent=codex state=waiting updated=${freshIso} -->`,
     '### Deferred queue ask card',
@@ -1281,6 +1291,7 @@ test('delivery badges, secondary copy button, coarse-pointer labels, interactive
   const model = serveModel(baseView, [], s, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
   const findAsk = text => model.asks.find(a => a.text.includes(text))
   Object.assign(findAsk('Proceed with live rollout?'), { send: 'send', line: 'now', session: 'ee100001', where: 'in Claude' })
+  Object.assign(findAsk('Use immediate mailbox route?'), { send: 'mailbox', line: 'now', lineText: 'OpenCode reads this now.', session: 'ee100006', where: 'in OpenCode' })
   Object.assign(findAsk('Pick rollout mode or defer?'), { send: 'mailbox', line: 'nextTurn', lineText: 'Codex reads this next turn.', session: 'ee100002', where: 'in Codex' })
   Object.assign(findAsk('Paste patch manually?'), { send: 'none' })
 
@@ -1291,9 +1302,11 @@ test('delivery badges, secondary copy button, coarse-pointer labels, interactive
   const dom = await pageDom(html, model)
   const cardNamed = needle => walk(dom.node('needs')).find(n => n.tag === 'article' && n.textContent.includes(needle))
   const liveCard = cardNamed('Proceed with live rollout?')
+  const liveMailboxCard = cardNamed('Use immediate mailbox route?')
   const queueCard = cardNamed('Pick rollout mode or defer?')
   const copyCard = cardNamed('Paste patch manually?')
   assert.equal(walk(liveCard).some(n => hasClass(n, 'route-pill')), false, 'immediate live card shows no redundant route badge')
+  assert.equal(walk(liveMailboxCard).some(n => hasClass(n, 'route-pill')), false, 'immediate mailbox route (line: now) omits Queued badge')
   const queuePill = walk(queueCard).find(n => hasClass(n, 'route-queue'))
   const morePill = walk(queueCard).find(n => hasClass(n, 'route-more'))
   const copyPill = walk(copyCard).find(n => hasClass(n, 'route-copy'))
