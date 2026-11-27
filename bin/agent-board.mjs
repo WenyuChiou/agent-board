@@ -82,24 +82,30 @@ const candidatesFor = dataDir => [
 ]
 const isFileAt = list => list.find(path => { try { return statSync(path).isFile() } catch { return false } })
 // A language the person chose stays until they choose another (#1245), in the board's own order
-// (hooks/board-settings.ts boardLanguage): --lang, then the page's saved choice beside the board's
-// progress.md, then the language the installed board script was set up in. Automatic follows the system.
+// (hooks/board-settings.ts boardLanguage): --lang (auto included), then the page's saved choice beside
+// the progress.md the board reads (localProgressPath in scripts/codex-local.ts), then the language the
+// installed board script was set up in. Automatic follows the system.
 const chosenLang = head => {
   let saved = null
-  if (typeof head?.path === 'string') {
+  const progress = flag('--progress-file') ?? (process.env.CLAUDE_PROGRESS_FILE || (typeof head?.path === 'string' ? head.path : undefined))
+  if (progress !== undefined) {
     try {
-      const lang = JSON.parse(readFileSync(`${head.path.replace(/\.md$/i, '')}-settings.json`, 'utf8'))?.lang
+      const lang = JSON.parse(readFileSync(`${resolve(progress).replace(/\.md$/i, '')}-settings.json`, 'utf8'))?.lang
       saved = lang === 'auto' ? 'auto' : langOf(lang)
     } catch {}
   }
-  const picked = langOf(flag('--lang')) ?? saved ?? langOf(head?.lang)
+  const picked = (flag('--lang') === 'auto' ? 'auto' : langOf(flag('--lang'))) ?? saved ?? langOf(head?.lang)
   return (picked === 'auto' ? null : picked) ?? systemLang(process.env.LANG) ?? 'en'
 }
 const headOf = path => {
   try { return JSON.parse(readFileSync(path, 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, '')) ?? {} } catch { return {} }
 }
 // Help and setup's own messages come before the board script is found, so they look for it here.
-const early = isFileAt(candidatesFor(flag('--data-dir')))
+// Setup and remove look where setup-agent.mjs does: --data-dir, else the .agent-board of --home.
+const isSetupCommand = args[0] === 'setup' || args[0] === 'remove'
+const early = isSetupCommand && (flag('--data-dir') || flag('--home'))
+  ? join(resolve(flag('--data-dir') || join(flag('--home'), '.agent-board')), 'agent-board.mjs')
+  : isFileAt(candidatesFor(flag('--data-dir')))
 let language = chosenLang(early ? headOf(early) : {})
 const at = ['en', 'zh-TW', 'zh-CN'].indexOf(language)
 const usage = [

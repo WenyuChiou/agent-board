@@ -1027,6 +1027,40 @@ test("a language chosen on the board's page is the one setup, --help and remove 
   assertWords(f.run(pkg, ['setup', '--home', f.home, '--lang', 'en'], env), 'en', 1)
 }))
 
+test('setup --help and remove --help with --home read the language of that home, not the running account', () => fixture(f => {
+  const pkg = packed(f)
+  const other = join(f.box, 'other home')
+  mkdirSync(other)
+  const env = { LANG: 'en_US.UTF-8' }
+  success(f.run(pkg, ['setup', '--agent', 'codex', '--home', other, '--lang', 'zh-CN', '--apply'], env))
+  assertWords(f.run(pkg, ['--help'], env), 'en', 0)
+  for (const args of [['setup', '--home', other, '--help'], ['remove', '--home', other, '--help'], ['setup', '--data-dir', join(other, '.agent-board'), '--help']]) assertWords(f.run(pkg, args, env), 'zh-CN', 0)
+  assertWords(f.run(pkg, ['setup', '--home', other], env), 'zh-CN', 1)
+}))
+
+test('the language saved for the progress file a command picks is the one help and setup use', () => fixture(f => {
+  const pkg = packed(f)
+  const env = { LANG: 'en_US.UTF-8' }
+  success(f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--lang', 'en', '--apply'], env))
+  const progress = JSON.parse(readFileSync(boardPath(f), 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, '')).path
+  save(`${progress.replace(/\.md$/i, '')}-settings.json`, `${JSON.stringify({ lang: 'en' })}\n`)
+  const second = join(dirname(progress), 'second.md')
+  save(join(dirname(progress), 'second-settings.json'), `${JSON.stringify({ lang: 'zh-CN' })}\n`)
+  assertWords(f.run(pkg, ['--help'], env), 'en', 0)
+  assertWords(f.run(pkg, ['--help', '--progress-file', second], env), 'zh-CN', 0)
+  assertWords(f.run(pkg, ['--help'], { ...env, CLAUDE_PROGRESS_FILE: second }), 'zh-CN', 0)
+  assertWords(f.run(pkg, ['setup', '--home', f.home], { ...env, CLAUDE_PROGRESS_FILE: second }), 'zh-CN', 1)
+}))
+
+test('--lang auto follows the system over a saved language in help and setup', () => fixture(f => {
+  const pkg = packed(f)
+  const env = { LANG: 'zh_TW.UTF-8' }
+  success(f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--lang', 'en', '--apply'], env))
+  assertWords(f.run(pkg, ['--help'], env), 'en', 0)
+  assertWords(f.run(pkg, ['--help', '--lang', 'auto'], env), 'zh-TW', 0)
+  assertWords(f.run(pkg, ['setup', '--home', f.home, '--lang', 'auto'], env), 'zh-TW', 1)
+}))
+
 test('agent-board setup with no agent found says how to name one, without a stack trace', () => fixture(f => {
   const pkg = packed(f)
   for (const [lang, hint, unknown] of [['en', 'Setup found no agent', '--agent named an agent setup does not know'], ['zh-TW', 'setup 在這台電腦沒有找到 agent', '--agent 寫了 setup 不認得的 agent 名稱'], ['zh-CN', 'setup 在这台电脑没有找到 agent', '--agent 写了 setup 不认识的 agent 名称']]) {
