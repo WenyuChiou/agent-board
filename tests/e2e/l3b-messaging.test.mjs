@@ -277,19 +277,3 @@ describe('messages: every sender-receiver pair either delivers with a receipt or
     await nativeOrFallback(hub, source, receiver, GAPS[to], `AB-pair-${index + 1}`)
   }))
 })
-
-// TEMPORARY (#1804 evidence run, reverted before Ready): the failing order, page → codex then page → antigravity,
-// 20 times, on the matrix's own actors. Four hubs of five rounds each, since a test server lives 90 s.
-for (let group = 0; group < 4; group++) describe(`messages: #1804 evidence, rounds ${group * 5 + 1} to ${group * 5 + 5}`, () => {
-  let hub
-  before(async () => {
-    hub = await openHub([
-      ...SENDERS.filter(from => from !== 'page').map(from => ({ agent: from, title: `Prepare ${from} sender` })),
-      ...RECEIVERS.map(to => ({ agent: to, title: `Review ${to} receiver` })),
-    ], { traceReceipt: true })
-  }, { timeout: 20000 })
-  after(async () => { await hub?.close() }, { timeout: 20000 })
-  for (let round = group * 5 + 1; round <= group * 5 + 5; round++) for (const to of ['codex', 'antigravity']) test(`messages: page → ${to} (other) delivers with a receipt or names the fallback in words, repeat ${round}`, { timeout: 20000 }, async () => {
-    await nativeOrFallback(hub, 'page', hub.actors.find(actor => actor.title === `Review ${to} receiver`), GAPS[to])
-  })
-})
