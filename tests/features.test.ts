@@ -1275,6 +1275,9 @@ test('an inline "A or B?" choice of amounts offers the amounts, not the question
   expect(askOf('Should the cache hold 2 GB or 4 GB?', '')).toMatchObject({ kind: 'choose', options: ['2 GB', '4 GB'] })
   // A short choice with no question frame stays as it was.
   expect(askOf('Debug or info?', '')).toMatchObject({ kind: 'choose', options: ['Debug', 'info'] })
+  // A compound amount has no clear start: its words stay whole rather than lose the earlier units.
+  expect(askOf('Should the export keep 1 day 12 hours or 2 days of history?', '').options[0]).toBe('Should the export keep 1 day 12 hours')
+  expect(askOf('Should the export keep 1 day and 12 hours or 2 days?', '').options[0]).toBe('Should the export keep 1 day and 12 hours')
   // A number inside the subject is not one of the amounts: the words stay whole, as before.
   expect(askOf('Should the 2 workers keep running or stop?', '')).toMatchObject({ kind: 'choose', options: ['Should the 2 workers keep running', 'stop'] })
 })

@@ -124,6 +124,9 @@ const parallelAmounts = (first: string, last: string): [string, string] | null =
   const firstWords = first.split(/\s+/)
   const from = firstWords.findLastIndex(word => NUMBER.test(word))
   if (from <= 0) return null
+  // A number just before it (`1 day 12 hours`, `1 day and 12 hours`) makes one compound amount whose
+  // start is unclear: the words then stay whole rather than send a shorter amount.
+  if (firstWords.slice(Math.max(0, from - 3), from).some(word => NUMBER.test(word))) return null
   const amount = firstWords.slice(from)
   if (amount.length > lastWords.length) return null
   const shared = lastWords.length > amount.length && SHARED_PREPOSITION.test(lastWords[amount.length] ?? '')

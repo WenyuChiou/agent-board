@@ -4315,6 +4315,8 @@ export const LINES = [
 "  const from = firstWords.findLastIndex((word) => NUMBER.test(word));",
 "  if (from <= 0)",
 "    return null;",
+"  if (firstWords.slice(Math.max(0, from - 3), from).some((word) => NUMBER.test(word)))",
+"    return null;",
 "  const amount = firstWords.slice(from);",
 "  if (amount.length > lastWords.length)",
 "    return null;",
