@@ -78,11 +78,12 @@ test('team stats scorecard groups merged pull requests by the Author line, with 
   assert.equal(scorecard({ issues, pullRequests }, date), [
     '| agent | pull requests merged | issues closed by them | approved at first review | review rounds per pull request | regressions |',
     '| --- | ---: | ---: | ---: | ---: | ---: |',
-    '| codex (phase1) | 2 | 2 | 1/2 | 1.5 | 1 |',
-    '| dot | 1 | 1 | - | 1.0 | 0 |',
+    '| codex (phase1) | 2 | 2 | 1/2 | 1.0 | 1 |',
+    '| dot | 1 | 1 | - | 0.0 | 0 |',
     '| muse | 0 | 0 | - | - | 1 |',
-    '| unknown | 1 | 1 | - | 1.0 | 0 |',
-    '| total | 4 | 3 | 1/2 | 1.3 | 2 |',
+    '| unknown | 1 | 1 | - | 0.0 | 0 |',
+    '| total | 4 | 3 | 1/2 | 0.5 | 2 |',
+    'merged with no review verdict: #3, #4',
   ].join('\n'))
   const nodes = [{
     number: 2,
@@ -103,11 +104,31 @@ test('team stats scorecard groups merged pull requests by the Author line, with 
   assert.match(scorecard({ issues: [], pullRequests: [] }, date), /\| total \| 0 \| 0 \| - \| - \| 0 \|$/)
   const multiline = merged(1, 'Author: codex, fix/multiline', [comment('Checks complete\nReview: APPROVE `abcdef0`', '2026-10-19T01:00:00Z')])
   assert.match(scorecard({ issues: [], pullRequests: [multiline] }, date), /\| codex \| 1 \| 0 \| 1\/1 \| 1\.0 \| 0 \|/)
-  assert.match(scorecard({ issues: [issue(26, { body: 'This is not a regression of #1' })], pullRequests }, date), /\| total \| 4 \| 3 \| .* \| 0 \|$/)
+  assert.match(scorecard({ issues: [issue(26, { body: 'This is not a regression of #1' })], pullRequests }, date), /\| total \| 4 \| 3 \| .* \| 0 \|$/m)
   for (const body of ['- Regression of #1', 'Details\n  * cAuSeD bY #1', '  Regression of #1']) {
-    assert.match(scorecard({ issues: [issue(26, { body })], pullRequests }, date), /\| total \| 4 \| 3 \| .* \| 1 \|$/)
+    assert.match(scorecard({ issues: [issue(26, { body })], pullRequests }, date), /\| total \| 4 \| 3 \| .* \| 1 \|$/m)
   }
   assert.deepEqual({ issues, pullRequests }, before)
+})
+
+test('team stats lists merged pull requests with no review verdict as zero rounds', () => {
+  const merged = (number, comments = [], merged_at = '2026-10-20T12:00:00Z') => pull(number, comments, { body: 'Author: codex, fix/x', merged_at, state: 'closed' })
+  const pullRequests = [merged(12, [comment('Ready for review abcdef0', '2026-10-19T01:00:00Z')]), merged(9), merged(99, [], '2026-10-01T00:00:00Z')]
+  const text = scorecard({ issues: [], pullRequests }, date)
+  assert.match(text, /\| codex \| 2 \| 0 \| - \| 0\.0 \| 0 \|/)
+  assert.match(text, /^merged with no review verdict: #9, #12$/m)
+  assert.doesNotMatch(text, /#99/)
+})
+
+test('team stats counts each reviewed head once across approvals and requests for changes', () => {
+  const merged = comments => pull(20, comments, { body: 'Author: codex, fix/x', merged_at: '2026-10-20T12:00:00Z', state: 'closed' })
+  const verdict = (kind, sha, id) => comment(`Review: ${kind} ${sha}`, `2026-10-19T0${id}:00:00Z`, id)
+  const approve = verdict('APPROVE', 'ccccccc', 1)
+  assert.match(scorecard({ issues: [], pullRequests: [merged([approve])] }, date), /\| codex \| 1 \| 0 \| 1\/1 \| 1\.0 \| 0 \|/)
+  const reviews = [verdict('REQUEST CHANGES', 'aaaaaaa', 1), verdict('REQUEST CHANGES', 'aaaaaaa111111111111111111111111111111111', 2), verdict('REQUEST CHANGES', 'bbbbbbb', 3), approve]
+  const text = scorecard({ issues: [], pullRequests: [merged(reviews)] }, date)
+  assert.match(text, /\| codex \| 1 \| 0 \| 0\/1 \| 3\.0 \| 0 \|/)
+  assert.doesNotMatch(text, /merged with no review verdict:/)
 })
 
 test('team stats rejects an unknown flag and a malformed date', () => {

@@ -1392,7 +1392,7 @@ export const cases = ({ body = '', title = '', number = null, tier = visibleTier
 // The distinct heads with a `Review: REQUEST CHANGES`, over the whole pull request: several verdicts on one head are one
 // round, a short sha and its full sha are one head, and an APPROVE does not reset the count. A bot's review is input for
 // the reviewer, not a verdict (team-process, From claim to merge), so it starts no round.
-export const roundsOf = comments => {
+export const roundsOf = (comments, { includeApprovals = false } = {}) => {
   const heads = []
   const add = head => { if (!heads.some(sha => sha.startsWith(head) || head.startsWith(sha))) heads.push(head) }
   for (const comment of comments ?? []) {
@@ -1401,12 +1401,26 @@ export const roundsOf = comments => {
     const shown = typeof comment === 'string' ? visibleLines(comment).join('\n')
       : comment && typeof comment.body === 'string' ? { ...comment, body: visibleLines(comment.body).join('\n') } : comment
     const review = reviewOf(shown)
-    if (review?.kind === 'REQUEST CHANGES') add(review.sha)
+    if (review?.kind === 'REQUEST CHANGES' || (includeApprovals && review?.kind === 'APPROVE')) add(review.sha)
     // A review that requests changes is a round whatever its text says, even when its body quotes an earlier approval.
     if (comment && typeof comment === 'object' && comment.state === 'CHANGES_REQUESTED' && typeof comment.commit_id === 'string' && comment.commit_id) add(comment.commit_id.toLowerCase())
   }
   return heads.length
 }
+
+const roundWarnings = ({ body, prComments, prReviews, issueComments, isDraft }) => {
+  if (isDraft || visibleTier(body) !== 'risk') return []
+  const count = roundsOf([...prComments, ...prReviews])
+  const shownLines = item => visibleLines(typeof item === 'string' ? item : item?.body ?? '')
+  const hasDiagnosis = [body, ...prComments, ...issueComments].some(item => shownLines(item).some(line =>
+    /^[ \t]*Fable diagnosis:[ \t]*(?:https?:\/\/[^\s<>()]+|<https?:\/\/[^\s<>]+>|\[[^\]]+\]\(https?:\/\/[^\s)]+\))/i.test(line)))
+  const hasTakeover = prComments.some(item => shownLines(item).some(line => /^[ \t]*(?:Takeover|Round cap):/i.test(line)))
+  const warnings = []
+  if (count >= 2 && !hasDiagnosis) warnings.push("2 REQUEST CHANGES rounds: if both found the same kind of fault, `Question:` on the issue and the maintainer's Fable diagnosis come before the next fix (team-process line 68)")
+  if (count >= 3 && !hasTakeover) warnings.push("the third round was the author's last (team-process line 65)")
+  return warnings
+}
+
 export const rounds = (comments, { body = '', title = '', number = null, isDraft = false, tier = visibleTier(body) } = {}) => {
   const output = result()
   if (tier !== 'risk' || isReleaseTitle(title) || (number !== null && number <= CASES_FROM)) return output
@@ -1482,7 +1496,7 @@ export const verdict = (comments, head, options = {}) => {
 }
 
 export const checkPr = data => {
-  const output = result()
+  const output = { ...result(), warnings: [] }
   const add = checked => {
     output.problems.push(...checked.problems)
     output.info.push(...(checked.info ?? []))
@@ -1556,6 +1570,8 @@ export const checkPr = data => {
   else {
     add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body) }))
     add(rounds([...data.prComments, ...(data.prReviews ?? [])], { body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
+    const linkedComments = [...new Set(issue.issues)].flatMap((number, index) => (index === 0 ? data.issueComments : data.moreIssues?.[number]?.issueComments) ?? [])
+    output.warnings.push(...roundWarnings({ body: data.body, prComments: data.prComments, prReviews: data.prReviews ?? [], issueComments: linkedComments, isDraft: data.isDraft }))
     // A round can be a review state alone, so reviews that could not be read leave the count unknown, never zero.
     if (data.isReviewsUnread && visibleTier(data.body) === 'risk' && !isRelease && data.number !== null && data.number > CASES_FROM) {
       output.problems.push(problem('rounds', 'the reviews of this pull request could not be read, so its review rounds are not counted.', 'run the check again; the round count reads every review, and it stops a risk-tier pull request at its cap (RULES.md, R6).'))
@@ -1569,19 +1585,21 @@ export const checkPr = data => {
 // also reads the older "##[" commands anywhere in a line; main's ::stop-commands:: wrapper covers those.
 const oneLine = text => String(text).replace(/[\r\n\u2028\u2029\u0085]+/g, ' ')
 
-export const report = ({ problems, info }, header) => safeText([
+export const report = ({ problems, info, warnings = [] }, header) => safeText([
   `pr-check: ${oneLine(header)}`,
   ...problems.flatMap(item => [`FAIL ${oneLine(item.check)}: ${oneLine(item.message)}`, `     Fix: ${oneLine(item.fix)}`]),
+  ...warnings.map(item => `WARN ${oneLine(item)}`),
   ...info.map(item => `info ${oneLine(item)}`),
   problems.length ? `pr-check: ${problems.length} problem${problems.length === 1 ? '' : 's'}` : 'pr-check: all checks passed',
 ].join('\n'))
 
 const markdownText = text => safeText(text).replace(/[&<>]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[character]).replace(/[\\`*_[\]{}()#+.!|~-]/g, '\\$&').replace(/\r?\n/g, ' ')
 
-export const reportMarkdown = ({ problems, info }, header) => [
+export const reportMarkdown = ({ problems, info, warnings = [] }, header) => [
   `## pr-check: ${markdownText(header)}`,
   '',
   ...problems.flatMap(item => [`- **FAIL ${markdownText(item.check)}:** ${markdownText(item.message)}`, `  - Fix: ${markdownText(item.fix)}`]),
+  ...warnings.map(item => `- **WARN** ${markdownText(item)}`),
   ...info.map(item => `- info ${markdownText(item)}`),
   '',
   problems.length ? `pr-check: ${problems.length} problem${problems.length === 1 ? '' : 's'}` : 'pr-check: all checks passed',
@@ -1967,7 +1985,9 @@ export const main = async (argv = process.argv.slice(2)) => {
       const [first, ...more] = [...new Set(parsedIssue.issues)]
       const lookup = async number => {
         const issueData = await api(`issues/${number}`, { isMissingAllowed: true })
-        return { issueData, issueComments: issueData === false || isTeam() ? [] : await api(`issues/${number}/comments`, { isList: true }) }
+        // A team author needs no claim (#607), but a risk-tier pull request's round warning looks there for a `Fable diagnosis:` link (#1914).
+        const isRead = issueData !== false && (!isTeam() || visibleTier(data.body) === 'risk')
+        return { issueData, issueComments: isRead ? await api(`issues/${number}/comments`, { isList: true }) : [] }
       }
       if (first !== undefined) {
         Object.assign(data, await lookup(first))

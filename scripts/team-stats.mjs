@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { authorKey, reviewOf, stripComments } from './pr-check.mjs'
+import { authorKey, reviewOf, roundsOf, stripComments } from './pr-check.mjs'
 import { safeLine } from './preflight.mjs'
 
 const usage = 'Usage: node scripts/team-stats.mjs [--week] [--date YYYY-MM-DD] [--repo owner/name] [--help]'
@@ -69,6 +69,7 @@ export const scorecard = ({ issues, pullRequests }, date) => {
   const end = endOfDate(date)
   const agents = new Map()
   const total = emptyStats()
+  const noVerdict = []
   const statsOf = agent => {
     if (!agents.has(agent)) agents.set(agent, emptyStats())
     return agents.get(agent)
@@ -77,7 +78,8 @@ export const scorecard = ({ issues, pullRequests }, date) => {
     const stats = statsOf(authorOf(pr.body))
     const comments = [...(pr.comments ?? [])].sort(byTime).map(comment => reviewOf(comment.body)).filter(Boolean)
     const first = comments[0]
-    const rounds = comments.filter(comment => comment.kind === 'REQUEST CHANGES').length + 1
+    const rounds = roundsOf(pr.comments, { includeApprovals: true })
+    if (rounds === 0) noVerdict.push(pr.number)
     const fixes = [...stripComments(pr.body ?? '').matchAll(/\b(?:fixes|closes|resolves)\s+#([1-9]\d*)\b/gi)].map(match => match[1])
     for (const row of [stats, total]) {
       row.merged++
@@ -105,6 +107,7 @@ export const scorecard = ({ issues, pullRequests }, date) => {
     '| --- | ---: | ---: | ---: | ---: | ---: |',
     ...[...agents].sort(([a], [b]) => a.localeCompare(b)).map(([agent, stats]) => rowText(agent, stats)),
     rowText('total', total),
+    ...(noVerdict.length ? [`merged with no review verdict: ${noVerdict.sort((a, b) => a - b).map(number => `#${number}`).join(', ')}`] : []),
   ].join('\n')
 }
 

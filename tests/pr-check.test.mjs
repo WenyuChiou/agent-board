@@ -2411,6 +2411,96 @@ const roundsRun = (comments, line, extra = {}) => rounds(comments, { body: `Fixe
 const rc = sha => ['REQUEST CHANGES', sha]
 const roundHeads = k => roundComments(...Array.from({ length: k }, (_, i) => rc(`a${i}`)))
 
+const roundWarningPr = (comments, extra = {}) => {
+  const pr = syntheticPr()
+  return { ...pr, body: `${body}Tier: risk\n`, prComments: [...comments, ...pr.prComments], ...extra }
+}
+const warningReport = pr => report(checkPr(pr), 'synthetic')
+const diagnosisWarning = '2 REQUEST CHANGES rounds: if both found the same kind of fault, `Question:` on the issue and the maintainer\'s Fable diagnosis come before the next fix (team-process line 68)'
+const takeoverWarning = "the third round was the author's last (team-process line 65)"
+
+test('pr-check round warnings appear at two and three distinct requests for changes', () => {
+  const before = warningReport(roundWarningPr(roundHeads(1)))
+  assert.doesNotMatch(before, /^WARN /m)
+  const repeated = warningReport(roundWarningPr([...roundHeads(1), ...roundHeads(1)]))
+  assert.doesNotMatch(repeated, /^WARN /m)
+  const second = warningReport(roundWarningPr(roundHeads(2)))
+  assert.ok(second.includes(`WARN ${diagnosisWarning}`), second)
+  assert.equal(second.includes(takeoverWarning), false)
+  const checked = checkPr(roundWarningPr(roundHeads(3)))
+  const third = report(checked, 'synthetic')
+  assert.ok(third.includes(`WARN ${diagnosisWarning}`), third)
+  assert.ok(third.includes(`WARN ${takeoverWarning}`), third)
+  assert.deepEqual(checked.problems, [])
+})
+
+test('pr-check round warning for diagnosis clears only with a visible diagnosis link', () => {
+  const pr = roundWarningPr(roundHeads(2))
+  assert.ok(warningReport(pr).includes(diagnosisWarning))
+  const diagnosis = 'Fable diagnosis: https://example.invalid/diagnosis'
+  const hasWarning = value => warningReport(value).includes(diagnosisWarning)
+  assert.equal(hasWarning({ ...pr, body: `${pr.body}${diagnosis}\n` }), false)
+  assert.equal(hasWarning({ ...pr, prComments: [...pr.prComments, { body: 'Fable diagnosis: [report](https://example.invalid/report)' }] }), false)
+  assert.equal(hasWarning({ ...pr, issueComments: [{ body: diagnosis }] }), false)
+  const more = { ...pr, body: pr.body.replace('Fixes #42\n', 'Fixes #42\nPart of #43\n'), moreIssues: { 43: { issueData: { state: 'open' }, issueComments: [{ body: diagnosis }] } } }
+  assert.equal(hasWarning(more), false)
+  assert.equal(hasWarning({ ...pr, moreIssues: { 43: { issueComments: [{ body: diagnosis }] } } }), true)
+  for (const example of ['Fable diagnosis: pending', `\`\`\`\n${diagnosis}\n\`\`\``, `<!--\n${diagnosis}\n-->`, `> ${diagnosis}`]) {
+    assert.equal(hasWarning({ ...pr, prComments: [...pr.prComments, { body: example }] }), true, example)
+  }
+})
+
+test('pr-check round warnings treat takeover and round cap comments separately from diagnosis', () => {
+  const pr = roundWarningPr(roundHeads(3))
+  const both = warningReport(pr)
+  assert.ok(both.includes(diagnosisWarning), both)
+  assert.ok(both.includes(takeoverWarning), both)
+  for (const marker of ['Takeover: reviewer takes the branch', 'Round cap: settled work remains']) {
+    const text = warningReport({ ...pr, prComments: [...pr.prComments, { body: marker }] })
+    assert.ok(text.includes(diagnosisWarning), text)
+    assert.equal(text.includes(takeoverWarning), false, text)
+  }
+  const bodyCap = warningReport({ ...pr, body: `${pr.body}Round cap: #99\n` })
+  assert.ok(bodyCap.includes(diagnosisWarning), bodyCap)
+  assert.ok(bodyCap.includes(takeoverWarning), bodyCap)
+  const diagnosis = warningReport({ ...pr, prComments: [...pr.prComments, { body: 'Fable diagnosis: https://example.invalid/report' }] })
+  assert.equal(diagnosis.includes(diagnosisWarning), false)
+  assert.ok(diagnosis.includes(takeoverWarning), diagnosis)
+})
+
+test('pr-check round warnings are limited to ready risk pull requests and leave the command successful', async t => {
+  const risk = roundWarningPr(roundHeads(2))
+  assert.ok(warningReport(risk).includes(diagnosisWarning))
+  for (const tier of ['light', 'normal']) assert.doesNotMatch(warningReport({ ...risk, body: risk.body.replace('Tier: risk', `Tier: ${tier}`) }), /^WARN /m)
+  assert.doesNotMatch(warningReport({ ...risk, isDraft: true }), /^WARN /m)
+
+  const setup = fixture(t)
+  const event = join(setup.directory, 'event.json')
+  const summary = join(setup.directory, 'summary.md')
+  const text = `${body}Tier: risk\n`
+  setup.put('event.json', JSON.stringify({ repository: { full_name: 'synthetic/example' }, pull_request: { number: 17, title: 'fix: synthetic check', body: text, draft: false, author_association: 'MEMBER', created_at: '2030-01-01T00:00:00Z', labels: [], head: { ref: branch, sha: setup.head }, base: { sha: setup.base } } }))
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  let issueComments = []
+  globalThis.fetch = async url => {
+    const payload = /\/pulls\/17$/.test(url.pathname) ? { head: { sha: '0'.repeat(40) } }
+      : url.pathname.endsWith('/issues/17/comments') ? [...roundHeads(2), { body: `Review: APPROVE ${setup.head} by independent reviewer` }]
+        : url.pathname.endsWith('/issues/42') ? { state: 'open' }
+          : url.pathname.endsWith('/issues/42/comments') ? issueComments : []
+    return { ok: true, status: 200, json: async () => payload, headers: new Headers() }
+  }
+  const env = { GITHUB_API_URL: 'https://api.example.invalid', GITHUB_TOKEN: 'synthetic-token-value', GITHUB_STEP_SUMMARY: summary }
+  const execution = await runMain(['--event', event, '--repo-dir', setup.directory], env)
+  assert.equal(execution.status, 0, execution.stdout + execution.stderr)
+  assert.ok(execution.stdout.includes(`WARN ${diagnosisWarning}`), execution.stdout)
+  assert.match(readFileSync(summary, 'utf8'), /\*\*WARN\*\* 2 REQUEST CHANGES rounds/)
+  // A team member's risk-tier pull request reads its issue's comments, so a diagnosis link there clears the warning.
+  issueComments = [{ body: 'Fable diagnosis: https://example.invalid/report' }]
+  const cleared = await runMain(['--event', event, '--repo-dir', setup.directory], env)
+  assert.equal(cleared.status, 0, cleared.stdout + cleared.stderr)
+  assert.equal(cleared.stdout.includes(diagnosisWarning), false, cleared.stdout)
+})
+
 test('pr-check counts one round per head with REQUEST CHANGES over the whole pull request', () => {
   // The #1366 shape: 2, APPROVE, 2, APPROVE, 5 heads with two verdicts on one: nine rounds, an APPROVE does not reset it.
   const shape = roundComments(rc('a1'), rc('a2'), ['APPROVE', 'a3'], rc('b1'), rc('b2'), ['APPROVE', 'b3'], rc('c1'), rc('c2'), rc('c2'), rc('c3'), rc('c4'), rc('c5'))
