@@ -132,7 +132,9 @@ const withHub = async (opts, fn) => {
     await fn({ dir, call, snapshot, messageOf, connectionOf, daemon, start, stop, send, registerHolder, disconnectHolder, starts })
   } finally {
     if (receiver) await receiver.close().catch(() => {})
+    server.closeAllConnections?.()
     await new Promise(done => server.close(done))
+    try { messaging.close?.() } catch {}
     try { rmSync(dir, { recursive: true, force: true, maxRetries: 15, retryDelay: 100 }) } catch {}
   }
 }
@@ -169,7 +171,7 @@ test('a late Codex ACK after acceptance is refused as CONTESTED while turn/start
   const ackFlag = join(f.dir, 'ack-contested')
   const d = f.daemon('contested-ack', { startDelay: 800, ackFlag })
   const errors = []
-  f.start(d, { pollMs: 1500, onError: error => errors.push(error.message) })
+  f.start(d, { pollMs: 2500, onError: error => errors.push(error.message) })
   const conn = await f.connectionOf()
   assert.equal((await f.send(conn, 'AB-CX-1796-2')).status, 200)
   await waitFor(() => f.starts(d) === 1, 10_000, 'turn/start called')
@@ -237,3 +239,45 @@ test('a Codex ACK receipt meeting a busy message store (503) retries via owed re
     assert.equal(stays.error, 'DISCONNECTED')
   })
 })
+
+test('a late Codex ACK that completes before a delayed turn/start answer arrives after board disconnect still acknowledges (#1796)', { timeout: 30_000 }, () => withHub({}, async f => {
+  const ackFlag = join(f.dir, 'early-ack-delayed-start')
+  const d = f.daemon('delayed-start-ack', { startDelay: 2000, ackFlag })
+  const errors = []
+  f.start(d, { pollMs: 150, tickMs: 100, onError: error => errors.push(error.message) })
+  const conn = await f.connectionOf()
+  assert.equal((await f.send(conn, 'AB-CX-1796-4')).status, 200)
+  await waitFor(() => f.starts(d) === 1, 10_000, 'turn/start called')
+
+  const holder = await f.registerHolder()
+  await waitFor(() => !f.snapshot().connections.some(one => one.id === conn.id), 10_000, 'original connection disconnect')
+  await waitFor(() => f.messageOf('AB-CX-1796-4')?.error === 'DISCONNECTED', 10_000, 'DISCONNECTED status after drop')
+
+  writeFileSync(ackFlag, '')
+  await waitFor(() => !existsSync(ackFlag), 10_000, 'daemon consumed ackFlag before delayed turn/start answered')
+  await f.disconnectHolder(holder)
+
+  const settled = await waitFor(() => {
+    const one = f.messageOf('AB-CX-1796-4')
+    return one?.status === 'acknowledged' ? one : null
+  }, 10_000, 'acknowledged after delayed turn/start answer')
+  assert.equal(settled.error, '')
+  assert.equal(tsMod.messageStatus(settled, Date.now(), tsMod.EN).state, 'read')
+  assert.equal(f.starts(d), 1)
+  assert.equal(errors.includes('OWNER_DISCONNECTED'), false)
+}))
+
+test('closing the Codex receiver while leaving a thread after ACK still delivers the acknowledged receipt (#1796)', { timeout: 30_000 }, () => withHub({}, async f => {
+  const d = f.daemon('close-while-leaving', { unsubscribeFaults: [400] })
+  f.start(d)
+  const conn = await f.connectionOf()
+  assert.equal((await f.send(conn, 'AB-CX-1796-5')).status, 200)
+  await waitFor(() => d.calls().some(one => one.method === 'thread/unsubscribe'), 10_000, 'thread/unsubscribe started')
+
+  await f.stop()
+  const settled = f.messageOf('AB-CX-1796-5')
+  assert.equal(settled.status, 'acknowledged')
+  assert.equal(settled.error, '')
+  assert.equal(tsMod.messageStatus(settled, Date.now(), tsMod.EN).state, 'read')
+  assert.equal(f.starts(d), 1)
+}))
