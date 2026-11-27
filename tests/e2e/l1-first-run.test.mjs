@@ -6,7 +6,6 @@ import { makeWorld } from './lib/world.mjs'
 import { block, hook, hookHosts } from './lib/writers.mjs'
 import { inspectSurfaces, terminal, seenPageWithin, serve, run } from './lib/surfaces.mjs'
 import { noMachineIds } from './lib/expect.mjs'
-import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_EVENT_MS, PAGE_EVENT_SAMPLES, PAGE_MS } from './lib/budget.mjs'
 
 // The page's empty board: the agents that report here and what to do next, in place of the sections.
@@ -18,10 +17,11 @@ describe('L1 first run', () => {
     try {
       assert.equal(world.exists('progress.md'), false)
       const screens = await inspectSurfaces(world)
-      for (const surface of ['terminal', 'chat', 'page', 'print']) {
+      for (const surface of ['terminal', 'watch', 'chat', 'page', 'print']) {
         // The page has no Needs you section yet: its empty board is the "Your board is ready" card.
         assert.match(screens[surface], surface === 'page' ? EMPTY_PAGE : /Nothing needs you|No work in progress/, surface)
-        await knownFailure('hold:empty-board-connect', () => assert.match(screens[surface], /\b(?:connect|set up|install)\b.*(?:agent|setup-agent)|setup-agent.*--apply/i, surface))
+        // The watch frame wraps the command onto the next row: match the words, not the rows.
+        assert.match(screens[surface].replace(/\s+/g, ' '), /\b(?:connect|set up|install)\b.*(?:agent|setup-agent)|setup-agent.*--apply/i, surface)
       }
     } finally { await world.close() }
   })

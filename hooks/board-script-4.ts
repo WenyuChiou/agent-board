@@ -308,7 +308,7 @@ export const LINES = [
 "    lines.push(\"\");",
 "  }",
 "  if (view.groups.every((group) => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && recentQuestions.length === 0)",
-"    lines.push(c(\"quiet\", s.empty), \"\");",
+"    lines.push(c(\"quiet\", s.empty), c(\"quiet\", s.boardNoAgents), \"\");",
 "  if (view.background)",
 "    lines.push(c(\"quiet\", cut(view.background, o.width)), \"\");",
 "  for (const line of view.health ?? [])",

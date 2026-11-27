@@ -1082,7 +1082,7 @@ const PAGE_WORDS = [
   'pgDoneSteps', 'pgDoneStepsOne', 'pgMoreSteps', 'pgMoreStepsOne', 'pgVersion', 'pgVersions', 'pgUnreadable', 'pgHowFix', 'pgFixAdvice',
   'approvalHead', 'approvalAllow', 'approvalDeny', 'approvalDenyWhy', 'approvalReasonPlaceholder', 'approvalSendDeny', 'approvalSubagent', 'settingsApprovals', 'approvalSwitchFailed',
   'pgReady', 'pgUnreadableReply', 'pgUnknownAge', 'pgCopyChoice', 'pgSendChoice', 'pgPasteIn', 'pgSentTo', 'pgCopyAgain', 'pgCancel',
-  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen', 'sideClose', 'pgDetailRail',
+  'showAllQuestions', 'pgCopyFailed', 'pgOffline', 'pgNotSeen', 'pgNoOthers', 'pgNoOthersFor', 'clearFilters', 'pgStateOpen', 'pgWorkingHint', 'pgPasteLater', 'serveRetry', 'serveCopyMessage', 'serveSendBusy', 'pgNoQuestions', 'pgNoQuestionsElsewhere', 'pgOthers', 'pgStopped', 'pgDoneWeek', 'pgChipEmpty', 'pgStartIn', 'pgStartAny', 'pgConnect', 'pgConnected', 'pgTipNeeds', 'pgTipNeedsOne', 'pgTipWorking', 'pgTipOpen', 'pgTipOpenOne', 'pgTipCantRead', 'pgSideFold', 'pgSideOpen', 'sideClose', 'pgDetailRail',
   'pgSearchPlaceholder', 'pgSearchLabel', 'pgFilterBar', 'pgFilterAgent', 'pgFilterProject', 'pgFilterInterface', 'pgInterfaceCli', 'pgInterfaceApp', 'pgFilterClear', 'pgSearchEmpty', 'groupWaitOthersCount',
 ] as const satisfies ReadonlyArray<keyof Strings>
 
@@ -4185,7 +4185,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function freshPage(view) {
     var ids = connectedIds(view);
-    if (!ids.length) return add(el('section', 'fresh'), freshMark(), el('h2', '', w('pgReady')), el('p', '', w('pgStartAny')));
+    if (!ids.length) return add(el('section', 'fresh'), freshMark(), el('h2', '', w('pgReady')), el('p', '', w('pgStartAny')), el('p', '', w('pgConnect')));
     var list = el('ul');
     ids.forEach(function (id) {
       add(list, add(el('li'), agentMark(id), add(el('span'), el('b', '', agentName(id)), el('span', 'ok', ' ✓ ' + w('pgConnected')))));

@@ -12661,8 +12661,9 @@ test('the empty page lists the connected agents and how their work appears', asy
     assert.deepEqual(markNames(fresh.node('board')), [])
     assert.ok(!drawn.includes(words.pgConnected), drawn)
     assert.ok(!drawn.includes(words.agentNames.claude) && !drawn.includes(words.agentNames.codex), drawn)
-    // And how to start, in one line.
+    // And how to start, in one line, and the command that connects the first agent (#256).
     assert.ok(drawn.includes(words.pgStartAny), drawn)
+    assert.ok(drawn.includes(words.pgConnect), drawn)
     assert.equal(fresh.node('chips').childNodes.length, 0)
     // An agent that has a delivery connection joins the list, marked connected.
     const joined = await pageDom(html, empty, { messaging: { connections: [{ agent: 'gemini', id: 'gemini-1', session: 'synthetic' }], messages: [] } })
@@ -14739,9 +14740,10 @@ test('the page of a grouped board draws each question once, copies an answer and
       assert.ok(fresh.node('board').textContent.includes(words.pgStartAny))
       // (The version label and the project's name on GitHub are the same in every language.)
       // The owner's tags AI, CLI and App stay as written in Chinese too (#1884): the page names no AI and marks CLI or App.
+      // The setup command stays as typed in every language (#256).
       const labels = Object.entries(runtime.pageWords(words, true)).filter(([key]) => key.startsWith('pg') && key !== 'pgVersion').map(([, value]) => value).join(' ')
       if (words === EN) assert.doesNotMatch(labels, /\p{Script=Han}/u)
-      else assert.doesNotMatch(labels.replaceAll('Agent Board', '').replaceAll('GitHub', '').replaceAll('Claude Code', '').replaceAll('Codex', '').replace(/\b(?:AI|CLI|App)\b/g, ''), /[A-Za-z]/)
+      else assert.doesNotMatch(labels.replaceAll('Agent Board', '').replaceAll('GitHub', '').replaceAll('Claude Code', '').replaceAll('Codex', '').replaceAll('npx @wenyuchiou/agent-board setup', '').replace(/\b(?:AI|CLI|App)\b/g, ''), /[A-Za-z]/)
     }
   } finally { await board.close() }
 })
