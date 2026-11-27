@@ -4,9 +4,9 @@ import { archiveQuestionsKept, captureCovers, captureJson, emptyQuestions, obser
 import { blockKey } from '../hooks/session-liveness'
 import { parseProgress } from '../hooks/parse'
 import { applyTaskCreate, applyTaskUpdate, emptyMirror } from '../hooks/mirror'
-import { archivableAsking, renderAutoBlock, takeArchivable } from '../hooks/blocks'
+import { archivableAsking, renderAutoBlock, takeArchivable, takeTask } from '../hooks/blocks'
 import { buildView } from '../hooks/view'
-import { boardItems, boardKey, boardScreen, boardText, chatText, emptyBoardState, peekInbox, pinned } from '../hooks/board'
+import { boardItems, boardKey, boardScreen, boardText, chatText, emptyBoardState, fingerprint, peekInbox, pinned } from '../hooks/board'
 import { sha256 } from '../hooks/sha256'
 import { serveAction, serveModel, servePage } from '../hooks/serve'
 import { STRINGS } from '../hooks/strings'
@@ -505,4 +505,126 @@ test('folding a question whose agent window is closed keeps its first observatio
   const view = buildView(projects, [], null, START + 6 * QUESTION_DAY, 0, {}, STRINGS.en, [], {}, folded, undefined, [], new Set(), undefined, 12 * 60 * 60 * 1000, undefined, gone)
   expect(view.waiting).toEqual([])
   expect(view.older.map(item => item.text)).toEqual(['Publish the synthetic plan, OK?'])
+})
+
+// #155: a question whose session ended is listed under Older. It archives its task where it is
+// shown, and "Still running" is said only of a question whose session may still be at work.
+const endedAt = START + 60 * 60 * 1000
+const asking = (state: string, words = 'Publish the synthetic plan, OK?', updated = START): string => `## demo\n<!-- auto session=a1b2c3d4 agent=codex state=${state} updated=${new Date(updated).toISOString()} -->\n### Release\n- [x] Synthetic preparation\n- [?] ${words}\n<!-- /auto session=a1b2c3d4 -->\n`
+const askingRef = { project: 'demo', title: 'Release', line: 2, session: 'a1b2c3d4' }
+const drawnAsking = (file: string, s: (typeof STRINGS)[keyof typeof STRINGS], at = endedAt) => {
+  const projects = parseProgress(file)
+  const ledger = observeQuestions(emptyQuestions(), projects, null, [], START, true, 'writer:155').ledger
+  const view = buildView(projects, [], null, at, 0, {}, s, [], {}, ledger)
+  const items = boardItems(view, [], false, true)
+  return { view, items, ledger }
+}
+const olderIndex = (items: ReturnType<typeof boardItems>): number => items.findIndex(item => item.type === 'ask' && item.key.startsWith('older:'))
+const liveIndex = (items: ReturnType<typeof boardItems>): number => items.findIndex(item => item.type === 'ask' && item.key.startsWith('ask:'))
+
+test('an ended session\'s question on Older archives its task from the terminal board and the page, and never says Still running (#155)', () => {
+  for (const s of Object.values(STRINGS)) {
+    const file = asking('ended')
+    const { view, items } = drawnAsking(file, s)
+    expect(view.waiting).toEqual([])
+    const index = olderIndex(items)
+    const item = items[index]
+    if (item?.type !== 'ask') throw new Error('Missing the Older copy')
+    expect(item.ask.archive).toEqual(askingRef)
+    const drawn = pinned({ ...emptyBoardState, isOlderOpen: true, selected: index }, items)
+    expect(boardScreen(view, [], drawn, s, { width: 500, isColor: false }).includes(s.archiveLive)).toBe(false)
+    const pressed = boardKey(drawn, 'a', items, s)
+    expect(pressed.action).toEqual({ type: 'archive', ref: askingRef, title: 'Release' })
+    expect(boardScreen(view, [], pressed.state, s, { width: 500, isColor: false }).includes(s.archiveLive)).toBe(false)
+    expect(serveAction(items, { key: item.key, type: 'archive', text: '', session: '', fp: fingerprint(item, items) }, s)).toEqual({ type: 'archive', ref: askingRef, title: 'Release' })
+    expect(takeTask(file, askingRef, endedAt, s)).not.toBe(null)
+    expect(serveModel(view, [], s).asks.some(ask => ask.archiveNote === s.archiveLive)).toBe(false)
+  }
+})
+
+test('a page card for a retained question whose block is gone, or a kept one, never answers Archive with Still running (#155)', () => {
+  for (const s of Object.values(STRINGS)) {
+    const { ledger } = drawnAsking(asking('waiting'), s, START)
+    for (const disposition of ['unresolved', 'archived'] as const) {
+      const view = buildView([], [], null, START + 60_000, 0, {}, s, [], {}, withCaptures(emptyQuestions(), [{ version: 1, disposition, record: ledger.records[0]! }]))
+      const items = boardItems(view, [], false, true)
+      const item = items.find(one => one.type === 'ask')
+      if (item?.type !== 'ask') throw new Error('Missing the retained question')
+      expect(serveModel(view, [], s).asks.map(ask => ask.archiveNote)).toEqual(disposition === 'unresolved' ? [''] : [])
+      expect(serveAction(items, { key: item.key, type: 'archive', text: '', session: '', fp: fingerprint(item, items) }, s)).toEqual({ type: 'refuse', note: s.archiveGone })
+      const drawn = pinned({ ...emptyBoardState, isOlderOpen: true, selected: items.indexOf(item) }, items)
+      expect(boardKey(drawn, 'a', items, s).state.note === s.archiveLive).toBe(false)
+    }
+  }
+})
+
+test('an Older question\'s Archive pressed after its session resumed is refused on the terminal board and the page, and only the live card says Still running', () => {
+  for (const s of Object.values(STRINGS)) {
+    const before = drawnAsking(asking('ended'), s)
+    const index = olderIndex(before.items)
+    const older = before.items[index]
+    if (older?.type !== 'ask') throw new Error('Missing the Older copy')
+    const drawn = pinned({ ...emptyBoardState, isOlderOpen: true, selected: index }, before.items)
+    const resumed = asking('waiting', undefined, endedAt)
+    const after = drawnAsking(resumed, s)
+    const pressed = boardKey(drawn, 'a', after.items, s)
+    expect(pressed.action).toBe(null)
+    expect(pressed.state.note).toBe(s.boardLineChanged)
+    expect(serveAction(after.items, { key: older.key, type: 'archive', text: '', session: '', fp: fingerprint(older, before.items) }, s)).toEqual({ type: 'refuse', note: s.boardLineChanged })
+    const live = after.items[liveIndex(after.items)]
+    if (live?.type !== 'ask') throw new Error('Missing the live card')
+    expect(live.ask.archive).toBe(undefined)
+    expect(boardKey(pinned({ ...emptyBoardState, selected: liveIndex(after.items) }, after.items), 'a', after.items, s).state.note).toBe(s.archiveLive)
+    expect(serveAction(after.items, { key: live.key, type: 'archive', text: '', session: '', fp: fingerprint(live, after.items) }, s)).toEqual({ type: 'refuse', note: s.archiveLive })
+    expect(serveModel(after.view, [], s).asks.map(ask => ask.archiveNote)).toEqual([s.archiveLive])
+    expect(takeTask(resumed, askingRef, endedAt, s)).toBe(null)
+  }
+})
+
+test('an Archive press on an ended question reworded since the draw is refused on the page and the terminal board', () => {
+  for (const s of Object.values(STRINGS)) {
+    const before = drawnAsking(asking('ended'), s)
+    const index = olderIndex(before.items)
+    const older = before.items[index]
+    if (older?.type !== 'ask') throw new Error('Missing the Older copy')
+    const drawn = pinned({ ...emptyBoardState, isOlderOpen: true, selected: index }, before.items)
+    const after = drawnAsking(asking('ended', 'Publish the synthetic plan today, OK?'), s)
+    expect(boardKey(drawn, 'a', after.items, s)).toEqual({ state: expect.objectContaining({ note: s.boardLineChanged }), action: null })
+    expect(serveAction(after.items, { key: older.key, type: 'archive', text: '', session: '', fp: fingerprint(older, before.items) }, s)).toEqual({ type: 'refuse', note: s.boardLineChanged })
+  }
+})
+
+test('the page and the terminal board archiving one ended question\'s block at once take it once and keep its question once', () => {
+  for (const s of Object.values(STRINGS)) {
+    const file = asking('ended')
+    const before = drawnAsking(file, s)
+    const older = before.items[olderIndex(before.items)]
+    if (older?.type !== 'ask') throw new Error('Missing the Older copy')
+    // The terminal board's press is written first; the page's press, drawn before it, reads the written file.
+    const taken = takeTask(file, askingRef, endedAt, s)
+    if (taken === null) throw new Error('The first press took nothing')
+    expect(taken.text.includes('Publish the synthetic plan')).toBe(false)
+    expect(takeTask(taken.text, askingRef, endedAt, s)).toBe(null)
+    const after = buildView(parseProgress(taken.text), [], null, endedAt, 0, {}, s, [], {}, withCaptures(before.ledger, [{ version: 1, disposition: 'archived', record: before.ledger.records[0]! }]))
+    const afterItems = boardItems(after, [], false, true)
+    expect(serveAction(afterItems, { key: older.key, type: 'archive', text: '', session: '', fp: fingerprint(older, before.items) }, s).type).toBe('refuse')
+    expect([...(after.older ?? []), ...after.waiting].filter(item => item.text === 'Publish the synthetic plan, OK?')).toHaveLength(1)
+  }
+})
+
+test('a pressed on a live question whose session ended since the draw archives nothing until its Older copy is drawn', () => {
+  for (const s of Object.values(STRINGS)) {
+    const before = drawnAsking(asking('waiting', undefined, endedAt), s)
+    const index = liveIndex(before.items)
+    const drawn = pinned({ ...emptyBoardState, selected: index }, before.items)
+    const after = drawnAsking(asking('ended', undefined, endedAt), s)
+    const pressed = boardKey(drawn, 'a', after.items, s)
+    expect(pressed.action).toBe(null)
+    expect(pressed.state.note).toBe(s.boardLineChanged)
+    const olderAt = olderIndex(after.items)
+    const redrawn = pinned({ ...emptyBoardState, isOlderOpen: true, selected: olderAt }, after.items)
+    const again = boardKey(redrawn, 'a', after.items, s)
+    expect(again.action).toEqual({ type: 'archive', ref: askingRef, title: 'Release' })
+    expect(boardScreen(after.view, [], again.state, s, { width: 500, isColor: false }).includes(s.archiveLive)).toBe(false)
+  }
 })
