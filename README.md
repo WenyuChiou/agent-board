@@ -32,7 +32,7 @@ npx @wenyuchiou/agent-board@next
 
 ## What you get
 
-- **Questions first.** A question an agent is waiting on goes to the top, whichever agent asked, with a button for each option it can read, or you write your own answer.
+- **Questions first.** A question an agent is waiting on goes to the top, whichever agent asked, with a button for each choice: the choices the agent gives the board, or the two sides of a short `A or B?` question (`24 hours or 7 days?`). A numbered or bulleted list inside a reply gets no buttons. You can always write your own answer.
 - **Every agent stays where it is.** Agents keep running in their own terminals and in the Codex and Antigravity desktop apps, with your sign-in and billing unchanged; the board reads what their hooks report, and closing it stops no session.
 - **Local and plain.** One Markdown file you can read and edit, a page on 127.0.0.1 only, and no model calls by the board.
 - **One command to install, one to remove.** `setup` shows what it will change before it writes; `remove` takes out what setup wrote and leaves your own settings alone.

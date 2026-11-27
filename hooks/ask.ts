@@ -110,6 +110,26 @@ const firstOption = (text: string): string =>
 const SHARED_TAIL = /^(\S+)\s+(?:for|in|on|with|to|at|as|from|into|via)\s+\S.*$/i
 const pairedLast = (first: string, last: string): string => /^[^\s㐀-鿿]+$/.test(first) ? last.replace(SHARED_TAIL, '$1') : last
 
+// A question frame left on the first option (`Should the export keep 24 hours` for `Should the
+// export keep 24 hours or 7 days of history?`) would send the question's own words as an answer
+// (#1640). When the last option opens with a number, the options are parallel amounts: the first
+// starts at the lead's last number, and the last loses the shared context after the same number of
+// words and a preposition (`7 days`). A lead with no such number keeps its words, as before.
+const SHARED_PREPOSITION = /^(?:for|in|on|with|to|at|as|from|into|via|of)$/i
+const NUMBER = /^\d/
+const parallelAmounts = (first: string, last: string): [string, string] | null => {
+  if (!CLAUSE_OPENING.test(first) || CJK.test(first) || CJK.test(last)) return null
+  const lastWords = last.split(/\s+/)
+  if (!NUMBER.test(lastWords[0] ?? '')) return null
+  const firstWords = first.split(/\s+/)
+  const from = firstWords.findLastIndex(word => NUMBER.test(word))
+  if (from <= 0) return null
+  const amount = firstWords.slice(from)
+  if (amount.length > lastWords.length) return null
+  const shared = lastWords.length > amount.length && SHARED_PREPOSITION.test(lastWords[amount.length] ?? '')
+  return [amount.join(' '), shared ? lastWords.slice(0, amount.length).join(' ') : last]
+}
+
 const lastOption = (text: string): string => {
   const option = text.trim()
   // These common nouns end in the same characters as question particles.
@@ -182,6 +202,8 @@ const optionsOf = (text: string): string[] => {
   const rest = lastOption(match[2] ?? '')
   // Reply length must not turn a real choice into a yes/no question; interfaces clip labels.
   const first = firstOption(lead)
+  const amounts = parallelAmounts(first, rest)
+  if (amounts !== null) return amounts
   return [first, pairedLast(first, rest)].filter(one => one !== '')
 }
 

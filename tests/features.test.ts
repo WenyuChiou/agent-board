@@ -1268,6 +1268,17 @@ test('an English "Should X be A or B?" question offers A and B as the answers, w
   })
 })
 
+test('an inline "A or B?" choice of amounts offers the amounts, not the question words (#1640)', () => {
+  expect(askOf('Should the export keep 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days'] })
+  expect(askOf('History', 'Should the export keep 24 hours or 7 days of history?')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days'] })
+  expect(askOf('Should I set the retry limit to 3 or 5?', '')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
+  expect(askOf('Should the cache hold 2 GB or 4 GB?', '')).toMatchObject({ kind: 'choose', options: ['2 GB', '4 GB'] })
+  // A short choice with no question frame stays as it was.
+  expect(askOf('Debug or info?', '')).toMatchObject({ kind: 'choose', options: ['Debug', 'info'] })
+  // A number inside the subject is not one of the amounts: the words stay whole, as before.
+  expect(askOf('Should the 2 workers keep running or stop?', '')).toMatchObject({ kind: 'choose', options: ['Should the 2 workers keep running', 'stop'] })
+})
+
 test('an English question with a relative clause keeps its words and does not strip to the clause\'s verb', () => {
   expect(askOf('Should I keep files that are backed up or delete them?', '')).toMatchObject({
     kind: 'choose',
