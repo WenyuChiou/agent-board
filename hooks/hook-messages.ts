@@ -112,8 +112,9 @@ export const WAKE_IDLE_MS = 10_000
 // Antigravity's own hooks number its turns (#1396): its turn-start hook adds one to `started` in the conversation's turn
 // order file and sends that number with its take, and its Stop hook sets `stopped` to the number of the turn it ends. Both
 // write the file before any board call, so the order comes from the hooks' own sequence, not from any clock. A progress
-// report says nothing of this, since a model may report waiting before its turn ends.
-export type TurnOrder = { started: number; stopped: number; stoppedAt: number; stopBegan?: number }
+// report says nothing of this, since a model may report waiting before its turn ends. `closed` names the start records
+// the last Stop listed and removed (#1612): a record it names holds no wake.
+export type TurnOrder = { started: number; stopped: number; stoppedAt: number; closed?: string[] }
 // The order file as the running board reads it now; undefined when there is none or it cannot be read, which holds a wake.
 export type TurnsOfSession = (agent: string, session: string) => TurnOrder | undefined
 // The board keeps the highest number a take sent, so a turn whose file write failed still reads as started.
@@ -135,6 +136,7 @@ const wakeStop = (state: MessageState, one: Message, now: number, turnsOfSession
   // Idle only when the last turn that started has had its Stop, by the file and by every take the board saw, and for 10 s
   // since. Not covered (an Edge): a Stop hook that starts after the next turn's start reads that turn's number, so it ends
   // the turn still running; only a turn number in the Stop's own input, or the app waiting for its Stop hook, closes that.
+  // Antigravity 2.35.2 started no turn during a slowed Stop in one live run, and its hook inputs carry no turn id.
   const turns = turnsOfSession(box.agent, box.session)
   if (turns === undefined || turns.stopped <= 0 || turns.stopped !== Math.max(turns.started, box.busySeq ?? 0) || now - turns.stoppedAt < WAKE_IDLE_MS) return undefined
   // One wake per Stop: a wake started since then has its turn to run.

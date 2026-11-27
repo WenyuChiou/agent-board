@@ -270,14 +270,14 @@ What each side may rely on:
   by the file and by every take the board saw, has had its `Stop`, 10 s after that `Stop`, and once per `Stop`. So a
   failed take, a failed file write, a waiting report, a repeated event or a clock set back starts no wake into a running
   turn. No file, or one that does not read, holds every wake; no file is written until a board has made the folder.
-- **Start records.** A turn start first makes an empty record beside the order file, `<mailbox id>.turns.open.<ms>.<pid>`,
-  with no lock, and a record holds the wake until the turn's `Stop` removes it. The `Stop` writes `stopBegan`, when it began,
-  beside its number, and removes the records dated before that or later than its own present time. A `Stop` that dies
-  after writing its number leaves its records, so a poll ignores a record dated before the `stopBegan` of an order file that
-  reads `stopped` equal to `started`, which is what that `Stop` would have removed, and goes on to take over its dead lock
-  after 30 s; a record made after it began still holds the wake. A clock set back between a start and its `Stop` leaves a
-  record dated after the `Stop`, which the `Stop` removes as made before it. A file without `stopBegan` keeps every record
-  holding the wake.
+- **Start records.** A turn start first makes an empty record beside the order file, `<mailbox id>.turns.open.<token>`,
+  named by a random token, with no lock, and a record holds the wake until a `Stop` closes it. A `Stop` lists the records
+  as its first act, writes the names it listed as `closed` in the same write as its number, then removes exactly those, so
+  a record the next turn makes after the list stays. A `Stop` that dies after writing its number leaves its records, and
+  a record its `closed` names holds no wake; a poll goes on to take over its dead lock after 30 s. A `Stop` that cannot take
+  the lock hands its list to the board script, which closes those names; one that cannot list the folder closes none. No
+  rule compares a record's date, so a clock set back or forward changes nothing. A file without `closed` keeps every record
+  holding the wake until the next `Stop`.
 - **Not covered.** Between the board's yes and the sidecar's `send-message` call the person may start a turn; a `Stop`
   hook that starts after the next turn's start reads that turn's number and ends it while it runs (only a turn number
   in the `Stop` input, or the app waiting for its `Stop` hook, closes that); a turn whose turn-start hook never ran

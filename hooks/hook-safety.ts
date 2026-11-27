@@ -197,43 +197,64 @@ ${hookRecoverySource(home, script, dataRoot)}
 // starts, so a board script that is slow, or stopped at the deadline and queued, still leaves the mark that keeps a wake
 // out of the running turn. Same file, lock file and rules as the board script's own mark, with shorter waits: the board
 // script takes the number only for the file it would write itself, and marks the turn on its own when this wrote nothing.
-// A turn start first makes its record, with no lock, so a start whose locked write fails or waits still holds a wake; a
-// Stop removes the records made before it began, or dated after its own present time (made before the clock was set back),
-// once it has written its number, and writes when it began beside its number, so a poll can tell a record that a Stop which
-// died would have removed (design A, #1612).
+// A turn start first makes its record, with no lock and named by a random token, so a start whose locked write fails or
+// waits still holds a wake. A Stop lists the records before anything else, writes the names it listed as closed in the
+// same write as its number, then removes exactly those, so a record the next turn makes after the list stays and holds
+// the wake; no record is judged by a date (D1, #1612). A Stop that cannot take the lock hands its list to the board script.
 const turnMarks = { SessionStart: 'start', PreInvocation: 'start', Stop: 'stop' }
-const markTurn = (payload, began) => {
-  const event = value('--event'), progress = value('--progress-file')
-  const mark = agent === 'antigravity' && args.includes('--agent-status') && Object.hasOwn(turnMarks, event) ? turnMarks[event] : undefined
-  const session = typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID
-  if (mark === undefined || typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session) || typeof progress !== 'string' || progress === '') return undefined
-  const hash = text => createHash('sha256').update(text).digest('hex')
+const turnHash = text => createHash('sha256').update(text).digest('hex')
+// The mark this hook writes, from its own arguments, so a Stop knows it is one before it reads its input.
+const turnMarkOf = () => {
+  const event = value('--event')
+  return agent === 'antigravity' && args.includes('--agent-status') && Object.hasOwn(turnMarks, event) ? turnMarks[event] : undefined
+}
+// The board's messages folder for the progress file this hook reports to, worked out as the board script does.
+const turnRoot = () => {
+  const progress = value('--progress-file')
+  if (typeof progress !== 'string' || progress === '') return undefined
   const boardHome = path.resolve(${JSON.stringify(home)}), runtime = process.env.XDG_RUNTIME_DIR
   const isOwn = dir => { try { const found = fs.lstatSync(dir); return found.isDirectory() && (process.getuid === undefined || found.uid === process.getuid() && (found.mode & 0o077) === 0) } catch { return false } }
   const folder = process.platform === 'win32' ? (runtime ? path.join(runtime, 'agent-board') : path.join(boardHome, '.cache', 'agent-board')) : runtime && isOwn(runtime) ? runtime : path.join(boardHome, '.cache', 'agent-board')
-  const root = path.resolve(folder, 'agent-board-' + hash(path.resolve(progress)).slice(0, 16) + '-messages')
-  const id = 'mailbox_' + hash('antigravity:' + session).slice(0, 24), opened = id + '.turns.open.'
+  return path.resolve(folder, 'agent-board-' + turnHash(path.resolve(progress)).slice(0, 16) + '-messages')
+}
+// A Stop's list of start records, taken as the worker's first act, before its input is read: every conversation's here,
+// and markTurn keeps its own. Undefined when the folder cannot be read, and that Stop closes no record.
+const listTurnRecords = () => {
+  if (turnMarkOf() !== 'stop') return undefined
+  try {
+    const root = turnRoot()
+    return root === undefined ? undefined : fs.readdirSync(root).filter(name => name.includes('.turns.open.'))
+  } catch { return undefined }
+}
+const markTurn = (payload, listed) => {
+  const mark = turnMarkOf(), root = turnRoot()
+  const session = typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID
+  if (mark === undefined || typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session) || root === undefined) return undefined
+  const id = 'mailbox_' + turnHash('antigravity:' + session).slice(0, 24), opened = id + '.turns.open.'
   const file = path.join(root, id + '.turns.json')
   const lock = file + '.lock', temp = file + '.' + process.pid + '.tmp'
   const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
-  let fd, identity
+  // Only this conversation's records, with no path in their names; the same rule as the board script's.
+  const own = (listed ?? []).filter(name => name.startsWith(opened) && /^[A-Za-z0-9._-]{1,64}$/.test(name.slice(opened.length)))
+  // A Stop that wrote nothing hands its list on, so the board script closes those names and not one made since.
+  const handOn = () => mark === 'stop' ? { file, mark, list: own } : undefined
+  let fd, identity, hasRecord = true
   try {
     // Only a board makes this folder, private; one made here would not be.
     const found = fs.lstatSync(root)
     if (!found.isDirectory() || found.isSymbolicLink()) return undefined
-    // A start whose record cannot be made, after a short wait for a scanner, writes no number and hands on no mark:
-    // a number written here alone could let a wake read the turn idle before it (#1612). The board script tries the
-    // record again and marks the turn itself.
+    // A start whose record cannot be made, after a short wait for a scanner, still writes its number at once, the start's
+    // first sign that lands, and hands on that it made no record, so the board script makes it (gemini_731 P1 1).
     if (mark === 'start') for (const wait of [10, 25, undefined]) {
-      try { fs.writeFileSync(path.join(root, opened + Date.now() + '.' + process.pid), '', { mode: 0o600 }); break } catch {
-        if (wait === undefined) return undefined
+      try { fs.writeFileSync(path.join(root, opened + randomUUID().replace(/-/g, '')), '', { flag: 'wx', mode: 0o600 }); break } catch {
+        if (wait === undefined) { hasRecord = false; break }
         pause(wait)
       }
     }
     // The lock's text is the board's own (scripts/local-lock.ts), so a board can take over the lock of a worker that died.
     for (const until = Date.now() + 150; ;) {
       try { fd = fs.openSync(lock, 'wx', 0o600); break } catch (error) {
-        if (error.code !== 'EEXIST' && !(process.platform === 'win32' && error.code === 'EPERM') || Date.now() >= until) return undefined
+        if (error.code !== 'EEXIST' && !(process.platform === 'win32' && error.code === 'EPERM') || Date.now() >= until) return handOn()
         pause(10)
       }
     }
@@ -247,8 +268,8 @@ const markTurn = (payload, began) => {
         if (isCount(started) && isCount(stopped) && isCount(stoppedAt) && stopped <= started) was = { started, stopped, stoppedAt }
       }
     } catch {}
-    // A start leaves the Stop's start time out: once started passes stopped it no longer covers any record.
-    const next = mark === 'start' ? { ...was, started: was.started + 1 } : { ...was, stopped: was.started, stoppedAt: Date.now(), stopBegan: began }
+    // A start writes no closed list: the records it named are gone, or a later Stop lists them again.
+    const next = mark === 'start' ? { ...was, started: was.started + 1 } : { ...was, stopped: was.started, stoppedAt: Date.now(), closed: own }
     try { fs.unlinkSync(temp) } catch (error) { if (error.code !== 'ENOENT') throw error }
     fs.writeFileSync(temp, JSON.stringify(next), { flag: 'wx', mode: 0o600 })
     // A scanner that holds the file for a moment is waited for briefly; the board script waits longer.
@@ -258,16 +279,10 @@ const markTurn = (payload, began) => {
         pause(wait)
       }
     }
-    if (mark === 'stop') try {
-      // A record dated after the present was made before the clock was set back, so before this Stop.
-      const present = Date.now()
-      for (const name of fs.readdirSync(root)) if (name.startsWith(opened)) {
-        const made = Number(name.slice(opened.length).split('.')[0])
-        if (made < began || made > present) try { fs.unlinkSync(path.join(root, name)) } catch {}
-      }
-    } catch {}
-    return { file, mark, count: next.started }
-  } catch { return undefined }
+    // A record already gone is no error: two Stops may have listed it.
+    if (mark === 'stop') for (const name of own) try { fs.unlinkSync(path.join(root, name)) } catch {}
+    return { file, mark, count: next.started, ...(hasRecord ? {} : { record: false }) }
+  } catch { return handOn() }
   finally {
     try { fs.unlinkSync(temp) } catch {}
     if (fd !== undefined) {
@@ -278,6 +293,7 @@ const markTurn = (payload, began) => {
   }
 }
 const run = async () => {
+  const listed = listTurnRecords()
   const now = Date.now(), supplied = Number(value('--hook-started'))
   const started = Math.floor(Math.min(performance.timeOrigin, Number.isSafeInteger(supplied) && supplied >= 0 && supplied <= now ? supplied : Infinity))
   if (safeAgent === 'unknown') return fail('UNSUPPORTED_AGENT')
@@ -313,7 +329,7 @@ const run = async () => {
   let payload
   try { payload = isCut ? hermesPrefix(text) : JSON.parse(text.replace(/^\\uFEFF/, '')); if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error() }
   catch { return fail('INCOMPLETE_INPUT') }
-  const turn = markTurn(payload, started)
+  const turn = markTurn(payload, listed)
   const internal = ['--hook-version', '--hook-event', '--hook-deadline', '--hook-started', '--home']
   const reporterArgs = args.filter((arg, index) => !internal.includes(arg) && !internal.includes(args[index - 1]))
   // The board script names the copy it queues with this id. A worker that has to stop it at the deadline can then tell

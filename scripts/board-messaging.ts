@@ -468,7 +468,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
       if (action === 'wake-poll' || action === 'wake-attempt' || action === 'wake-report') {
         const turnsOf = gate?.turnsOfSession
         const decide = (isLockHeld: boolean) => wakeAction(state, action, body, now, (agent, session) => {
-          // A turn start's record holds the wake; it is looked for before the order file is read (design A, #1612).
+          // A turn start's record holds the wake; it is looked for before the order file is read (D1, #1612).
           if (isTurnOpen(root, agent, session)) return undefined
           const turns = turnsOf?.(agent, session)
           if (turns === undefined || isLockHeld || !isTurnOrderLocked(root, agent, session)) return turns
@@ -481,7 +481,7 @@ const openClaimedMessaging = (root: string, claim: MessageStoreClaim, isFreshDef
         // start writes either before that read, which holds the wake, or after the board's yes (round 4, codex_481). A
         // lock it cannot take in 100 ms, a hook's or one a dead hook left less than 30 s ago, holds the wake. A start's
         // record needs no lock, so the attempt looks for one again once its start is saved: a start whose hook made its
-        // record by then undoes the start (design A, #1612), and one that makes it later comes after the board's yes.
+        // record by then undoes the start (#1612), and one that makes it later comes after the board's yes.
         // An undo that cannot be saved is the board's error, so the sidecar runs nothing and the saved start keeps the
         // message to the next turn's take.
         const one = action === 'wake-attempt' && typeof body.id === 'string' ? state.messages.find(message => message.id === body.id) : undefined
@@ -745,42 +745,41 @@ export const mcpMailbox = (directory: string, budget = 1000) => mailboxAccess(di
 // named by its mailbox id, so its name holds no session id. Its hooks write it, each under the file's own lock and before
 // any board call; the running board only reads it.
 const turnOrderFile = (directory: string, agent: string, session: string): string => join(resolve(directory), `${mailboxId(agent, session)}.turns.json`)
-// A turn start's record (design A, #1612): an empty file the turn-start hook makes before anything else and with no lock,
-// named by when it was made and by the process that made it, so a start the order file does not show yet holds the
-// wake. The turn's Stop removes the records made before the Stop began, or dated after its own present time (made before
-// the clock was set back), once it has written its number, so the next turn's record stays. A Stop that died after
-// writing its number leaves its records, so a record that Stop would have removed, one dated before the `stopBegan` in an
-// order file that reads `stopped === started`, holds no wake: that is the rule the Stop applies, so it opens no new window.
-// An order file that cannot be read, and a folder that cannot be read, hold the wake.
+// A turn start's record (D1, #1612): an empty file the turn-start hook makes before anything else and with no lock, named
+// by a random token, so a start the order file does not show yet holds the wake. Records are owned by their names, never
+// by a date: a Stop lists them first, then writes its number with `closed`, the names it listed, in the same write, and
+// removes exactly those. A record made after the list stays and holds the wake until its own turn's Stop. A Stop that died
+// after writing its number leaves its records, which hold nothing once `closed` names them. A record the order file's
+// `closed` does not name holds the wake, and so does an order file or a folder that cannot be read.
 const turnRecords = (agent: string, session: string): string => `${mailboxId(agent, session)}.turns.open.`
+// A name a Stop may remove: one of this conversation's records, with no path in it. A list handed through the
+// environment is read only through this (an older hook's `<time>.<pid>` names pass too, so an upgrade clears them).
+const isOwnRecord = (prefix: string, name: unknown): name is string => typeof name === 'string' && name.startsWith(prefix) && /^[A-Za-z0-9._-]{1,64}$/.test(name.slice(prefix.length))
 export const isTurnOpen = (directory: string, agent: string, session: string): boolean => {
   try {
     const prefix = turnRecords(agent, session)
     const open = readdirSync(resolve(directory)).filter(name => name.startsWith(prefix))
     if (open.length === 0) return false
-    const order = readTurnOrder(directory, agent, session)
-    const covered = order?.stopBegan
-    if (covered === undefined || order?.stopped !== order?.started) return true
-    return open.some(name => !(Number(name.slice(prefix.length).split('.')[0]) < covered))
+    const closed = new Set(readTurnOrder(directory, agent, session)?.closed ?? [])
+    return open.some(name => !closed.has(name))
   } catch { return true }
 }
-export const openTurnRecord = (directory: string, agent: string, session: string, now: number): void => {
+export const openTurnRecord = (directory: string, agent: string, session: string): void => {
   const root = resolve(directory)
   const folder = lstatSync(root)
   if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING')
-  writeFileSync(join(root, `${turnRecords(agent, session)}${now}.${process.pid}`), '', { mode: 0o600 })
+  writeFileSync(join(root, `${turnRecords(agent, session)}${randomBytes(16).toString('hex')}`), '', { flag: 'wx', mode: 0o600 })
 }
-const closeTurnRecords = (root: string, agent: string, session: string, before: number): void => {
-  const prefix = turnRecords(agent, session)
+// This conversation's records as a Stop lists them, before it takes the lock; undefined when the folder cannot be read.
+const listTurnRecords = (root: string, agent: string, session: string): string[] | undefined => {
   try {
-    // A record dated after the present was made before the clock was set back, so before this Stop.
-    const present = Date.now()
-    for (const name of readdirSync(root)) {
-      if (!name.startsWith(prefix)) continue
-      const made = Number(name.slice(prefix.length).split('.')[0])
-      if (made < before || made > present) try { unlinkSync(join(root, name)) } catch {}
-    }
-  } catch {}
+    const prefix = turnRecords(agent, session)
+    return readdirSync(root).filter(name => isOwnRecord(prefix, name))
+  } catch { return undefined }
+}
+// A record already gone is no error: two Stops may have listed it.
+const closeTurnRecords = (root: string, names: readonly string[]): void => {
+  for (const name of names) try { unlinkSync(join(root, name)) } catch {}
 }
 const isCount = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0
 // Undefined when there is no file, or it is not a plain file, or it does not read as one: the board then holds the wake.
@@ -788,32 +787,35 @@ export const readTurnOrder = (directory: string, agent: string, session: string)
   try {
     const file = turnOrderFile(directory, agent, session)
     if (!lstatSync(file).isFile()) return undefined
-    const { started, stopped, stoppedAt, stopBegan } = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
+    const { started, stopped, stoppedAt, closed } = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>
     if (!(isCount(started) && isCount(stopped) && isCount(stoppedAt) && stopped <= started)) return undefined
-    // `stopBegan` is optional: a file written without it reads as before.
-    return isCount(stopBegan) ? { started, stopped, stoppedAt, stopBegan } : { started, stopped, stoppedAt }
+    // `closed` is optional: a file an older hook wrote, or one whose list is not a list of names, closes no record.
+    return Array.isArray(closed) && closed.every(name => typeof name === 'string') ? { started, stopped, stoppedAt, closed } : { started, stopped, stoppedAt }
   } catch { return undefined }
 }
 // A turn-start hook adds one to `started` and gets the new number back; a Stop hook sets `stopped` to the number of the
-// turn it ends, `stoppedAt` to now and `stopBegan` to `began`, when the Stop hook began, then removes the start records
-// made before `began` or dated after now. A
-// file that cannot be read starts again from nothing, which holds wakes until its numbers pass the board's. Nothing is
-// written where no board has made the folder, since a folder made here would not be the private one a board makes.
-export const markTurnOrder = (directory: string, agent: string, session: string, mark: 'start' | 'stop', now: number, waitMs: number, began = now): number => {
+// turn it ends, `stoppedAt` to now and `closed` to the records it listed, then removes exactly those. `listed` is the list
+// the hook worker took as its first act and handed on; without it the list is taken here, before the lock. A Stop that
+// cannot list the folder closes nothing, so the records hold the wake until the next Stop. A file that cannot be read
+// starts again from nothing, which holds wakes until its numbers pass the board's. Nothing is written where no board has
+// made the folder, since a folder made here would not be the private one a board makes.
+export const markTurnOrder = (directory: string, agent: string, session: string, mark: 'start' | 'stop', now: number, waitMs: number, listed?: readonly string[]): number => {
   const root = resolve(directory), file = turnOrderFile(root, agent, session)
   const folder = lstatSync(root)
   if (!folder.isDirectory() || folder.isSymbolicLink()) throw new Error('BOARD_NOT_RUNNING')
+  const prefix = turnRecords(agent, session)
+  const names = mark === 'stop' ? (listed ?? listTurnRecords(root, agent, session) ?? []).filter(name => isOwnRecord(prefix, name)) : []
   return withLocalLock(`${file}.lock`, () => {
     const was = readTurnOrder(root, agent, session) ?? { started: 0, stopped: 0, stoppedAt: 0 }
-    // A start leaves `stopBegan` out: once started passes stopped it no longer covers any record.
-    const next: TurnOrder = mark === 'start' ? { started: was.started + 1, stopped: was.stopped, stoppedAt: was.stoppedAt } : { started: was.started, stopped: was.started, stoppedAt: now, stopBegan: began }
+    // A start writes no `closed`: the records it named are gone, or a later Stop lists them again.
+    const next: TurnOrder = mark === 'start' ? { started: was.started + 1, stopped: was.stopped, stoppedAt: was.stoppedAt } : { started: was.started, stopped: was.started, stoppedAt: now, closed: names }
     const temp = `${file}.${process.pid}.tmp`
     try {
       try { unlinkSync(temp) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
       writeFileSync(temp, JSON.stringify(next), { flag: 'wx', mode: 0o600 })
       replaceFile(temp, file)
     } finally { try { unlinkSync(temp) } catch {} }
-    if (mark === 'stop') closeTurnRecords(root, agent, session, began)
+    if (mark === 'stop') closeTurnRecords(root, names)
     return next.started
   }, { waitMs })
 }
@@ -827,13 +829,19 @@ export const isTurnOrderLocked = (directory: string, agent: string, session: str
   } catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT' }
 }
 // The hook worker marks the turn before it starts the board script (hooks/hook-safety.ts) and hands on what it wrote:
-// the file, the mark and the number. The number counts only for the file this board would write and for the same mark;
-// anything else is undefined, and the board script then marks the turn itself, so a turn counts once.
-export const workerTurnMark = (handed: string | undefined, directory: string, agent: string, session: string, mark: 'start' | 'stop'): number | undefined => {
+// the file, the mark and the number, `record: false` for a start whose record it could not make, or, for a Stop that could
+// not take the lock, no number and the list of records it took first. It counts only for the file this board would write
+// and for the same mark; anything else is undefined, and the board script then marks the turn itself, so a turn counts
+// once. A handed list keeps only this conversation's record names.
+export type WorkerMark = { count: number; hasRecord: boolean } | { count?: undefined; list: string[] }
+export const workerTurnMark = (handed: string | undefined, directory: string, agent: string, session: string, mark: 'start' | 'stop'): WorkerMark | undefined => {
   try {
     const found = JSON.parse(handed ?? 'null') as Record<string, unknown> | null
-    const count = found?.count
-    return found?.file === turnOrderFile(directory, agent, session) && found.mark === mark && isCount(count) && (mark === 'stop' || count > 0) ? count : undefined
+    if (found?.file !== turnOrderFile(directory, agent, session) || found.mark !== mark) return undefined
+    const { count, list } = found
+    if (isCount(count) && (mark === 'stop' || count > 0)) return { count, hasRecord: found.record !== false }
+    if (mark === 'stop' && Array.isArray(list)) return { list: list.filter(name => isOwnRecord(turnRecords(agent, session), name)) }
+    return undefined
   } catch { return undefined }
 }
 // A turn-start hook has little time, so its waits are short (150 ms for the board, 120 ms for the store). An

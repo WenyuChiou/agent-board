@@ -1505,14 +1505,19 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     if (current !== undefined && turnMark !== undefined) {
       const messages = defaultMessagesDirectory(progress, home, process.env, process.platform)
       const marked = workerTurnMark(handed, messages, 'antigravity', current.session, turnMark)
-      if (marked !== undefined) {
-        if (turnMark === 'start') turnSeq = marked
+      if (marked?.count !== undefined) {
+        // A start the worker numbered but could not make a record for gets one here; the number is already written.
+        if (turnMark === 'start') {
+          turnSeq = marked.count
+          if (!marked.hasRecord) try { openTurnRecord(messages, 'antigravity', current.session) } catch {}
+        }
       } else {
-        // A start the worker did not mark may have no record either (design A, #1612), so this makes one too; a second
-        // record is harmless, since the turn's Stop removes both.
-        if (turnMark === 'start') try { openTurnRecord(messages, 'antigravity', current.session, Date.now()) } catch {}
+        // A start the worker did not mark may have no record either (#1612), so this makes one too; a second record is
+        // harmless, since the turn's Stop lists and removes both. A Stop the worker could not mark closes the records it
+        // listed first, handed on here, so a record made after that list stays.
+        if (turnMark === 'start') try { openTurnRecord(messages, 'antigravity', current.session) } catch {}
         try {
-          const count = markTurnOrder(messages, 'antigravity', current.session, turnMark, Date.now(), Math.max(0, Math.min(500, hookDeadline - Date.now() - 500)), started)
+          const count = markTurnOrder(messages, 'antigravity', current.session, turnMark, Date.now(), Math.max(0, Math.min(500, hookDeadline - Date.now() - 500)), marked?.list)
           if (turnMark === 'start') turnSeq = count
         } catch {
           if (turnMark === 'start') turnSeq = (readTurnOrder(messages, 'antigravity', current.session)?.started ?? 0) + 1

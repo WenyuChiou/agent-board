@@ -930,8 +930,8 @@ test('a Stop writes its turn number and the names of the start records it listed
   assert.equal(order.stopped, order.started)
   assert.deepEqual(order.closed?.slice().sort(), listed)
   assert.deepEqual(w.records(APP), [])
-  // No lock and no temporary file is left.
-  assert.deepEqual(readdirSync(folderOf(w)).filter(name => name.endsWith('.lock') || name.endsWith('.tmp')), [])
+  // No order-file lock and no temporary file is left (the board's own server lock is not the Stop's).
+  assert.deepEqual(readdirSync(folderOf(w)).filter(name => name.endsWith('.turns.json.lock') || name.endsWith('.tmp')), [])
 }))
 
 test('a Stop removes every start record it listed, whatever date is in its name, so a clock set back inside the Stop\'s run keeps no record', () => using(w => {
