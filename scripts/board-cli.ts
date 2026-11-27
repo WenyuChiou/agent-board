@@ -2157,37 +2157,97 @@ const readRunning = (file = serveFile()): Running | null => {
 
 const tokenOf = (url: string): string => new URL(url).searchParams.get('t') ?? ''
 
-// The board opens its own page, with a one-time approval key the address file never holds, so only
-// that page can answer approvals (D3, #1318). A page started by an older copy has no such route:
-// the page is opened here, as before, and cannot answer approvals. Over SSH and in tests nothing
-// opens, as before.
-// `canOpenHere`: false when a page is open already and only one that can answer approvals is wanted:
-// if the board cannot open that one, the open page stays the only window.
-const openThroughBoard = async (url: string, asApp: boolean, canOpenHere = true): Promise<boolean> => {
-  if (!isNoWindowHere()) {
-    try {
-      const answer = await fetch(`http://127.0.0.1:${new URL(url).port}/api/open`, {
-        method: 'POST',
-        headers: { 'x-board-token': tokenOf(url), 'content-type': 'application/json' },
-        body: JSON.stringify({ asApp }),
-        signal: AbortSignal.timeout(15_000),
-      })
-      if (answer.ok) {
-        const reply = (await answer.json()) as { isOpen?: unknown; hasTried?: unknown }
-        if (reply.isOpen === true) return true
-        // The board tried this computer's browsers and none opened: trying them again from here
-        // fails the same way, or opens a second window when a launcher reported an error after all.
-        // A board started where no display reaches (a stale DISPLAY in tmux) now leaves the person the
-        // printed link rather than a window from here that could not answer approvals.
-        if (reply.hasTried === true) return false
-      }
-    } catch {}
+// The board's answer to a request for a one-use link (#1650). `unsupported`: a page from before
+// one-use links, which has no such route. `busy`: anything else (no answer in time, a refusal, a
+// reply of another shape), from a page that should have made one.
+type LinkAnswer = { kind: 'ok'; url: string } | { kind: 'unsupported' } | { kind: 'busy' }
+
+const requestOpenLink = async (address: string): Promise<LinkAnswer> => {
+  try {
+    const res = await fetch(`http://127.0.0.1:${new URL(address).port}/api/open-link`, {
+      method: 'POST',
+      headers: { 'x-board-token': tokenOf(address), 'content-type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(5000),
+    })
+    if (res.status === 404) {
+      await res.arrayBuffer().catch(() => undefined)
+      return { kind: 'unsupported' }
+    }
+    if (!res.ok) {
+      await res.arrayBuffer().catch(() => undefined)
+      return { kind: 'busy' }
+    }
+    const reply = (await res.json()) as { url?: unknown }
+    return typeof reply.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/.test(reply.url) ? { kind: 'ok', url: reply.url } : { kind: 'busy' }
+  } catch {
+    return { kind: 'busy' }
   }
-  // An older board (no such route, or no `hasTried`), or one that opens no window where it runs (a
-  // test's board, #959): this process opens the page as before, with this caller's browsers, and
-  // that page cannot answer approvals.
-  if (!canOpenHere) return false
-  return new Promise<boolean>(done => openInBrowser(url, done, asApp))
+}
+
+// This process's one way to start a window, so a test that stands in for the browser has one place
+// to do it.
+const launchHere = (url: string, asApp: boolean): Promise<boolean> => new Promise<boolean>(done => openInBrowser(url, done, asApp))
+
+// What asking the board for a window came to. 'redeemed': the window loaded the board's code, so
+// the person sees the page. 'launched': a launcher said yes, but nothing has loaded the page (yet).
+// 'failed': no window. 'busy': the board's table of open links is full of links still wanted, so it
+// opened nothing and answered 503; this process does not open a link of its own either.
+type Launch = 'redeemed' | 'launched' | 'failed' | 'busy'
+
+// The board opens its own page, with a one-time approval key the address file never holds, so only
+// that page can answer approvals (D3, #1318), and says whether the window it opened used its code.
+// A board that opens no window where it runs (a test's board, #959) leaves it to this process,
+// which opens a one-use link of its own and cannot see it used.
+// `canLaunchHere`: false when a page is open already and only one that can answer approvals is wanted.
+const launchThroughBoard = async (address: string, canLaunchHere: boolean): Promise<Launch> => {
+  try {
+    const answer = await fetch(`http://127.0.0.1:${new URL(address).port}/api/open`, {
+      method: 'POST',
+      headers: { 'x-board-token': tokenOf(address), 'content-type': 'application/json' },
+      // `waitRedeem`: the board waits for the window to load its code, and says whether it did.
+      body: JSON.stringify({ asApp: true, waitRedeem: true }),
+      signal: AbortSignal.timeout(20_000),
+    })
+    if (answer.ok) {
+      const reply = (await answer.json()) as { isOpen?: unknown; hasTried?: unknown; isRedeemed?: unknown }
+      if (reply.isRedeemed === true) return 'redeemed'
+      if (reply.isOpen === true) return 'launched'
+      // The board tried this computer's browsers and none opened: trying them again from here
+      // fails the same way, or opens a second window when a launcher reported an error after all.
+      if (reply.hasTried === true) return 'failed'
+    } else if (answer.status === 503 && ((await answer.json().catch(() => null)) as { error?: unknown } | null)?.error === 'busy') {
+      return 'busy'
+    } else await answer.arrayBuffer().catch(() => undefined)
+  } catch (error) {
+    // The board took the request and is still waiting on its launcher: a window may be on its way.
+    if (error instanceof Error && error.name === 'TimeoutError') return 'launched'
+  }
+  if (!canLaunchHere) return 'failed'
+  const own = await requestOpenLink(address)
+  if (own.kind === 'busy') return 'busy'
+  if (own.kind !== 'ok') return 'failed'
+  return (await launchHere(own.url, true)) ? 'launched' : 'failed'
+}
+
+// A page from before one-use links, kept because a reply may be on its way: it opens as it did
+// before, through that board's own opener or this process's, which gets its address with the
+// token. Nothing of that address is printed.
+const launchOlderPage = async (address: string): Promise<boolean> => {
+  try {
+    const answer = await fetch(`http://127.0.0.1:${new URL(address).port}/api/open`, {
+      method: 'POST',
+      headers: { 'x-board-token': tokenOf(address), 'content-type': 'application/json' },
+      body: JSON.stringify({ asApp: true }),
+      signal: AbortSignal.timeout(15_000),
+    })
+    if (answer.ok) {
+      const reply = (await answer.json()) as { isOpen?: unknown; hasTried?: unknown }
+      if (reply.isOpen === true) return true
+      if (reply.hasTried === true) return false
+    } else await answer.arrayBuffer().catch(() => undefined)
+  } catch {}
+  return launchHere(address, true)
 }
 
 const isRunning = (pid: number): boolean => {
@@ -2932,77 +2992,115 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
   return untilDeadline(onePass, deadline)
 }
 
+// What opening the page came to (#1650), worked out once for every way in (`--serve`, the plain
+// command, `--html`, `--no-open`, the terminal board's `o`, the plugin, other agents' tools); each
+// of them only words it. 'opened': a window this run started loaded its page, so no link is
+// printed. 'link': a fresh one-use link, with why it is printed. 'refused': no way in from here,
+// with the next step; the command exits 1.
+type LinkHint = 'plain' | 'already' | 'launched' | 'none'
+type OpenResult =
+  | { kind: 'opened'; server: RunningServer }
+  | { kind: 'link'; server: RunningServer; url: string; hint: LinkHint }
+  | { kind: 'refused'; server: RunningServer | null; note: string }
+
+const isSshHere = (): boolean => Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY)
+
+// A window may be started here unless the person asked for none, or the terminal is remote: over
+// SSH a window would open on the other computer, not in front of the person.
+const mayLaunchHere = (): boolean => !args.includes('--no-open') && !isSshHere()
+
+const openBoard = async (mayLaunch: boolean): Promise<OpenResult> => {
+  const failure: ServeFailure = {}
+  const server = await ensureServer(failure)
+  if (server === null) return { kind: 'refused', server: null, note: serveFailureNote(failure) }
+  // The link comes first, so every outcome below has a way in, or says why not.
+  const link = await requestOpenLink(server.url)
+  if (link.kind === 'busy') return { kind: 'refused', server, note: s.serveBusy }
+  if (link.kind === 'unsupported') {
+    // A page from before one-use links is kept, never restarted: a reply may be on its way.
+    if (mayLaunch && (await launchOlderPage(server.url))) return { kind: 'opened', server }
+    return { kind: 'refused', server, note: s.serveKeptNoLink }
+  }
+  if (!mayLaunch) return { kind: 'link', server, url: link.url, hint: 'plain' }
+  // A page in front: no second window, and the link is there in case it is not the person's.
+  const page = await openPageState(server)
+  if (page === 'open') return { kind: 'link', server, url: link.url, hint: 'already' }
+  const launch = await launchThroughBoard(server.url, page === 'none')
+  if (launch === 'busy') return { kind: 'refused', server, note: s.serveBusy }
+  if (launch === 'redeemed') return { kind: 'opened', server }
+  if (launch === 'launched') return { kind: 'link', server, url: link.url, hint: 'launched' }
+  if (page === 'unkeyed') return { kind: 'link', server, url: link.url, hint: 'already' }
+  // A board a test started opens no window, so there is no browser to name.
+  return { kind: 'link', server, url: link.url, hint: isNoWindowHere() ? 'plain' : 'none' }
+}
+
+const sshHintOf = (url: string): string => s.serveSshHint(pagePortOf(url), sshTargetOf(process.env), url)
+
+// The note beside a link: over SSH how to forward the port, else what happened to the window.
+const linkNote = (url: string, hint: LinkHint): string =>
+  isSshHere() ? sshHintOf(url)
+    : hint === 'already' ? s.boardPageAlreadyOpenLink(url)
+      : hint === 'launched' ? s.boardPageLaunchedLink(url)
+        : hint === 'none' ? s.serveBrowserNone(url)
+          : s.boardPageLink(url)
+
 // Prints the board, then the address of its page, started in the background if no page of this
 // copy is running yet (and opened in the browser then, unless --no-open). It returns at once, so
 // an agent's command tool is not left waiting on the server.
 const serveBoard = async (): Promise<void> => {
   const requestedIdle = idleMs()
-  const requestedStale = staleTimeoutMs()
-  const failure: ServeFailure = {}
+  // A --stale-ms that is not a positive number stops here with INVALID_STALE_MS, before any page starts.
+  staleTimeoutMs()
   // `--serve` is what older command files and scripts still run: it opens the page like the plain
   // command and prints no text board before the address (#868). `--quiet-board` is now a no-op.
-  const serverPromise = ensureServer(failure)
-  // The note goes above the address, so the address stays the last line an agent shows.
-  const show = async (url: string, isKept = false, actualIdle?: number, page: PageState = 'none'): Promise<void> => {
-    const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60_000)}\n` : ''
-    process.stdout.write(`\n${isKept ? `${s.serveKept}\n` : ''}${idleNote}${s.serveAt(url)}\n`)
-    // The address comes from a file and goes to a shell on Windows: only the shape this server
-    // writes is opened.
-    if (!args.includes('--no-open') && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(url) && page !== 'open') {
-      const isOpen = await openThroughBoard(url, true, page === 'none')
-      // With a page already open, no window is missing.
-      if (!isOpen && page === 'none' && !isNoWindowHere()) {
-        process.stderr.write(`${s.serveBrowserNone(url)}\n`)
-      }
-    }
-    if (args.includes('--lan')) await showLan(url)
-  }
-  const server = await serverPromise
-  if (server === null) {
-    // No page started: a script that checks the exit status must not read success (#1292).
+  const opened = await openBoard(mayLaunchHere())
+  const actualIdle = opened.server?.idleMs
+  const idleNote = actualIdle !== undefined && actualIdle !== requestedIdle ? `${actualIdle === 0 ? s.serveIdle : s.serveIdleTimed(actualIdle / 60_000)}\n` : ''
+  const prefix = `\n${opened.server?.isKept === true ? `${s.serveKept}\n` : ''}${idleNote}`
+  if (opened.kind === 'refused') {
+    // A script that checks the exit status must not read success (#1292).
     process.exitCode = 1
-    process.stdout.write(`\n${serveFailureNote(failure)}\n`)
-    return
+    process.stdout.write(`\n${idleNote}${opened.note}\n`)
+  } else if (opened.kind === 'opened') {
+    process.stdout.write(`${prefix}${s.boardPageWindowOpened}\n`)
+  } else {
+    // The address stays the last line an agent shows; the note about it goes to stderr.
+    process.stdout.write(`${prefix}${s.serveAt(opened.url)}\n`)
+    const note = linkNote(opened.url, opened.hint)
+    if (note !== s.boardPageLink(opened.url)) process.stderr.write(`${note}\n`)
   }
-  await show(server.url, server.isKept, server.idleMs, await openPageState(server))
+  // The phone's address does not depend on a local link: an older page still hands it over.
+  if (args.includes('--lan') && opened.server !== null) await showLan(opened.server.url)
 }
 
-const openPage = async (): Promise<{ note: string; isOpen: boolean; url?: string }> => {
-  const failure: ServeFailure = {}
-  const server = await ensureServer(failure)
-  if (server === null) {
+// The terminal board's `o`: one line, so no two addresses run together on its screen.
+const openPage = async (): Promise<{ note: string; isOpen: boolean }> => {
+  const opened = await openBoard(mayLaunchHere())
+  if (opened.kind === 'refused') {
     process.exitCode = 1
-    return { note: serveFailureNote(failure), isOpen: false }
+    return { note: opened.note, isOpen: false }
   }
-  const address = server.url
-  const isNoOpen = args.includes('--no-open')
-  const isShape = !isNoOpen && /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/.test(address)
-  // The page is already in a window: point at it rather than opening another one that would poll too.
-  const page = isShape ? await openPageState(server) : 'none'
-  if (page === 'open') return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
-  const isOpen = isShape ? await openThroughBoard(address, true, page === 'none') : false
-  // The board could not open a page that answers approvals beside the open one: point at that one.
-  if (!isOpen && page === 'unkeyed') return { note: s.boardPageAlreadyOpen(address), isOpen: true, url: address }
-  const isSuppressed = isNoWindowHere()
-  const note = isOpen
-    ? s.boardPageWindowOpened(address)
-    : isNoOpen || (isSuppressed && !isOpen)
-      ? s.boardPageLink(address)
-      : s.serveBrowserNone(address)
-  return { note, isOpen, url: address }
+  if (opened.kind === 'opened') return { note: s.boardPageWindowOpened, isOpen: true }
+  return { note: linkNote(opened.url, opened.hint), isOpen: opened.hint === 'already' || opened.hint === 'launched' }
 }
 
 const openPageSurface = async (): Promise<void> => {
-  const opened = await openPage()
-  // Over SSH the address is on the remote computer, even when a page is already open there: say
-  // how to forward its port first, as the terminal board does, so the address stays the last line
-  // an agent shows (#1283). The terminal board's own `o` keeps one-line notes.
-  if (opened.url !== undefined && (process.env.SSH_CONNECTION || process.env.SSH_TTY)) {
-    process.stdout.write(`${s.serveSshHint(pagePortOf(opened.url), sshTargetOf(process.env), opened.url)}\n`)
+  const opened = await openBoard(mayLaunchHere())
+  if (opened.kind === 'refused') {
+    process.exitCode = 1
+    process.stdout.write(`${opened.note}\n`)
+  } else if (opened.kind === 'opened') {
+    // A window on a kept page shows that page, not this copy's: say so, as --serve does.
+    process.stdout.write(`${opened.server.isKept ? `${s.serveKept}\n` : ''}${s.boardPageWindowOpened}\n`)
+  } else if (isSshHere()) {
+    // Over SSH the address is on the remote computer: how to forward its port comes first, so the
+    // address stays the last line an agent shows (#1283).
+    process.stdout.write(`${sshHintOf(opened.url)}\n${opened.url}\n`)
+  } else {
+    process.stdout.write(`${linkNote(opened.url, opened.hint)}\n`)
   }
-  process.stdout.write(`${opened.note}\n`)
-  // `--lan` without `--serve`: the page opens here and the phone's address follows it (#868).
-  if (args.includes('--lan') && opened.url !== undefined) await showLan(opened.url)
+  // `--lan` without `--serve`: the phone's address follows, whatever happened here (#868).
+  if (args.includes('--lan') && opened.server !== null) await showLan(opened.server.url)
 }
 
 const stopBoard = async (): Promise<void> => {
@@ -3151,12 +3249,14 @@ const json = (): void => {
 }
 
 const runWatchTerminal = async (): Promise<void> => {
+  // Over SSH the page runs on this computer and the person sits at another: the hint names the
+  // forward and the key. It stays on screen as long as the board runs, so it holds no link that
+  // would be used up or expire meanwhile; each `o` makes a fresh one (#1650).
   let sshHint = ''
-  if (process.env.SSH_CONNECTION || process.env.SSH_TTY) {
-    const server = await ensureServer()
-    if (server) {
-      sshHint = `\n${mutedLine(s.serveSshHint(server.port, sshTargetOf(process.env), server.url), options())}\n`
-    }
+  if (isSshHere()) {
+    const failure: ServeFailure = {}
+    const server = await ensureServer(failure)
+    sshHint = `\n${mutedLine(server !== null ? s.serveSshForwardKey(server.port, sshTargetOf(process.env)) : serveFailureNote(failure), options())}\n`
   }
   let state: BoardState = { ...emptyBoardState, seen: {}, isIdleOpen: args.includes('--all') }
   // What is on the screen now: a redraw that would show the same writes nothing.
