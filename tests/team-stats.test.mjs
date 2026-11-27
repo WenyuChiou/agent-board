@@ -228,6 +228,38 @@ test('team stats counts a GitHub review that approves or requests changes as a v
   assert.equal(calls.filter(args => String(args.at(-1)).includes('/reviews?')).length, 1)
 })
 
+test('team stats orders a GitHub review read through the REST fallback by the time it was submitted', () => {
+  const member = { user: { login: 'teammate', type: 'User' }, author_association: 'MEMBER' }
+  const request = { body: '', state: 'CHANGES_REQUESTED', commit_id: head, submitted_at: '2026-10-19T01:00:00Z', id: 900, ...member }
+  const approval = { ...comment(`Review: APPROVE ${head}`, '2026-10-19T02:00:00Z', 100), ...member }
+  const pr = pull(38, [approval], { body: 'Author: codex, fix/x', merged_at: '2026-10-20T12:00:00Z', state: 'closed', reviews: [request] })
+  assert.match(scorecard({ issues: [], pullRequests: [pr] }, date), /^\| codex \| 1 \| 0 \| 0\/1 \| 1\.0 \| 0 \|$/m)
+})
+
+test('team stats reads every GitHub review through the REST fallback when a pull request has more than 100', () => {
+  const graph = {
+    number: 39, body: 'Author: codex, fix/x', mergedAt: '2026-10-20T12:00:00Z', state: 'MERGED', isDraft: false, headRefOid: head,
+    comments: { totalCount: 0, nodes: [] },
+    reviews: { totalCount: 101, nodes: [] },
+  }
+  const restReview = { body: '', state: 'APPROVED', commit_id: head, submitted_at: '2026-10-19T01:00:00Z', id: 5, user: { login: 'teammate', type: 'User' }, author_association: 'MEMBER' }
+  const run = (command, args) => {
+    assert.equal(command, 'gh')
+    if (args[1] === 'graphql') {
+      assert.match(args.find(arg => arg.startsWith('query=')), /reviews\(first: 100\) \{\s*totalCount/)
+      return JSON.stringify(graph)
+    }
+    const endpoint = args.at(-1)
+    if (endpoint.includes('/issues?') || endpoint.includes('/pulls?')) return ''
+    if (endpoint.includes('/pulls/39/reviews?')) return JSON.stringify(restReview)
+    throw new Error(`unexpected endpoint: ${endpoint}`)
+  }
+  const fetched = teamStats.fetchStats({ repo: 'synthetic/example', date, isWeek: true }, run)
+  assert.deepEqual(fetched.pullRequests.find(item => item.number === 39).reviews, [restReview])
+  assert.match(scorecard(fetched, date), /^\| codex \| 1 \| 0 \| 1\/1 \| 1\.0 \| 0 \|$/m)
+  assert.doesNotMatch(scorecard(fetched, date), /merged with no review verdict:/)
+})
+
 test('team stats rejects an unknown flag and a malformed date', () => {
   for (const argv of [['--unknown'], ['--date', '2026-02-30'], ['--date', '2026-2-01'], ['--date', 'invalid'], ['--date'], ['--repo'], ['--week', '--week'], ['--repo', '../bad'], ['--repo', 'owner/..']]) assert.throws(() => parseArgs(argv))
   assert.deepEqual(parseArgs([], new Date('2026-10-20T23:00:00Z')), { date, repo: 'WenyuChiou/agent-board', isWeek: false, isHelp: false })

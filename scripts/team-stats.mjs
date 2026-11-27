@@ -6,7 +6,9 @@ import { safeLine } from './preflight.mjs'
 const usage = 'Usage: node scripts/team-stats.mjs [--week] [--date YYYY-MM-DD] [--repo owner/name] [--help]'
 const day = 24 * 60 * 60 * 1000
 const maxBuffer = 64 * 1024 * 1024
-const byTime = (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at) || a.id - b.id
+// GitHub's REST reviews carry submitted_at where comments carry created_at.
+const timeOf = item => Date.parse(item.created_at ?? item.submitted_at)
+const byTime = (a, b) => timeOf(a) - timeOf(b) || a.id - b.id
 const isOpen = item => item.state === 'open'
 const inWindow = (value, start, end) => value && Date.parse(value) >= start && Date.parse(value) < end
 const weekStart = date => Date.parse(date) - 6 * day
@@ -156,6 +158,7 @@ export const fetchStats = ({ repo, date, isWeek }, run = execFileSync) => {
           nodes { body createdAt databaseId author { login __typename } authorAssociation }
         }
         reviews(first: 100) {
+          totalCount
           nodes { body state submittedAt commit { oid } author { login __typename } authorAssociation }
         }
       }
@@ -171,6 +174,7 @@ export const fetchStats = ({ repo, date, isWeek }, run = execFileSync) => {
     for (const pr of fromGraphql(nodes)) byNumber.set(pr.number, { ...byNumber.get(pr.number), ...pr })
     for (const node of nodes) {
       if (node.comments.totalCount > 100) byNumber.get(node.number).comments = fetchList(repo, `issues/${node.number}/comments`, run)
+      if ((node.reviews?.totalCount ?? 0) > 100) byNumber.get(node.number).reviews = fetchList(repo, `pulls/${node.number}/reviews`, run)
     }
     for (const pr of byNumber.values()) {
       if (inWindow(pr.merged_at, weekStart(date), endOfDate(date)) && !Array.isArray(pr.comments)) {

@@ -2441,6 +2441,15 @@ test('pr-check reads verdicts in one place: a bot\'s line, a hidden line and an 
   ])
 })
 
+test('pr-check reads a GitHub review that approves on its own commit, whatever verdict line its body quotes', () => {
+  const earlier = 'a'.repeat(40)
+  const reviewed = 'b'.repeat(40)
+  const items = [{ body: `Fixed since:
+Review: REQUEST CHANGES ${earlier}`, state: 'APPROVED', commit_id: reviewed, user: { login: 'reviewer' }, author_association: 'MEMBER' }]
+  assert.deepEqual(prCheck.verdictsOf(items), [{ kind: 'APPROVE', sha: reviewed, reviewer: 'reviewer' }])
+  assert.equal(prCheck.roundsOf(items), 0)
+})
+
 test('pr-check round warnings are not cleared by a diagnosis, takeover or round cap line from a bot or an outside author', () => {
   const pr = roundWarningPr(roundHeads(3))
   const markers = ['Fable diagnosis: https://example.invalid/report', 'Takeover: reviewer takes the branch', 'Round cap: settled work remains']

@@ -1398,9 +1398,9 @@ export const verdictsOf = items => {
     // A verdict in a code fence or an HTML comment is an example, not a review.
     const shown = typeof item === 'string' ? visibleLines(item).join('\n')
       : item && typeof item.body === 'string' ? { ...item, body: visibleLines(item.body).join('\n') } : item
-    // A request for changes is on its own commit, even when the review quotes an earlier approval.
-    const review = item && typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id
-      ? reviewOf({ ...shown, body: '' }) : reviewOf(shown)
+    // A GitHub review that approves or requests changes is on its own commit, whatever verdict line its body quotes.
+    const isStated = item && typeof item === 'object' && ['APPROVED', 'CHANGES_REQUESTED'].includes(item.state) && item.commit_id
+    const review = isStated ? reviewOf({ ...shown, body: '' }) : reviewOf(shown)
     if (review && (isTeamAuthor(item) || review.kind === 'REQUEST CHANGES')) {
       const { kind, sha, reviewer } = review
       verdicts.push({ kind, sha, ...(reviewer ? { reviewer } : {}) })
