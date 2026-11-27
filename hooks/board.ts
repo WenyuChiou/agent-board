@@ -14,7 +14,7 @@ import type { BarRole, BarStyle } from './progress-bar'
 import type { Tone } from './palette'
 import { sha256 } from './sha256'
 import { agentLabel } from './strings'
-import { isSameName, questionHead, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
+import { isLiveAsk, isSameName, questionHead, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
 import type { TidyPreview } from './tidy'
@@ -852,7 +852,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
     }
     // Said only when asked: a live session's question is that session's to take off the board.
     if (key === 'a' && ask.archive !== undefined) return { state, action: { type: 'archive', ref: ask.archive, title: ask.task } }
-    if (key === 'a' && ask.where !== 'manual' && ask.isKept !== true && ask.canHide !== false) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
+    if (key === 'a' && isLiveAsk(ask)) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
   }
   if (item.type === 'row') {
     const { row } = item

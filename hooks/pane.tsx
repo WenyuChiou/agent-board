@@ -16,7 +16,7 @@ import { displayColumns } from './board'
 import { agentLabel } from './strings'
 import { askColor, stepColor, toneColor } from './palette'
 import type { Palette } from './palette'
-import { OLDER_SHOWN, questionHead, replyHint } from './view'
+import { isLiveAsk, OLDER_SHOWN, questionHead, replyHint } from './view'
 import { barPieces, barRole, DEFAULT_BAR_STYLE } from './progress-bar'
 import type { BarStyle, Cell } from './progress-bar'
 import type { Focus, PrView, StepRef, TaskRow, Tone, View, ViewStep, WaitingItem } from './view'
@@ -72,6 +72,8 @@ export type PaneActions = {
   copyResume: (row: TaskRow, surface: RenderSurface) => PressOutcome | Promise<PressOutcome>
   // Moves one task to the archive file now: an ended session's block or a hand-kept task.
   archiveRow: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
+  // Archives the task of a question whose session ended, only while the block still asks it (#155).
+  archiveAsk: (item: WaitingItem) => PressOutcome | Promise<PressOutcome>
   confirmRow: (row: TaskRow) => PressOutcome | Promise<PressOutcome>
   report: (surface: RenderSurface) => PressOutcome | Promise<PressOutcome>
   toggleNotify: () => PressOutcome | Promise<PressOutcome>
@@ -450,8 +452,15 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {item.note !== '' && <Text wrap="wrap">{item.note}</Text>}
       {item.note === '' && item.context !== '' && muted(s.contextLine(item.context))}
       {item.when !== '' && muted(item.when)}
-      {item.canHide === false ? muted(s.questionReviewOnly) : item.where !== 'manual' && item.isKept !== true && muted(s.archiveLive)}
+      {item.canHide === false ? muted(s.questionReviewOnly) : isLiveAsk(item) && muted(s.archiveLive)}
       {askActions(item)}
+      {item.archive !== undefined && (
+        <Box marginTop={1}>
+          <Button key={`${item.key}::archive`} onPress={buttonPress(`${item.key}::archive`, () => actions.archiveAsk(item))}>
+            {s.archiveThis}
+          </Button>
+        </Box>
+      )}
       {item.hideKey !== '' && item.canHide !== false && (
         <Box marginTop={1}>
           <Button key={`${item.key}::hide`} onPress={buttonPress(`${item.key}::hide`, () => actions.hide(item))}>

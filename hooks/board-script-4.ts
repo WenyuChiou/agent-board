@@ -614,7 +614,7 @@ export const LINES = [
 "    }",
 "    if (key === \"a\" && ask.archive !== undefined)",
 "      return { state, action: { type: \"archive\", ref: ask.archive, title: ask.task } };",
-"    if (key === \"a\" && ask.where !== \"manual\" && ask.isKept !== true && ask.canHide !== false)",
+"    if (key === \"a\" && isLiveAsk(ask))",
 "      return { state: { ...state, note: s.archiveLive, tone: \"quiet\" }, action: null };",
 "  }",
 "  if (item.type === \"row\") {",

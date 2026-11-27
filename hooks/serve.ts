@@ -16,7 +16,7 @@ import { agentLabel } from './strings'
 import type { Tone } from './palette'
 import { cellCode } from './progress-bar'
 import { RESUME } from './parse'
-import { OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from './view'
+import { isLiveAsk, OLDER_SHOWN, relativeTime, replyHint, rowNeedsYou, wayBackText } from './view'
 import type { RowState as DerivedRowState } from './row-state'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
@@ -671,7 +671,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         fp: fingerprint(item, items),
         tickFp: fingerprint(item, items, true),
         where: send === 'send' ? (ask.target?.dir ?? '') : '',
-        archiveNote: isManual ? '' : s.archiveLive,
+        archiveNote: isLiveAsk(ask) ? s.archiveLive : '',
         info: found || isManual ? '' : (lanInfo(baseMode, ask.agent) ?? ((!isLan ? codexCopyHint(ask.agent, askState, s) : '') || infoOf(send, ask.agent, ask.task, '', s))),
         ...lineOf,
         back: wayBackText(hint),
@@ -961,7 +961,7 @@ const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings
     if (item.type === 'row' && item.row.archive !== null) return { type: 'archive', ref: item.row.archive, title: item.row.title }
     // A card that says the window may be closed archives its task (#1092); the write guard checks again.
     if (item.type === 'ask' && item.ask.archive !== undefined) return { type: 'archive', ref: item.ask.archive, title: item.ask.task }
-    const isLive = item.type === 'row' && (item.row.auto === 'working' || item.row.auto === 'waiting') || item.type === 'ask' && item.ask.where !== 'manual'
+    const isLive = item.type === 'row' && (item.row.auto === 'working' || item.row.auto === 'waiting') || item.type === 'ask' && isLiveAsk(item.ask)
     return { type: 'refuse', note: isLive ? s.archiveLive : s.archiveGone }
   }
   if (request.type === 'done') {
