@@ -1,5 +1,7 @@
 import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressTask } from '../types'
-import { parseAttrs, RESUME, STALE_MS } from './parse'
+import { isStale, isTaskComplete, observedTime, parseAttrs, RESUME, STALE_MS } from './parse'
+import { questionWords } from './questions'
+import { blockKey } from './session-liveness'
 
 // Only a conversation a person started is a row (#501). Strong host signals suppress new run
 // blocks; legacy blocks and weak hints still fold into the row of the session that started
@@ -70,8 +72,55 @@ export const startersOf = (projects: readonly ProgressProject[]): ((auto: Progre
   }
 }
 
+export type FoldOptions = {
+  now?: number
+  staleMs?: number
+  gone?: ReadonlySet<string>
+  seen?: Readonly<Record<string, number>>
+}
+
 const isAfter = (a: Entry, b: Entry): boolean =>
   a.auto.updated !== b.auto.updated ? a.auto.updated > b.auto.updated : a.order > b.order
+
+const latestByOrder = (entries: readonly Entry[]): Entry =>
+  entries.reduce((best, entry) => (isAfter(entry, best) ? entry : best))
+
+const isDoneEntry = (entry: Entry): boolean =>
+  entry.auto.state === 'done' || isTaskComplete(entry.task)
+
+const updatedOfEntry = (entry: Entry, options?: FoldOptions): number =>
+  options?.now !== undefined && options.seen !== undefined
+    ? observedTime(entry.auto, options.now, options.seen).updated
+    : entry.auto.updated
+
+const isDeadEntry = (entry: Entry, options?: FoldOptions): boolean =>
+  options?.gone !== undefined && options.gone.has(blockKey(entry.auto))
+
+const isStaleEntry = (entry: Entry, options?: FoldOptions): boolean =>
+  options?.now !== undefined && isStale(entry.auto, options.now, updatedOfEntry(entry, options), options.staleMs ?? STALE_MS)
+
+const isLivelyEntry = (entry: Entry, options?: FoldOptions): boolean =>
+  isDoneEntry(entry) || (!isDeadEntry(entry, options) && !isStaleEntry(entry, options))
+
+const isRepliedAtOrAfter = (auto: ProgressAuto, updated: number): boolean =>
+  auto.replied !== undefined && Number.isFinite(auto.replied) && auto.replied >= updated
+
+const pickWinner = (group: readonly Entry[], options?: FoldOptions): Entry => {
+  const lively = group.filter(entry => isLivelyEntry(entry, options))
+  const candidates = lively.length > 0 ? lively : group
+  const doneEntries = candidates.filter(isDoneEntry)
+  if (doneEntries.length === 0 || doneEntries.length === candidates.length) {
+    return latestByOrder(candidates)
+  }
+  const bestDone = latestByOrder(doneEntries)
+  const activeOverride = candidates.filter(entry =>
+    !isDoneEntry(entry) && (
+      (entry.auto.state === 'working' && (entry.auto.source === 'turns' || isAfter(entry, bestDone))) ||
+      (entry.auto.state === 'waiting' && isAfter(entry, bestDone) && entry.task.steps.some(step => step.status === 'waiting') && !isRepliedAtOrAfter(entry.auto, entry.auto.updated))
+    ),
+  )
+  return activeOverride.length > 0 ? latestByOrder(activeOverride) : bestDone
+}
 
 const tally = (): { add: (agent: string, at: number) => void; done: () => RunGroup } => {
   const counts = new Map<string, number>()
@@ -93,7 +142,7 @@ const tally = (): { add: (agent: string, at: number) => void; done: () => RunGro
 export const mergeGroups = (a: RunGroup | null, b: RunGroup): RunGroup =>
   a === null ? b : { count: a.count + b.count, agents: [...new Set([...a.agents, ...b.agents])], last: Math.max(a.last, b.last) }
 
-export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
+export const foldRuns = (projects: readonly ProgressProject[], options?: FoldOptions): Folded => {
   const entries: Entry[] = []
   let order = 0
   for (const project of projects) {
@@ -102,9 +151,10 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
       if (task.auto !== null) entries.push({ project, task, auto: task.auto, order })
     }
   }
-  // Two blocks of one agent and one full session id are one session: the newest write wins. A
-  // run mark on either makes the session a run, so a reporter with no signal cannot hide it.
-  const winners = new Map<string, Entry>()
+  // Two blocks of one agent and one full session id are one session: choose one deterministic
+  // winner (fresh working hooks turns / resumed asks first, then done, then newest write). A run
+  // mark on either makes the session a run, so a reporter with no signal cannot hide it.
+  const groupsByKey = new Map<string, Entry[]>()
   const runKeys = new Set<string>()
   const parents = new Map<string, string>()
   for (const entry of entries) {
@@ -112,8 +162,13 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
     if (key === null) continue
     if (entry.auto.isRun === true) runKeys.add(key)
     if (entry.auto.parent !== undefined && !parents.has(key)) parents.set(key, entry.auto.parent)
-    const held = winners.get(key)
-    if (held === undefined || isAfter(entry, held)) winners.set(key, entry)
+    const group = groupsByKey.get(key)
+    if (group === undefined) groupsByKey.set(key, [entry])
+    else group.push(entry)
+  }
+  const winners = new Map<string, Entry>()
+  for (const [key, group] of groupsByKey) {
+    winners.set(key, group.length === 1 ? group[0]! : pickWinner(group, options))
   }
   const isLoser = (entry: Entry): boolean => {
     const key = sessionKey(entry.auto)
@@ -124,6 +179,29 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
     const key = sessionKey(entry.auto)
 
     return entry.auto.isRun === true || key !== null && runKeys.has(key)
+  }
+  const replacements = new Map<ProgressTask, ProgressTask>()
+  for (const [key, group] of groupsByKey) {
+    if (group.length < 2 || runKeys.has(key)) continue
+    const winner = winners.get(key)
+    if (winner === undefined || isDoneEntry(winner)) continue
+    const winnerWords = new Set(winner.task.steps.filter(step => step.status === 'waiting').map(step => questionWords(step.text)))
+    const losers = group.filter(entry => entry !== winner).sort((a, b) => (isAfter(a, b) ? -1 : isAfter(b, a) ? 1 : 0))
+    const extraSteps: ProgressTask['steps'] = []
+    for (const loser of losers) {
+      if (isDoneEntry(loser) || loser.auto.state === 'ended' || isDeadEntry(loser, options) || isStaleEntry(loser, options)) continue
+      if (isRepliedAtOrAfter(loser.auto, loser.auto.updated) || isRepliedAtOrAfter(winner.auto, loser.auto.updated)) continue
+      for (const step of loser.task.steps) {
+        if (step.status !== 'waiting') continue
+        const words = questionWords(step.text)
+        if (winnerWords.has(words)) continue
+        winnerWords.add(words)
+        extraSteps.push(step)
+      }
+    }
+    if (extraSteps.length > 0) {
+      replacements.set(winner.task, { ...winner.task, steps: [...winner.task.steps, ...extraSteps] })
+    }
   }
   const parentOf = (entry: Entry): string | undefined => {
     const key = sessionKey(entry.auto)
@@ -184,24 +262,32 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
     groups.set(root.task, group)
   }
 
+  const resolveTask = (task: ProgressTask): ProgressTask => replacements.get(task) ?? task
+
   return {
-    projects: gone.size === 0 ? [...projects] : projects.map(project => ({ ...project, tasks: project.tasks.filter(task => !gone.has(task)) })),
-    runs: new Map([...groups].map(([task, group]) => [task, group.done()])),
+    projects: gone.size === 0 && replacements.size === 0
+      ? [...projects]
+      : projects.map(project => ({ ...project, tasks: project.tasks.filter(task => !gone.has(task)).map(resolveTask) })),
+    runs: new Map([...groups].map(([task, group]) => [resolveTask(task), group.done()])),
     background: hasBackground ? background.done() : null,
     duplicates,
   }
 }
 
-// Whether a newer block carries the same agent and full session id. The archive of a twin is
-// checked again at the write, against the file as it is then.
-export const isOutranked = (tasks: readonly ProgressTask[], task: ProgressTask): boolean => {
+// Whether a winning block outranks this task for the same agent and full session id. The archive
+// of a twin is checked again at the write, against the file as it is then.
+export const isOutranked = (tasks: readonly ProgressTask[], task: ProgressTask, options?: FoldOptions): boolean => {
   const auto = task.auto
   if (auto === null || auto.resume === null) return false
+  const peers: Entry[] = []
+  tasks.forEach((other, index) => {
+    if (other.auto !== null && other.auto.agent === auto.agent && other.auto.resume === auto.resume) {
+      peers.push({ project: { name: '', tasks: [] }, task: other, auto: other.auto, order: index + 1 })
+    }
+  })
+  if (peers.length <= 1) return false
 
-  return tasks.some(other =>
-    other !== task && other.auto !== null && other.auto.agent === auto.agent && other.auto.resume === auto.resume &&
-    (other.auto.updated > auto.updated || other.auto.updated === auto.updated && other.line > task.line),
-  )
+  return pickWinner(peers, options).task !== task
 }
 
 // A writer that knows a run but not who started it names the person's session that is working in

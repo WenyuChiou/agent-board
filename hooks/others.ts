@@ -5,6 +5,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { asData, dataBlock } from './mirror'
 import { countSteps, isHereProject, isTaskComplete } from './parse'
+import { foldRuns } from './runs'
 import { sha256 } from './sha256'
 
 const DAY = 24 * 60 * 60 * 1000
@@ -92,9 +93,12 @@ export const sessionPushNote = (
     lines.push(line)
   }
 
+  const folded = foldRuns(projects, { now })
+  const duplicates = new Set(folded.duplicates.map(one => one.task))
   for (const project of projects) {
     if (!isHereProject(project.name, here)) continue
     for (const task of project.tasks) {
+      if (duplicates.has(task)) continue
       const auto = task.auto
       if (auto === null || matchesSpan(auto, own)) continue
       if (now - auto.updated > 7 * DAY) continue
@@ -157,7 +161,8 @@ export const sessionPushNote = (
 // do with it, in words its host has tools for.
 export const othersNote = (projects: readonly ProgressProject[], here: readonly string[], own: BlockIdentity, now: number, s: Strings = ZH_TW, tail: string = s.othersTail): string | null => {
   const lines: string[] = []
-  for (const project of projects) {
+  const folded = foldRuns(projects, { now })
+  for (const project of folded.projects) {
     if (!isHereProject(project.name, here)) continue
     for (const task of project.tasks) {
       const auto = task.auto

@@ -933,7 +933,7 @@ export const buildView = (
 ): View => {
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
   // pair is no second row. What is left is what the rows, the questions and the counts read.
-  const folded = foldRuns(projects)
+  const folded = foldRuns(projects, { now, staleMs, gone, seen })
   const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)

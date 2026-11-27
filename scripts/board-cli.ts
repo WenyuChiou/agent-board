@@ -228,7 +228,7 @@ const doneBlockLines = (projects: readonly ProgressProject[], journal: string, n
   const day = localDay(now)
   const written = new Set(parseJournal(journal).filter(entry => entry.at === day).map(entry => `${entry.project}\n${entry.task}`))
   const lines: string[] = []
-  const duplicates = new Set(foldRuns(projects).duplicates.map(one => one.task))
+  const duplicates = new Set(foldRuns(projects, { now }).duplicates.map(one => one.task))
   for (const project of projects) {
     for (const task of project.tasks) {
       if (duplicates.has(task)) continue

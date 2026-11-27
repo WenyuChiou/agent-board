@@ -4413,7 +4413,7 @@ export const LINES = [
 "var runAgents = (group, s) => group.agents.map((agent) => s.agentNames[agent] ?? agentName(agent)).join(\" / \");",
 "var runsText = (group, now, s) => s.runsLine(group.count, runAgents(group, s), relativeTime(group.last, now, s));",
 "var buildView = (projects, here, mine, now, today = 0, doneSeen = {}, s = ZH_TW, answered = [], seen = {}, questions, proofs = { retired: [], consumed: [] }, pending = [], frozen = new Set, observe = observeQuestions, staleMs = STALE_MS, counts, gone = new Set) => {",
-"  const folded = foldRuns(projects);",
+"  const folded = foldRuns(projects, { now, staleMs, gone, seen });",
 "  const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, \"preview\", proofs ?? { retired: [], consumed: [] }, pending, [], frozen);",
 "  const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions);",
 "  const marked = new Set(proofs === null ? [] : observed?.marked ?? answered);",

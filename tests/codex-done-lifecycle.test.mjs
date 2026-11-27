@@ -276,6 +276,356 @@ test('a skill report and hook turns give one row (#1832)', async () => {
 
   const withHelperRun = `${doneProgress}\n<!-- auto session=run12345 agent=codex state=done updated=${t4} origin=run parent=${resume} -->\n### Helper run task\n- [x] Subagent finished\n<!-- /auto session=run12345 -->\n`
   assert.equal(collectFinished(withHelperRun, [], [], 7, baseNow).length, 2)
+
+  // Row 2: reverse order (hooks older, skill newer) + equal updated= tie-break by file order.
+  const reverseProgress = [
+    '# Progress',
+    '',
+    '## board-sitting-1125',
+    `<!-- auto session=${turnId} agent=codex state=working updated=${t1} resume=${resume} source=turns -->`,
+    '### Synthetic hook turn task',
+    '- [ ] Working in progress',
+    `<!-- /auto session=${turnId} -->`,
+    '',
+    `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=working updated=${t2} resume=${resume} -->`,
+    '### Synthetic skill task',
+    '- [~] Counting lines',
+    `<!-- /auto session=${localId} -->`,
+    '',
+  ].join('\n')
+  const reverseView = buildView(parseProgress(reverseProgress), [], null, baseNow, 0, {}, s)
+  assert.equal(reverseView.stopped.length, 0)
+  assert.equal(reverseView.groups.flatMap(g => g.rows).length, 1)
+  assert.equal(serveModel(reverseView, [], s, new Set(), false, undefined, false, group).view?.all.stopped.length, 0)
+  assert.equal(boardText(reverseView, [], s, { width: 100, isColor: false }).includes(s.stoppedCount(1)), false)
+  const reverseDoc = boardDocument(reverseView, [], [], s, '', false, baseNow, group)
+  assert.equal(reverseDoc.counts.stopped, 0)
+  assert.equal(reverseDoc.counts.working + reverseDoc.counts.waiting, 1)
+
+  const equalProgress = reverseProgress.replace(`updated=${t1}`, `updated=${t2}`)
+  const equalView = buildView(parseProgress(equalProgress), [], null, baseNow, 0, {}, s)
+  assert.equal(equalView.stopped.length, 0)
+  assert.equal(equalView.groups.flatMap(g => g.rows).map(r => r.title)[0], 'Synthetic skill task')
+
+  // Row 3 (no Copy answer card outside Done): neither model.view.agents nor model.stopped has hasCopyBox outside Done.
+  assert.equal(doneModel.view?.all.done.length, 1)
+  assert.equal(doneModel.stopped.every(r => r.hasCopyBox === false), true)
+
+  // Row 7: two Codex blocks in same project & same title with different resume=, and two sharing only 8-char block id.
+  const resumeA = '019a1832-7777-4222-8333-111111111111'
+  const resumeB = '019a1832-7777-4222-8333-222222222222'
+  const diffResumeProgress = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=aaaa1111 agent=codex state=working updated=${t2} resume=${resumeA} -->`,
+    '### Same title',
+    '- [~] Work A',
+    '<!-- /auto session=aaaa1111 -->',
+    '',
+    `<!-- auto session=aaaa1111 agent=codex state=done updated=${t2} resume=${resumeB} -->`,
+    '### Same title',
+    '- [x] Work B',
+    '<!-- /auto session=aaaa1111 -->',
+    '',
+  ].join('\n')
+  const diffResumeView = buildView(parseProgress(diffResumeProgress), [], null, baseNow, 0, {}, s)
+  assert.equal(diffResumeView.active.length, 1)
+  assert.equal(diffResumeView.recent.length, 1)
+  assert.equal(diffResumeView.stopped.length, 0)
+
+  // Row 8: same resume= text, different agents (codex + opencode) -> two rows, never merged.
+  const crossAgentProgress = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=cccc1111 agent=codex state=working updated=${t2} resume=${resume} -->`,
+    '### Codex row',
+    '- [~] Step C',
+    '<!-- /auto session=cccc1111 -->',
+    '',
+    `<!-- auto session=dddd2222 agent=opencode state=working updated=${t2} resume=${resume} -->`,
+    '### OpenCode row',
+    '- [~] Step O',
+    '<!-- /auto session=dddd2222 -->',
+    '',
+  ].join('\n')
+  const crossAgentView = buildView(parseProgress(crossAgentProgress), [], null, baseNow, 0, {}, s)
+  assert.equal(crossAgentView.active.length, 2)
+  assert.equal(crossAgentView.stopped.length, 0)
+
+  // Row 9: one block without resume= is never merged with a block sharing its project/title.
+  const noResumeProgress = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=eeee1111 agent=codex state=working updated=${t2} resume=${resume} -->`,
+    '### Shared title',
+    '- [~] Live step',
+    '<!-- /auto session=eeee1111 -->',
+    '',
+    `<!-- auto session=ffff2222 agent=codex state=done updated=${t1} -->`,
+    '### Shared title',
+    '- [x] Finished legacy step',
+    '<!-- /auto session=ffff2222 -->',
+    '',
+  ].join('\n')
+  const noResumeView = buildView(parseProgress(noResumeProgress), [], null, baseNow, 0, {}, s)
+  assert.equal(noResumeView.active.length, 1)
+  assert.equal(noResumeView.recent.length, 1)
+  assert.equal(noResumeView.stopped.length, 0)
+
+  // Row 10: two blocks of one conversation under different ## headings & titles -> one row, no leftover row under other heading.
+  const crossProjectProgress = [
+    '# Progress',
+    '',
+    '## Project Alpha',
+    `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=working updated=${t1} resume=${resume} -->`,
+    '### Skill title',
+    '- [~] Doing step',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    '## Project Beta',
+    `<!-- auto session=${turnId} agent=codex state=working updated=${t2} resume=${resume} source=turns -->`,
+    '### Hook title',
+    '- [ ] Working in progress',
+    `<!-- /auto session=${turnId} -->`,
+    '',
+  ].join('\n')
+  const crossProjectView = buildView(parseProgress(crossProjectProgress), [], null, baseNow, 0, {}, s)
+  assert.equal(crossProjectView.groups.length, 1)
+  assert.equal(crossProjectView.groups[0]?.project, 'Project Beta')
+  assert.equal(crossProjectView.groups[0]?.rows.length, 1)
+  assert.equal(crossProjectView.groups[0]?.rows[0]?.title, 'Hook title')
+  assert.equal(crossProjectView.stopped.length, 0)
+
+  // Row 12: either block carrying origin=run keeps conversation folded as a run (background or starter), never a row or Stopped.
+  const runNewerProgress = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=${localId} agent=codex state=working updated=${t1} resume=${resume} -->`,
+    '### Helper plain copy',
+    '- [~] Running',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    `<!-- auto session=${turnId} agent=codex state=working updated=${t2} resume=${resume} origin=run -->`,
+    '### Helper run copy',
+    '- [~] Running',
+    `<!-- /auto session=${turnId} -->`,
+    '',
+  ].join('\n')
+  const runView = buildView(parseProgress(runNewerProgress), [], null, baseNow, 0, {}, s)
+  assert.equal(runView.active.length, 0)
+  assert.equal(runView.stopped.length, 0)
+  assert.equal(Boolean(runView.background), true)
+})
+
+test('twin blocks keep a fresh working turn live and never pull done to Stopped (#1832)', async () => {
+  const { blockId } = await import('../hooks/inbox.ts')
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { buildView } = await import('../hooks/view.ts')
+  const { serveModel } = await import('../hooks/serve.ts')
+  const { boardScreen, boardText, emptyBoardState } = await import('../hooks/board.ts')
+  const { boardDocument } = await import('../hooks/board-json.ts')
+
+  const s = STRINGS.en
+  const resume = '019a1832-4444-4222-8333-444444444444'
+  const localSession = createHash('sha256').update(`codex:${resume}`).digest('hex')
+  const localId = localSession.slice(0, 8)
+  const turnId = blockId('codex', resume)
+  const now = Date.parse('2026-11-24T16:10:00.000Z')
+  const tOld = new Date(now - 120_000).toISOString()
+  const tMid = new Date(now - 60_000).toISOString()
+  const tNew = new Date(now - 20_000).toISOString()
+  const tStale = new Date(now - 13 * 3600_000).toISOString()
+  const group = { now, repoOf: () => null, versions: { board: '0.25.1', package: null }, unreadable: [] }
+
+  // Row 4: skill already marked done at tNew, while fresh hooks block is still working at tOld -> stays working mid-turn, then Done when turn ends.
+  const midTurnProgress = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=done updated=${tNew} resume=${resume} -->`,
+    '### Mid-turn done skill',
+    '- [x] Report written',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    `<!-- auto session=${turnId} agent=codex state=working updated=${tOld} resume=${resume} source=turns -->`,
+    '### Live hook turn',
+    `- [ ] ${s.codexLifecycleWorking}`,
+    `<!-- /auto session=${turnId} -->`,
+    '',
+  ].join('\n')
+  const midTurnView = buildView(parseProgress(midTurnProgress), [], null, now, 0, {}, s)
+  assert.equal(midTurnView.stopped.length, 0)
+  assert.equal(midTurnView.recent.length, 0)
+  assert.equal(midTurnView.active.length, 1)
+  assert.equal(midTurnView.active[0]?.auto, 'working')
+  assert.equal(midTurnView.active[0]?.rowState, 'working')
+  const midDoc = boardDocument(midTurnView, [], [], s, '', false, now, group)
+  assert.equal(midDoc.counts.working, 1)
+  assert.equal(midDoc.counts.stopped, 0)
+
+  // Row 5: skill done + hooks waiting or ended, in EITHER write order -> one Done entry, never Stopped.
+  for (const [hookState, skillTime, hookTime] of [
+    ['waiting', tOld, tNew],
+    ['waiting', tNew, tOld],
+    ['ended', tOld, tNew],
+    ['ended', tNew, tOld],
+  ]) {
+    const row5Progress = [
+      '# Progress',
+      '',
+      '## Demo',
+      `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=done updated=${skillTime} resume=${resume} -->`,
+      '### Done skill task',
+      '- [x] All done',
+      `<!-- /auto session=${localId} -->`,
+      '',
+      `<!-- auto session=${turnId} agent=codex state=${hookState} updated=${hookTime} resume=${resume} source=turns -->`,
+      '### Hook turn task',
+      `- [ ] ${s.codexLifecycle}`,
+      `<!-- /auto session=${turnId} -->`,
+      '',
+    ].join('\n')
+    const view5 = buildView(parseProgress(row5Progress), [], null, now, 0, {}, s)
+    assert.equal(view5.stopped.length, 0, `expected no stopped row for ${hookState} (${skillTime} vs ${hookTime})`)
+    assert.equal(view5.active.length, 0)
+    assert.equal(view5.recent.length, 1)
+    const model5 = serveModel(view5, [], s, new Set(), false, undefined, false, group)
+    assert.equal(model5.view?.all.done.length, 1)
+    assert.equal(model5.view?.all.stopped.length, 0)
+    const doc5 = boardDocument(view5, [], [], s, '', false, now, group)
+    assert.equal(doc5.counts.doneRecently, 1)
+    assert.equal(doc5.counts.stopped, 0)
+    assert.equal(boardText(view5, [], s, { width: 100, isColor: false }).includes(s.sectionRecent), true)
+    assert.equal(boardScreen(view5, [], emptyBoardState, s, { width: 100, isColor: false }).includes(s.sectionRecent), true)
+  }
+
+  // Row 6: stale or dead-process skill working block paired with fresh working or done hooks block -> fresh state wins.
+  for (const [freshState, freshStep] of [
+    ['working', `- [ ] ${s.codexLifecycleWorking}`],
+    ['done', `- [x] ${s.codexLifecycle}`],
+  ]) {
+    const row6Progress = [
+      '# Progress',
+      '',
+      '## Demo',
+      `<!-- auto session=${turnId} agent=codex state=${freshState} updated=${tMid} resume=${resume} source=turns -->`,
+      '### Fresh hook block',
+      freshStep,
+      `<!-- /auto session=${turnId} -->`,
+      '',
+      `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=working updated=${tStale} resume=${resume} -->`,
+      '### Stale or gone skill block',
+      '- [~] Stuck step',
+      `<!-- /auto session=${localId} -->`,
+      '',
+    ].join('\n')
+    const deadKey = `codex:${localId}:${tStale}`
+    for (const goneSet of [new Set(), new Set([deadKey])]) {
+      const view6 = buildView(parseProgress(row6Progress), [], null, now, 0, {}, s, [], {}, undefined, undefined, [], new Set(), undefined, undefined, undefined, goneSet)
+      assert.equal(view6.stopped.length, 0)
+      if (freshState === 'working') {
+        assert.equal(view6.active.length, 1)
+        assert.equal(view6.active[0]?.auto, 'working')
+        assert.notEqual(view6.active[0]?.rowState, 'ended')
+        assert.notEqual(view6.active[0]?.rowState, 'unsure')
+      } else {
+        assert.equal(view6.recent.length, 1)
+      }
+    }
+  }
+})
+
+test('an open question on a folded twin appears once under Needs you and clears on answer (#1832)', async () => {
+  const { blockId } = await import('../hooks/inbox.ts')
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { buildView } = await import('../hooks/view.ts')
+  const { serveModel } = await import('../hooks/serve.ts')
+  const { boardDocument } = await import('../hooks/board-json.ts')
+
+  const s = STRINGS.en
+  const resume = '019a1832-5555-4222-8333-555555555555'
+  const localSession = createHash('sha256').update(`codex:${resume}`).digest('hex')
+  const localId = localSession.slice(0, 8)
+  const turnId = blockId('codex', resume)
+  const now = Date.parse('2026-11-24T16:10:00.000Z')
+  const t1 = new Date(now - 120_000).toISOString()
+  const t2 = new Date(now - 60_000).toISOString()
+  const group = { now, repoOf: () => null, versions: { board: '0.25.1', package: null }, unreadable: [] }
+
+  // Row 11 (forward): loser (skill) has open [?], winner (hooks) has none.
+  const loserAskingProgress = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=waiting updated=${t1} resume=${resume} -->`,
+    '### Asking skill copy',
+    '- [?] Which database should we use? — Postgres or SQLite?',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    `<!-- auto session=${turnId} agent=codex state=working updated=${t2} resume=${resume} source=turns -->`,
+    '### Active hook copy',
+    `- [ ] ${s.codexLifecycleWorking}`,
+    `<!-- /auto session=${turnId} -->`,
+    '',
+  ].join('\n')
+
+  const forwardView = buildView(parseProgress(loserAskingProgress), [], null, now, 0, {}, s)
+  assert.equal(forwardView.waiting.length, 1)
+  assert.equal(forwardView.waiting[0]?.sessionId, resume)
+  assert.equal(forwardView.waiting[0]?.text, 'Which database should we use?')
+  const forwardModel = serveModel(forwardView, [], s, new Set(), false, undefined, false, group)
+  assert.equal(forwardModel.asks.length, 1)
+  assert.equal(forwardModel.asks[0]?.sessionId, resume)
+  const forwardDoc = boardDocument(forwardView, [], [], s, '', false, now, group)
+  assert.equal(forwardDoc.needs.length, 1)
+
+  // Duplicate identical [?] on both twins is still asked only once.
+  const bothAskingProgress = loserAskingProgress.replace(
+    `- [ ] ${s.codexLifecycleWorking}`,
+    '- [?] Which database should we use? — Postgres or SQLite?',
+  )
+  const bothView = buildView(parseProgress(bothAskingProgress), [], null, now, 0, {}, s)
+  assert.equal(bothView.waiting.length, 1)
+
+  // Answering via hideKey clears Needs you.
+  const hideKey = forwardView.waiting[0]?.hideKey ?? ''
+  assert.ok(hideKey)
+  const answeredView = buildView(parseProgress(loserAskingProgress), [], null, now, 0, {}, s, [hideKey])
+  assert.equal(answeredView.waiting.length, 0)
+
+  // Replying on winner clears carried-over question.
+  const repliedProgress = loserAskingProgress.replace(
+    `updated=${t2} resume=${resume}`,
+    `updated=${t2} replied=${new Date(now - 10_000).toISOString()} resume=${resume}`,
+  )
+  const repliedView = buildView(parseProgress(repliedProgress), [], null, now, 0, {}, s)
+  assert.equal(repliedView.waiting.length, 0)
+
+  // Row 11 (reverse): winner has open [?], loser has none.
+  const winnerAskingProgress = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=working updated=${t1} resume=${resume} -->`,
+    '### Quiet skill copy',
+    '- [~] Preparing rollout',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    `<!-- auto session=${turnId} agent=codex state=waiting updated=${t2} resume=${resume} source=turns -->`,
+    '### Asking hook copy',
+    '- [?] Deploy to staging now?',
+    `<!-- /auto session=${turnId} -->`,
+    '',
+  ].join('\n')
+  const reverseView = buildView(parseProgress(winnerAskingProgress), [], null, now, 0, {}, s)
+  assert.equal(reverseView.waiting.length, 1)
+  assert.equal(reverseView.waiting[0]?.text, 'Deploy to staging now?')
+  const reverseHideKey = reverseView.waiting[0]?.hideKey ?? ''
+  assert.equal(buildView(parseProgress(winnerAskingProgress), [], null, now, 0, {}, s, [reverseHideKey]).waiting.length, 0)
 })
 
 test('a done block shows under Done on the page, the terminal board and --json, never under Stopped (#1832)', async () => {
@@ -423,6 +773,58 @@ test('archiving a winning row or tidying removes its hidden older twin copy so i
   assert.equal(extraTaskTidied.entries.length, 1)
   assert.ok(extraTaskTidied.text.includes('Keep this open work'))
   assert.ok(parseProgress(extraTaskTidied.text).flatMap(p => p.tasks).some(t => t.title === 'Unrelated hand-kept task'))
+
+  // Row 13 (reverse-order Row-5 sweep + unrelated same-prefix session + adjacent hand-kept work + live duplicate archive).
+  const row5SweepText = [
+    '# Progress',
+    '',
+    '## board-sitting-1125',
+    `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=done updated=${t1} resume=${resume} -->`,
+    '### Done skill copy',
+    '- [x] Done step',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    `<!-- auto session=${turnId} agent=codex state=ended updated=${t2} resume=${resume} source=turns -->`,
+    '### Ended hook copy',
+    `- [ ] ${s.codexLifecycle}`,
+    `<!-- /auto session=${turnId} -->`,
+    '',
+    `<!-- auto session=${localId} agent=codex state=working updated=${t2} resume=019a1832-9999-4222-8333-999999999999 -->`,
+    '### Other conversation sharing 8-char prefix',
+    '- [~] Must remain',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    '### Adjacent hand-kept task',
+    '- [ ] Must remain untouched',
+    '',
+  ].join('\n')
+  const row5Tidied = takeArchivable(row5SweepText, now, undefined, s, true)
+  assert.equal(row5Tidied.entries.length, 2)
+  assert.ok(row5Tidied.text.includes('Must remain'))
+  assert.ok(row5Tidied.text.includes('Must remain untouched'))
+  assert.ok(!row5Tidied.text.includes('Done skill copy'))
+  assert.ok(!row5Tidied.text.includes('Ended hook copy'))
+
+  // Row 13: archiving only the hidden duplicate keeps live winner writable and its row alive.
+  const liveTwinText = endedText.replace(`state=ended updated=${t2}`, `state=working updated=${t2}`)
+  const liveDupRemoved = takeTask(liveTwinText, { project: 'board-sitting-1125', title: 'Older skill copy', line: 4, session: localId, isDuplicate: true }, now, s)
+  assert.ok(liveDupRemoved)
+  assert.equal(liveDupRemoved.entries.length, 1)
+  assert.ok(liveDupRemoved.text.includes('Winning hook copy'))
+  assert.equal(buildView(parseProgress(liveDupRemoved.text), [], null, now, 0, {}, s).active.length, 1)
+
+  // Row 14: cut-off (unclosed) folded twin is never removed; changed file between read and write causes takeTask to bail out.
+  const unclosedTwinText = endedText.replace(`<!-- /auto session=${localId} -->`, '')
+  const unclosedView = buildView(parseProgress(unclosedTwinText), [], null, now, 0, {}, s)
+  assert.equal(unclosedView.stopped.length, 1)
+  const takeOnUnclosedWinner = takeTask(unclosedTwinText, unclosedView.stopped[0].archive, now, s)
+  assert.ok(takeOnUnclosedWinner)
+  assert.equal(takeOnUnclosedWinner.entries.length, 1)
+  assert.ok(takeOnUnclosedWinner.text.includes('Older skill copy'))
+  const tidiedUnclosed = takeArchivable(unclosedTwinText, now, undefined, s, true)
+  assert.equal(tidiedUnclosed.entries.length, 0)
+  assert.ok(tidiedUnclosed.text.includes('Older skill copy'))
+  assert.equal(takeTask(liveTwinText, winnerArchive, now, s), null)
 })
 
 test('non-Claude ended row without a target gets send=none and no Copy answer box (#1832)', async () => {
@@ -475,4 +877,72 @@ test('non-Claude ended row without a target gets send=none and no Copy answer bo
   assert.equal(model.stopped.length, 1)
   assert.equal(model.stopped[0]?.send, 'none')
   assert.equal(model.stopped[0]?.hasCopyBox, false)
+})
+
+test('after folding to one row both writers keep writing and othersNote deduplicates (#1832)', async () => {
+  const { blockId } = await import('../hooks/inbox.ts')
+  const { putCodexBlock } = await import('../hooks/codex.ts')
+  const { upsertAutoBlock } = await import('../hooks/blocks.ts')
+  const { emptyMirror } = await import('../hooks/mirror.ts')
+  const { othersNote } = await import('../hooks/others.ts')
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { buildView } = await import('../hooks/view.ts')
+  const { sendPlan } = await import('../hooks/serve.ts')
+
+  const s = STRINGS.en
+  const resume = '019a1832-6666-4222-8333-666666666666'
+  const owner = createHash('sha256').update(`codex:${resume}`).digest('hex')
+  const turnId = blockId('codex', resume)
+  const now = Date.parse('2026-11-24T16:10:00.000Z')
+  const peer = { sessionId: '99990000', agent: 'codex', resume: '99990000-0000-4000-8000-000000000099' }
+
+  const skillReport1 = {
+    agent: 'codex',
+    session: resume,
+    project: 'Demo',
+    title: 'Skill feature',
+    state: 'working',
+    updated: new Date(now - 90_000).toISOString(),
+    steps: ['- [~] Writing code'],
+  }
+  const hookMirror1 = {
+    ...emptyMirror(turnId, 'Demo', now - 60_000, ''),
+    agent: 'codex',
+    resume,
+    title: 'Hook turn',
+    cwd: '/tmp/demo',
+    source: 'turns',
+  }
+  const hookMirror1WithTask = { ...hookMirror1, tasks: [{ id: '1', subject: s.codexLifecycleWorking, status: 'in_progress', waiting: null, blocked: null }] }
+
+  let text = '# Progress\n\n## Demo\n'
+  text = putCodexBlock(text, skillReport1, owner)
+  text = upsertAutoBlock(text, hookMirror1WithTask, s)
+
+  // Both writers write again cleanly: no BLOCK_CONFLICT / BLOCK_NOT_VISIBLE, still 2 blocks and 1 row.
+  text = putCodexBlock(text, { ...skillReport1, updated: new Date(now - 30_000).toISOString(), steps: ['- [x] Writing code', '- [~] Testing'] }, owner)
+  text = upsertAutoBlock(text, { ...hookMirror1WithTask, updated: now - 15_000 }, s)
+
+  const blocks = parseProgress(text).flatMap(p => p.tasks)
+  assert.equal(blocks.length, 2)
+
+  const liveView = buildView(parseProgress(text), [], null, now, 0, {}, s)
+  assert.equal(liveView.active.length, 1)
+  assert.equal(liveView.stopped.length, 0)
+  const target = liveView.active[0]?.target
+  assert.ok(target)
+  const plan = sendPlan(target, 'Please run tests', false)
+  assert.ok(plan)
+  assert.equal(plan.args.includes(resume), true)
+
+  // othersNote lists the open conversation once (never twice).
+  const openNote = othersNote(parseProgress(text), ['Demo'], peer, now, s)
+  assert.ok(openNote)
+  const listedLines = openNote.split('\n').filter(line => line.startsWith('- '))
+  assert.equal(listedLines.length, 1)
+
+  // Once skill marks done while hooks is waiting/ended, othersNote omits the finished conversation.
+  text = putCodexBlock(text, { ...skillReport1, state: 'done', updated: new Date(now - 10_000).toISOString(), steps: ['- [x] Writing code', '- [x] Testing'] }, owner)
+  text = upsertAutoBlock(text, { ...hookMirror1WithTask, state: 'ended', updated: now - 5_000, tasks: [{ id: '1', subject: s.codexLifecycle, status: 'todo', waiting: null, blocked: null }] }, s)
+  assert.equal(othersNote(parseProgress(text), ['Demo'], peer, now, s), null)
 })

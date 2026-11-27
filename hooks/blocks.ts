@@ -615,7 +615,7 @@ const hasExtraTask = (visible: readonly (string | null)[], span: BlockSpan): boo
   return false
 }
 
-// Closed older blocks sharing `(agent, resume)` that are strictly outranked by `winner` (#1832).
+// Closed older or superseded blocks sharing `(agent, resume)` that are outranked by `winner` (#1832).
 const outrankedBy = (spans: readonly BlockSpan[], winner: BlockSpan, visible: readonly (string | null)[]): BlockSpan[] => {
   if (winner.resume == null) return []
   const agent = (winner.agent || 'claude').toLowerCase()
@@ -624,7 +624,10 @@ const outrankedBy = (spans: readonly BlockSpan[], winner: BlockSpan, visible: re
     other.isClosed &&
     other.resume === winner.resume &&
     (other.agent || 'claude').toLowerCase() === agent &&
-    (other.updated < winner.updated || (other.updated === winner.updated && other.start < winner.start)) &&
+    (
+      (other.updated < winner.updated || (other.updated === winner.updated && other.start < winner.start)) ||
+      (winner.state === 'done' && (other.state === 'waiting' || other.state === 'ended'))
+    ) &&
     !hasExtraTask(visible, other),
   )
 }
@@ -764,7 +767,7 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       const auto = task?.auto ?? null
       // The older block of a twin pair is offered for archive while it still looks live (#399):
       // a newer block with the same agent and full id is the one that runs.
-      const isTwin = ref.isDuplicate === true && task !== undefined && isOutranked(tasks, task)
+      const isTwin = ref.isDuplicate === true && task !== undefined && isOutranked(tasks, task, { now, staleMs, gone })
       const updated = auto === null ? 0 : observedTime(auto, now, observations).updated
       // A silence-classified row is kept for review: the write guard refuses its archive
       // as the row does (#1051, #1000).

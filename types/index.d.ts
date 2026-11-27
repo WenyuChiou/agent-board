@@ -131,6 +131,8 @@ export type ProgressAuto = {
   parent?: string
   // Timestamp when a prompt replied to a waiting question in chat before the next report (#401).
   replied?: number
+  // Writer source attribute (`source=turns`, `source=codex-local`, etc.) when present on the start marker.
+  source?: string
 }
 
 export type ProgressTask = {
