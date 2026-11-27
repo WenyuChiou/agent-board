@@ -115,8 +115,8 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   if (reason === 'TURN_RUNNING') return s.serveSendBusy(name)
   if (!canSend && line === 'nextTurn' && codexCopyHint(agent, state, s)) return s.serveCodexCopyHint
   if (line === 'none' && !canSend && agent === 'codex' && state === 'ended') return codexResumeHint(agent, state, s)
-  // Codex's daemon receiver takes `afterWait` on idle because it watches the thread for about 10 minutes
-  // (or longer if configured) before starting a message (#1578, #1814). Each route line maps cleanly to its own text.
+  // Codex's daemon receiver takes `afterWait` on idle because it starts a message within seconds with a Codex window open,
+  // after a watch of up to about 10 minutes without one, before starting a message (#1578, #1814, #1652). Each route line maps cleanly to its own text.
   const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name))
     : line === 'afterWait' ? s.serveLineSoon(name)
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))

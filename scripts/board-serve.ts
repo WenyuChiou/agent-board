@@ -54,7 +54,7 @@ export type ServeOptions = {
   // so nothing runs). A running turn is never steered (#1409). appSessions: the Codex desktop app conversations, for the
   // receiver that runs their next turn in the background once the app has let go of them (#557); none, no such receiver.
   // appHome: the Codex home `--codex-dir` named, where they were found, which those runs read too.
-  codex?: { threads: () => string[]; executable: string | null; unloadMs?: number; appSessions?: () => CodexAppSession[]; appHome?: string }
+  codex?: { threads: () => string[]; executable: string | null; unloadMs?: number; clients?: () => Promise<unknown[]>; appSessions?: () => CodexAppSession[]; appHome?: string }
   reports?: (isFresh?: boolean) => ProgressBinding[]
   s: Strings
   port: number
@@ -1405,7 +1405,7 @@ export const startServer = (o: ServeOptions): void => {
     lastSeen = Date.now()
     if (o.codex?.executable) {
       // The address and token stay in this process: the Codex program is given neither.
-      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable, ...(o.codex.unloadMs === undefined ? {} : { unloadMs: o.codex.unloadMs, unloadMarginMs: o.codex.unloadMs }) })
+      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable, ...(o.codex.clients === undefined ? {} : { clients: o.codex.clients }), ...(o.codex.unloadMs === undefined ? {} : { unloadMs: o.codex.unloadMs, unloadMarginMs: o.codex.unloadMs }) })
       // A process that exits another way (Windows sends no SIGTERM) still ends the Codex program it started.
       process.once('exit', () => codexReceiver?.kill())
       if (o.codex.appSessions !== undefined) {

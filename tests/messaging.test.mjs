@@ -5367,12 +5367,48 @@ const codexUnloadMs = 400
 // The page's own receiver waits 10 minutes and 5 seconds before it reads a thread as a person's. A page started by a test may be given the
 // stand-in daemon's shorter delay; the page takes it only from a test process, so both names are set and both are cleared.
 const codexShortWait = (isOn = true) => {
-  if (isOn) { process.env.AGENT_BOARD_TEST_PID = String(process.pid); process.env.AGENT_BOARD_CODEX_UNLOAD_MS = String(codexUnloadMs) } else { delete process.env.AGENT_BOARD_TEST_PID; delete process.env.AGENT_BOARD_CODEX_UNLOAD_MS }
+  if (isOn) { process.env.AGENT_BOARD_TEST_PID = String(process.pid); process.env.AGENT_BOARD_CODEX_UNLOAD_MS = String(codexUnloadMs); process.env.AGENT_BOARD_CODEX_CLIENTS = 'unreadable' } else { delete process.env.AGENT_BOARD_TEST_PID; delete process.env.AGENT_BOARD_CODEX_UNLOAD_MS; delete process.env.AGENT_BOARD_CODEX_CLIENTS }
 }
 // A receiver asks the board for messages every 2 seconds, and most of these tests wait for one such poll: theirs asks every
 // half second (CI has a time limit for this file). A test that needs the real period says so.
 const codexPollMs = 500
-const codexReceiver = (board, daemon, options = {}) => startCodexReceiver({ boardUrl: board.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs, ...options })
+// The process list the receiver reads to find a Codex terminal window (#1652). The tests' stand-in always finds one window, so a test
+// that does not ask about the list keeps the wait it had. A test that does passes its own `clients` function, which is told why the
+// list is read: 'decide' (is a message to be started), 'join' (right before the receiver joins the thread) or 'start' (right before
+// turn/start, after a starting receipt that took more than a tick).
+const codexClientRow = (pid = 4242, started = 1_700_000_000_000, argv = 'codex') => ({ pid, started, name: process.platform === 'win32' ? 'codex.exe' : 'codex', argv })
+const codexOneClient = async () => [codexClientRow()]
+// The older tests below are about the wait of the long route (the process list cannot be read), so their stand-in cannot read it. The
+// receiver tells that once (CLIENTS_UNKNOWN); a test that is not about it does not hear of it.
+const codexUnreadable = async () => { throw new Error('SYNTHETIC_PROCESS_LIST_UNREADABLE') }
+const codexReceiver = (board, daemon, options = {}) => startCodexReceiver({ boardUrl: board.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs, clients: codexUnreadable, ...options, onError: error => { if (options.clients !== undefined || error?.message !== 'CLIENTS_UNKNOWN') options.onError?.(error) } })
+// A receiver with the real waits (no unloadMs, no margin) that reads the time from a clock this test moves by hand: it steps once the
+// stand-in has answered another thread/read, so its looks are always one step apart on that clock, well inside the gap rule's 20 s
+// (watchTickMs), however slow the machine is (the #1578 test below explains why). `advance` never goes past its limit.
+const codexStepped = (board, daemon, options = {}) => {
+  let clock = 0
+  const reads = () => daemon.calls().filter(one => one.method === 'thread/read').length
+  const receiver = codexReceiver(board, daemon, { unloadMs: undefined, unloadMarginMs: undefined, now: () => clock, watchTickMs: 10_000, ...options })
+  // gapMs: real time left between two steps. The board hands out claims on real time, a poll apart, so a clock that steps faster
+  // can pass a whole wait between two claims and never hold still while one is read.
+  const advance = async (limit, { done = () => false, step = 5000, gapMs = 0 } = {}) => {
+    while (clock < limit) {
+      if (done()) return
+      const seen = reads(), until = Date.now() + 20_000
+      while (reads() === seen) {
+        if (done()) return
+        assert.ok(Date.now() < until, `no thread/read for 20 s at ${clock / 1000} s by the receiver's clock`)
+        await pause(20)
+      }
+      if (gapMs > 0) await pause(gapMs)
+      if (done()) return
+      clock = Math.min(limit, clock + step)
+    }
+  }
+  // The receiver looks at the thread a few times with the clock where it is.
+  const settle = async (count = 2) => { const first = reads(); await waitFor(async () => reads() >= first + count) }
+  return { receiver, advance, settle, reads, now: () => clock, jump: to => { clock = to } }
+}
 
 test('a Codex message is sent only to a thread the running daemon has loaded, with no shell', async () => fixture(async (board, dir) => {
   codexKnown(dir, codexThread, '99999999-2222-4333-8444-555555555555')
@@ -5416,7 +5452,7 @@ test('a Codex thread whose board connection ended is attached again, not left st
   // Every poll is refused for good (403), so each connection ends at once; a stale entry would keep the thread at one registration.
   const proxy = await pollingProxy(board, 'forbidden-always')
   const daemon = codexDaemon(dir, {})
-  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100 })
+  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, clients: codexUnreadable, tickMs: 100 })
   try {
     await waitFor(async () => proxy.registrations() >= 2)
     // Claimed messages are never replayed: the new attachment only registers, it sends nothing.
@@ -5953,6 +5989,11 @@ test('a delay set for one Codex thread longer than its folder\'s does not read a
   assert.deepEqual([664_999, 665_000].map(listedAt => isWaitOver({ since: 60_000, listedAt, delay: 0 })), [false, true])
   // A test's shorter wait (`unloadMs`, `unloadMarginMs`) replaces the least wait and the margin, as the receiver passes them.
   assert.deepEqual([399, 400].map(listedAt => isWaitOver({ since: 0, listedAt, delay: 0, unloadMs: 400, unloadMarginMs: 400 })), [false, true])
+  // With no floor (`unloadMs: 0`, the wait of a thread on the background service while a Codex window is open) the wait is the
+  // folder's delay and the 5 s margin and nothing more (#1652).
+  for (const [delay, over] of [[60_000, 65_000], [20_000, 25_000], [300_000, 305_000]]) {
+    assert.deepEqual([over - 1, over].map(listedAt => isWaitOver({ since: 0, listedAt, delay, unloadMs: 0 })), [false, true], `delay ${delay}`)
+  }
 })
 
 test('a Codex receiver with its own default wait starts nothing on a listed idle thread before 10 minutes and 5 s of watching, and starts the message after (#1578)', () => codexFixture(async (board, dir) => {
@@ -6003,6 +6044,563 @@ test('a Codex receiver with its own default wait starts nothing on a listed idle
     assert.ok(at >= 605_000, `started at ${Math.round(at / 1000)} s by the receiver's clock`)
   } finally { await receiver.close() }
 }))
+
+// A thread on Codex's background service takes a board message at the next tick when a Codex terminal window is open (#1652): the
+// process list is what tells a person is there, so there is no quiet wait. The tests' clock stands still (codexStepped, never advanced):
+// a start is at clock 0, so no wait of the folder's delay or the margin was kept. `codexWindow` is the stand-in that finds a window.
+const codexWindow = { clients: codexOneClient }
+const codexAtOnce = async (board, dir, { daemonConfig = {}, before = async () => undefined, id = 'AB-CX-001' } = {}) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none', ...daemonConfig })
+  const stepped = codexStepped(board, daemon, codexWindow)
+  try {
+    const connection = await codexConnection(board)
+    await before(stepped, daemon, connection)
+    const sentAt = Date.now()
+    assert.equal(await codexSend(board, connection, id), 200)
+    await waitFor(async () => codexStarts(daemon) === 1)
+    // One receiver tick and one board poll, with room for a slow machine.
+    assert.ok(Date.now() - sentAt < 5000, `started ${Date.now() - sentAt} ms after the send`)
+    assert.equal(stepped.now(), 0)
+    await waitFor(async () => (await codexMessage(board, id))?.status === 'acknowledged')
+  } finally { await stepped.receiver.close() }
+}
+
+test('terminal alive, thread idle: starts at once', () => codexFixture(async (board, dir) =>
+  codexAtOnce(board, dir, { before: stepped => stepped.settle(4) })))
+
+test('a Codex terminal thread that just finished a turn starts a board message at the next tick', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  const stepped = codexStepped(board, daemon, codexWindow)
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    // The turn has just ended (and the receiver left): an AI that stopped to ask a question gets the answer at the next tick.
+    const sentAt = Date.now()
+    assert.equal(await codexSend(board, connection, 'AB-CX-002'), 200)
+    await waitFor(async () => codexStarts(daemon) === 2)
+    assert.ok(Date.now() - sentAt < 5000, `started ${Date.now() - sentAt} ms after the send`)
+    assert.equal(stepped.now(), 0)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-002'))?.status === 'acknowledged')
+  } finally { await stepped.receiver.close() }
+}))
+
+test('a thread seen for the first time starts a board message at the next tick when a Codex window is open', () => codexFixture(async (board, dir) =>
+  codexAtOnce(board, dir)))
+
+test('a process list that takes several seconds to read still gives the short route, not the 10-minute wait (#1652)', () => codexFixture(async (board, dir) => {
+  // The live run of 2026-11-26 timed the Windows list at 1.6 to 5.7 s on a busy computer: a read that slow is still an answer.
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  const errors = []
+  const slowWindow = async () => { await pause(4500); return [codexClientRow()] }
+  const stepped = codexStepped(board, daemon, { clients: slowWindow, onError: error => errors.push(error?.message) })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle(2)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexStarts(daemon) === 1)
+    // Started with the receiver's clock where it was: no wait of the long route was kept, and the list was not read as unknown.
+    assert.equal(stepped.now(), 0)
+    assert.deepEqual(errors.filter(one => one === 'CLIENTS_UNKNOWN'), [])
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+  } finally { await stepped.receiver.close() }
+}))
+
+test('the folder\'s unload delay does not hold a board message on the short route', () => codexFixture(async (board, dir) => {
+  // The folder keeps threads 300 s (a 305 s wait on the old route): the message is started at once all the same.
+  await codexAtOnce(board, dir, { daemonConfig: { unloadSecs: 300 } })
+}))
+
+test('a delay the daemon will not give does not send a terminal thread to the 10-minute route', () => codexFixture(async (board, dir) => {
+  const configFaults = join(dir, 'config-faults')
+  writeFileSync(configFaults, '')
+  await codexAtOnce(board, dir, { daemonConfig: { configFaults } })
+}))
+
+test('terminal gone, thread still listed: not started at the next tick, and started only once the 10-minute wait is over (#1652)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  const asked = []
+  // No Codex terminal window on the computer, though the daemon still lists the thread.
+  const stepped = codexStepped(board, daemon, { clients: async why => { asked.push(why); return [] } })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await stepped.settle()
+    // The claim that finds no window goes back at once; the card reads queued, apart from the moment of a later claim, which the
+    // thread's hold (10 ticks) keeps rare. It is never started or joined.
+    const seen = new Set()
+    const watch = async ms => { const until = Date.now() + ms; while (Date.now() < until) { seen.add((await codexMessage(board, 'AB-CX-001')).status); await pause(50) } }
+    await stepped.advance(66_000, { step: 10_000 })
+    await watch(6 * codexPollMs)
+    assert.ok(seen.has('queued'), JSON.stringify([...seen]))
+    assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon), [...seen].every(status => status === 'queued' || status === 'uncertain')], [false, 0, true])
+    // The receiver did look for a window, so this is its answer and not a thread it never decided on.
+    assert.ok(asked.length > 0 && asked.every(why => why === 'decide'), JSON.stringify(asked))
+    // A thread nobody holds is unloaded long before 10 minutes. One still listed then is held by a client the list does not show as a
+    // window (another client of the daemon, or a window whose command line reads as one of Codex's other commands): it gets the
+    // message once the 10-minute wait is over, with no check, as every message did before #1652, never a wait with no end.
+    let at = null
+    await stepped.advance(900_000, { step: 10_000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    assert.equal(codexStarts(daemon), 1)
+    assert.ok(at >= 605_000, `started at ${Math.round(at / 1000)} s by the receiver's clock`)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    assert.ok(asked.every(why => why === 'decide'), JSON.stringify(asked))
+  } finally { await stepped.receiver.close() }
+}))
+
+test('a window closed after its thread sat idle for over 10 minutes: the 10-minute wait counts from when no window was found, not from the idle start (#1652)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  // The person's Codex window was open while the thread sat idle, and closed just before the message: the daemon still lists the
+  // thread for its unload delay, so the process list is the only sign that nobody is there.
+  const stepped = codexStepped(board, daemon, { clients: async () => [] })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    await stepped.advance(660_000, { step: 10_000 })
+    const sentAt = stepped.now()
+    assert.equal(await codexSend(board, connection), 200)
+    // Not started while the thread could still be one whose window just closed: the idle stretch before the message counts for
+    // nothing once no window is found.
+    await stepped.advance(sentAt + 120_000, { step: 10_000, done: () => codexStarts(daemon) > 0 })
+    assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon)], [false, 0])
+    // Still listed a full wait after no window was found, it is held by a client the list does not show: the message goes then,
+    // never a wait with no end, though the thread's hold ends and the list is read again meanwhile.
+    let at = null
+    const started = () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null }
+    await stepped.advance(sentAt + 600_000, { step: 10_000, done: started })
+    // Past the 10-minute wait the clock moves a step for every two polls of the board, so a claim lands at each step.
+    await stepped.advance(sentAt + 1_200_000, { step: 10_000, gapMs: 2 * codexPollMs, done: started })
+    assert.equal(codexStarts(daemon), 1)
+    assert.ok(at - sentAt >= 600_000, `started ${Math.round((at - sentAt) / 1000)} s after the message by the receiver's clock`)
+  } finally { await stepped.receiver.close() }
+}))
+
+test('a thread the daemon closes while the process list is read before the join is not joined, which would load it again (#1652)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  let joins = 0, readAt = null, methodsAtRead = 0
+  const clients = async why => {
+    if (why === 'join' && ++joins === 1) {
+      // While the read before the join is under way (a read may take seconds), the person's client leaves the thread, for another
+      // thread in the same window, and the daemon unloads it (thread/closed). The window itself is still there.
+      unlinkSync(person)
+      await pause(1500)
+      readAt = Date.now()
+      methodsAtRead = codexMethods(daemon).length
+    }
+    return [codexClientRow()]
+  }
+  const stepped = codexStepped(board, daemon, { clients, tickMs: 300 })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => readAt !== null)
+    // Nothing is joined or started on the unloaded thread.
+    await pause(1000)
+    assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon)], [false, 0], JSON.stringify(codexMethods(daemon).slice(methodsAtRead - 3)))
+  } finally { await stepped.receiver.close() }
+}))
+
+test('on Linux a Codex window whose prompt starts with one of Codex\'s command words is still a window: its exact arguments are read (#1652)', async () => {
+  const { linuxCommandLine, terminalClients } = await import('../scripts/codex-receiver.mjs')
+  const at = 1_700_000_000_000
+  const row = (pid, cmdline) => ({ pid, started: at, name: 'codex', argv: linuxCommandLine(cmdline) })
+  // /proc/<pid>/cmdline splits the arguments by NUL: `codex "review this change"` is one prompt, `codex exec the plan` a one-shot run.
+  assert.deepEqual(terminalClients([
+    row(11, '/usr/bin/codex\0review this change\0'),
+    row(12, '/usr/bin/codex\0exec\0the synthetic plan\0'),
+    row(13, '/usr/bin/codex\0resume\0synthetic-thread\0'),
+    row(14, '/usr/bin/codex\0say "exec" twice\0'),
+  ], 'linux'), { clients: [`11:${at}`, `13:${at}`, `14:${at}`], isUnsure: false })
+  assert.equal(linuxCommandLine(''), null)
+})
+
+// The window the decision found must be the one there when the receiver joins: the list read right before the join is compared with
+// the decision's by process id and start time. firstJoin says what the first such read finds. The claim then goes back to the queue and
+// the thread is held for 10 ticks (3 s here), which is long enough to read the card; a claim after that reads the list afresh.
+const codexJoinCheck = async (board, dir, firstJoin) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  const whys = []
+  let joins = 0
+  const clients = async why => {
+    whys.push(why)
+    if (why === 'join' && ++joins === 1) return firstJoin()
+    return [codexClientRow()]
+  }
+  const stepped = codexStepped(board, daemon, { clients, tickMs: 300 })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => joins >= 1)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'queued')
+    // The receiver joined nothing and asked Codex for nothing; the claim went back, and the card says queued, with no error.
+    const one = await codexMessage(board, 'AB-CX-001')
+    assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon), one.status, one.error], [false, 0, 'queued', ''])
+    // A later claim reads the list afresh; this time the window is the same at the join, and the message is delivered once, with its text.
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    const starts = daemon.calls().filter(call => call.method === 'turn/start')
+    assert.equal(starts.length, 1)
+    assert.ok(JSON.stringify(starts[0].params).includes('Check the build and tell me what failed.'))
+    assert.deepEqual([whys.filter(why => why === 'decide').length >= 2, whys.filter(why => why === 'join').length], [true, 2])
+  } finally { await stepped.receiver.close() }
+}
+
+test('a reused process id does not count as the Codex window that was there', () => codexFixture(async (board, dir) =>
+  // The decision saw process 4242 started at one time; the read before the join finds a process with that id started long after.
+  codexJoinCheck(board, dir, () => [codexClientRow(4242, 1_700_000_900_000)])))
+
+test('a Codex window closed between the decision and the start gets no turn, and the message goes back to the queue', () => codexFixture(async (board, dir) =>
+  codexJoinCheck(board, dir, () => [])))
+
+test('a process list that cannot be read keeps the 10-minute wait', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  const errors = []
+  const stepped = codexStepped(board, daemon, { clients: async () => { throw new Error('SYNTHETIC_PROCESS_LIST_FAILURE') }, onError: error => errors.push(error.message) })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await stepped.settle()
+    await stepped.advance(65_000)
+    await pause(6 * codexPollMs)
+    assert.deepEqual([codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [0, 'queued'])
+    let at = null
+    await stepped.advance(900_000, { step: 10_000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    assert.equal(codexStarts(daemon), 1)
+    assert.ok(at >= 605_000, `started at ${Math.round(at / 1000)} s by the receiver's clock`)
+    // The failure is told once for the daemon connection, not on each tick.
+    assert.deepEqual(errors, ['CLIENTS_UNKNOWN'])
+  } finally { await stepped.receiver.close() }
+}))
+
+test('a thread on the background service with no message waiting reads no process list', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  const asked = []
+  const stepped = codexStepped(board, daemon, { clients: async why => { asked.push(why); return [codexClientRow()] } })
+  try {
+    await codexConnection(board)
+    await stepped.settle()
+    // The thread is ready for a message from its first look, and the board polls many times: with nothing waiting, the process list
+    // is never read.
+    await stepped.advance(30_000, { step: 10_000 })
+    await pause(10 * codexPollMs)
+    assert.deepEqual(asked, [])
+    // The first message is what makes the receiver look.
+    assert.equal(await codexSend(board, await codexConnection(board)), 200)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    assert.ok(asked.length > 0 && asked[0] === 'decide', JSON.stringify(asked))
+  } finally { await stepped.receiver.close() }
+}))
+
+test('a Codex process whose command line cannot be read is not counted as a window', async () => {
+  const { terminalClients } = await import('../scripts/codex-receiver.mjs')
+  const at = 1_700_000_000_000
+  const unsure = { clients: [], isUnsure: true }
+  // The list names a Codex program but not its command line (it could be the app-server), or not its start time: nothing can be said.
+  assert.deepEqual(terminalClients([{ pid: 10, started: at, name: 'codex.exe', argv: null }], 'win32'), unsure)
+  assert.deepEqual(terminalClients([{ pid: 10, started: at, name: 'codex.exe', argv: '' }], 'win32'), unsure)
+  assert.deepEqual(terminalClients([{ pid: 10, started: null, name: 'codex.exe', argv: 'codex' }], 'win32'), unsure)
+  assert.deepEqual(terminalClients([{ pid: 10, started: 0, name: 'codex.exe', argv: 'codex' }], 'win32'), unsure)
+  // A clear window beside it settles the question: one is open.
+  const clear = { pid: 11, started: at + 1000, name: 'codex.exe', argv: 'codex resume abc' }
+  assert.deepEqual(terminalClients([{ pid: 10, started: at, name: 'codex.exe', argv: null }, clear], 'win32'), { clients: [`11:${at + 1000}`], isUnsure: false })
+  // A row that is not Codex, or no row at all, is not unsure.
+  assert.deepEqual(terminalClients([{ pid: 12, started: null, name: 'node.exe', argv: null }], 'win32'), { clients: [], isUnsure: false })
+  assert.deepEqual(terminalClients([], 'win32'), { clients: [], isUnsure: false })
+})
+
+test('only a Codex program that is not the app-server counts as a window, by its process id and start time', async () => {
+  const { terminalClients, hasSameClient } = await import('../scripts/codex-receiver.mjs')
+  const at = 1_700_000_000_000
+  const rows = [
+    { pid: 10, started: at, name: 'codex.exe', argv: '"C:\\Users\\someone\\codex.exe"' },
+    { pid: 11, started: at + 1, name: 'codex.exe', argv: 'codex resume 11111111-2222-4333-8444-555555555555' },
+    { pid: 12, started: at + 2, name: 'codex.exe', argv: 'codex.exe app-server proxy' },
+    { pid: 13, started: at + 3, name: 'codex.exe', argv: 'codex.exe app-server daemon pid-update-loop' },
+    { pid: 14, started: at + 4, name: 'node.exe', argv: 'node C:\\x\\node_modules\\@openai\\codex\\bin\\codex.js' },
+    { pid: 15, started: at + 5, name: 'Codex.EXE', argv: 'Codex.EXE' },
+  ]
+  // The first two and the case variant count; the app-server rows and the npm launcher do not.
+  assert.deepEqual(terminalClients(rows, 'win32'), { clients: [`10:${at}`, `11:${at + 1}`, `15:${at + 5}`], isUnsure: false })
+  // A row with no start time is "cannot tell", and so is the whole list when nothing clear is in it.
+  assert.deepEqual(terminalClients([{ pid: 16, started: null, name: 'codex.exe', argv: 'codex' }], 'win32'), { clients: [], isUnsure: true })
+  // Elsewhere the program is `codex`, in that letter case only.
+  const others = [{ pid: 20, started: at, name: 'codex', argv: '/usr/bin/codex' }, { pid: 21, started: at, name: 'Codex', argv: 'Codex' }, { pid: 22, started: at, name: 'codex', argv: '/usr/bin/codex app-server' }]
+  assert.deepEqual(terminalClients(others, 'linux'), { clients: [`20:${at}`], isUnsure: false })
+  // The same window is the same process id with a start time within 3 s; a reused id, or another id, is not.
+  assert.equal(hasSameClient([`10:${at}`], [`10:${at}`]), true)
+  assert.equal(hasSameClient([`10:${at}`], [`10:${at + 3000}`]), true)
+  assert.equal(hasSameClient([`10:${at}`], [`10:${at + 3001}`]), false)
+  assert.equal(hasSameClient([`10:${at}`], [`11:${at}`]), false)
+  assert.equal(hasSameClient([`10:${at}`, `11:${at}`], [`12:${at}`, `11:${at + 1000}`]), true)
+  assert.equal(hasSameClient([], [`10:${at}`]), false)
+  assert.equal(hasSameClient([`10:${at}`], []), false)
+})
+
+test('the Codex desktop app\'s exec-server and an MCP server are not counted as a terminal window', async () => {
+  const { terminalClients } = await import('../scripts/codex-receiver.mjs')
+  const at = 1_700_000_000_000
+  // The desktop app starts its own Codex programs: the app-server and an exec-server, both with flags before the command.
+  const app = [
+    { pid: 30, started: at, name: 'codex.exe', argv: '"C:\\Apps\\Codex\\codex.exe" -c features.code_mode_host=true app-server --analytics-default-enabled' },
+    { pid: 31, started: at, name: 'codex.exe', argv: '"C:\\Apps\\Codex\\codex.exe" -c features.prefer_mxc=true -c "forced_login_method=\\"chatgpt\\"" exec-server --listen stdio' },
+    { pid: 32, started: at, name: 'codex.exe', argv: 'codex.exe mcp-server' },
+  ]
+  assert.deepEqual(terminalClients(app, 'win32'), { clients: [], isUnsure: false })
+  // A terminal window beside them is still found.
+  assert.deepEqual(terminalClients([...app, { pid: 33, started: at, name: 'codex.exe', argv: 'codex' }], 'win32'), { clients: [`33:${at}`], isUnsure: false })
+  assert.deepEqual(terminalClients([{ pid: 40, started: at, name: 'codex', argv: '/usr/bin/codex exec-server' }], 'linux'), { clients: [], isUnsure: false })
+})
+
+test('a one-shot Codex run (codex exec) and Codex\'s other commands are not counted as a terminal window, while a prompt or a resumed session still is (#1652)', async () => {
+  const { terminalClients } = await import('../scripts/codex-receiver.mjs')
+  const at = 1_700_000_000_000
+  const none = { clients: [], isUnsure: false }
+  // Another tool's one-shot run, an account command or a setup tool: the word right after the program is Codex's command.
+  for (const argv of [
+    '"C:\\bin\\codex.exe" exec --sandbox read-only -m synthetic-model "Synthetic task"',
+    'codex.exe e "Synthetic task"',
+    '"C:\\bin\\codex.exe" review',
+    'C:\\bin\\codex.exe login',
+    '"C:\\bin\\codex.exe" apply',
+  ]) assert.deepEqual(terminalClients([{ pid: 50, started: at, name: 'codex.exe', argv }], 'win32'), none, argv)
+  assert.deepEqual(terminalClients([{ pid: 51, started: at, name: 'codex', argv: '/usr/bin/codex exec --json Synthetic' }], 'linux'), none)
+  assert.deepEqual(terminalClients([{ pid: 52, started: at, name: 'codex', argv: '/opt/homebrew/bin/codex exec Synthetic' }], 'darwin'), none)
+  // A person's window: no command, a prompt (quoted, or one whose first word is no command), or a resumed or forked session.
+  for (const argv of [
+    'codex',
+    '"C:\\bin\\codex.exe"',
+    '"C:\\bin\\codex.exe" "exec the synthetic plan"',
+    'codex.exe fix the exec step',
+    '"C:\\bin\\codex.exe" resume 00000000-0000-0000-0000-000000000000',
+    '"C:\\bin\\codex.exe" fork --last',
+  ]) assert.deepEqual(terminalClients([{ pid: 53, started: at, name: 'codex.exe', argv }], 'win32'), { clients: [`53:${at}`], isUnsure: false }, argv)
+  // A window beside a one-shot run is still found.
+  assert.deepEqual(terminalClients([{ pid: 54, started: at, name: 'codex.exe', argv: 'codex.exe exec "Synthetic task"' }, { pid: 55, started: at, name: 'codex.exe', argv: 'codex' }], 'win32'), { clients: [`55:${at}`], isUnsure: false })
+})
+
+test('a process list that could not be read keeps only its own message on the 10-minute wait, and the next message reads the list again', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  let calls = 0
+  const stepped = codexStepped(board, daemon, { clients: async () => { calls += 1; if (calls === 1) throw new Error('SYNTHETIC_PROCESS_LIST_FAILURE'); return [codexClientRow()] }, onError: () => {} })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await stepped.settle()
+    // The first claim cannot read the list: that message goes back and waits as it did before the list was read.
+    let at = null
+    await stepped.advance(900_000, { step: 5000, done: () => { if (codexStarts(daemon) > 0) at ??= stepped.now(); return at !== null } })
+    assert.equal(codexStarts(daemon), 1)
+    assert.ok(at >= 600_000, `the first message started at ${Math.round(at / 1000)} s by the receiver's clock`)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    // The next message reads the list again, finds the window and starts on the short wait.
+    const sent = stepped.now()
+    assert.equal(await codexSend(board, connection, 'AB-CX-002'), 200)
+    let next = null
+    await stepped.advance(sent + 300_000, { step: 5000, done: () => { if (codexStarts(daemon) > 1) next ??= stepped.now(); return next !== null } })
+    assert.equal(codexStarts(daemon), 2)
+    assert.ok(calls >= 2, `the list was read ${calls} times`)
+    assert.ok(next !== null && next - sent < 300_000, `the next message started ${next === null ? 'never' : Math.round((next - sent) / 1000) + ' s after it was sent'} by the receiver's clock`)
+  } finally { await stepped.receiver.close() }
+}))
+
+test('an ephemeral Codex thread is never read as a person\'s', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  // thread/read says the thread is ephemeral (a short thread the daemon closes by itself): it is never watched into a stretch,
+  // so nothing joins it or starts in it, on the short wait or the long one.
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none', ephemeral: true })
+  const stepped = codexStepped(board, daemon, codexWindow)
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await stepped.settle()
+    await stepped.advance(60_000, { step: 10_000 })
+    await pause(6 * codexPollMs)
+    assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon), (await codexMessage(board, 'AB-CX-001')).status], [false, 0, 'queued'])
+  } finally { await stepped.receiver.close() }
+}))
+
+test('a resumed terminal thread, which sends no thread/started, starts a board message at the next tick once the receiver sees it loaded', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), loadFlag = join(dir, 'load')
+  writeFileSync(person, '')
+  // The daemon has not loaded the thread; `codex resume` loads it later, and the only notice is a status change to idle.
+  const daemon = codexDaemon(dir, { person, loadFlag, unloadSecs: 'none' })
+  const stepped = codexStepped(board, daemon, codexWindow)
+  try {
+    await waitFor(async () => daemon.calls().some(one => one.method === 'thread/loaded/list'))
+    stepped.jump(1_000_000)
+    writeFileSync(loadFlag, '')
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexStarts(daemon) === 1)
+    assert.equal(stepped.now(), 1_000_000)
+  } finally { await stepped.receiver.close() }
+}))
+
+test('a second message to a terminal thread starts at the next tick after the receiver\'s own leave, not one delay later', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  const stepped = codexStepped(board, daemon, codexWindow)
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    // The receiver has just left; its own leave no longer starts a wait on this route.
+    assert.equal(await codexSend(board, connection, 'AB-CX-002'), 200)
+    await waitFor(async () => codexStarts(daemon) === 2)
+    assert.equal(stepped.now(), 0)
+  } finally { await stepped.receiver.close() }
+}))
+
+test('a thread/closed notice ends a terminal thread\'s watch, and a message is started at the next tick once it is loaded again', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), closeFlag = join(dir, 'close')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, closeFlag, unloadSecs: 'none' })
+  const stepped = codexStepped(board, daemon, codexWindow)
+  try {
+    const first = await codexConnection(board)
+    await stepped.settle()
+    await stepped.advance(60_000)
+    // The daemon says it closed the thread (and lists it again at once): the board connection ends and is made again.
+    writeFileSync(closeFlag, '')
+    const second = await waitFor(async () => { const one = await codexConnection(board); return one.id !== first.id && one })
+    assert.equal(await codexSend(board, second), 200)
+    await waitFor(async () => codexStarts(daemon) === 1)
+    assert.equal(stepped.now(), 60_000)
+  } finally { await stepped.receiver.close() }
+}))
+
+test('a start held up by a busy board checks for a Codex window again before it asks Codex', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none' })
+  let isGone = false
+  const whys = []
+  // The board answers the starting receipt after 600 ms, more than one tick (100 ms here, 3 s for real); the window closes meanwhile.
+  const proxy = await pollingProxy(board, 'pass', undefined, async () => { await pause(600); isGone = true })
+  const stepped = codexStepped(board, daemon, { boardUrl: proxy.address, clients: async why => { whys.push(why); return isGone ? [] : [codexClientRow()] } })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    assert.equal(await codexSend(board, connection), 200)
+    // The receiver joined the thread, found no window before turn/start, asked Codex for nothing, and left; the message is queued.
+    await waitFor(async () => codexMethods(daemon).includes('thread/unsubscribe'))
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'queued')
+    assert.deepEqual([codexMethods(daemon).includes('thread/resume'), codexStarts(daemon)], [true, 0])
+    assert.ok(whys.includes('start'), JSON.stringify(whys))
+    assert.ok(whys.indexOf('join') < whys.indexOf('start'), JSON.stringify(whys))
+  } finally { await stepped.receiver.close(); await proxy.close() }
+}))
+
+test('a turn the person starts while the process list is read before turn/start gets no board message in it: the thread is read again after the list (#1652, #1370)', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person'), beginFlag = join(dir, 'begin-turn'), endFlag = join(dir, 'end-turn')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, beginFlag, endFlag, unloadSecs: 'none' })
+  let isBegun = false
+  // The board answers the starting receipt after 600 ms, more than one tick, so the list is read once more before turn/start; the
+  // person's own turn begins while that read is out, and its notices have arrived by the time the read answers.
+  const proxy = await pollingProxy(board, 'pass', undefined, async () => { await pause(600) })
+  const stepped = codexStepped(board, daemon, { boardUrl: proxy.address, clients: async why => {
+    if (why === 'start' && !isBegun) { isBegun = true; writeFileSync(beginFlag, ''); await waitFor(async () => !existsSync(beginFlag)); await pause(300) }
+    return [codexClientRow()]
+  } })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => isBegun && !existsSync(beginFlag))
+    await pause(1500)
+    assert.equal(codexStarts(daemon), 0)
+    // Once the person's turn ends, the message is started once, and never into a running turn.
+    writeFileSync(endFlag, '')
+    await waitFor(async () => codexStarts(daemon) === 1)
+    assert.deepEqual(daemon.calls().filter(call => 'startedInRunningTurn' in call).map(call => call.startedInRunningTurn), [false])
+  } finally { await stepped.receiver.close(); await proxy.close() }
+}))
+
+test('with another Codex window open, a closed window\'s thread can still be started until it unloads', () => codexFixture(async (board, dir) => {
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  // The window on this thread closes, and the daemon keeps the thread listed 4 s more; another window is open (the stand-in finds
+  // one), so the receiver cannot tell and starts the message: the risk the docs name. An approval nobody answers still stops the turn.
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none', unloadDelay: 4000, approval: 'hold' })
+  const stepped = codexStepped(board, daemon, { approvalMs: 600, ...codexWindow })
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle()
+    unlinkSync(person)
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexStarts(daemon) === 1)
+    await codexUncertain(board, 'AB-CX-001', 'APPROVAL_TIMEOUT')
+    const interrupt = await waitFor(() => daemon.calls().find(one => one.method === 'turn/interrupt'))
+    assert.equal(interrupt.params.turnId, 'turn-delivery')
+  } finally { await stepped.receiver.close() }
+}))
+
+test('the process list stand-in for a test\'s page is taken only when the test names the process that started the page (#1652)', async () => {
+  const { testClients, terminalClients } = await import('../scripts/codex-receiver.mjs')
+  const env = (pid, given) => ({ ...(pid === undefined ? {} : { AGENT_BOARD_TEST_PID: pid }), ...(given === undefined ? {} : { AGENT_BOARD_CODEX_CLIENTS: given }) })
+  const one = terminalClients(await testClients(env('4242', 'one'), 4242)(), process.platform)
+  assert.deepEqual([one.clients.length, one.isUnsure], [1, false])
+  assert.deepEqual(await testClients(env('4242', 'none'), 4242)(), [])
+  await assert.rejects(() => testClients(env('4242', 'unreadable'), 4242)())
+  // Another process, no process, no stand-in named, or one that is not known: the page reads the real process list.
+  for (const pid of ['4243', '0', '', 'true', ' 4242', undefined]) assert.equal(testClients(env(pid, 'one'), 4242), undefined, JSON.stringify(pid))
+  for (const given of ['some', '', undefined]) assert.equal(testClients(env('4242', given), 4242), undefined, JSON.stringify(given))
+  assert.match(readFileSync(new URL('../scripts/board-cli.ts', import.meta.url), 'utf8'), /clients: testClients\(process\.env, process\.ppid\)/)
+})
+
+test('the Windows and macOS process lists are read into rows with a start time, and a line that is not a row makes the list unreadable (#1652)', async () => {
+  const { parseWindowsClients, parsePsClients, terminalClients } = await import('../scripts/codex-receiver.mjs')
+  // Windows: process id, creation time in 100 ns ticks since 1601, program name, command line (which may be empty or run on).
+  const ticks = 133_800_000_000_000_000n, ms = Number(ticks / 10000n - 11644473600000n)
+  const text = [`4242|${ticks}|codex.exe|"C:\\bin\\codex.exe" resume abc`, `4300|${ticks + 10_000_000n}|codex.exe|`, `4400||codex.exe|codex`, `4500|${ticks}|codex.exe|codex --note one`, 'two lines', ''].join('\r\n')
+  assert.deepEqual(parseWindowsClients(text), [
+    { pid: 4242, started: ms, name: 'codex.exe', argv: '"C:\\bin\\codex.exe" resume abc' },
+    { pid: 4300, started: ms + 1000, name: 'codex.exe', argv: null },
+    { pid: 4400, started: null, name: 'codex.exe', argv: 'codex' },
+    { pid: 4500, started: ms, name: 'codex.exe', argv: 'codex --note one\ntwo lines' },
+  ])
+  assert.deepEqual(parseWindowsClients(''), [])
+  assert.throws(() => parseWindowsClients('not a process row'), /CLIENTS_UNPARSABLE/)
+  assert.deepEqual(terminalClients(parseWindowsClients(text), 'win32').clients, [`4242:${ms}`, `4500:${ms}`])
+  // macOS: `ps -axo pid=,lstart=,command=` with the C locale and UTC; only the Codex programs are kept.
+  const ps = ['  501 Thu Nov 26 10:11:12 2026 /usr/local/bin/codex resume abc', '  777 Thu Nov 26 10:11:13 2026 /Users/x/My Tools/codex', '  778 Thu Nov 26 10:11:14 2026 node /usr/lib/node_modules/@openai/codex/bin/codex.js', '  779 Thu Nov 26 10:11:15 2026 /usr/local/bin/codex app-server proxy', '  780 Thu Nov 26 10:11:16 2026 /usr/bin/vim /tmp/codex', ''].join('\n')
+  const rows = parsePsClients(ps)
+  assert.deepEqual(rows.map(one => [one.pid, one.name]), [[501, 'codex'], [777, 'codex'], [779, 'codex'], [780, 'codex']])
+  // Only a command whose first word is the codex program is read as one. A `/codex` further on (a folder with a space in the program's
+  // own path, or another program's argument) cannot be told apart from the other, so that row counts as one that cannot be read.
+  assert.deepEqual(rows.map(one => one.argv === null), [false, true, false, true])
+  assert.equal(rows[0].started, Date.parse('Thu Nov 26 10:11:12 2026 UTC'))
+  assert.deepEqual(terminalClients(rows, 'darwin').clients, [`501:${rows[0].started}`])
+  assert.deepEqual(terminalClients(rows.filter(one => one.pid !== 501), 'darwin'), { clients: [], isUnsure: true })
+  assert.throws(() => parsePsClients('garbled'), /CLIENTS_UNPARSABLE/)
+})
 
 test('an unsent receipt from the connection that holds a claim puts the message back in the queue with its text; any other claim refuses it (#1578)', () => {
   const now = Date.now()
@@ -6168,7 +6766,7 @@ const codexGiveBackCase = async (board, dir, mode, { endTurn, started, onError, 
   let receiver
   const close = async () => { await receiver?.close(); await proxy.close() }
   try {
-    receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 4000, ...(onError ? { onError } : {}), ...receiverOptions })
+    receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, clients: codexUnreadable, tickMs: 100, pollMs: codexPollMs, unloadMs: 2000, unloadMarginMs: 400, ackMs: 4000, ...(onError ? { onError } : {}), ...receiverOptions })
     await started?.({ proxy, receiver, daemon })
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
@@ -6314,6 +6912,28 @@ test('a Codex claim that meets a busy thread goes back to the queue with its tex
     assert.equal(starts.length, 1)
     assert.ok(JSON.stringify(starts[0].params).includes('Check the build and tell me what failed.'))
   } finally { await receiver.close() }
+  // On the short route (a Codex window open) the claim goes back when two ticks of its time are left, not by the long wait. Here the
+  // long wait is 4 s and the claim's own time 6 s: it is given back after 5.8 s, not after 1.2 s (#1652).
+  const second = codexCase(dir, 1, { readActive: true, endFlag: join(dir, 'end-turn-2'), person: join(dir, 'person-2') })
+  writeFileSync(join(dir, 'person-2'), '')
+  const again = codexReceiver(board, second.daemon, { ackMs: 6000, unloadMs: 4000, unloadMarginMs: 1000, ...codexWindow })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection, second.id), 200)
+    await waitFor(async () => (await codexMessage(board, second.id))?.status === 'uncertain')
+    await waitFor(async () => codexMethods(second.daemon).includes('thread/unsubscribe'))
+    const until = Date.now() + 2000
+    while (Date.now() < until) {
+      assert.notEqual((await codexMessage(board, second.id)).status, 'queued', 'given back before the short wait was out')
+      await pause(100)
+    }
+    await waitFor(async () => (await codexMessage(board, second.id))?.status === 'queued')
+    writeFileSync(join(dir, 'end-turn-2'), '')
+    await waitFor(async () => (await codexMessage(board, second.id))?.status === 'acknowledged')
+    const starts = second.daemon.calls().filter(one => one.method === 'turn/start')
+    assert.equal(starts.length, 1)
+    assert.ok(JSON.stringify(starts[0].params).includes('Check the build and tell me what failed.'))
+  } finally { await again.close() }
 }))
 
 test('a Codex daemon whose unload delay cannot be read gets no message, and gets it once the delay is read for the thread\'s folder (#318)', () => codexFixture(async (board, dir) => {
@@ -6342,6 +6962,19 @@ test('a Codex daemon whose unload delay cannot be read gets no message, and gets
     const delays = [{ config: {} }, { config: { thread_unload_delay_secs: null } }, { config: { thread_unload_delay_secs: 300 } }, { config: { thread_unload_delay_secs: 0 } }, { config: { thread_unload_delay_secs: '60' } }, { config: { thread_unload_delay_secs: -1 } }, { config: { thread_unload_delay_secs: 1.5 } }, { config: [] }, {}, null]
     assert.deepEqual(delays.map(unloadDelayOf), [60_000, 60_000, 300_000, 0, null, null, null, null, null, null])
   } finally { await receiver.close() }
+  // The short route, with a Codex window open, does not wait on that delay: the folder's config is refused all the while, and the
+  // message is started at the next tick (#1652).
+  const person = join(dir, 'person'), refused = join(dir, 'refused')
+  writeFileSync(person, '')
+  writeFileSync(refused, '')
+  const second = codexCase(dir, 1, { person, configFaults: refused, unloadSecs: 'none' })
+  const stepped = codexStepped(board, second.daemon, codexWindow)
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection, second.id), 200)
+    await waitFor(async () => codexStarts(second.daemon) === 1)
+    assert.equal(stepped.now(), 0)
+  } finally { await stepped.receiver.close() }
 }))
 
 test('a Codex thread whose reads carry no updatedAt is never read as a person\'s: a turn between two looks could not be seen (#318)', () => codexFixture(async (board, dir) => {
@@ -7030,7 +7663,7 @@ const codexHeldClaim = async (board, daemon, beginFlag) => {
     await waitFor(async () => daemon.calls().length > 0 && !existsSync(beginFlag))
     await pause(400)
   })
-  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs })
+  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, clients: codexOneClient, tickMs: 100, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs })
   return { claimed: () => claims >= 1, close: async () => { await receiver.close(); await proxy.close() } }
 }
 const codexTable = [
@@ -7230,7 +7863,7 @@ const codexTable = [
     // The poll that hands the message out is answered and every later poll is refused for good, so the client closes about 2 seconds
     // after the claim, 1.5 seconds before the read answers. The next tick is far off, so only the client's own close can stop the start.
     const proxy = await pollingProxy(board, 'forbidden-after-claim')
-    const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 30_000, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs })
+    const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, clients: codexOneClient, tickMs: 30_000, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs })
     try {
       assert.equal(await codexSend(board, await codexConnection(board)), 200)
       // It was never said to start, so the client's close puts it back in the queue (#1507), stamped as left by that connection.
@@ -7350,7 +7983,7 @@ test('a refusal from the daemon is rejected, and nothing else is tried', () => c
 
 test('a Codex turn that ends without the ACK or fails after it never reads as acknowledged', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { start: 'silent', endFlag: join(dir, 'end-turn') })
-  const receiver = codexReceiver(board, daemon)
+  const receiver = codexReceiver(board, daemon, codexWindow)
   try {
     const connection = await codexConnection(board)
     await codexSend(board, connection)
@@ -7362,7 +7995,7 @@ test('a Codex turn that ends without the ACK or fails after it never reads as ac
   // The ACK line is there, but the turn failed or was interrupted: it never reads as a receipt.
   for (const endStatus of ['failed', 'interrupted']) await codexFixture(async (board, dir) => {
     const daemon = codexDaemon(dir, { endStatus })
-    const receiver = codexReceiver(board, daemon)
+    const receiver = codexReceiver(board, daemon, codexWindow)
     try {
       const connection = await codexConnection(board)
       await codexSend(board, connection)
@@ -7374,7 +8007,7 @@ test('a Codex turn that ends without the ACK or fails after it never reads as ac
 
 test('a turn longer than the ACK window ends as uncertain with ACK_TIMEOUT, and nothing is sent again', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { start: 'silent' })
-  const receiver = codexReceiver(board, daemon, { ackMs: 400 })
+  const receiver = codexReceiver(board, daemon, { ackMs: 400, ...codexWindow })
   try {
     const connection = await codexConnection(board)
     await codexSend(board, connection)
@@ -7387,7 +8020,7 @@ test('a turn longer than the ACK window ends as uncertain with ACK_TIMEOUT, and 
 
 test('a joined receiver leaves approval requests to the person\'s own client', async () => codexFixture(async (board, dir) => {
   const daemon = codexDaemon(dir, { approval: true })
-  const receiver = codexReceiver(board, daemon)
+  const receiver = codexReceiver(board, daemon, codexWindow)
   try {
     const connection = await codexConnection(board)
     await codexSend(board, connection)
@@ -8686,7 +9319,7 @@ test('a Codex message that went back to the queue stays queued through a second 
 // The Codex receiver's side of #1507, through a proxy in front of the board that can fault the starting receipt.
 const m5aReceiver = async (board, daemon, mode = 'pass', onStarting) => {
   const proxy = await pollingProxy(board, mode, undefined, onStarting, () => codexStarts(daemon) > 0)
-  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, tickMs: 100, pollMs: codexPollMs, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs })
+  const receiver = startCodexReceiver({ boardUrl: proxy.address, threads: () => [codexCurrent], executable: daemon.executable, env: daemon.env, clients: codexOneClient, tickMs: 100, pollMs: codexPollMs, unloadMs: codexUnloadMs, unloadMarginMs: codexUnloadMs })
   return { proxy, close: async () => { await receiver.close(); await proxy.close() } }
 }
 

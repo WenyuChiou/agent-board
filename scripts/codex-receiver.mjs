@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { readdir, readFile } from 'node:fs/promises'
 import { isAbsolute, posix, win32 } from 'node:path'
 import { ackLine, boardClient, deliveryPrompt } from './message-client.mjs'
 import { openWebSocketStdio } from './ws-stdio.mjs'
@@ -10,7 +11,8 @@ export const messagingReceiver = {
   agent: 'codex',
   kind: 'live',
   // The live run woke an idle Codex CLI session on the shared daemon after its ~10-minute watch (#1578, #1814);
-  // a message during a running turn is not recorded (#1409).
+  // a message during a running turn is not recorded (#1409). With a Codex terminal window open a message goes in at the next
+  // tick (#1652; timing record docs/validation/2026-11-26-codex-daemon-short-wait-live.md).
   surfaces: [{ name: 'Daemon', id: 'Codex daemon', evidence: 'docs/validation/2026-11-13-codex-cli-wake-live.md' }],
   routes: {
     idle: { line: 'afterWait', record: 'docs/validation/2026-11-13-codex-cli-wake-live.md', surfaces: ['Codex daemon'] },
@@ -37,12 +39,34 @@ const MIN_DAEMON = [0, 169, 0]
 // take and for two clocks that do not run alike. A person can set the delay (`thread_unload_delay_secs` in Codex's config), so the
 // receiver asks the daemon for the delay of the thread's folder. A delay set for one thread only (`codex -c
 // thread_unload_delay_secs=…`, or a client's `config` on `thread/start`) is not in that answer, and no answer of the daemon names
-// it (Codex 0.169.0), so the receiver never waits less than 10 minutes with the margin (UNLOAD_LEAST_MS): a per-thread delay
-// up to 10 minutes cannot keep a thread listed past that with nobody on it (#1578).
+// it (Codex 0.169.0), so without a way to tell that a Codex terminal window is open the receiver never waits less than 10
+// minutes with the margin (UNLOAD_LEAST_MS): a per-thread delay up to 10 minutes cannot keep a thread listed past that with
+// nobody on it (#1578). Every thread this receiver watches is on the background service that a terminal `codex` starts and
+// uses, and a terminal's own thread has the folder's delay (a `-c` override runs in a process of its own, never on the
+// daemon), so while at least one Codex terminal window process is alive a message needs no quiet wait at all: that process is the
+// sign a person is there (#1652). The process list is read only once a message is claimed (`readClients`), never while nothing waits.
 const UNLOAD_DEFAULT_SECS = 60
 const UNLOAD_MARGIN_MS = 5000
 const UNLOAD_LEAST_MS = 10 * 60_000
 const UNLOAD_MS = UNLOAD_LEAST_MS + UNLOAD_MARGIN_MS
+// How a Codex terminal window is told from the rest of the process list (#1652), and how long the list may take. A window is a
+// Codex program that is not the app-server and is not the npm launcher; one is known by its process id and start time, and the
+// same window is the same id with a start time within the drift hooks/session-liveness.ts allows.
+const AGENT_START_DRIFT_MS = 3000
+// The live run of 2026-11-26 timed the Windows list (PowerShell, CIM) at 1.6 to 5.7 s on a busy computer: a slow read is still an
+// answer, and one cut short sends the message to the 10-minute route.
+const CLIENTS_LIMIT_MS = 10_000
+const CLIENTS_ASK_LIMIT_MS = 11_000
+// A thread with no window found is kept off the short wait for this many ticks, so a waiting message costs one read in that time.
+const HOLD_TICKS = 10
+// A Codex program running as a server, not as a person's window: the command anywhere after the flags.
+const SERVER_COMMAND = /(?:^|[\s"])(?:app|exec|mcp)-server(?=\s|"|$)/
+// Codex's commands that run with no window of a person's (`codex --help`, 0.174): a one-shot run (`exec`, `e`, `review`) such as
+// another tool's, the account and setup tools, and the servers. Only the word right after the program is read: Codex reads that
+// word as its command, never as a prompt, so a prompt or a resumed session (`resume`, `fork`) is still a window. A command after
+// flags (`codex -c k=v exec`) is still read as a window, the wait the person's own window would give.
+const NO_WINDOW_COMMANDS = new Set(['exec', 'e', 'review', 'login', 'logout', 'mcp', 'plugin', 'app-server', 'remote-control', 'app', 'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'a', 'queue', 'archive', 'delete', 'migrate-rollouts', 'migrate-nfs-db', 'unarchive', 'exec-server', 'mcp-server', 'features', 'help'])
+const commandWord = argv => /^\s*(?:"[^"]*"|\S+)\s+([^\s"]+)(?=\s|$)/.exec(argv)?.[1] ?? ''
 // Whether a listing asked at `listedAt` is one wait after a stretch that began at `since`: the longer of `unloadMs` and the
 // folder's unload delay (`delay`) with its margin (#1578).
 export const isWaitOver = ({ since, listedAt, delay, unloadMs = UNLOAD_MS, unloadMarginMs = UNLOAD_MARGIN_MS }) =>
@@ -61,6 +85,113 @@ const OVER = new Set(['completed', 'interrupted', 'failed'])
 // same receipt would be refused again, whichever connection sent it.
 const SETTLED = new Set(['MESSAGE_EXPIRED', 'MESSAGE_DISMISSED', 'RECEIPT_CONFLICT', 'TARGET_MISMATCH', 'CLAIM_REQUIRED', 'INVALID_RECEIPT', 'INVALID_TEXT', 'UNKNOWN_FIELD', 'ACK_REQUIRED'])
 const RETRY_MAX_MS = 30_000
+
+// The Codex terminal windows among process rows `{ pid, started (ms), name, argv }` (`argv` a string, or null when unreadable).
+// A window is a row named `codex.exe` (Windows, any letter case) or `codex` (elsewhere) whose command line is readable, does not
+// name the app-server, and whose start time is known. Returns each window as `pid:started` and whether the list is unsure: a
+// Codex-named row that cannot be read, with no clear window found.
+export const terminalClients = (rows, platform = process.platform) => {
+  const isCodex = platform === 'win32' ? name => /^codex\.exe$/i.test(name) : name => name === 'codex'
+  const clients = []
+  let isUnsure = false
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!isCodex(String(row?.name ?? ''))) continue
+    const isKnown = typeof row.argv === 'string' && row.argv !== '' && Number.isSafeInteger(row.started) && row.started > 0 && Number.isSafeInteger(row.pid) && row.pid > 0
+    if (!isKnown) { isUnsure = true; continue }
+    // The app-server, and the servers the Codex desktop app starts (exec-server) or a host starts (mcp-server), are no window.
+    if (SERVER_COMMAND.test(row.argv) || NO_WINDOW_COMMANDS.has(commandWord(row.argv))) continue
+    clients.push(`${row.pid}:${row.started}`)
+  }
+  return { clients, isUnsure: isUnsure && clients.length === 0 }
+}
+// Whether one window is in both lists: the same process id, started within the drift of each other. A fresh list alone would take
+// any new Codex process for the window that was there, so the list read right before the start is held to the decision's.
+export const hasSameClient = (before, after) => {
+  const split = one => { const at = String(one).indexOf(':'); return [Number(String(one).slice(0, at)), Number(String(one).slice(at + 1))] }
+  return before.some(a => after.some(b => {
+    const [pidA, startA] = split(a), [pidB, startB] = split(b)
+    return pidA === pidB && Math.abs(startA - startB) <= AGENT_START_DRIFT_MS
+  }))
+}
+// Rows from the Windows query: `pid|creation time in 100 ns ticks since 1601|name|command line` per line; a line that is not
+// that is the rest of the line before it. Anything else, or nothing before the first row, is an unreadable list.
+export const parseWindowsClients = text => {
+  const rows = []
+  for (const line of String(text).split(/\r?\n/)) {
+    if (line.trim() === '') continue
+    const head = /^(\d+)\|(\d*)\|([^|]*)\|(.*)$/.exec(line)
+    if (head === null) {
+      if (rows.length === 0) throw new Error('CLIENTS_UNPARSABLE')
+      const last = rows[rows.length - 1]
+      if (last.argv !== null) last.argv += '\n' + line
+      continue
+    }
+    const started = head[2] === '' ? null : Number(BigInt(head[2]) / 10000n - 11644473600000n)
+    rows.push({ pid: Number(head[1]), started, name: head[3], argv: head[4] === '' ? null : head[4] })
+  }
+  return rows
+}
+// Rows from `ps -axo pid=,lstart=,command=` (C locale, UTC); only the Codex programs are kept.
+export const parsePsClients = text => {
+  const rows = []
+  for (const line of String(text).split('\n')) {
+    if (line.trim() === '') continue
+    const head = /^\s*(\d+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/.exec(line)
+    if (head === null) throw new Error('CLIENTS_UNPARSABLE')
+    const command = head[3]
+    // ps joins a program's words with spaces, unquoted. A command whose first word is the codex program is one. A `/codex` further
+    // on may be a program in a folder with a space, or another program's argument: that row is kept with no command line, so it
+    // reads as one that cannot be read (the 10-minute route), never as a window.
+    const isProgram = /^(?:\S*\/)?codex(?=\s|$)/.test(command)
+    if (!isProgram && !/\/codex(?=\s|$)/.test(command)) continue
+    const started = Date.parse(`${head[2]} UTC`)
+    rows.push({ pid: Number(head[1]), started: Number.isFinite(started) && started > 0 ? started : null, name: 'codex', argv: isProgram ? command : null })
+  }
+  return rows
+}
+// The process list, asked without blocking the page's server (never execFileSync), with a limit. Any error, timeout or odd output
+// rejects: the list cannot be read, and the receiver then keeps the 10-minute wait.
+const askProcesses = (program, args, options, parse) => new Promise((done, fail) => {
+  const child = execFile(program, args, { windowsHide: true, timeout: CLIENTS_LIMIT_MS, maxBuffer: 16_000_000, encoding: 'utf8', ...options }, (error, stdout) => {
+    if (error) { fail(error); return }
+    try { done(parse(stdout)) } catch (odd) { fail(odd) }
+  })
+  child.stdin?.end()
+})
+const readWindowsClients = () => {
+  const shell = win32.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  const script = '$ErrorActionPreference = \'Stop\'; Get-CimInstance Win32_Process -Filter "Name=\'codex.exe\'" | ForEach-Object { $t = if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { \'\' }; \'{0}|{1}|{2}|{3}\' -f $_.ProcessId, $t, $_.Name, $_.CommandLine }'
+  return askProcesses(shell, ['-NoProfile', '-NonInteractive', '-Command', script], { env: childEnvironment(process.env) }, parseWindowsClients)
+}
+const readMacClients = () => askProcesses('/bin/ps', ['-axo', 'pid=,lstart=,command='], { env: { ...childEnvironment(process.env), LC_ALL: 'C', TZ: 'UTC' } }, parsePsClients)
+const linuxTicks = stat => {
+  const close = stat.lastIndexOf(')')
+  const ticks = close < 0 ? NaN : Number(stat.slice(close + 2).trim().split(/\s+/)[19])
+  return Number.isSafeInteger(ticks) && ticks >= 0 ? ticks : null
+}
+// /proc/<pid>/cmdline holds the exact arguments, split by NUL. They are written as one line the way Windows gives it: an argument
+// with a space or a quote is put in quotes, so a prompt (`codex "review this"`) is not read as Codex's `review` command.
+export const linuxCommandLine = text => String(text).split('\0').filter(one => one !== '')
+  .map(one => /[\s"]/.test(one) ? `"${one.replace(/"/g, "'")}"` : one).join(' ') || null
+// Linux reads /proc, with no process started; the start time is worked out as scripts/local-lock.ts does.
+const readLinuxClients = async () => {
+  const self = linuxTicks(await readFile('/proc/self/stat', 'utf8'))
+  const rows = []
+  for (const id of (await readdir('/proc')).filter(name => /^[1-9]\d*$/.test(name))) {
+    let stat
+    try { stat = await readFile(`/proc/${id}/stat`, 'utf8') } catch { continue }
+    const open = stat.indexOf('('), close = stat.lastIndexOf(')')
+    if (open < 0 || close < open || stat.slice(open + 1, close) !== 'codex') continue
+    const ticks = linuxTicks(stat)
+    let argv = null
+    try { argv = linuxCommandLine(await readFile(`/proc/${id}/cmdline`, 'utf8')) } catch { /* Unreadable: the row says so. */ }
+    rows.push({ pid: Number(id), started: ticks === null || self === null ? null : Math.round(performance.timeOrigin + (ticks - self) * 10), name: 'codex', argv })
+  }
+  return rows
+}
+export const readCodexClients = () => process.platform === 'win32' ? readWindowsClients()
+  : process.platform === 'linux' ? readLinuxClients()
+    : process.platform === 'darwin' ? readMacClients() : Promise.reject(new Error('CLIENTS_UNSUPPORTED'))
 
 // The Codex program to run, as a path that needs no shell: an `.exe` or a script Node runs. On Windows
 // the `codex.cmd` an npm install leaves is a shell script, so its Codex script is run by Node instead,
@@ -201,23 +332,34 @@ export const testUnloadMs = (env, parent) => {
   return typeof pid === 'string' && /^[1-9]\d*$/.test(pid) && Number(pid) === parent && Number.isInteger(given) && given >= 100 && given <= 65_000 ? given : undefined
 }
 
+// What a page started by a test finds in the process list, in place of the real one: AGENT_BOARD_CODEX_CLIENTS is `none`, `one` or
+// `unreadable`, and is taken only from a test process that named itself (AGENT_BOARD_TEST_PID) and started the page, as testUnloadMs.
+export const testClients = (env, parent, platform = process.platform) => {
+  const pid = env.AGENT_BOARD_TEST_PID, given = env.AGENT_BOARD_CODEX_CLIENTS
+  if (!(typeof pid === 'string' && /^[1-9]\d*$/.test(pid) && Number(pid) === parent)) return undefined
+  if (given === 'none') return async () => []
+  if (given === 'one') return async () => [{ pid: 4242, started: 1_700_000_000_000, name: platform === 'win32' ? 'codex.exe' : 'codex', argv: 'codex' }]
+  if (given === 'unreadable') return async () => { throw new Error('CLIENTS_UNREADABLE') }
+  return undefined
+}
+
 const input = prompt => [{ type: 'text', text: prompt, text_elements: [] }]
 // Whether a user message item is this delivery's own: its echoed claim nonce, or the exact text it was sent with.
 const isOwnInput = (item, pending) => item.clientId === pending.nonce
   || Array.isArray(item.content) && item.content.some(part => part?.type === 'text' && part.text === pending.prompt)
 // Takes a board message for each Codex thread that a person has open and the board knows, and starts one turn with it when the
-// thread reads idle. The daemon tells nobody who is subscribed to a thread. It keeps a thread loaded while any client is subscribed
-// to it or a turn runs, and unloads it 60 s after the later of "the last one left" and "the last turn ended". So a listed thread
-// shows a person's client only when nothing else can have kept it loaded: the receiver counts a listing only if it was asked for
-// one wait after the start of an unbroken stretch in which the receiver itself saw all three, that it held no subscription to
-// the thread, that every status it read was idle, and that every listing showed the thread (`quiet`, `sample`). The wait is the
-// unload delay the daemon's config gives the thread's folder, with a margin, and never less than unloadMs; a delay that cannot be
-// read is not guessed. Whatever the receiver did not see starts the stretch again, and until one is complete the answer is
-// "nobody": the message stays queued. So the first message to a thread waits one wait after the receiver first sees it, and so
-// does each message after a delivery. The
+// thread reads idle. Every thread here is on the background service. The daemon tells nobody who is subscribed to a thread, so a
+// person's Codex window is told from the process list (#1652), read only when a message was claimed (`readClients`: 'decide' at the
+// claim, 'join' right before the receiver joins, 'start' before the turn when the board took long to answer). A window found: the
+// message goes in at the next tick of a thread that reads idle in a fresh look and listing, however recently its last turn ended.
+// No window: the claim goes back `unsent` and the thread is kept off this route for HOLD_TICKS ticks. A list that cannot be read:
+// the claim goes back and the thread waits as it did before the process check (`quiet`, `sample`): the daemon keeps a thread loaded
+// until 60 s (its config's delay for the folder) after the last client left or the last turn ended, so a listing one wait after
+// an unbroken stretch the receiver saw, with no subscription of its own and idle statuses, shows a person's client; the wait is
+// the folder's delay with a margin, never less than unloadMs, and a delay that cannot be read is not guessed. The
 // receiver stays out of the thread while it waits: it joins to deliver one message and leaves when the turn ends. A claim that
-// meets a busy thread or nobody attached is held here, never given back (the board's claim is the only change of owner), and the
-// board's own 30-minute limit on an unanswered message covers it. `threads()` gives the Codex session ids the board knows, and
+// meets a busy thread or nobody attached is given back or held here, and the board's own 30-minute limit on an unanswered message
+// covers it. `threads()` gives the Codex session ids the board knows, and
 // throws when it cannot tell. Nothing is started for a thread the daemon has not loaded, nothing goes through Codex's queue,
 // and a running turn is never steered (#1409).
 export const startCodexReceiver = ({
@@ -230,6 +372,8 @@ export const startCodexReceiver = ({
   // The tick that the watch's gap rule counts in on `now`'s clock (two looks more than two of these apart end the stretch). It
   // is tickMs, the timer's own period, except in a test that runs `now` faster than the wall clock to watch a whole wait (#1578).
   watchTickMs = tickMs,
+  // The process list, `async (why) => rows` (why: 'decide', 'join' or 'start'), and the platform its rows are read for (#1652).
+  clients = readCodexClients, platform = process.platform,
 }) => {
   if (typeof threads !== 'function' || !isAbsolute(executable ?? '')) throw new Error('EXPLICIT_EXECUTABLE_REQUIRED')
   const client = boardClient(boardUrl)
@@ -264,11 +408,36 @@ export const startCodexReceiver = ({
   // when there is none yet. last: when the last look was answered. marker: the thread's `updatedAt` at that look. epoch: counts
   // the breaks, so a look asked before one cannot start a stretch after it. sampling: the look in flight. delay: the longest
   // unload delay the daemon's config gave for the thread's folder at any look, or null while none could be read. The daemon fixes
-  // a thread's delay when it loads it, so a config that was changed to a shorter one since does not shorten the wait.
+  // a thread's delay when it loads it, so a config that was changed to a shorter one since does not shorten the wait. noneEpoch:
+  // the epoch a find of no window started, so a later find in the same stretch does not start it again.
   const quiet = new Map()
-  let hasConfigFailed = false
+  let hasConfigFailed = false, hasClientsFailed = false
+  // A thread kept off the short wait (#1652). none: a claim found no Codex window, so for HOLD_TICKS ticks it is not claimed on the
+  // short wait; unreadable: the process list could not be read. Either way the message waits as it did before the process check
+  // and goes with no check once that wait is over; for none the wait counts from the find (holdNone): a thread nobody holds is
+  // unloaded long before, so one still listed is held by a client the list does not show as a window, and a message never waits
+  // with no end. An unreadable hold ends when its message
+  // goes, and the next message reads the list again, so one failed read is not kept for the thread. A readable list that finds a
+  // window ends either.
+  const holds = new Map()
+  // How many times the daemon said it closed each thread: a close during a process-list read voids what the read decided.
+  const closes = new Map()
+  const holdOf = thread => {
+    const hold = holds.get(thread)
+    if (hold === undefined) return null
+    if (hold.until !== null && Date.now() >= hold.until) { holds.delete(thread); return null }
+    return hold
+  }
+  // No window found: the 10-minute wait starts again, since the stretch may have begun while a window was open, and a thread whose
+  // window just closed is still listed for its unload delay. Only the first such find in a stretch starts it again: a later one,
+  // after the hold ended and the list was read again, does not, so the message never waits with no end.
+  const holdNone = thread => {
+    holds.set(thread, { kind: 'none', until: Date.now() + HOLD_TICKS * tickMs })
+    const q = quietOf(thread)
+    if (q.noneEpoch !== q.epoch) { restart(thread); q.noneEpoch = q.epoch }
+  }
   const quietOf = thread => {
-    if (!quiet.has(thread)) quiet.set(thread, { since: null, last: null, marker: undefined, epoch: 0, sampling: null, delay: null })
+    if (!quiet.has(thread)) quiet.set(thread, { since: null, last: null, marker: undefined, epoch: 0, sampling: null, delay: null, isIdle: false, noneEpoch: null })
     return quiet.get(thread)
   }
   // Something happened that the stretch cannot span: it starts again at a later look.
@@ -292,7 +461,7 @@ export const startCodexReceiver = ({
   const read = async thread => {
     const found = (await ask('thread/read', { threadId: thread, includeTurns: false }))?.thread
     if (typeof found?.status?.type !== 'string') throw new Error('INVALID_OWNER_RESPONSE')
-    return { status: found.status.type, marker: found.updatedAt, cwd: found.cwd, isWaiting: Array.isArray(found.status.activeFlags) && found.status.activeFlags.includes('waitingOnApproval') }
+    return { status: found.status.type, marker: found.updatedAt, cwd: found.cwd, isEphemeral: found.ephemeral === true, isWaiting: Array.isArray(found.status.activeFlags) && found.status.activeFlags.includes('waitingOnApproval') }
   }
   // The unload delay the daemon's config gives a thread in this folder, project config included. Asked of the daemon, which reads
   // its own config: the receiver never opens the person's Codex home. A refusal or an odd answer is reported once per connection.
@@ -322,7 +491,7 @@ export const startCodexReceiver = ({
       const on = daemon, sentAt = now()
       if (q.last === null || sentAt - q.last > 2 * watchTickMs) restart(thread)
       // In the thread, or maybe in it, the receiver's own subscription keeps it loaded: nothing read now is about a person.
-      if (subs.get(thread)?.mayBeSubscribed === true) { q.since = null; return }
+      if (subs.get(thread)?.mayBeSubscribed === true) { q.since = null; q.isIdle = false; return }
       const epoch = q.epoch
       let seen = null, delay = null
       try { seen = await read(thread) } catch { /* A look that failed saw nothing. */ }
@@ -333,9 +502,12 @@ export const startCodexReceiver = ({
       // Asked in time and answered late: what the thread did meanwhile nobody saw, as when it is asked late.
       if (q.last !== null && at - q.last > 2 * watchTickMs) q.since = null
       q.last = at
+      // What the short route needs from a look: the thread read idle, is not an ephemeral one, and the receiver is out of it.
+      q.isIdle = seen?.status === 'idle' && seen.isEphemeral !== true && subs.get(thread)?.mayBeSubscribed !== true
       if (delay !== null) q.delay = Math.max(q.delay ?? 0, delay)
       const hasMarker = typeof seen?.marker === 'number' || typeof seen?.marker === 'string'
-      if (seen?.status !== 'idle' || delay === null || !hasMarker || q.epoch !== epoch || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) { q.since = null; return }
+      // An ephemeral thread (a short one the daemon closes by itself) is never a person's.
+      if (seen?.status !== 'idle' || seen.isEphemeral || delay === null || !hasMarker || q.epoch !== epoch || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) { q.since = null; return }
       if (seen.marker !== q.marker) { q.marker = seen.marker; q.since = null }
       if (q.since === null) q.since = at
     })().finally(() => { q.sampling = null })
@@ -344,18 +516,50 @@ export const startCodexReceiver = ({
   // A person's client is on the thread, or left it less than 60 s ago: the receiver is out of it, the stretch is unbroken up to
   // a look and a listing no older than two ticks, and that listing was asked for one wait after the stretch began. With no client
   // on it and no turn, the daemon would have unloaded the thread by then. Anything not known reads as nobody.
-  const isPersonAttached = thread => {
+  const isPersonAttached = (thread, floor = unloadMs) => {
     const q = quiet.get(thread), at = now()
+    // The short route (#1652) has no quiet wait: a person's Codex window is told by the process check in `deliver`, so a thread that
+    // reads idle in a fresh look and a fresh listing can take a message at the next tick, however recently a turn ended.
+    if (holdOf(thread) === null) {
+      return canTell && q !== undefined && q.last !== null && q.isIdle && subs.get(thread)?.mayBeSubscribed !== true && listing.set.has(thread)
+        && at - q.last <= 2 * watchTickMs && at - listing.sentAt <= 2 * watchTickMs
+    }
     if (!canTell || q === undefined || q.since === null || q.last === null || q.delay === null || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) return false
     if (at - q.last > 2 * watchTickMs || at - listing.sentAt > 2 * watchTickMs) return false
-    return isWaitOver({ since: q.since, listedAt: listing.sentAt, delay: q.delay, unloadMs, unloadMarginMs })
+    return isWaitOver({ since: q.since, listedAt: listing.sentAt, delay: q.delay, unloadMs: floor, unloadMarginMs })
   }
+  // The least wait for a thread: none (the folder's delay and the margin) unless it is on hold. No process list is read here: this
+  // runs on every board poll, whether or not a message waits.
+  const floorOf = thread => holdOf(thread) === null ? 0 : unloadMs
   // Whether a message can go to the thread now, from a fresh look and a listing no older than two ticks.
   const isReady = async thread => {
     if (!canTell || subs.get(thread)?.mayBeSubscribed === true) return false
     await sample(thread)
     if (now() - listing.sentAt > 2 * watchTickMs) try { await list() } catch { return false }
-    return isPersonAttached(thread)
+    // A thread with no Codex window found is not claimed on the short wait until its hold is over; the 10-minute wait still holds.
+    return isPersonAttached(thread, floorOf(thread))
+  }
+  // Whether the process list shows a Codex terminal window now: 'clients' (with their ids), 'none', or 'unreadable' (an error, a
+  // timeout, an odd answer, or a Codex row that cannot be read with no clear window). Told once per daemon connection.
+  const readClients = async why => {
+    try {
+      const rows = await new Promise((done, fail) => {
+        const timer = setTimeout(() => fail(new Error('CLIENTS_TIMEOUT')), CLIENTS_ASK_LIMIT_MS)
+        timer.unref?.()
+        Promise.resolve().then(() => clients(why)).then(value => { clearTimeout(timer); done(value) }, error => { clearTimeout(timer); fail(error) })
+      })
+      if (!Array.isArray(rows)) throw new Error('CLIENTS_UNKNOWN')
+      const found = terminalClients(rows, platform)
+      if (found.clients.length > 0) return { kind: 'clients', ids: found.clients }
+      if (!found.isUnsure) return { kind: 'none', ids: [] }
+    } catch { /* Told below. */ }
+    if (!hasClientsFailed) { hasClientsFailed = true; onError(new Error('CLIENTS_UNKNOWN')) }
+    return { kind: 'unreadable', ids: [] }
+  }
+  // Whether the window found before is still there: one window of the earlier list, by process id and start time.
+  const isWindowThere = async (before, why) => {
+    const found = await readClients(why)
+    return found.kind === 'clients' && hasSameClient(before, found.ids)
   }
   // Leaves the thread so the daemon can unload it once nobody else is on it. One leave at a time: a second caller gets the one in
   // flight. Only the daemon's own word that this connection is out, or a lost connection (the daemon drops its subscriptions),
@@ -594,6 +798,8 @@ export const startCodexReceiver = ({
     const thread = p.threadId, sub = subs.get(thread), one = attached.get(thread)
     if (value.method === 'thread/closed') {
       listing.set.delete(thread)
+      holds.delete(thread)
+      closes.set(thread, (closes.get(thread) ?? 0) + 1)
       restart(thread)
       // An unloaded thread has no turn left to stop. Whether this connection is still subscribed is asked, not assumed (the tick's leave).
       if (sub) { sub.interrupt = null; endWatch(sub) }
@@ -680,6 +886,8 @@ export const startCodexReceiver = ({
     listing = { set: new Set(), sentAt: 0 }
     quiet.clear()
     hasConfigFailed = false
+    hasClientsFailed = false
+    holds.clear()
     for (const sub of subs.values()) { sub.mayBeSubscribed = false; sub.hasLeaveFailed = false; sub.leaveFails = 0; if (sub.interrupt !== null) sub.interrupt.isAsking = false }
   }
   // close() waits for a connection still being made, and one that is made after close() began is ended at once (#1632).
@@ -793,7 +1001,7 @@ export const startCodexReceiver = ({
           // turn/start and never asks again: the board hands the message out again if it took the give-back, and expires the claim if
           // it did not.
           let canGiveBack = typeof unsent === 'function', giveBackAt = 0, wasBusy = false
-          const isShort = () => ackMs - (Date.now() - waitsSince) < Math.max(unloadMs, (quiet.get(thread)?.delay ?? 0) + unloadMarginMs) + 2 * tickMs
+          const isShort = () => ackMs - (Date.now() - waitsSince) < (holdOf(thread) === null ? 0 : Math.max(unloadMs, (quiet.get(thread)?.delay ?? 0) + unloadMarginMs)) + 2 * tickMs
           // 'back': the board took it; 'held': the board saved nothing, so the claim is still this delivery's; 'unknown': either may be so.
           const giveBack = async () => {
             if (!canGiveBack || Date.now() < giveBackAt) return 'held'
@@ -842,16 +1050,44 @@ export const startCodexReceiver = ({
           // The board's answer to `starting` holds for the whole claim: once it took the receipt, a busy read and a new join lead to
           // a fresh idle read and turn/start, with no second `starting`, whose answer, if lost, would end a claim the board has
           // already marked.
-          let said = null, settledAck = null, acking = null, finishAck = null
+          let said = null, startingSince = 0, ids = null, settledAck = null, acking = null, finishAck = null
           try {
           try {
+            // A message was claimed, so now the process list is read: is a Codex terminal window open? None: the claim goes back and
+            // the thread is held off the short wait. Unreadable: it goes back too, and the message waits as it did before this check,
+            // then goes with no check. A thread already on that wait reads no list (#1652).
+            const decide = async () => {
+              const found = await readClients('decide')
+              if (found.kind === 'clients') { ids = found.ids; holds.delete(thread); return true }
+              if (found.kind === 'none') holdNone(thread)
+              else holds.set(thread, { kind: 'unreadable', until: null })
+              return false
+            }
+            if (holdOf(thread) === null && !await decide() && await giveBack() !== 'held') return undefined
             for (;;) {
               for (;;) {
                 if (isDone()) return undefined
                 // A leave that was refused or got no answer is asked again while this claim waits: the receiver is still in the
                 // thread for all it knows, and stays out of it until it can tell a person from its own subscription.
                 if (sub.mayBeSubscribed) await leave(thread)
-                else if (!sub.isInUse && await isReady(thread) && !isDone()) break
+                else if (!sub.isInUse && await isReady(thread) && !isDone()) {
+                  // On the 10-minute wait (a list that could not be read, or no window found), the message goes with no check, as
+                  // before the check.
+                  if (ids === null && holdOf(thread) !== null) break
+                  // The short route needs a window found for this claim. The window the decision found must be the one there now,
+                  // right before the join: the same process id and start time; a reused id is not that window. A claim with none
+                  // found (it kept its claim when it gave back, and its hold ended while it waited) reads the list again here.
+                  // Nothing was joined or asked of Codex, so a claim with no window goes back.
+                  // The read may take seconds: a thread the daemon unloaded meanwhile (thread/closed) is not joined, which would load
+                  // it again, even when it is listed again by then.
+                  const closed = closes.get(thread) ?? 0
+                  if (ids === null ? await decide() : await isWindowThere(ids, 'join')) {
+                    if (isDone()) return undefined
+                    if ((closes.get(thread) ?? 0) === closed && listing.set.has(thread)) break
+                  }
+                  if (ids !== null) { ids = null; holdNone(thread) }
+                  if (await giveBack() !== 'held') return undefined
+                }
                 if (!isDone() && isShort() && await giveBack() !== 'held') return undefined
                 await nextEvent()
               }
@@ -880,8 +1116,15 @@ export const startCodexReceiver = ({
               // holds the claim as a busy read does (#1370). A busy store saved nothing, so the receiver stays in the thread and asks
               // again after the next event: leaving and joining again would start the daemon's delay, and with it a whole wait. A
               // claim that is done, or too short of time for that wait, leaves as a busy one does, so the wait above gives it back.
-              let status
+              let status, isWindowGone = false
               for (;;) {
+                // A starting receipt that took more than a tick may have outlived the window: the list is read once more, before the
+                // thread's last fresh read, so turn/start still follows that read with nothing asked between them (#1370). A turn the
+                // person starts while the list is read shows in that read.
+                if (said === 'said' && ids !== null && startingSince !== 0 && Date.now() - startingSince > tickMs) {
+                  startingSince = 0
+                  if (!await isWindowThere(ids, 'start')) { isWindowGone = true; break }
+                }
                 status = undefined
                 try { status = await readStatus() } catch (error) {
                   // A read that got no answer started nothing either: it is asked again. A refused or odd answer is a refusal.
@@ -889,6 +1132,7 @@ export const startCodexReceiver = ({
                   if (error?.message !== 'OWNER_TIMEOUT') throw error
                 }
                 if (status !== 'idle' || !isIdle() || isDone() || said === 'said') break
+                if (startingSince === 0) startingSince = Date.now()
                 said = await sayStarting()
                 if (said === 'end') return undefined
                 if (said === 'held') {
@@ -896,10 +1140,12 @@ export const startCodexReceiver = ({
                   await nextEvent()
                 }
               }
-              if (said === 'said' && status === 'idle' && isIdle() && !isDone()) break
+              if (!isWindowGone && said === 'said' && status === 'idle' && isIdle() && !isDone()) break
+              if (isWindowGone) { ids = null; holdNone(thread) }
               // Busy: the receiver leaves again, so the thread is not kept loaded for a person who has gone.
               release()
               await leave(thread)
+              if (isWindowGone && await giveBack() !== 'held') return undefined
               await nextEvent()
             }
             const answer = new Promise((done, reject) => {
@@ -917,6 +1163,8 @@ export const startCodexReceiver = ({
             // answer) may have been delivered. The claim nonce is the message id Codex records.
             let result, begunBefore = new Set()
             pending = state.pending
+            // The message goes now, so a hold for a list that could not be read ends with it: the next message reads the list again.
+            if (holds.get(thread)?.kind === 'unreadable') holds.delete(thread)
             // A request that cannot leave (the connection is already gone) starts nothing, as one the daemon refuses.
             const canLeave = daemon !== null && daemon.isOpen()
             try { result = await ask('turn/start', { threadId: thread, input: input(prompt), clientUserMessageId: message.nonce }, 10_000, () => { begunBefore = new Set([...pending.begun, ...watch.begun]) }) } catch (error) {
