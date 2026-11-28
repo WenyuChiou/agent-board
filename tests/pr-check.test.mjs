@@ -721,6 +721,32 @@ test('a verdict line that carries the words started new for this review but does
   assert.deepEqual(problems([codexBotState(pr.head), nested, line('by sonnet_900, lane example')], 'risk'), [])
 })
 
+test('a verdict line ends at any line break and needs a name with a letter or digit before its note, so a note on the next line or after no name never reads as started new for this review (#1974)', () => {
+  const pr = syntheticPr()
+  const problems = (comments, tier) => checkPr({ ...pr, body: `${body}Tier: ${tier}\nSurface: delivery\n`, prComments: comments }).problems.filter(item => item.check === 'review')
+  // Round 4: a note after a lone carriage return, or another line break, belongs to the next line, so the author's own
+  // name approves nothing.
+  for (const broken of ['\r', ' ', ' ']) {
+    const own = { body: `Review: APPROVE ${pr.head} by codex${broken}Assistant (started new for this review)` }
+    assert.equal(reviewOf(own.body).isFresh, undefined, JSON.stringify(broken))
+    assert.equal(reviewOf(own.body).reviewer, 'codex', JSON.stringify(broken))
+    const found = problems([codexBotState(pr.head), own], 'normal')
+    assert.equal(found.length, 1, JSON.stringify(broken))
+    assert.match(found[0].message, /cannot approve their own/)
+  }
+  // A verdict whose words are split over lines is no verdict.
+  assert.equal(reviewOf(`Review: APPROVE\n${pr.head} by codex (started new for this review), lane x`), null)
+  assert.equal(reviewOf(`Review:\nAPPROVE ${pr.head} by codex (started new for this review), lane x`), null)
+  assert.equal(reviewOf(`Review:\tAPPROVE\t${pr.head} by codex (read-only, started new for this review), lane x`).isFresh, true)
+  // The words after no name, or after a name with no letter or digit, cannot be read.
+  for (const name of ['', '-', '`', '​', '  ']) {
+    assert.equal(reviewOf(`Review: APPROVE ${pr.head} by ${name} (started new for this review), lane x`)?.isUnreadable, true, JSON.stringify(name))
+  }
+  assert.equal(reviewOf(`Review: APPROVE ${pr.head} by 小花 (started new for this review), lane x`).isFresh, true)
+  // Without the words such a line reads as before.
+  assert.deepEqual(reviewOf(`Review: APPROVE ${pr.head} by - (desktop), lane x`), { kind: 'APPROVE', sha: pr.head, reviewer: '- (desktop)' })
+})
+
 test('approval gate: a ready pull request requires a qualifying review approval on the exact head (#1219)', () => {
   const head = syntheticPr().head
   const basePr = { ...syntheticPr(), prComments: [] }
