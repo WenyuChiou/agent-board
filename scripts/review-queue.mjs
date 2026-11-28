@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { authorKey, isLaneReviewer, reviewOf, tierOf } from './pr-check.mjs'
+import { authorKey, codexStateOf, isLaneReviewer, isSurfaceNone, reviewOf, riskApprovalGap, tierOf } from './pr-check.mjs'
 import { bundleSources, safeLine } from './preflight.mjs'
 
 const usage = 'Usage: node scripts/review-queue.mjs [--repo owner/name] [--roadmap N] [--json] [--help]'
@@ -100,21 +100,6 @@ const utcMs = (date, time = '00:00:00') => {
 
 const codexLogin = /^chatgpt-codex-connector(?:\[bot\])?$/i
 const codexMarker = /<!--\s*codex-review-state:v1\s+(\{[\s\S]*?\})\s*-->/
-
-// The newest Codex state comment decides. One whose JSON cannot be read is passed over, so noise cannot hide a real state.
-const codexStateOf = (comments, head) => {
-  for (const { comment } of [...comments].reverse()) {
-    const json = codexLogin.test(comment.user?.login ?? '') ? (comment.body ?? '').match(codexMarker)?.[1] : null
-    if (!json) continue
-    let review
-    try { review = JSON.parse(json)?.code_review } catch { continue }
-    const sha = typeof review?.commit_sha === 'string' ? review.commit_sha.toLowerCase() : ''
-    if (!/^[0-9a-f]{7,40}$/.test(sha) || typeof review.has_unresolved_findings !== 'boolean') continue
-    if (!head.startsWith(sha)) return 'stale'
-    return review.has_unresolved_findings ? 'open' : 'clean'
-  }
-  return 'none'
-}
 
 // Codex also runs a security review, reported in the same state comment. When the paying account is out of usage the code
 // review still completes but the security review fails, so a reviewer needs to see that it never ran on this head.
@@ -250,10 +235,12 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     // A Reviewing comment past its 2 hours no longer holds the review; the queue names who let it lapse.
     const takenBy = taking && !isLapsed(taking.time, nowMs) ? taking.label : null
     const lapsedBy = taking && !takenBy ? taking.label : null
-    // What the review bots say about the head. A missing bot review never moves a pull request between groups.
+    // What the review bots say about the head. A missing bot review moves a pull request between groups only for a risk-tier
+    // approval by a reviewer started new for this review (#1974).
     const extras = {
-      bots: { codex: codexStateOf(comments, head), codexSecurity: codexSecurityOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
+      bots: { codex: codexStateOf(comments.map(entry => entry.comment), head), codexSecurity: codexSecurityOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
     }
+    const riskGap = latestHeadVerdict?.verdict.kind === 'APPROVE' ? riskApprovalGap(latestHeadVerdict.verdict, { tier: tierOf(pr.body), isRelease: /^chore\(release\):/.test(item.title), isSurfaceNone: isSurfaceNone(pr.body), codexState: extras.bots.codex }) : null
     if (ready && !reviewAfterReady) {
       if (!Number.isFinite(ready.time)) throw new Error('invalid Ready time')
       const hours = Math.max(0, nowMs - ready.time) / hour
@@ -264,9 +251,12 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
       // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
       // even when it arrives from the shared login. The lane is part of the identity, so "codex (e2e)" approving
       // "codex (phase1)" counts, while a verdict with no name keeps its old reading. Outside a release pull request a
-      // reviewer the lane started new for this review counts on every tier, as the PR check reads it (#1974). This checks
-      // only who the author is: whether the Codex review bot reviewed the head of a risk-tier pull request is not checked here.
+      // reviewer the lane started new for this review counts on every tier, as the PR check reads it (#1974).
       result.waitingForAuthor.push({ ...item, detail: 'approval is by the author', ...extras })
+    } else if (riskGap) {
+      // On the risk tier a reviewer started new for this review counts only once the Codex review bot reviewed the head,
+      // and never for a lane under risk-tier review, as the PR check reads it (RULES R2, #1974).
+      result.waitingForAuthor.push({ ...item, detail: riskGap === 'surface-none' ? 'approved by the lane; a lane under risk-tier review takes the maintainer route' : 'approved; the Codex review bot has not reviewed this head', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
       // A release must contain current main before it merges (docs/RELEASING.md, step 5), so an approved one that is behind waits.

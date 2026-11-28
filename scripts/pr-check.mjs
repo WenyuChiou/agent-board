@@ -787,6 +787,43 @@ const isFreshLine = line => {
 // author approving (RULES R2).
 export const isLaneReviewer = (review, tier, { isRelease = false } = {}) => review?.isFresh === true && !isRelease && (tier === 'light' || tier === 'normal' || tier === 'risk')
 
+const codexLogin = /^chatgpt-codex-connector(?:\[bot\])?$/i
+const codexMarker = /<!--\s*codex-review-state:v1\s+(\{[\s\S]*?\})\s*-->/
+
+// The Codex review bot's code review of a head, from the newest of its state comments that can be read (the caller lists
+// them oldest first): clean, open (findings left), stale (it names another head) or none. One whose JSON cannot be read
+// is passed over, so noise cannot hide a real state.
+export const codexStateOf = (comments, head) => {
+  for (const comment of [...(comments ?? [])].reverse()) {
+    const json = codexLogin.test(comment?.user?.login ?? '') ? (comment.body ?? '').match(codexMarker)?.[1] : null
+    if (!json) continue
+    let review
+    try { review = JSON.parse(json)?.code_review } catch { continue }
+    const sha = typeof review?.commit_sha === 'string' ? review.commit_sha.toLowerCase() : ''
+    if (!/^[0-9a-f]{7,40}$/.test(sha) || typeof review.has_unresolved_findings !== 'boolean') continue
+    if (!String(head ?? '').toLowerCase().startsWith(sha)) return 'stale'
+    return review.has_unresolved_findings ? 'open' : 'clean'
+  }
+  return 'none'
+}
+
+// `Surface: none`: the pull request is risk tier only because its lane is under risk-tier review after a P0 or P1.
+export const isSurfaceNone = body => {
+  const { filled } = surfaceLine(body ?? '')
+  return filled.length === 1 && filled[0].replace(/`/g, '').trim().toLowerCase() === 'none'
+}
+
+// What keeps a risk-tier approval by a reviewer started new for this review from counting, of the R2 conditions this
+// check can read (owner, 2026-11-28; #1974): `surface-none` for a lane under risk-tier review, which takes the maintainer
+// route, and `no-codex-review` until the Codex review bot reviewed the head (clean or with findings: whether they are
+// settled is the reviewer's to read). Null when it counts or the tier does not ask; a verdict ending `, maintainer route`
+// is read as before.
+export const riskApprovalGap = (review, { tier = null, isRelease = false, isSurfaceNone: isNone = false, codexState = 'none' } = {}) => {
+  if (tier !== 'risk' || isRelease || review?.kind !== 'APPROVE' || review.isFresh !== true || review.isMaintainerRoute === true) return null
+  if (isNone) return 'surface-none'
+  return codexState === 'clean' || codexState === 'open' ? null : 'no-codex-review'
+}
+
 const isBotUser = user => user?.type === 'Bot' || /\[bot\]$/i.test(user?.login ?? '')
 
 // Only team associations (OWNER, MEMBER, COLLABORATOR) and allowed apps may approve; no review bot or app is
@@ -812,13 +849,17 @@ const readReview = item => {
       }
       return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
     }
-    const isFresh = isFreshLine(body.slice(match.index).split(/\r?\n/, 1)[0])
+    const verdictLine = body.slice(match.index).split(/\r?\n/, 1)[0]
+    const isFresh = isFreshLine(verdictLine)
+    // The maintainer route's verdict ends `, maintainer route` (RULES R2).
+    const isMaintainerRoute = /,[ \t]*maintainer route[ \t.]*$/i.test(verdictLine)
     return {
       review: {
         kind,
         sha: match[2].toLowerCase(),
         ...(reviewer ? { reviewer } : {}),
         ...(isFresh ? { isFresh } : {}),
+        ...(isMaintainerRoute ? { isMaintainerRoute } : {}),
       },
       ignored: null,
     }
@@ -1462,7 +1503,7 @@ export const rounds = (comments, { body = '', title = '', number = null, isDraft
 
 export const verdict = (comments, head, options = {}) => {
   const output = result()
-  const { isDraft = false, authorAgent = null, number = null, tier = null, isRelease = false } = options
+  const { isDraft = false, authorAgent = null, number = null, tier = null, isRelease = false, isSurfaceNone: isNone = false } = options
   const reviews = []
   for (const comment of comments ?? []) {
     const { review, ignored } = readReview(comment)
@@ -1509,6 +1550,12 @@ export const verdict = (comments, head, options = {}) => {
   }
 
   output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, the current head.`)
+  const gap = riskApprovalGap(last, { tier, isRelease, isSurfaceNone: isNone, codexState: codexStateOf(comments, head) })
+  if (gap && !isDraft && number !== null) {
+    output.problems.push(gap === 'surface-none'
+      ? problem('review', 'a pull request of a lane under risk-tier review (`Surface: none`) takes the maintainer route; a reviewer the lane starts cannot approve it (RULES.md, R2).', 'hand it to the maintainer, whose verdict line ends `, maintainer route`.')
+      : problem('review', `the Codex review bot has not reviewed ${head.slice(0, 7)}; a reviewer started new for this review approves a risk-tier pull request only once it has (RULES.md, R2).`, 'comment `@codex review` and approve again once it has reviewed this head; after an hour without its review, hand the pull request to the maintainer route.'))
+  }
   return output
 }
 
@@ -1585,7 +1632,7 @@ export const checkPr = data => {
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
   else {
-    add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body), isRelease: isReleaseTitle(data.title ?? '') }))
+    add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body), isRelease: isReleaseTitle(data.title ?? ''), isSurfaceNone: isSurfaceNone(data.body) }))
     add(rounds([...data.prComments, ...(data.prReviews ?? [])], { body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
     const linkedComments = [...new Set(issue.issues)].flatMap((number, index) => (index === 0 ? data.issueComments : data.moreIssues?.[number]?.issueComments) ?? [])
     output.warnings.push(...roundWarnings({ body: data.body, prComments: data.prComments, prReviews: data.prReviews ?? [], issueComments: linkedComments }))
