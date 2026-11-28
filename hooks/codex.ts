@@ -1,4 +1,3 @@
-import { LANGS } from './i18n'
 import type { Strings } from './i18n'
 import { STRINGS } from './strings'
 import type { LocalAgent } from './local-agents'
@@ -127,27 +126,9 @@ export const folderProject = (cwd: unknown): string => {
 export const sessionTitle = (folder: string, fallback: string, distinct = ''): string =>
   line(folder || (distinct === '' ? fallback : `${fallback} · ${distinct}`))
 
-// The step a hook writes for a session that has reported none of its own (`codexLifecycle` here,
-// `localAgentLifecycle` in codex-local.ts). The view tells it from an agent's step by these words:
-// every language's, and those earlier releases wrote, which stay in old blocks (#612).
-const EARLIER_LIFECYCLE_STEPS = [
-  'Local session activity; Codex explicitly reports task steps',
-  '本機 session 活動狀態；任務步驟由 Codex 明確回報',
-  '本地 session 活动状态；任务步骤由 Codex 明确报告',
-  'Native session activity; the current agent explicitly reports task steps',
-  '原生 session 活動狀態；任務步驟由目前 agent 明確回報',
-  '原生 session 活动状态；任务步骤由当前 agent 明确报告',
-]
-export const LIFECYCLE_STEPS: ReadonlySet<string> = new Set([
-  ...LANGS.flatMap(lang => [
-    STRINGS[lang].codexLifecycle,
-    STRINGS[lang].codexLifecycleWorking,
-    STRINGS[lang].localAgentLifecycle,
-    STRINGS[lang].localAgentLifecycleWorking,
-  ]),
-  ...EARLIER_LIFECYCLE_STEPS,
-])
-export const isLifecycleStep = (text: string): boolean => LIFECYCLE_STEPS.has(text.replace(/^- \[[ x~?!]\] /, '').trim())
+// The hook's own placeholder step and its words live in lifecycle-steps.ts (view.ts and row-state.ts read them without pulling in this module's writers).
+export { isLifecycleStep, LIFECYCLE_STEPS } from './lifecycle-steps'
+import { isLifecycleStep } from './lifecycle-steps'
 
 export const codexLifecycleStep = (state: string, s: Strings): string =>
   state === 'working' ? `- [ ] ${s.codexLifecycleWorking}` : state === 'done' ? `- [x] ${s.codexLifecycle}` : `- [ ] ${s.codexLifecycle}`
