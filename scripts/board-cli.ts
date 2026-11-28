@@ -1678,7 +1678,7 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
       // archive is written, and the next try starts again from it.
       if (asking.length > 0 && read(path) !== text) return AGAIN
     }
-    const blocks = takeArchivable(text, now, undefined, s, isNow, span => kept.has(span.start), span => runs.has(span.start))
+    const blocks = takeArchivable(text, now, undefined, s, isNow, span => kept.has(span.start), span => runs.has(span.start), { staleMs: staleTimeoutMs(), gone: goneBlocksOf(parseProgress(text)) })
     const manual = !isNow && !isCleanUp && !isHandKeptMoveOn
       ? { text: blocks.text, entries: [], keys: [] }
       : takeManualDone(blocks.text, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now), s, isNow)
@@ -3240,7 +3240,7 @@ const boardJson = (days?: number, projectFilter?: string) => {
         if (t) archiveTexts.push(t)
       }
     }
-    finished = collectFinished(source, journalTexts, archiveTexts, days, now, projectFilter, home, isWin)
+    finished = collectFinished(source, journalTexts, archiveTexts, days, now, projectFilter, home, isWin, { staleMs: staleTimeoutMs(), gone: goneBlocksOf(parseProgress(source)), seen: lastSeen })
   }
   return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group, finished, queuedMessaging())
 }

@@ -647,20 +647,21 @@ const outrankedBy = (spans: readonly BlockSpan[], target: BlockSpan, visible: re
 // been quiet long enough (`isAskingArchiveDue`) and `mayTake` says its questions are kept outside
 // it, so the question goes on under Older unanswered (`archivableAsking` lists the ones to ask about).
 // A verified agent run needs neither an age wait nor a retained question.
-export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean, isAgentRun?: (span: BlockSpan) => boolean): Archived => {
+export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean, isAgentRun?: (span: BlockSpan) => boolean, foldOptions?: FoldOptions): Archived => {
   const lines = linesOf(text)
   const visible = readable(lines)
   const allSpans = scanBlocks(lines)
+  const fold: FoldOptions = { ...foldOptions, now }
   const isMidTurnDone = (span: BlockSpan): boolean => {
     if (span.state !== 'done') return false
     const peers = twinPeers(allSpans, span, visible)
-    const best = peers.length > 1 ? pickTwinWinner(peers, { now }).span : undefined
+    const best = peers.length > 1 ? pickTwinWinner(peers, fold).span : undefined
     return best !== undefined && best.start !== span.start && best.state === 'working'
   }
   const primary = allSpans.filter(span => span.isClosed && span.session !== keep && !isMidTurnDone(span) && (isAgentRun?.(span) === true || isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isAskingArchiveDue(span, now) && mayTake?.(span) === true))))
   const selected = new Set(primary)
   for (const winner of primary) {
-    for (const older of outrankedBy(allSpans, winner, visible, { now })) {
+    for (const older of outrankedBy(allSpans, winner, visible, fold)) {
       if (older.session === keep || selected.has(older)) continue
       if (!isAsking(visible, older) || (isAskingArchiveDue(older, now) && mayTake?.(older) === true)) {
         selected.add(older)

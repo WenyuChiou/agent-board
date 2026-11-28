@@ -95,6 +95,7 @@ export const sessionPushNote = (
   }
 
   const dupWinner = new Map(foldRuns(projects, { now }).duplicates.map(one => [one.task, one.winner?.task]))
+  const replied = (t: ProgressTask | undefined) => t?.auto?.replied !== undefined && Number.isFinite(t.auto.replied) ? t.auto.replied : -1
   for (const project of projects) {
     if (!isHereProject(project.name, here)) continue
     for (const task of project.tasks) {
@@ -103,43 +104,35 @@ export const sessionPushNote = (
       if (now - auto.updated > 7 * DAY) continue
       const from = asData(auto.agent || project.name)
       const title = asData(task.title)
-      if (dupWinner.has(task)) {
-        const winner = dupWinner.get(task)
-        const replied = (t: ProgressTask | undefined) => t?.auto?.replied !== undefined && Number.isFinite(t.auto.replied) ? t.auto.replied : -1
-        if (auto.state !== 'done' && auto.state !== 'ended' && !isTaskComplete(task) && winner?.auto?.state !== 'done' && !(winner && isTaskComplete(winner)) && replied(task) < auto.updated && replied(winner) < auto.updated) {
-          const seenWords = new Set((winner?.steps ?? []).filter(s => s.status === 'waiting').map(s => questionWords(s.text)))
-          for (const step of task.steps) {
-            if (step.status === 'waiting' && step.native === undefined && namesTarget(step.text, agentTokens, exactIds) && !seenWords.has(questionWords(step.text))) {
-              add(`ask:${auto.session}:${sha256(step.text).slice(0, 16)}`, s.othersPushQuestion(from, title, asData(step.text)))
-            }
-          }
-        }
-        continue
-      }
+      const isDup = dupWinner.has(task)
+      const winner = dupWinner.get(task)
+      const keySession = winner?.auto?.session ?? auto.session
+      const canAsk = !isDup || (auto.state !== 'done' && auto.state !== 'ended' && !isTaskComplete(task) && winner?.auto?.state !== 'done' && !(winner && isTaskComplete(winner)) && replied(task) < auto.updated && replied(winner) < auto.updated)
+      const seenWords = isDup ? new Set((winner?.steps ?? []).filter(st => st.status === 'waiting').map(st => questionWords(st.text))) : null
 
       for (const note of task.notes) {
         const match = HANDOFF.exec(note)
         if (match?.[1] !== undefined && namesTarget(match[1], agentTokens, exactIds)) {
-          add(`handoff:${auto.session}:${sha256(match[1]).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(match[1])))
+          add(`handoff:${keySession}:${sha256(match[1]).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(match[1])))
         }
       }
 
       for (const step of task.steps) {
         const transferred = TRANSFERRED.exec(step.text)
         if (transferred?.[1] !== undefined && namesTarget(transferred[1], agentTokens, exactIds, true)) {
-          add(`handoff:${auto.session}:${sha256(step.text).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(step.text)))
+          add(`handoff:${keySession}:${sha256(step.text).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(step.text)))
           continue
         }
         if (step.status === 'running' && namesTarget(step.text, agentTokens, exactIds)) {
-          add(`handoff:${auto.session}:${sha256(step.text).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(step.text)))
+          add(`handoff:${keySession}:${sha256(step.text).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(step.text)))
           continue
         }
-        if (step.status === 'waiting' && step.native === undefined && namesTarget(step.text, agentTokens, exactIds)) {
+        if (step.status === 'waiting' && step.native === undefined && namesTarget(step.text, agentTokens, exactIds) && canAsk && !seenWords?.has(questionWords(step.text))) {
           add(`ask:${auto.session}:${sha256(step.text).slice(0, 16)}`, s.othersPushQuestion(from, title, asData(step.text)))
         }
       }
 
-      if (auto.state === 'done' || isTaskComplete(task)) {
+      if (!isDup && (auto.state === 'done' || isTaskComplete(task))) {
         const isDelegatedRun = auto.isRun === true && auto.parent !== undefined
           && [ownSession.toLowerCase(), ownShort, ownResume?.toLowerCase() ?? ''].filter(Boolean).includes(auto.parent.toLowerCase())
         const otherTitle = task.title.trim().toLowerCase()

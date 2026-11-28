@@ -1027,3 +1027,85 @@ test('after folding to one row both writers keep writing and othersNote deduplic
   text = upsertAutoBlock(text, { ...hookMirror1WithTask, state: 'ended', updated: now - 1_000, tasks: [{ id: '1', subject: s.codexLifecycle, status: 'todo', waiting: null, blocked: null }] }, s)
   assert.equal(othersNote(parseProgress(text), ['Demo'], peer, now, s), null)
 })
+
+test('folded twin handoffs, takeArchivable staleMs, and collectFinished foldOptions (#1832 bot P1 fixes)', async () => {
+  const { blockId } = await import('../hooks/inbox.ts')
+  const { parseProgress } = await import('../hooks/parse.ts')
+  const { sessionPushNote } = await import('../hooks/others.ts')
+  const { takeArchivable } = await import('../hooks/blocks.ts')
+  const { collectFinished } = await import('../hooks/board-json.ts')
+
+  const s = STRINGS.en
+  const resume = '019a1832-7777-4222-8333-777777777777'
+  const localSession = createHash('sha256').update(`codex:${resume}`).digest('hex')
+  const localId = localSession.slice(0, 8)
+  const turnId = blockId('codex', resume)
+  const now = Date.parse('2026-11-24T16:10:00.000Z')
+  const tOld = new Date(now - 120_000).toISOString()
+  const tMid = new Date(now - 60_000).toISOString()
+  const t13h = new Date(now - 13 * 3600_000).toISOString()
+
+  // 1. Folded twin Handoff: / Transferred / running still push once, while losing done twin emits no finished notice.
+  const pushBoard = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=done updated=${tOld} resume=${resume} -->`,
+    '### Skill task',
+    '- [x] Done step - Handed to reviewer',
+    '- [>] Ping @reviewer for smoke check',
+    '> Handoff: @reviewer — review PR',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    `<!-- auto session=${turnId} agent=codex state=working updated=${tMid} resume=${resume} source=turns -->`,
+    '### Hook turn',
+    `- [ ] ${s.codexLifecycleWorking}`,
+    '> Handoff: @reviewer — review PR',
+    `<!-- /auto session=${turnId} -->`,
+    '',
+  ].join('\n')
+  const push = sessionPushNote(parseProgress(pushBoard), ['Demo'], { sessionId: 'rev12345', agent: 'reviewer', title: 'Review work', steps: ['- [?] Waiting for Skill task'] }, new Set(), now, s)
+  assert.ok(push.note)
+  assert.equal(push.keys.filter(k => k.startsWith('handoff:')).length, 3)
+  assert.equal(push.keys.some(k => k.startsWith('waited:')), false)
+
+  // 2. takeArchivable forwards custom staleMs into pickTwinWinner / outrankedBy.
+  const archiveBoard = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=done updated=${t13h} resume=${resume} -->`,
+    '### Old done skill',
+    '- [x] Done step',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    `<!-- auto session=${turnId} agent=codex state=working updated=${t13h} resume=${resume} source=turns -->`,
+    '### 13h working hook',
+    `- [ ] ${s.codexLifecycleWorking}`,
+    `<!-- /auto session=${turnId} -->`,
+    '',
+  ].join('\n')
+  assert.equal(takeArchivable(archiveBoard, now, undefined, s).entries.length, 2)
+  assert.equal(takeArchivable(archiveBoard, now, undefined, s, false, undefined, undefined, { staleMs: 24 * 3600_000 }).entries.length, 0)
+
+  // 3. collectFinished honours staleMs and gone when deduplicating twin blocks.
+  const { blockKey } = await import('../hooks/session-liveness.ts')
+  const finishedBoard = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=done updated=${tMid} resume=${resume} -->`,
+    '### Done skill twin',
+    '- [x] All done',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    `<!-- auto session=${turnId} agent=codex state=working updated=${tOld} resume=${resume} source=turns agentpid=43210 agentstarted=1700000 -->`,
+    '### Older working hook twin',
+    `- [ ] ${s.codexLifecycleWorking}`,
+    `<!-- /auto session=${turnId} -->`,
+    '',
+  ].join('\n')
+  assert.equal(collectFinished(finishedBoard, [], [], 7, now).length, 0)
+  assert.equal(collectFinished(finishedBoard, [], [], 7, now, undefined, '', false, { staleMs: 60_000 }).length, 1)
+  assert.equal(collectFinished(finishedBoard, [], [], 7, now, undefined, '', false, { gone: new Set([blockKey({ agent: 'codex', session: turnId, resume, agentPid: 43210, agentStarted: 1700000 })]) }).length, 1)
+})

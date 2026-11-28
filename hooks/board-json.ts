@@ -7,6 +7,7 @@ import type { StatusState } from './message-status'
 import { localDay, parseJournal } from './journal'
 import { isTaskComplete, parseProgress } from './parse'
 import { foldRuns } from './runs'
+import type { FoldOptions } from './runs'
 import { serveModel } from './serve'
 import type { QueuedMessaging } from './board-status'
 import type { GroupOptions, ServeAsk, ServeModel, ServeRow, ServeTurn } from './serve'
@@ -89,6 +90,7 @@ export const collectFinished = (
   projectFilter?: string,
   home: string = '',
   isWindows: boolean = false,
+  foldOptions?: FoldOptions,
 ): FinishedTask[] => {
   const fromDay = localDay(now - (days - 1) * 24 * 60 * 60 * 1000)
   const toDay = localDay(now)
@@ -140,7 +142,7 @@ export const collectFinished = (
 
   if (progressText) {
     const parsed = parseProgress(progressText)
-    const duplicates = new Set(foldRuns(parsed, { now }).duplicates.map(one => one.task))
+    const duplicates = new Set(foldRuns(parsed, { ...foldOptions, now }).duplicates.map(one => one.task))
     for (const project of parsed) {
       const proj = named(project.name)
       for (const task of project.tasks) {
