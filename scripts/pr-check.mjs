@@ -582,7 +582,7 @@ const claimBoundary = '[\\s`\'",:;()!?*<>\\[\\].]'
 // When a claim runs out: its "until" time, "2026-10-28 21:04 UTC" or "2026-10-28T21:04Z" (always read as UTC).
 // "waiting for a slot" runs out 7 days after its comment and a claim with no readable time after 2, the longest rule 3
 // allows; a comment with no date counts as still live.
-const claimEnd = comment => {
+export const claimEnd = comment => {
   const until = String(comment.body).match(/\buntil\s+(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/i)
   if (until) return Date.UTC(Number(until[1]), Number(until[2]) - 1, Number(until[3]), Number(until[4]), Number(until[5]))
   const written = writtenAt(comment)
