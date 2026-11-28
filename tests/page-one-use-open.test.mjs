@@ -1706,6 +1706,7 @@ test('a 503 busy from the board on either open route prints serveBusy, opens not
         assert.equal(all.includes(EN.serveLanWarn), false, label)
         if (runs[index][0] !== '--keys o') assert.equal(result.stdout.trim().split(/\r?\n/).at(-1), EN.serveBusy, label)
       })
+      assert.equal(calls.includes('/api/open-link'), true, `${route}: the link was asked for, so the busy answer is the board's`)
       assert.equal(calls.includes('/api/lan'), false, `${route}: a busy board is not asked for the phone's address`)
       assert.equal(existsSync(openLog), false, `${route}: no window is opened from here after a busy answer`)
       // A busy first request never goes on to /api/open; the command that does asks to hear whether the window loaded.
@@ -1720,6 +1721,52 @@ test('a 503 busy from the board on either open route prints serveBusy, opens not
     }
   })
   await Promise.all([runBusy('/api/open-link'), runBusy('/api/open')])
+})
+
+// Only the board's own busy answer stops the phone's handoff. A link request that fails some other
+// way (an error status, no answer in time) still says serveBusy here, and --lan hands the phone its
+// address as before, since that does not depend on a local link.
+test('a link request that fails without a busy answer still hands the phone its address', { timeout: 60_000 }, async () => {
+  await withCliFixture({ openResult: true, recordOpen: true, extraEnv: { AGENT_BOARD_TEST_PID: String(process.pid) } }, async ({ run, env, progress, script, openLog }) => {
+    const calls = []
+    const sockets = new Set()
+    const stub = createHttpServer((req, res) => {
+      calls.push(req.url)
+      req.resume()
+      req.on('end', () => {
+        const reply = (status, body) => {
+          res.writeHead(status, { 'content-type': 'application/json' })
+          res.end(JSON.stringify(body))
+        }
+        if (req.url === '/api/ping') return reply(200, { ok: true, path: progress, built: String(statSync(script).mtimeMs), allowResume: false, codexSend: true, pageAgo: null })
+        if (req.url === '/api/open-link') return reply(500, { error: 'synthetic-failure' })
+        if (req.url === '/api/lan') return reply(200, { url: `http://192.0.2.10:${stub.address().port}/?t=synthetic-lan` })
+        reply(404, {})
+      })
+    })
+    stub.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)) })
+    await new Promise(done => stub.listen(0, '127.0.0.1', done))
+    const { port } = stub.address()
+    writeAddressFile(run, progress, JSON.stringify({ pid: process.pid, port, url: `http://127.0.0.1:${port}/?t=synthetic-local`, path: progress, built: String(statSync(script).mtimeMs) }))
+    try {
+      for (const args of [['--serve', '--lan'], ['--html', '--lan']]) {
+        const label = args.join(' ')
+        const result = await runCli(script, args, env)
+        const all = `${result.stdout}${result.stderr}`
+        assert.equal(result.status, 1, `${label}: ${all}`)
+        assert.ok(result.stdout.includes(EN.serveBusy), `${label}: ${all}`)
+        assert.ok(result.stdout.includes(EN.serveLanAt(`http://192.0.2.10:${port}/?t=synthetic-lan`)), `${label}: the phone's address follows: ${all}`)
+        assert.ok(result.stdout.includes(EN.serveLanWarn), label)
+        assert.equal(all.includes('synthetic-local'), false, `${label}: the local page's token is not printed`)
+      }
+      assert.equal(calls.filter(url => url === '/api/lan').length, 2, 'each run asked for the phone address once')
+      assert.equal(calls.includes('/api/open'), false, 'no window is asked for without a link')
+      assert.equal(existsSync(openLog), false)
+    } finally {
+      for (const socket of sockets) socket.destroy()
+      await new Promise(done => stub.close(done))
+    }
+  })
 })
 
 // The kept-server line: when a reply may still be on its way, the board keeps the server it found
