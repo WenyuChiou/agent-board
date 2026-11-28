@@ -6517,6 +6517,11 @@ test('a Codex window whose prompt names a server command is still a window (#190
   ]
   for (const row of servers) assert.deepEqual(terminalClients([row], 'win32'), { clients: [], isUnsure: false }, row.argv)
   assert.deepEqual(terminalClients([{ pid: 80, started: at, name: 'codex', argv: '"/opt/My Tools/codex" -c k=v app-server' }], 'linux'), { clients: [], isUnsure: false })
+  // macOS's ps loses the quotes: `codex -C "/tmp/My Project" app-server` reads as `codex -C /tmp/My Project app-server`, so there a
+  // server's name anywhere after the program keeps the row off the windows (Greptile on #1990).
+  const { parsePsClients } = await import('../scripts/codex-receiver.mjs')
+  const ps = ['  901 Thu Nov 26 10:11:12 2026 /usr/local/bin/codex -C /tmp/My Project app-server', '  902 Thu Nov 26 10:11:13 2026 /usr/local/bin/codex -c k=v exec-server --listen stdio', '  903 Thu Nov 26 10:11:14 2026 /usr/local/bin/codex resume abc', ''].join('\n')
+  assert.deepEqual(terminalClients(parsePsClients(ps), 'darwin').clients, [`903:${Date.parse('Thu Nov 26 10:11:14 2026 UTC')}`])
 })
 
 test('a one-shot Codex run (codex exec) and Codex\'s other commands are not counted as a terminal window, while a prompt or a resumed session still is (#1652)', async () => {

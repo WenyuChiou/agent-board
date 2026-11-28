@@ -62,6 +62,9 @@ const HOLD_TICKS = 10
 // A Codex program running as a server, not as a person's window: its command word, after the program and its flags, is one of
 // these. A prompt or a flag's value that names one is not the command, so it is still a window (#1907).
 const SERVER_COMMANDS = new Set(['app-server', 'exec-server', 'mcp-server'])
+// macOS's `ps` joins the arguments with spaces and no quotes, so a flag's value with a space (`-C "/tmp/My Project"`) cannot be
+// told from the command after it: there a server's name anywhere after the program still means a server, the safe side.
+const SERVER_ANYWHERE = /(?:^|[\s"])(?:app|exec|mcp)-server(?=\s|"|$)/
 // Codex's flags that take their value as the next argument (`codex --help`, 0.174); a flag written `--flag=value`, or any other
 // flag, is one argument.
 const VALUE_FLAGS = new Set(['-c', '--config', '--enable', '--disable', '-i', '--image', '-m', '--model', '--local-provider', '-p', '--profile', '-s', '--sandbox', '-a', '--ask-for-approval', '-C', '--cd', '--add-dir'])
@@ -110,6 +113,7 @@ const RETRY_MAX_MS = 30_000
 // Codex-named row that cannot be read, with no clear window found.
 export const terminalClients = (rows, platform = process.platform) => {
   const isCodex = platform === 'win32' ? name => /^codex\.exe$/i.test(name) : name => name === 'codex'
+  const isServer = platform === 'darwin' ? argv => SERVER_ANYWHERE.test(argv) : argv => SERVER_COMMANDS.has(serverWord(argv))
   const clients = []
   let isUnsure = false
   for (const row of Array.isArray(rows) ? rows : []) {
@@ -117,7 +121,7 @@ export const terminalClients = (rows, platform = process.platform) => {
     const isKnown = typeof row.argv === 'string' && row.argv !== '' && Number.isSafeInteger(row.started) && row.started > 0 && Number.isSafeInteger(row.pid) && row.pid > 0
     if (!isKnown) { isUnsure = true; continue }
     // The app-server, and the servers the Codex desktop app starts (exec-server) or a host starts (mcp-server), are no window.
-    if (SERVER_COMMANDS.has(serverWord(row.argv)) || NO_WINDOW_COMMANDS.has(commandWord(row.argv))) continue
+    if (isServer(row.argv) || NO_WINDOW_COMMANDS.has(commandWord(row.argv))) continue
     clients.push(`${row.pid}:${row.started}`)
   }
   return { clients, isUnsure: isUnsure && clients.length === 0 }
