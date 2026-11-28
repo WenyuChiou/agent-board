@@ -139,7 +139,9 @@ const startLimitProbe = (): ((name: string) => void) => {
     const lastCall = last === undefined ? 'no last call' : `last call ${last.name} ${Math.round(now - last.at)} ms ago`
     console.error(`[#1786 pane timing] ${toFirst}, ${calls} calls, ${lastCall}, the ${LIMIT_PROBE_MS} ms timer fired ${late} ms late`)
   }, LIMIT_PROBE_MS)
-  limitProbe.unref()
+  // The test kit's timer may be a plain number with no `unref`, so call it only where it exists.
+  const timer: { unref?: () => void } = limitProbe as never
+  timer.unref?.()
   return name => {
     const at = performance.now()
     first ??= at
