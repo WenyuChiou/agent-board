@@ -909,6 +909,11 @@ const passQuestions = async ($: EngineInterface, path: string, projects: readonl
   }
 }
 
+// A question kept only for review (#155): its block is gone and it was not archived, so the pane
+// can only resolve it, keeping its copy in the ledger.
+const isReviewOnly = (item: { key: string }): boolean => item.key.startsWith('retained::')
+const reviewOnly = (view: View): WaitingItem[] => [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].filter(item => isReviewOnly(item) && item.canHide === false)
+
 const pollQuestions = async ($: EngineInterface, path: string, projects: readonly ProgressProject[], isSettled = false, captured: readonly PendingTurn[] = [], answeredTurns: readonly QuestionAnswerEvidence[] = [], resolveId?: string): Promise<boolean> => {
   const deadline = (await $.clock.now()) + HUNG_MS
   while (questionsRunning !== null) {
@@ -1363,7 +1368,11 @@ const poll = async ($: EngineInterface, canReplace = false): Promise<void> => {
         const frozen = cutOffScopes(projects, cutOffSpans(source, at - changedAt >= CUT_SETTLE_MS))
         const view = boardView(projects, [], await read($, mine), at, 0, {}, await wordsOf($), await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen, new Set(gone))
         const rows = [...view.stopped, ...view.recent]
-        const isDrawn = result.kind === 'changed'
+        // A kept copy's result stays while that copy is drawn, and a "changed" one also while a card
+        // with its id is: the session came back, and the result says why the copy went.
+        const isDrawn = isReviewOnly(result)
+          ? reviewOnly(view).some(question => question.key === result.key) || result.kind === 'changed' && [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? []), ...rows.flatMap(row => row.questions ?? [])].some(question => question.questionId === result.questionId)
+          : result.kind === 'changed'
           ? rows.some(row => result.key.startsWith(`${row.key}::`))
           : rows.flatMap(row => row.questions ?? []).some(question => question.questionId === result.questionId)
         if (!isDrawn) await update($, resolveResult, () => null)
@@ -5152,7 +5161,11 @@ export const register: Register = (on, options) => {
           const frozen = cutOffScopes(projects, cutOffSpans(source, progressChangedAt !== null && at - progressChangedAt >= CUT_SETTLE_MS))
           const gone = await pluginGoneBlocks($, projects)
           const view = boardView(projects, [], await read($, mine), at, 0, {}, s, await read($, hiddenAsks), {}, await read($, questionLedger), await questionProofsFor($, path), await pendingTurns($), frozen, gone)
-          const items = [...(view.provisional ?? []), ...view.stopped.flatMap(row => row.questions ?? []), ...view.recent.flatMap(row => row.questions ?? [])]
+          // A question kept only for review (#155) is closed only while that same copy is still kept: a
+          // live card that carries its id is its session's, and is never resolved from here.
+          const items = isReviewOnly(item)
+            ? reviewOnly(view).filter(question => question.key === item.key)
+            : [...(view.provisional ?? []), ...view.stopped.flatMap(row => row.questions ?? []), ...view.recent.flatMap(row => row.questions ?? [])]
           if (item.questionId === undefined || !items.some(question => question.questionId === item.questionId && question.text === item.text && question.note === item.note)) return result('changed')
           if (!(await pollQuestions($, path, projects, false, [], [], questionId))) return result(await savedResolution() ? 'resolved' : 'failed')
           return result((await read($, questionLedger)).records.some(record => record.id === item.questionId && record.isUnresolved === false) ? 'resolved' : 'failed')
