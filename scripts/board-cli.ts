@@ -23,8 +23,10 @@ import { boardLanguage, isLanguageOverridden, settingsLangOf, withBoardSettings 
 import type { SettingsLang } from '../hooks/board-settings'
 import { barStyleName, barStyleOf, nextBarStyle } from '../hooks/progress-bar'
 import type { BarStyle } from '../hooks/progress-bar'
-import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, manualStepRef, mergeBlock, scanBlocks, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
-import type { ConfirmedTask } from '../hooks/blocks'
+import { archivableAsking, countManualDone, isHandKeptMoveOn, confirmMatches, confirmTask, CUT_SETTLE_MS, cutBlockLines, cutOffBlocks, cutOffSpans, linesOf, manualStepRef, mergeBlock, scanBlocks, sectionOfProject, seenOf, takeArchivable, takeManualDone, takeTask, setManualStep } from '../hooks/blocks'
+import type { BlockSpan, ConfirmedTask } from '../hooks/blocks'
+import { applyArchiveUndo, applyUndo, recordUndo } from '../hooks/undo'
+import type { UndoRecord } from '../hooks/undo'
 import type { ProgressProject } from '../types'
 import { boardVersion, startServer } from './board-serve'
 import { moveLockAside, readQueuedMessaging } from './board-messaging'
@@ -1308,7 +1310,9 @@ const isSymlinkOrNonRegular = (file: string): boolean => {
 // when a file could not be written.
 // Entries are counted with their number: two done blocks with the same title and steps make
 // the same entry text, and both leave (#231).
-const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[] } | null | typeof AGAIN, now: number, onReplaced?: () => void): number | null => {
+type ArchiveCapture = { before: string; after: string; span?: BlockSpan; archiveFile?: string; entries: string[] }
+
+const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[]; span?: BlockSpan } | null | typeof AGAIN, now: number, onReplaced?: () => void, onArchived?: (details: ArchiveCapture) => void): number | null => {
   const archived = new Map<string, number>()
   const pendingFile = pendingArchivePath(path)
   let pending: PendingArchiveRecord[] = []
@@ -1318,8 +1322,12 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
     } catch {}
   }
   let didRemove = false
+  let archiveFile: string | undefined
+  const writtenAll: string[] = []
+  let lastCapture: ArchiveCapture | null = null
   const wrote = rewrite(path, (text, isLast) => {
     didRemove = false
+    lastCapture = null
     const currentBoardHash = createHash('sha256').update(text).digest('hex')
     const taken = take(text, isLast)
     if (taken === AGAIN) return AGAIN
@@ -1328,6 +1336,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
     if (taken.entries.length === 0) return taken.text
     didRemove = true
     const fresh = unwrittenEntries(taken.entries, archived)
+    let batchMissing: string[] = []
     if (fresh.length > 0 || archived.size > 0) {
       const month = archivePath(path, now)
       const part = partOf(month)
@@ -1336,6 +1345,8 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
       const kept = rewrite(part, past => {
         // A previous process may have saved the archive but failed to remove the task.
         const planned = nextPendingArchive([past, ...earlier], fresh, archived, pending, currentBoardHash)
+        archiveFile = part
+        batchMissing = planned.missing
         if (planned.missing.length === 0 && archived.size === 0) return past
         if (isSymlinkOrNonRegular(pendingFile)) {
           throw fileError(pendingFile, Object.assign(new Error('EEXIST: refusing to write symlinked or non-regular pending note'), { code: 'EEXIST' }))
@@ -1354,10 +1365,12 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
         return planned.missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${planned.missing.join('\n\n')}\n`
       })
       if (kept === null) return null
+      writtenAll.push(...batchMissing)
       for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     }
+    lastCapture = { before: text, after: taken.text, ...(taken.span === undefined ? {} : { span: taken.span }), ...(archiveFile === undefined ? {} : { archiveFile }), entries: [...writtenAll] }
     return taken.text
-  }, onReplaced)
+  }, () => { onReplaced?.(); if (lastCapture !== null) onArchived?.(lastCapture) })
 
   if (wrote !== null && didRemove && isRegularFile(pendingFile)) {
     try {
@@ -1404,8 +1417,38 @@ const undoJournal = (added: Map<string, number>, journal: string, writesBefore: 
   writes = writesBefore
 }
 
+// Only the latest Confirm done or Archive press in this server process can be undone (#566).
+let lastUndo: UndoRecord | null = null
+const undoProject = (text: string, project: string): string => project === s.uncategorized && sectionOfProject(seenOf(linesOf(text)), project) === null ? '' : project
+
+const undoLastPress = (): { ok: boolean; note: string } => {
+  const record = lastUndo
+  lastUndo = null
+  if (record === null) return { ok: false, note: s.undoNothing }
+  drainQuestionCaptures()
+  let reason: 'changed' | 'gone' | null = null
+  const wrote = rewrite(path, current => {
+    const reverted = applyUndo(current, record)
+    if (!reverted.ok) { reason = reverted.reason; return null }
+    if (record.kind === 'archive' && record.archiveFile !== undefined && record.archiveEntries.length > 0 && !applyArchiveUndo(read(record.archiveFile), record, s.archiveTitle).ok) {
+      reason = 'changed'
+      return null
+    }
+    return reverted.text
+  })
+  if (wrote === null) return { ok: false, note: reason === 'gone' ? s.undoGone : reason === 'changed' ? s.undoChanged : s.boardWriteFailed }
+  if (record.kind === 'archive' && record.archiveFile !== undefined && record.archiveEntries.length > 0) {
+    rewrite(record.archiveFile, past => { const cleaned = applyArchiveUndo(past, record, s.archiveTitle); return cleaned.ok ? cleaned.text : null })
+  } else if (record.kind === 'done' && record.journalFile !== undefined && record.journalLines.length > 0) {
+    try { undoJournal(new Map(record.journalLines), record.journalFile, writes) } catch {}
+  }
+  try { view() } catch {}
+  return { ok: true, note: s.undoneOne(record.title) }
+}
+
 // What a key's action does to the files, and the line the board shows after it.
 const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' | 'alert' }): string => {
+  lastUndo = null
   const done = (text: string): string => {
     if (fallback !== undefined) fallback.tone = 'done'
     return text
@@ -1420,6 +1463,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
   }
   if (action.type === 'done') {
     let confirmed: ConfirmedTask | null = null
+    let doneBefore = ''
     const added = new Map<string, number>()
     let isReplaced = false
     const writesBefore = writes
@@ -1432,6 +1476,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
         const gone = goneBlocksOf(parseProgress(text))
         const next = confirmTask(text, action.ref, now, s, lastSeen, staleTimeoutMs(), gone)
         if (next === null) return null
+        doneBefore = text
         const lines = next.entries.map(entry => journalLine(entry, now, s))
         rewrite(journal, past => {
           const missing = lines.filter(line => !past.split(/\r?\n/).includes(line))
@@ -1452,6 +1497,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     if (wrote === null && !isReplaced) undoJournal(added, journal, writesBefore)
     const found = confirmed as ConfirmedTask | null
     if (found === null || wrote === null || !confirmMatches(read(path), found.ref, s)) return s.boardLineChanged
+    if (isReplaced) lastUndo = recordUndo(doneBefore, found.text, { kind: 'done', title: action.title, project: undoProject(doneBefore, action.ref.project), session: action.ref.session, start: found.span.start, end: found.span.end, journalFile: journal, journalLines: [...added.entries()] })
     return done(s.confirmedDone(action.title))
   }
   if (action.type === 'tick') {
@@ -1505,6 +1551,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     const hasQuestions = refTasks(projects, action.ref).some(task => task.steps.some(step => step.status === 'waiting'))
     if (hasQuestions && (ledger === null || !archiveQuestionsKept(projects, action.ref, ledger))) return s.questionRetentionFailed
     let retentionFailed = false
+    let captured: ArchiveCapture | null = null
     const count = archiveOut(text => {
       const current = parseProgress(text)
       const asking = refTasks(current, action.ref).some(task => task.steps.some(step => step.status === 'waiting'))
@@ -1514,10 +1561,14 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
       }
       const gone = goneBlocksOf(current)
       return takeTask(text, action.ref, now, s, lastSeen, staleTimeoutMs(), gone)
-    }, now)
+    }, now, undefined, details => { captured = details })
     if (retentionFailed) return s.questionRetentionFailed
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
+    if (captured !== null) {
+      const { before, after, span, archiveFile, entries } = captured as ArchiveCapture
+      if (span !== undefined) lastUndo = recordUndo(before, after, { kind: 'archive', title: action.title, project: undoProject(before, action.ref.project), session: action.ref.session, start: span.start, end: span.end, ...(archiveFile === undefined ? {} : { archiveFile }), archiveEntries: entries })
+    }
     // Not through view(), which may rewrite the question list and throw: a list another process holds
     // for a moment must not change what is said about an archive that has already happened.
     try {
@@ -1727,6 +1778,7 @@ const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind:
     bulkTidyPreviews.delete(request.token)
     return { ok: true, note: s.tidyCancelled }
   }
+  if (request.kind === 'confirm') lastUndo = null
   if (request.kind === 'preview') {
     // A request that arrives over HTTP may carry any shape; only a selector that
     // validates is honoured, so a malformed one cannot silently mean "stopped".
@@ -1835,6 +1887,7 @@ const tidyNote = (count: number | null, isNow: boolean, finished = 0): string =>
   count === null ? s.boardWriteFailed : count === 0 ? (isNow ? s.tidyNothing : finished > 0 ? s.canArchive(finished) : s.tidyScheduledNothing) : s.tidyMoved(count)
 
 const tidy = (isNow = true): string => {
+  if (isNow) lastUndo = null
   let finished = 0
   const count = tidyCount(isNow, false, false, count => { finished = count })
   if (!isNow) moveOldMonths()
@@ -1845,6 +1898,7 @@ const tidy = (isNow = true): string => {
 // A person's Clean up moves the due hand-kept tasks as well as the normal sweep's blocks.
 // An unreadable completion record stops the whole press before any write.
 const cleanUp = (): string => {
+  lastUndo = null
   try {
     if (!isSeenText(read(seenPath(path)))) return s.cleanSeenUnreadable
   } catch {
@@ -2372,6 +2426,9 @@ const serveChild = (): void => {
       watch: { progress: path, inbox: join(dirname(path), 'progress-inbox') },
       pending: (isFresh = true) => pending(undefined, isFresh),
       act,
+      undo: undoLastPress,
+      hasUndo: () => lastUndo !== null,
+      dropUndo: () => { lastUndo = null },
       tidy,
       paste,
       clean: cleanUp,

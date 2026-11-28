@@ -15,10 +15,9 @@ const archiveName = (now = NOW) => {
   return `progress-archive-${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}.md`
 }
 
-const journalName = (now = NOW) => {
-  const date = new Date(now)
-  const month = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`
-  return `progress-journal-${month}-${String(date.getDate()).padStart(2, '0')}.md`
+const journalFileIn = dir => {
+  const name = readdirSync(dir).find(one => one.startsWith('progress-journal-') && one.endsWith('.md'))
+  return name ? join(dir, name) : null
 }
 
 const startBoard = async (initialProgress, now = NOW) => {
@@ -113,15 +112,15 @@ test('Undo after Confirm done puts the block back as it was', { timeout: 30_000 
     assert.equal(pressed.status, 200, pressed.body)
     assert.equal(pressed.json().canUndo, true)
     assert.notEqual(readFileSync(board.path, 'utf8'), before)
-    const journalPath = join(board.dir, journalName())
-    assert.ok(readFileSync(journalPath, 'utf8').includes('Finish synthetic report'))
+    const journalPath = journalFileIn(board.dir)
+    assert.ok(journalPath !== null && readFileSync(journalPath, 'utf8').includes('Finish synthetic report'))
 
     const undone = await board.call('POST', '/api/undo', {})
     assert.equal(undone.status, 200, undone.body)
     assert.equal(undone.json().ok, true)
     assert.match(undone.json().note, /Restored.*Ended Codex task/)
     assert.equal(readFileSync(board.path, 'utf8'), before)
-    const journalAfter = fs.existsSync(journalPath) ? readFileSync(journalPath, 'utf8') : ''
+    const journalAfter = journalPath && fs.existsSync(journalPath) ? readFileSync(journalPath, 'utf8') : ''
     assert.ok(!journalAfter.includes('Finish synthetic report'), `journal still kept entry: ${journalAfter}`)
 
     // Also verify Confirm done + Undo on a hand-kept stopped manual task when an auto block is not involved.
@@ -135,6 +134,18 @@ test('Undo after Confirm done puts the block back as it was', { timeout: 30_000 
     assert.equal(manualUndone.status, 200, manualUndone.body)
     assert.equal(readFileSync(board.path, 'utf8'), manualBefore)
   } finally { await board.close() }
+
+  // Regression P1-3: uncategorized manual task above first ## section restores after Confirm done.
+  const uncat = await startBoard(`# Progress\n\n### Uncategorized manual\n- [x] Done step\n- [ ] Open manual\n\n## beta\n### Beta task\n- [ ] Keep\n`)
+  try {
+    const beforeUncat = readFileSync(uncat.path, 'utf8')
+    const row = await uncat.rowOf('Uncategorized manual')
+    assert.ok(row && row.canConfirm)
+    assert.equal((await uncat.call('POST', '/api/act', { key: row.key, type: 'done', fp: row.fp })).status, 200)
+    const undone = await uncat.call('POST', '/api/undo', {})
+    assert.equal(undone.status, 200, undone.body)
+    assert.equal(readFileSync(uncat.path, 'utf8'), beforeUncat)
+  } finally { await uncat.close() }
 })
 
 test('Undo after Archive puts the task back and removes its archive entry', { timeout: 30_000 }, async () => {
@@ -147,7 +158,7 @@ test('Undo after Archive puts the task back and removes its archive entry', { ti
     const archived = await board.call('POST', '/api/act', { key: row.key, type: 'archive', fp: row.fp })
     assert.equal(archived.status, 200, archived.body)
     assert.equal(archived.json().canUndo, true)
-    assert.equal(readFileSync(board.path, 'utf8'), '')
+    assert.ok(!readFileSync(board.path, 'utf8').includes('Archiveable task'))
     const archFile = join(board.dir, archiveName())
     assert.ok(readFileSync(archFile, 'utf8').includes('Archiveable task'))
 
@@ -158,6 +169,32 @@ test('Undo after Archive puts the task back and removes its archive entry', { ti
     const archAfter = fs.existsSync(archFile) ? readFileSync(archFile, 'utf8') : ''
     assert.ok(!archAfter.includes('Archiveable task'), `archive still contains undone entry: ${archAfter}`)
   } finally { await board.close() }
+
+  // Regression P1-1 & P1-2: archiving a middle/first section and restoring after concurrent edit keeps section ordering and section boundaries.
+  const multi = await startBoard(
+    `# Progress\n\n## alpha\n### Alpha sibling\n- [ ] Keep\n\n${autoStopped('a1112222', 'alpha', 'Alpha gone')}\n\n## beta\n### Beta task\n- [ ] Open\n`,
+  )
+  try {
+    const rowA = await multi.rowOf('Alpha gone')
+    assert.equal((await multi.call('POST', '/api/act', { key: rowA.key, type: 'archive', fp: rowA.fp })).status, 200)
+    writeFileSync(multi.path, readFileSync(multi.path, 'utf8').replace('- [ ] Open', '- [ ] Concurrent beta edit'))
+    const resA = await multi.call('POST', '/api/undo', {})
+    assert.equal(resA.status, 200, resA.body)
+    const afterA = readFileSync(multi.path, 'utf8')
+    assert.ok(afterA.indexOf('Alpha gone') > afterA.indexOf('## alpha') && afterA.indexOf('Alpha gone') < afterA.indexOf('## beta'), afterA)
+  } finally { await multi.close() }
+
+  // Archiving the sole task in ## alpha puts ## alpha back before ## beta after a concurrent edit.
+  const soloOrder = await startBoard(`# Progress\n\n## alpha\n${autoStopped('a3334444', 'alpha', 'Alpha solo')}\n\n## beta\n### Beta task\n- [ ] Open\n`)
+  try {
+    const rowSolo = await soloOrder.rowOf('Alpha solo')
+    assert.equal((await soloOrder.call('POST', '/api/act', { key: rowSolo.key, type: 'archive', fp: rowSolo.fp })).status, 200)
+    writeFileSync(soloOrder.path, readFileSync(soloOrder.path, 'utf8').replace('- [ ] Open', '- [ ] Beta changed'))
+    const resSolo = await soloOrder.call('POST', '/api/undo', {})
+    assert.equal(resSolo.status, 200, resSolo.body)
+    const afterSolo = readFileSync(soloOrder.path, 'utf8')
+    assert.ok(afterSolo.indexOf('## alpha') >= 0 && afterSolo.indexOf('## alpha') < afterSolo.indexOf('## beta'), afterSolo)
+  } finally { await soloOrder.close() }
 })
 
 test('Undo refuses with the reason when the block changed after the press', { timeout: 30_000 }, async () => {
@@ -236,6 +273,20 @@ test('Undo after Archive refuses when the archive entry changed since', { timeou
     assert.equal(readFileSync(board.path, 'utf8'), afterArchiveProgress)
     assert.equal(readFileSync(archFile, 'utf8'), editedArchive)
   } finally { await board.close() }
+
+  // Regression P1-4: appending a paragraph to the archived entry must also refuse Undo.
+  const ext = await startBoard(`# Progress\n\n## api-gateway\n${autoStopped('f7a8b9c0', 'api-gateway', 'Extended archive')}\n`)
+  try {
+    const row = await ext.rowOf('Extended archive')
+    assert.equal((await ext.call('POST', '/api/act', { key: row.key, type: 'archive', fp: row.fp })).status, 200)
+    const archFile = join(ext.dir, archiveName())
+    const appendedArchive = `${readFileSync(archFile, 'utf8').trimEnd()}\n\n- [x] Appended note\n`
+    writeFileSync(archFile, appendedArchive)
+    const refused = await ext.call('POST', '/api/undo', {})
+    assert.equal(refused.status, 409, refused.body)
+    assert.equal(refused.json().note, 'Could not undo: that task changed since your press.')
+    assert.equal(readFileSync(archFile, 'utf8'), appendedArchive)
+  } finally { await ext.close() }
 })
 
 test('Undo after Confirm done or Archive keeps an unrelated block written meanwhile', { timeout: 30_000 }, async () => {

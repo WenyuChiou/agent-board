@@ -64,6 +64,10 @@ export type ServeOptions = {
   pending: (isFresh?: boolean) => PendingTurn[]
   // A tick or an archive, written the way the terminal board writes one: the line to show.
   act: (action: BoardAction) => string
+  // Restores the last Archive or Confirm done action when its block and archive entry stayed untouched (#566).
+  undo?: () => { ok: boolean; note: string }
+  hasUndo?: () => boolean
+  dropUndo?: () => void
   // Every finished task to the archive now: the line to show.
   tidy: () => string
   // A bulk archive in two steps: a preview names the count, a confirm archives it.
@@ -1387,15 +1391,23 @@ export const startServer = (o: ServeOptions): void => {
         if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})
+          o.dropUndo?.()
           return sendMessage({ id: body.id, target: action.connection.id, turn: action.connection.turn, text: action.text, ...(action.answers === undefined ? {} : { answers: action.answers }) }, action.connection.agent)
         }
         if (action.type === 'send') {
+          o.dropUndo?.()
           const sent = send(action.target, action.text, action.title, text(body.key))
           return json(res, sent.status, { note: sent.note })
         }
         const note = o.act(action) || o.s.pressNothing
         const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone, o.s.hideFailed, o.s.boardLineChanged, o.s.questionRetentionFailed, o.s.pressFailed].includes(note)
-        return json(res, isDone ? 200 : 409, { note })
+        const canUndo = isDone && (action.type === 'archive' || action.type === 'done') && o.hasUndo?.() === true
+        return json(res, isDone ? 200 : 409, { note, ...(canUndo ? { canUndo: true } : {}) })
+      }
+      if (url.pathname === '/api/undo') {
+        if (o.undo === undefined) return json(res, 409, { ok: false, note: o.s.undoNothing })
+        const result = o.undo()
+        return json(res, result.ok ? 200 : 409, result)
       }
       if (url.pathname === '/api/tidy') {
         const note = o.tidy()
@@ -1441,6 +1453,7 @@ export const startServer = (o: ServeOptions): void => {
         return json(res, note === o.s.boardWriteFailed ? 409 : 200, { note })
       }
       if (url.pathname === '/api/paste') {
+        o.dropUndo?.()
         const pasted = o.paste(text(body.text), text(body.reviewToken))
         return json(res, pasted.isAdded ? 200 : 409, { note: pasted.note, review: pasted.review })
       }

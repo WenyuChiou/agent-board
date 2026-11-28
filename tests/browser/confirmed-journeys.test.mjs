@@ -795,9 +795,10 @@ process.stdout.write('Redis it is; wiring it up now.\\n')
       await board.open(await startServer())
 
       // 1. Confirm done on a stopped row offers Undo for 8 s and restores the task when pressed.
-      await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
-      await board.openTask(stoppedTitle)
-      await page.getByRole('button', { name: 'Confirm done', exact: true }).click()
+      const rail = page.locator('#detail-rail')
+      const ensureOpen = async () => { if (!(await rail.isVisible())) await board.openTask(stoppedTitle) }
+      await ensureOpen()
+      await rail.getByRole('button', { name: 'Confirm done', exact: true }).click()
       const undoFromDone = page.locator('#detail-rail, article.lost').getByRole('button', { name: 'Undo', exact: true }).first()
       await undoFromDone.waitFor({ state: 'visible' })
       await undoFromDone.click()
@@ -807,8 +808,8 @@ process.stdout.write('Redis it is; wiring it up now.\\n')
       await board.task(stoppedTitle).waitFor({ state: 'visible' })
 
       // 2. Archive removes the stopped row, surfaces Undo on a lost result card, and restores both board and archive.
-      await board.openTask(stoppedTitle)
-      await page.getByRole('button', { name: 'Archive', exact: true }).click()
+      await ensureOpen()
+      await rail.getByRole('button', { name: 'Archive', exact: true }).click()
       const lostNotice = page.locator('article.lost > .press-result').filter({ hasText: `Archived “${stoppedTitle}”` })
       const undoFromArchive = lostNotice.getByRole('button', { name: 'Undo', exact: true })
       await undoFromArchive.waitFor({ state: 'visible' })
@@ -819,8 +820,8 @@ process.stdout.write('Redis it is; wiring it up now.\\n')
       await board.task(stoppedTitle).waitFor({ state: 'visible' })
 
       // 3. The Undo offer expires automatically after 8 s.
-      await board.openTask(stoppedTitle)
-      await page.getByRole('button', { name: 'Archive', exact: true }).click()
+      await ensureOpen()
+      await rail.getByRole('button', { name: 'Archive', exact: true }).click()
       const secondUndo = page.locator('article.lost').getByRole('button', { name: 'Undo', exact: true })
       await secondUndo.waitFor({ state: 'visible' })
       await secondUndo.waitFor({ state: 'detached', timeout: 12_000 })
