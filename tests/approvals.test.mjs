@@ -1835,6 +1835,15 @@ test('the moment between the check and the request is named in SECURITY.md', () 
   assert.match(readFileSync(new URL('../SECURITY.md', import.meta.url), 'utf8'), /take the port in the moment between the check and the request/)
 })
 
+// #1380: OpenCode's plugin reads the last assistant reply itself, so SECURITY.md may not say the reporters read no conversations.
+test('SECURITY.md says which reporters read the last reply and what the board keeps of it', () => {
+  const text = readFileSync(new URL('../SECURITY.md', import.meta.url), 'utf8')
+  assert.doesNotMatch(text, /model replies and permission decisions, read no conversations/)
+  assert.match(text, /OpenCode's plugin asks the client for the session's messages when a session goes idle and reads the last assistant reply/)
+  assert.match(text, /Codex, Grok Build and Cursor CLI hooks receive the reply on their input/)
+  assert.match(text, /keeps only the reply's closing question/)
+})
+
 test('the check stops at the discovery deadline when that comes before its 2 s', () => {
   let at = 1_000
   const given = []
