@@ -1316,6 +1316,7 @@ test('an inline "A or B?" choice whose first amount holds a comma offers no shor
   // A question frame before the amounts does not make them a list of three (#1978 review).
   expect(askOf('Do you want 1 day, 12 hours or 2 days?', '')).toMatchObject({ kind: 'reply', options: [] })
   expect(askOf('Do you want 3, 5 or 7?', '').options).toEqual(['3', '5', '7'])
+  expect(askOf('用 1 day、12 hours 还是 2 days？', '').options).toEqual(['1 day', '12 hours', '2 days'])
   // A comma before `or`, a comma after a lead-in and a listed choice keep their buttons.
   expect(askOf('Should the export keep 1 day, or 2 days?', '').options).toEqual(['1 day', '2 days'])
   expect(askOf('Tests pass, 3 or 5?', '').options).toEqual(['3', '5'])

@@ -208,8 +208,8 @@ const listBefore = (before: string): string[] | typeof UNCLEAR_AMOUNTS | null =>
   const isAsked = first !== items[0] || CLAUSE_OPENING.test(first)
   // `Do you want 1 day, 12 hours or 2 days?`: after a question frame, a comma between an amount
   // with a unit and a number may sit inside one amount, as in `amountBeforeComma`. Bare numbers
-  // (`Do you want 3, 5 or 7?`) and a lead-in of its own (`Which count, 3, 5 or 7?`) stay a list (#1936).
-  if (first !== items[0] && endsWithAmount(first) && !NUMBER.test(first.split(/\s+/).at(-1) ?? '') && NUMBER.test(items[1] ?? '')) return UNCLEAR_AMOUNTS
+  // (`Do you want 3, 5 or 7?`), a lead-in of its own (`Which count, 3, 5 or 7?`) and a `、` list stay a list (#1936).
+  if (!isListed && first !== items[0] && endsWithAmount(first) && !NUMBER.test(first.split(/\s+/).at(-1) ?? '') && NUMBER.test(items[1] ?? '')) return UNCLEAR_AMOUNTS
   if (first === items[0] && CLAUSE_OPENING.test(first)) {
     if (first.split(/\s+/).length > 4) return null
     items.shift()

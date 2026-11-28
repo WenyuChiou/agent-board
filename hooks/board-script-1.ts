@@ -4434,7 +4434,7 @@ export const LINES = [
 "    items.pop();",
 "  const first = firstOption(items[0] ?? \"\");",
 "  const isAsked = first !== items[0] || CLAUSE_OPENING.test(first);",
-"  if (first !== items[0] && endsWithAmount(first) && !NUMBER.test(first.split(/\\s+/).at(-1) ?? \"\") && NUMBER.test(items[1] ?? \"\"))",
+"  if (!isListed && first !== items[0] && endsWithAmount(first) && !NUMBER.test(first.split(/\\s+/).at(-1) ?? \"\") && NUMBER.test(items[1] ?? \"\"))",
 "    return UNCLEAR_AMOUNTS;",
 "  if (first === items[0] && CLAUSE_OPENING.test(first)) {",
 "    if (first.split(/\\s+/).length > 4)",
