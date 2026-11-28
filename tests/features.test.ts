@@ -5852,6 +5852,39 @@ test('a hand-kept task whose trailer is wrong or names no block still shows in n
   }
 })
 
+test('a hand-kept task whose trailer names a Claude block shows under Claude', () => {
+  const file = ['## demo', '<!-- auto session=ef56ab78 agent=claude state=working updated=2026-11-26T11:55:00Z -->', '### Port the parser', '- [~] Port it', '<!-- /auto session=ef56ab78 -->', '', '## Home', '### Check the synthetic mail <!-- session=ef56ab78 -->', '- [?] Reply to the synthetic mail', ''].join('\n')
+  const result = writerBoard(file)
+  const card = result.all.cards.find(one => one.task === 'Check the synthetic mail')
+  expect(card?.agent).toBe('claude')
+  expect(result.agents.find(group => group.agent === 'claude')?.cards.map(one => [one.task, one.isOwn])).toContainEqual(['Check the synthetic mail', true])
+  expect(result.needs.n).toBe(1)
+})
+
+test('a hand-kept task whose trailer matches blocks of two different AIs shows under no AI', () => {
+  const twoAgents = [
+    '## demo',
+    '<!-- auto session=ab12cd34 agent=codex state=working updated=2026-11-26T11:55:00Z -->',
+    '### Port the parser',
+    '- [~] Port it',
+    '<!-- /auto session=ab12cd34 -->',
+    '',
+    '## other',
+    '<!-- auto session=ab12cd34 agent=cursor state=working updated=2026-11-26T11:56:00Z -->',
+    '### Read the logs',
+    '- [~] Read them',
+    '<!-- /auto session=ab12cd34 -->',
+    '',
+  ]
+  const file = [...twoAgents, '## Home', '### Check the synthetic mail <!-- session=ab12cd34 -->', '- [?] Reply to the synthetic mail', ''].join('\n')
+  const result = writerBoard(file)
+  expect(result.agents.map(group => group.agent)).toEqual(expect.arrayContaining(['codex', 'cursor']))
+  const card = result.all.cards.find(one => one.task === 'Check the synthetic mail')
+  expect(card?.agent).toBe('')
+  expect(result.needs.n).toBe(1)
+  for (const group of result.agents) expect(group.cards.some(one => one.task === 'Check the synthetic mail')).toBe(false)
+})
+
 test('a trailer on a task inside an agent block is not a writer', () => {
   const file = ['## demo', '<!-- auto session=ab12cd34 agent=codex state=working updated=2026-11-26T11:55:00Z -->', '### Port the parser <!-- session=ab12cd34 -->', '- [~] Port it', '<!-- /auto session=ab12cd34 -->', ''].join('\n')
   const tasks = parseProgress(file).flatMap(project => project.tasks)
