@@ -27,7 +27,7 @@ import { liveBoardScript, pageDonePath } from '../hooks/live-page.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
-import { noAddress, readPrintedLink, wordingsOf } from './helpers/printed-link.mjs'
+import { noAddress, readPrintedLink, withoutSsh, wordingsOf } from './helpers/printed-link.mjs'
 import { immutableQuestionFiles } from '../scripts/question-files.ts'
 import { recentInboxFiles } from '../scripts/inbox-files.ts'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from '../scripts/server-runtime.ts'
@@ -6157,10 +6157,18 @@ const serveIn = () => {
     AGENT_BOARD_TEST_PID: String(process.pid),
   }
   const serve = (extra = []) =>
-    new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+    new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out, err) => {
+      if (error) return fail(error)
+      // The tests read stdout; stderr holds no link, address or token (#1970).
+      try { noAddress({ stdout: '', stderr: err }) } catch (refused) { return fail(refused) }
+      done(out)
+    }))
   // A start that fails exits 1 (#1292): its output and status, for the tests of that failure.
   const serveFailing = (extra = [], timeout = 20_000) =>
-    new Promise(done => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout }, (error, out) => done({ status: error ? error.code : 0, out })))
+    new Promise(done => execFile(process.execPath, [script, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout }, (error, out, err) => {
+      noAddress({ stdout: '', stderr: err })
+      done({ status: error ? error.code : 0, out })
+    }))
   // The one-use link a run printed, read whole and per stream (#1970): `out` is its stdout, or both
   // streams. null when it printed no address at all; any other address or token fails the test.
   const openUrlOf = (out, options = {}) => {
@@ -7009,13 +7017,14 @@ test('over SSH with a config folder variable set, plain agent-board opens the pa
       // A person's own profile can set an agent's config folder; that still picks the page.
       const env = { ...board.env, SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 22', SSH_TTY: '/dev/pts/0', CI: '', [name]: join(board.dir, 'own-config') }
       for (const key of ['DISPLAY', 'WAYLAND_DISPLAY', 'BROWSER']) delete env[key]
-      const out = await new Promise((done, fail) => {
-        execFile(process.execPath, ['--require', shim, board.script], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
+      const ran = await new Promise((done, fail) => {
+        execFile(process.execPath, ['--require', shim, board.script], { env, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(error) : done({ stdout, stderr })))
       })
       // Over SSH the forward note names the link, then the link stands alone on the last line.
       const sshRead = host => ({ wordings: [EN.boardPageLink], copies: { stdout: 2, stderr: 0 }, notes: [link => EN.serveSshHint(Number(new URL(link).port), host, link)] })
-      const openUrl = board.openUrlOf(out, sshRead('203.0.113.9'))
-      url = board.urlOf(out, sshRead('203.0.113.9'))
+      const openUrl = board.openUrlOf(ran, sshRead('203.0.113.9'))
+      url = board.urlOf(ran, sshRead('203.0.113.9'))
+      const out = ran.stdout
       assert.ok(openUrl && url, `${name}: the page's address is printed: ${JSON.stringify(out)}`)
       const port = Number(new URL(openUrl).port)
       const lines = out.trim().split('\n')
@@ -7023,18 +7032,20 @@ test('over SSH with a config folder variable set, plain agent-board opens the pa
       assert.equal(lines.at(-2), EN.serveSshHint(port, '203.0.113.9', openUrl), `${name}: the line before it says how to forward the port`)
       assert.doesNotMatch(out, /\u001b\[\?1049h|Opened Agent Board|No browser found/, `${name}: no terminal board, no window, no browser note`)
       const runAgain = extra => new Promise((done, fail) => {
-        execFile(process.execPath, ['--require', shim, board.script], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 20_000 }, (error, stdout) => (error ? fail(error) : done(stdout)))
+        execFile(process.execPath, ['--require', shim, board.script], { env: { ...env, ...extra }, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(error) : done({ stdout, stderr })))
       })
       // An SSH server on another port: the command must name it, or the forward reaches port 22.
-      const otherOut = await runAgain({ SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222' })
-      const otherOpenUrl = board.openUrlOf(otherOut, sshRead('-p 2222 203.0.113.9'))
+      const otherRun = await runAgain({ SSH_CONNECTION: '203.0.113.5 50000 203.0.113.9 2222' })
+      const otherOpenUrl = board.openUrlOf(otherRun, sshRead('-p 2222 203.0.113.9'))
+      const otherOut = otherRun.stdout
       const other = otherOut.trim().split('\n')
       assert.ok(otherOpenUrl && other.at(-1) === otherOpenUrl, otherOut)
       assert.equal(other.at(-2), EN.serveSshHint(port, '-p 2222 203.0.113.9', otherOpenUrl), `${name}: the SSH port is named`)
       // A page already open somewhere on the remote computer: the person here still needs the forward.
       await fetch(openUrl)
-      const openOut = await runAgain({})
-      const sshOpenUrl = board.openUrlOf(openOut, sshRead('203.0.113.9'))
+      const openRun = await runAgain({})
+      const sshOpenUrl = board.openUrlOf(openRun, sshRead('203.0.113.9'))
+      const openOut = openRun.stdout
       assert.ok(sshOpenUrl && new URL(sshOpenUrl).origin === new URL(openUrl).origin, openOut)
       const open = openOut.trim().split('\n')
       assert.equal(open.at(-1), sshOpenUrl, `${name}: over SSH the second run still ends with a fresh one-use link`)
@@ -7046,7 +7057,7 @@ test('over SSH with a config folder variable set, plain agent-board opens the pa
       assert.doesNotMatch(keys.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
       // The terminal board wraps the forward note at its 80 columns, before "open <link>".
       const wrapped = link => EN.serveSshHint(Number(new URL(link).port), '203.0.113.9', link).split(/ (?=open http)/)
-      const keysOpen = board.openUrlOf(keys.stdout, { wordings: [link => wrapped(link)[1]], notes: [link => wrapped(link)[0]] })
+      const keysOpen = board.openUrlOf(keys, { wordings: [link => wrapped(link)[1]], notes: [link => wrapped(link)[0]] })
       assert.ok(keysOpen && new URL(keysOpen).origin === new URL(openUrl).origin, keys.stdout)
       assert.doesNotMatch(keys.stdout, /\/open\/[\w-]+(?:http|Forward)/, `${name}: the address is not joined to another line`)
     } finally { await board.end([url]) }
@@ -8928,7 +8939,7 @@ const timer = setInterval(() => {
   const script = join(board.dir, 'agent-board.mjs')
   // Every home and settings folder an agent or the board reads is the fixture's own.
   const homes = ['HOME', 'USERPROFILE', 'TEMP', 'TMP', 'TMPDIR', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'CLAUDE_CONFIG_DIR', 'HERMES_HOME', 'CODEX_HOME', 'GROK_HOME', 'OPENCLAW_STATE_DIR']
-  const env = { ...process.env, ...Object.fromEntries(homes.map(key => [key, board.dir])), CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run'), ...agents }
+  const env = { ...withoutSsh(process.env), ...Object.fromEntries(homes.map(key => [key, board.dir])), CLAUDE_PROGRESS_FILE: '', NO_COLOR: '1', XDG_RUNTIME_DIR: join(board.dir, 'run'), ...agents }
   const ran = () => (existsSync(calls) ? readFileSync(calls, 'utf8').split('\n').filter(Boolean) : [])
   // A condition, not a fixed number of sleeps, advances each phase. The test's existing
   // deadline still bounds a missing signal; cancellation also releases the stand-in below.
@@ -8949,7 +8960,8 @@ const timer = setInterval(() => {
     update: () => {
       writeFileSync(script, `${readFileSync(script, 'utf8')}\n// synthetic-newer-release\n`)
     },
-    serve: () => new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', '--allow-resume'], { env, encoding: 'utf8', timeout: 30_000 }, (error, out) => (error ? fail(error) : done(out)))),
+    // Both streams, so the printed link is read per stream (#1970).
+    serve: () => new Promise((done, fail) => execFile(process.execPath, [script, '--serve', '--no-open', '--allow-resume'], { env, encoding: 'utf8', timeout: 30_000 }, (error, stdout, stderr) => (error ? fail(error) : done({ stdout, stderr })))),
     // Lets the reply go, waits until the page has none in flight, and closes it if it is still there.
     stop: async () => {
       writeFileSync(gate, 'go')
@@ -9251,10 +9263,11 @@ test('a newer --serve does not start a second page while the page it would repla
     await held.started()
     assert.equal((await board.call('GET', '/api/ping')).json().sending, 1)
     held.update()
-    const out = await held.serve()
+    const served = await held.serve()
+    const out = served.stdout
     // The page that is sending is the only address shown, with the note above it, and no second
     // page took its place in the address file.
-    const { link: kept } = readPrintedLink({ stdout: out, stderr: '' }, { wordings: [EN.serveAt] })
+    const { link: kept } = readPrintedLink(served, { wordings: [EN.serveAt] })
     assert.equal(new URL(kept).origin, board.url.origin, out)
     assert.ok(out.includes('A reply may still be on its way to an agent, so the board server that is already running is kept'), out)
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).url, board.url.href)
@@ -9265,15 +9278,17 @@ test('a newer --serve does not start a second page while the page it would repla
     // The address file 0.19.0 left beside progress.md is kept the same way while its page sends.
     const beside = join(board.dir, 'progress-serve.json')
     renameSync(board.served, beside)
-    const old = await held.serve()
-    const { link: oldLink } = readPrintedLink({ stdout: old, stderr: '' }, { wordings: [EN.serveAt] })
+    const oldRun = await held.serve()
+    const old = oldRun.stdout
+    const { link: oldLink } = readPrintedLink(oldRun, { wordings: [EN.serveAt] })
     assert.equal(new URL(oldLink).origin, board.url.origin, old)
     assert.ok(existsSync(beside) && !existsSync(board.served))
     renameSync(beside, board.served)
     // Once the reply is in, the page agrees to close and the newer copy starts its own.
     await held.release()
-    const next = await held.serve()
-    const { link: nextOpen } = readPrintedLink({ stdout: next, stderr: '' }, { wordings: [EN.serveAt] })
+    const nextRun = await held.serve()
+    const next = nextRun.stdout
+    const { link: nextOpen } = readPrintedLink(nextRun, { wordings: [EN.serveAt] })
     const url = JSON.parse(readFileSync(board.served, 'utf8')).url
     assert.equal(new URL(nextOpen).origin, new URL(url).origin, next)
     urls.push(url)
@@ -9412,14 +9427,15 @@ test("--serve --lan prints the page's network address, a QR code of it and that 
   const board = serveIn()
   const urls = []
   const serveLan = () =>
-    new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--lan'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? fail(error) : done(out))))
+    new Promise((done, fail) => execFile(process.execPath, [board.script, '--serve', '--no-open', '--lan'], { env: board.env, encoding: 'utf8', timeout: 20_000 }, (error, stdout, stderr) => (error ? fail(error) : done({ stdout, stderr }))))
   try {
     // The address line, then the phone's block: its address, its QR code and the warning (#1970).
     const read = { wordings: [EN.serveAt], lan: { at: [EN.serveLanAt], warn: [EN.serveLanWarn], none: [EN.serveLanNone, EN.serveLanFailed] } }
-    const out = await serveLan()
-    urls.push(board.urlOf(out, read))
+    const ran = await serveLan()
+    const out = ran.stdout
+    urls.push(board.urlOf(ran, read))
     assert.ok(urls[0], out)
-    const { lan } = readPrintedLink({ stdout: out, stderr: '' }, read)
+    const { lan } = readPrintedLink(ran, read)
     if (lan === null) {
       assert.ok(out.includes('This computer has no address on a local network'), out)
       t.skip('no local network address here')
@@ -9431,8 +9447,8 @@ test("--serve --lan prints the page's network address, a QR code of it and that 
     assert.ok(out.includes(EN.serveLanWarn), out)
     assert.ok(!out.includes('\u001b['))
     const again = await serveLan()
-    assert.equal(board.urlOf(again, read), urls[0], again)
-    assert.equal(readPrintedLink({ stdout: again, stderr: '' }, read).lan, lan, again)
+    assert.equal(board.urlOf(again, read), urls[0], again.stdout)
+    assert.equal(readPrintedLink(again, read).lan, lan, again.stdout)
   } finally {
     await board.end(urls)
   }

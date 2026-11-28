@@ -7,12 +7,12 @@ import test from 'node:test'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { liveBoardPage } from '../hooks/live-page.ts'
-import { readPrintedLink } from './helpers/printed-link.mjs'
+import { readPrintedLink, withoutSsh } from './helpers/printed-link.mjs'
 
 const closePage = async (url, script) => {
   if (script) {
     spawnSync(process.execPath, [script, '--stop'], {
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
@@ -74,7 +74,7 @@ test('synthetic opener spawn error produces an understandable manual-open instru
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
 
     assert.equal(result.status, 0, result.stderr)
@@ -107,7 +107,7 @@ test('opener failure in --serve outputs manual-open instruction to stderr and pr
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
 
     assert.equal(result.status, 0, result.stderr)
@@ -143,7 +143,7 @@ test('a board that tried the browsers and opened none is not followed by a secon
       encoding: 'utf8',
       timeout: 20000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
 
     assert.equal(result.status, 0, result.stderr)
@@ -177,7 +177,7 @@ test('--no-open prints the address without starting an opener and keeps stderr c
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
     assert.equal(resultHtml.status, 0, resultHtml.stderr)
     assert.equal(resultHtml.stderr, '')
@@ -190,7 +190,7 @@ test('--no-open prints the address without starting an opener and keeps stderr c
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
     assert.equal(resultServe.status, 0, resultServe.stderr)
     assert.equal(resultServe.stderr, '')
@@ -221,7 +221,7 @@ test('a launcher that starts or exits cleanly is not represented as confirmed br
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
     assert.equal(result.status, 0, result.stderr)
     // A launcher that said yes is no proof of a window: the window never loaded its page, so the
@@ -265,7 +265,7 @@ test('--serve asks openInBrowser for the app window like the plain command and -
         encoding: 'utf8',
         timeout: 15000,
         windowsHide: true,
-        env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1', CI: '' },
+        env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1', CI: '' },
       })
       assert.equal(result.status, 0, `${mode.join(' ') || 'plain'}: ${result.stderr}`)
       assert.match(result.stdout, /Opened Agent Board in your browser/, `${mode.join(' ') || 'plain'} stdout:\n${result.stdout}`)

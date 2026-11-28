@@ -8,7 +8,7 @@ import vm from 'node:vm'
 import { dockArguments, dockCommand, dockPlace, dockScript, isReachable, launchPlace, probeOf, windowPath, windowPlaceOf } from '../hooks/board-dock.ts'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { EN } from '../hooks/strings-en.ts'
-import { readPrintedLink } from './helpers/printed-link.mjs'
+import { readPrintedLink, withoutSsh } from './helpers/printed-link.mjs'
 
 const screen = (width, height = 1040, x = 0, y = 0) => ({ x, y, width, height })
 const address = 'http://127.0.0.1:4242/?t=abc'
@@ -214,7 +214,7 @@ test('#1084: the computer\'s page keeps the window place in a file of its own an
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${BOARD_SCRIPT}`)
     const result = spawnSync(process.execPath, [script, '--html', '--no-open'], {
       encoding: 'utf8', timeout: 15000, windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
     assert.equal(result.status, 0, result.stderr)
     const { link: openUrl } = readPrintedLink(result, { wordings: [EN.boardPageLink] })

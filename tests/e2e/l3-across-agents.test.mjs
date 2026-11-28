@@ -111,9 +111,11 @@ describe('L3 across agents and sessions', () => {
       assert.equal(windows(outputs[0]), 1)
       assert.equal(windows(outputs[2]), 0, outputs[2])
       // The agent's own way to open the page (--html, the same code /agent-board uses) points at the open window too.
-      const html = await keeping([['page-zero', '1']], () => command(world, ['--html']))
+      const htmlRun = await keeping([['page-zero', '1']], () => run(world, ['--html']))
+      assert.equal(htmlRun.status, 0, htmlRun.stderr || htmlRun.stdout)
+      const html = htmlRun.stdout
       assert.equal(windows(html), 0, html)
-      readPrintedLink({ stdout: html, stderr: '' }, { wordings: [EN.boardPageAlreadyOpenLink], secrets: [page.searchParams.get('t')] })
+      readPrintedLink(htmlRun, { wordings: [EN.boardPageAlreadyOpenLink], secrets: [page.searchParams.get('t')] })
       // A page that says it is leaving is no longer an open window: the next open starts one.
       assert.equal((await leave('page-zero')).status, 200)
       assert.equal(windows(await serving()), 1)

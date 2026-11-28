@@ -76,6 +76,13 @@ export const wordingsOf = (names, languages = [EN, ZH_TW, ZH_CN]) => languages.f
   return words[name]
 }))
 
+// Over SSH the board prints its forward note with the link (#1283), so a test that runs the
+// command on this computer leaves the two variables of the person's own terminal out (#1970).
+export const withoutSsh = env => {
+  const { SSH_CONNECTION: _connection, SSH_TTY: _tty, ...rest } = env
+  return rest
+}
+
 // A command that failed prints no address and no page token on either stream.
 export const noAddress = ({ stdout, stderr }, secrets = []) => {
   for (const [name, text] of [['stdout', stdout], ['stderr', stderr]]) holdsNothingElse(name, text, text, secrets)

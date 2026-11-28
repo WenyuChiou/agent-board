@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { bundleFiles, bundleFromDir } from '../scripts/bundle-text.mjs'
 import { privateRuntimeFolder, writePrivateRuntimeFile } from '../scripts/runtime-folder.ts'
 import { setupPrograms } from './helpers/setup-programs.mjs'
-import { readPrintedLink } from './helpers/printed-link.mjs'
+import { readPrintedLink, withoutSsh } from './helpers/printed-link.mjs'
 import { EN } from '../hooks/strings-en.ts'
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
@@ -30,11 +30,9 @@ const makeBox = () => {
   const tmp = join(box, 'tmp')
   const cache = join(box, 'npm-cache')
   for (const dir of [home, tmp, cache]) mkdirSync(dir)
-  // Over SSH the launcher prints the forward note before the link (#1283); the launchers here run
-  // on this computer, so the two variables of the person's own terminal are left out (#1970).
-  const { SSH_CONNECTION: _sshConnection, SSH_TTY: _sshTty, ...outer } = process.env
+  // Over SSH the launcher prints the forward note before the link (#1283): left out here (#1970).
   const env = {
-    ...outer,
+    ...withoutSsh(process.env),
     HOME: home, USERPROFILE: home, TEMP: tmp, TMP: tmp,
     CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
     CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),

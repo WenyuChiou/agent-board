@@ -6,7 +6,7 @@ import { basename, delimiter, dirname, extname, isAbsolute, join, relative, reso
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { recordSocketState } from './socket-state.mjs'
-import { readPrintedLink, wordingsOf } from '../helpers/printed-link.mjs'
+import { readPrintedLink, withoutSsh, wordingsOf } from '../helpers/printed-link.mjs'
 
 const execFileAsync = promisify(execFile)
 const repository = fileURLToPath(new URL('../..', import.meta.url))
@@ -51,7 +51,8 @@ const isolatedEnvironment = root => {
   }
   for (const directory of Object.values(directories)) mkdirSync(directory, { recursive: true })
   const env = {
-    ...process.env,
+    // Over SSH the command prints its forward note with the link (#1283, #1970).
+    ...withoutSsh(process.env),
     // A board this fixture starts opens no window and stops once this test process is gone (#959).
     AGENT_BOARD_TEST_PID: String(process.pid),
     // Every route the receivers name counts as shown live here: these journeys press Send on them.
