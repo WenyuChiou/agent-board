@@ -1623,14 +1623,50 @@ export const rounds = (comments, { body = '', title = '', number = null, isDraft
   return output
 }
 
+const VERDICT_LINE = /^Review:\s*(?:APPROVE|REQUEST CHANGES)\b/gmi
+const isOnHead = (sha, head) => {
+  const one = String(sha ?? '').toLowerCase()
+  const two = head.toLowerCase()
+  return one !== '' && (two.startsWith(one) || one.startsWith(two))
+}
+const timeOf = item => {
+  const at = Date.parse(typeof item === 'object' && item ? item.submitted_at ?? item.created_at ?? '' : '')
+  return Number.isNaN(at) ? null : at
+}
+// Where `verdict` would pass, the sequences it must still refuse (#1982, from the diagnosis of #1257). Only refusals
+// are added here, after the last verdict is chosen as before, so the check can refuse more than it did, never less.
+const approvalHole = (item, comments, head, { prReviews = [], isReviewsUnread = false } = {}) => {
+  const fix = 'address the request for changes, or post one approval line alone in a new comment: `Review: APPROVE <full head sha> by <reviewer>, lane <lane>`.'
+  if (isReviewsUnread) return { message: 'the GitHub reviews of this pull request could not be read, so a request for changes there is not known (RULES.md, R2).', fix: 'run the check again once GitHub answers.' }
+  if (typeof item === 'object' && item && item.state === 'CHANGES_REQUESTED') return { message: 'the approving verdict is in a GitHub review that requests changes; a request for changes never approves (RULES.md, R2).', fix }
+  const body = typeof item === 'string' ? item : item?.body ?? ''
+  if ((body.match(VERDICT_LINE) ?? []).length > 1) return { message: 'the approving comment has more than one `Review:` line, so its verdict cannot be read as one (RULES.md, R2).', fix }
+  const isComment = one => typeof one === 'string' || (typeof one === 'object' && one !== null && one.state === undefined)
+  if (typeof item === 'object' && item && item.state === 'APPROVED' && comments.some(one => one !== item && isComment(one) && isOnHead(reviewOf(one)?.sha, head))) {
+    return { message: 'a GitHub approval does not clear a verdict a comment gave on this head; the comments carry the verdict (RULES.md, R2).', fix }
+  }
+  const approvedAt = timeOf(item)
+  const held = (Array.isArray(prReviews) ? prReviews : []).some(review => {
+    if (!review || review === item || review.state !== 'CHANGES_REQUESTED' || !isOnHead(review.commit_id, head)) return false
+    const at = timeOf(review)
+    return approvedAt === null || at === null || at >= approvedAt
+  })
+  if (held) return { message: 'a GitHub review requested changes on this head no earlier than the approval; it holds until it is answered (RULES.md, R2).', fix }
+  return null
+}
+
 export const verdict = (comments, head, options = {}) => {
   const output = result()
   const { isDraft = false, authorAgent = null, number = null, tier = null, isRelease = false, isSurfaceNone: isNone = false } = options
   const reviews = []
+  // The item each verdict was read from, in the same order, for the refusals at the pass point (#1982).
+  const sources = []
   for (const comment of comments ?? []) {
     const { review, ignored } = readReview(comment)
-    if (review) reviews.push(review)
-    else if (ignored) {
+    if (review) {
+      reviews.push(review)
+      sources.push(comment)
+    } else if (ignored) {
       const who = safeText(String(ignored.who).replace(/\s+/g, ' ').trim())
       const reason = safeText(String(ignored.reason).replace(/\s+/g, ' ').trim())
       output.info.push(`review: ignored approval from ${who} (${reason}); only a team member or an allowed app may approve.`)
@@ -1697,6 +1733,10 @@ export const verdict = (comments, head, options = {}) => {
     output.problems.push(gap === 'surface-none'
       ? problem('review', 'a pull request of a lane under risk-tier review (`Surface: none`) takes the maintainer route; a reviewer the lane starts cannot approve it (RULES.md, R2).', 'hand it to the maintainer, whose verdict line ends `, maintainer route`; only a pull request of a lane under risk-tier review says `Surface: none`.')
       : problem('review', `the Codex review bot has not reviewed ${head.slice(0, 7)}; a reviewer started new for this review approves a risk-tier pull request only once it has (RULES.md, R2).`, 'comment `@codex review` and approve again once it has reviewed this head; after an hour without its review, hand the pull request to the maintainer route.'))
+  }
+  if (!gap && !isDraft && number !== null) {
+    const hole = approvalHole(sources.at(-1), comments ?? [], head, options)
+    if (hole) output.problems.push(problem('review', hole.message, hole.fix))
   }
   return output
 }
@@ -1774,7 +1814,7 @@ export const checkPr = data => {
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
   else {
-    add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body), isRelease: isReleaseTitle(data.title ?? ''), isSurfaceNone: isSurfaceNone(data.body) }))
+    add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body), isRelease: isReleaseTitle(data.title ?? ''), isSurfaceNone: isSurfaceNone(data.body), prReviews: data.prReviews ?? [], isReviewsUnread: Boolean(data.isReviewsUnread) }))
     add(rounds([...data.prComments, ...(data.prReviews ?? [])], { body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
     const linkedComments = [...new Set(issue.issues)].flatMap((number, index) => (index === 0 ? data.issueComments : data.moreIssues?.[number]?.issueComments) ?? [])
     output.warnings.push(...roundWarnings({ body: data.body, prComments: data.prComments, prReviews: data.prReviews ?? [], issueComments: linkedComments }))
