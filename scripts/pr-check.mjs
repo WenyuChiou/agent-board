@@ -781,9 +781,11 @@ const isFreshLine = line => {
   return notes.split(',').some(note => note.trim().toLowerCase() === 'started new for this review')
 }
 
-// On the light and normal tiers a reviewer the author's lane started new for this review may approve, whatever its
-// name; on the risk tier, or with no tier named, a reviewer named like the author is the author approving (RULES R2).
-export const isLaneReviewer = (review, tier) => review?.isFresh === true && (tier === 'light' || tier === 'normal')
+// On every named tier a reviewer the author's lane started new for this review may approve, whatever its name; on the
+// risk tier the Codex review bot's review of the same head is the other model family's check (owner, 2026-11-28;
+// #1974). A release pull request never takes one, and with no tier named a reviewer named like the author is the
+// author approving (RULES R2).
+export const isLaneReviewer = (review, tier, { isRelease = false } = {}) => review?.isFresh === true && !isRelease && (tier === 'light' || tier === 'normal' || tier === 'risk')
 
 const isBotUser = user => user?.type === 'Bot' || /\[bot\]$/i.test(user?.login ?? '')
 
@@ -1460,7 +1462,7 @@ export const rounds = (comments, { body = '', title = '', number = null, isDraft
 
 export const verdict = (comments, head, options = {}) => {
   const output = result()
-  const { isDraft = false, authorAgent = null, number = null, tier = null } = options
+  const { isDraft = false, authorAgent = null, number = null, tier = null, isRelease = false } = options
   const reviews = []
   for (const comment of comments ?? []) {
     const { review, ignored } = readReview(comment)
@@ -1498,10 +1500,10 @@ export const verdict = (comments, head, options = {}) => {
     return output
   }
 
-  if (authorAgent && last.reviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase()) && !isLaneReviewer(last, tier)) {
+  if (authorAgent && last.reviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase()) && !isLaneReviewer(last, tier, { isRelease })) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
-      output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer; on the light and normal tiers, a reviewer your lane starts new for this review says so on its verdict line ("started new for this review").'))
+      output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer; outside a release pull request, a reviewer your lane starts new for this review says so on its verdict line ("started new for this review").'))
     }
     return output
   }
@@ -1583,7 +1585,7 @@ export const checkPr = data => {
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
   else {
-    add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body) }))
+    add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body), isRelease: isReleaseTitle(data.title ?? '') }))
     add(rounds([...data.prComments, ...(data.prReviews ?? [])], { body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
     const linkedComments = [...new Set(issue.issues)].flatMap((number, index) => (index === 0 ? data.issueComments : data.moreIssues?.[number]?.issueComments) ?? [])
     output.warnings.push(...roundWarnings({ body: data.body, prComments: data.prComments, prReviews: data.prReviews ?? [], issueComments: linkedComments }))
