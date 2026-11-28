@@ -219,6 +219,8 @@ export const ZH_TW = {
     "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
     "keptData": "保留 {progress} 旁邊的資料與歷史紀錄（回答、提問、日誌、歸檔、工作階段）：",
+    "keptBoard": "也保留看板的工作階段紀錄與排隊中的訊息：",
+    "folderIfEmpty": "{folder}（資料夾若已清空也一併移除）",
     "applyRemove": "套用此移除變更：{command}",
     "restartRemove": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
     "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",

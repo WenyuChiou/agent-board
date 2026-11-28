@@ -181,6 +181,8 @@ export const ZH_CN: Strings = {
     "appliedRemoveOne": "已移除 {count} 个设置文件",
     "noInstalled": "没有已安装的 Agent Board 设置可供移除",
     "keptData": "保留 {progress} 旁的数据与历史记录（回答、提问、日志、归档、会话）：",
+    "keptBoard": "也保留看板的会话记录与排队中的消息：",
+    "folderIfEmpty": "{folder}（文件夹若已清空也一并移除）",
     "applyRemove": "应用此移除更改：{command}",
     "restartRemove": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
     "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
