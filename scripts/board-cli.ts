@@ -2996,12 +2996,13 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
 // command, `--html`, `--no-open`, the terminal board's `o`, the plugin, other agents' tools); each
 // of them only words it. 'opened': a window this run started loaded its page, so no link is
 // printed. 'link': a fresh one-use link, with why it is printed. 'refused': no way in from here,
-// with the next step; the command exits 1.
+// with the next step; the command exits 1. `isBusy`: the board said busy, so nothing else is
+// handed out either, the phone's address included.
 type LinkHint = 'plain' | 'already' | 'launched' | 'none'
 type OpenResult =
   | { kind: 'opened'; server: RunningServer }
   | { kind: 'link'; server: RunningServer; url: string; hint: LinkHint }
-  | { kind: 'refused'; server: RunningServer | null; note: string }
+  | { kind: 'refused'; server: RunningServer | null; note: string; isBusy: boolean }
 
 const isSshHere = (): boolean => Boolean(process.env.SSH_CONNECTION || process.env.SSH_TTY)
 
@@ -3012,21 +3013,21 @@ const mayLaunchHere = (): boolean => !args.includes('--no-open') && !isSshHere()
 const openBoard = async (mayLaunch: boolean): Promise<OpenResult> => {
   const failure: ServeFailure = {}
   const server = await ensureServer(failure)
-  if (server === null) return { kind: 'refused', server: null, note: serveFailureNote(failure) }
+  if (server === null) return { kind: 'refused', server: null, note: serveFailureNote(failure), isBusy: false }
   // The link comes first, so every outcome below has a way in, or says why not.
   const link = await requestOpenLink(server.url)
-  if (link.kind === 'busy') return { kind: 'refused', server, note: s.serveBusy }
+  if (link.kind === 'busy') return { kind: 'refused', server, note: s.serveBusy, isBusy: true }
   if (link.kind === 'unsupported') {
     // A page from before one-use links is kept, never restarted: a reply may be on its way.
     if (mayLaunch && (await launchOlderPage(server.url))) return { kind: 'opened', server }
-    return { kind: 'refused', server, note: s.serveKeptNoLink }
+    return { kind: 'refused', server, note: s.serveKeptNoLink, isBusy: false }
   }
   if (!mayLaunch) return { kind: 'link', server, url: link.url, hint: 'plain' }
   // A page in front: no second window, and the link is there in case it is not the person's.
   const page = await openPageState(server)
   if (page === 'open') return { kind: 'link', server, url: link.url, hint: 'already' }
   const launch = await launchThroughBoard(server.url, page === 'none')
-  if (launch === 'busy') return { kind: 'refused', server, note: s.serveBusy }
+  if (launch === 'busy') return { kind: 'refused', server, note: s.serveBusy, isBusy: true }
   if (launch === 'redeemed') return { kind: 'opened', server }
   if (launch === 'launched') return { kind: 'link', server, url: link.url, hint: 'launched' }
   if (page === 'unkeyed') return { kind: 'link', server, url: link.url, hint: 'already' }
@@ -3069,8 +3070,9 @@ const serveBoard = async (): Promise<void> => {
     const note = linkNote(opened.url, opened.hint)
     if (note !== s.boardPageLink(opened.url)) process.stderr.write(`${note}\n`)
   }
-  // The phone's address does not depend on a local link: an older page still hands it over.
-  if (args.includes('--lan') && opened.server !== null) await showLan(opened.server.url)
+  // The phone's address does not depend on a local link: an older page still hands it over. A busy
+  // board hands out nothing, so the person runs the command again in a moment.
+  if (args.includes('--lan') && opened.server !== null && !(opened.kind === 'refused' && opened.isBusy)) await showLan(opened.server.url)
 }
 
 // The terminal board's `o`: one line, so no two addresses run together on its screen.
@@ -3099,8 +3101,9 @@ const openPageSurface = async (): Promise<void> => {
   } else {
     process.stdout.write(`${linkNote(opened.url, opened.hint)}\n`)
   }
-  // `--lan` without `--serve`: the phone's address follows, whatever happened here (#868).
-  if (args.includes('--lan') && opened.server !== null) await showLan(opened.server.url)
+  // `--lan` without `--serve`: the phone's address follows, whatever happened here (#868), unless
+  // the board said busy.
+  if (args.includes('--lan') && opened.server !== null && !(opened.kind === 'refused' && opened.isBusy)) await showLan(opened.server.url)
 }
 
 const stopBoard = async (): Promise<void> => {
