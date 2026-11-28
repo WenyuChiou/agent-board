@@ -62,8 +62,9 @@ const fixture = async (folder, fn) => {
     }
     const one = id => state().messages.find(message => message.id === id)
     // A turn start that hands the message over (a slow store defers the first one by design).
-    const handOver = async id => {
-      await hookOrDeferred(() => call('PreInvocation'), () => one(id).status === 'accepted')
+    // `fields` changes the hook's input, as `call` does (an invocation number other than the turn's first, for one).
+    const handOver = async (id, fields = {}) => {
+      await hookOrDeferred(() => call('PreInvocation', fields), () => one(id).status === 'accepted')
       assert.equal(one(id).status, 'accepted')
       return one(id).nonce
     }
@@ -249,6 +250,58 @@ for (const [surface, folder] of SURFACES) {
     f.say(`ACK ${second}`)
     const before = JSON.stringify(f.state().messages)
     f.stop('second-message', false)
+    assert.equal(JSON.stringify(f.state().messages), before)
+  }))
+
+  // #1622: the turn's input may be written before the hand-over (the order the live run shows). Such a turn ends at the next
+  // USER_INPUT, so a turn with no reply whose turn end could not read the transcript is not acknowledged by the next turn.
+  const input = { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Synthetic prompt' }
+  const blindStop = f => {
+    renameSync(f.transcript, `${f.transcript}.away`)
+    assert.match(f.call('Stop').stderr, /^board: mailbox failed \(TRANSCRIPT_UNREADABLE\)$/m)
+    renameSync(`${f.transcript}.away`, f.transcript)
+  }
+
+  test(`${surface}: a turn whose input came before the hand-over, with no reply and a turn end that cannot read the transcript, is not acknowledged by the next turn's ACK`, () => fixture(folder, async f => {
+    f.say('An earlier turn.')
+    f.append(input)
+    f.seed('input-first')
+    const nonce = await f.handOver('input-first')
+    // The turn works but writes no reply, then its turn end cannot read the transcript, so the claim is kept.
+    f.append({ source: 'SYSTEM', type: 'TOOL_RESULT', content: 'Synthetic tool output' }, { source: 'MODEL', type: 'PLANNER_RESPONSE', content: '   ' })
+    blindStop(f)
+    assert.equal(f.one('input-first').status, 'accepted')
+    // The next turn hands nothing over; its reply's first line is the kept claim's ACK line.
+    f.say(`ACK ${nonce}`)
+    const before = JSON.stringify(f.state().messages)
+    f.stop('input-first', false)
+    assert.equal(JSON.stringify(f.state().messages), before)
+  }))
+
+  test(`${surface}: a turn whose input came before the hand-over is acknowledged by its own reply, after a turn end that cannot read the transcript too`, () => fixture(folder, async f => {
+    f.say('An earlier turn.')
+    f.append(input)
+    f.seed('input-first-ack')
+    const nonce = await f.handOver('input-first-ack')
+    f.append({ source: 'MODEL', type: 'PLANNER_RESPONSE', content: `ACK ${nonce}` })
+    blindStop(f)
+    assert.equal(f.one('input-first-ack').status, 'accepted')
+    f.say('A later turn about something else.')
+    f.stop('input-first-ack', true)
+    assert.equal(f.one('input-first-ack').status, 'acknowledged')
+    assert.equal(f.one('input-first-ack').reply, `ACK ${nonce}`)
+  }))
+
+  test(`${surface}: a hand-over at a later invocation of a turn, with no reply after it and a turn end that cannot read the transcript, is not acknowledged by the next turn's ACK`, () => fixture(folder, async f => {
+    f.say('The turn so far.')
+    f.seed('mid-turn')
+    const nonce = await f.handOver('mid-turn', { invocationNum: 1 })
+    f.append({ source: 'SYSTEM', type: 'TOOL_RESULT', content: 'Synthetic tool output' })
+    blindStop(f)
+    assert.equal(f.one('mid-turn').status, 'accepted')
+    f.say(`ACK ${nonce}`)
+    const before = JSON.stringify(f.state().messages)
+    f.stop('mid-turn', false)
     assert.equal(JSON.stringify(f.state().messages), before)
   }))
 }
