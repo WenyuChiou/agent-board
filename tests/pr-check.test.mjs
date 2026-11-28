@@ -585,7 +585,7 @@ test('pr-check reports the last review verdict and distinguishes current and old
   assert.match(verdict(comments, head).info[0], /REQUEST CHANGES.*current head/)
   assert.match(verdict(comments.slice(0, 1), head).info[0], /older head/)
   assert.match(verdict([], head).info[0], /no review verdict/)
-  assert.deepEqual(reviewOf('Checks complete\nReview: APPROVE ABCDEF0\nReview: REQUEST CHANGES 1234567'), { kind: 'APPROVE', sha: 'abcdef0' })
+  assert.deepEqual(reviewOf('Checks complete\nReview: APPROVE ABCDEF0 by independent\nReview: REQUEST CHANGES 1234567'), { kind: 'APPROVE', sha: 'abcdef0', reviewer: 'independent' })
   assert.deepEqual(reviewOf('Review: REQUEST CHANGES `ABCDEF0`'), { kind: 'REQUEST CHANGES', sha: 'abcdef0' })
   assert.equal(reviewOf('Checks complete without a verdict'), null)
   assert.match(verdict([{ body: `Checks complete\nReview: REQUEST CHANGES \`${head}\`` }], head).info[0], /REQUEST CHANGES.*current head/)
@@ -734,17 +734,92 @@ test('a verdict line ends at any line break and needs a name with a letter or di
     assert.equal(found.length, 1, JSON.stringify(broken))
     assert.match(found[0].message, /cannot approve their own/)
   }
-  // A verdict whose words are split over lines is no verdict.
-  assert.equal(reviewOf(`Review: APPROVE\n${pr.head} by codex (started new for this review), lane x`), null)
-  assert.equal(reviewOf(`Review:\nAPPROVE ${pr.head} by codex (started new for this review), lane x`), null)
+  // An approval whose words are split over lines cannot be read (round 5).
+  assert.equal(reviewOf(`Review: APPROVE\n${pr.head} by codex (started new for this review), lane x`).isUnreadable, true)
+  assert.equal(reviewOf(`Review:\nAPPROVE ${pr.head} by codex (started new for this review), lane x`).isUnreadable, true)
   assert.equal(reviewOf(`Review:\tAPPROVE\t${pr.head} by codex (read-only, started new for this review), lane x`).isFresh, true)
   // The words after no name, or after a name with no letter or digit, cannot be read.
   for (const name of ['', '-', '`', '\u200b', '  ']) {
     assert.equal(reviewOf(`Review: APPROVE ${pr.head} by ${name} (started new for this review), lane x`)?.isUnreadable, true, JSON.stringify(name))
   }
   assert.equal(reviewOf(`Review: APPROVE ${pr.head} by 小花 (started new for this review), lane x`).isFresh, true)
-  // Without the words such a line reads as before.
-  assert.deepEqual(reviewOf(`Review: APPROVE ${pr.head} by - (desktop), lane x`), { kind: 'APPROVE', sha: pr.head, reviewer: '- (desktop)' })
+  // Without the words such a line names no reviewer either, so it cannot be read (round 5).
+  assert.equal(reviewOf(`Review: APPROVE ${pr.head} by - (desktop), lane x`).isUnreadable, true)
+})
+
+test('an approval counts only when its own line names the reviewer right after the sha, and a request for changes is read wherever main reads one, so no approval main refuses counts and no request for changes main reads is lost (#1974)', () => {
+  const pr = syntheticPr()
+  const problems = (comments, tier, surface = 'delivery') => checkPr({ ...pr, body: `${body}Tier: ${tier}\nSurface: ${surface}\n`, prComments: comments }).problems.filter(item => item.check === 'review')
+  const account = text => ({ body: text, user: { login: 'shared-account' } })
+  // Round 5: an approval with no name on its own line, or not in the R2 form, is no approval, never one by the account.
+  const unnamed = [
+    `Review: APPROVE ${pr.head}`,
+    `Review: APPROVE ${pr.head} by \rcodex (started new for this review), lane x`,
+    `Review: APPROVE ${pr.head} by , lane x`,
+    `Review: APPROVE ${pr.head} by -`,
+    `Review: APPROVE ${pr.head} by (read-only)`,
+    `Review: APPROVE ${pr.head} by \u200b`,
+    `Review: APPROVE ${pr.head}zz by gemini`,
+    `Review: APPROVE ${pr.head}0 by gemini`,
+    `Review: APPROVE ${pr.head} with notes by gemini`,
+    `Review: APPROVE\u00a0${pr.head} by gemini`,
+    `Review: APPROVE ${pr.head} by\u00a0gemini`,
+    `Review: APPROVE\n${pr.head} by gemini`,
+    `Review: APPROVE \`${pr.head} by gemini`,
+  ]
+  for (const line of unnamed) {
+    const read = reviewOf(account(line))
+    assert.equal(read?.kind, 'APPROVE', JSON.stringify(line))
+    assert.equal(read.isUnreadable, true, JSON.stringify(line))
+    assert.equal(read.reviewer, undefined, JSON.stringify(line))
+  }
+  // The PR check says to post it again with the name, on a normal pull request and on a risk one with Surface: none.
+  const nameless = account(`Review: APPROVE ${pr.head} by \rcodex (started new for this review), lane x`)
+  for (const [tier, surface] of [['normal', 'delivery'], ['risk', 'none']]) {
+    const found = problems([codexBotState(pr.head), nameless], tier, surface)
+    assert.equal(found.length, 1, tier)
+    assert.match(found[0].message, /does not name its reviewer/)
+    assert.match(found[0].fix, /by <reviewer>, lane <lane>`, on one line/)
+  }
+  // The forms in use read as before.
+  assert.deepEqual(reviewOf(`Review: APPROVE ${pr.head} by gemini, lane x`), { kind: 'APPROVE', sha: pr.head, reviewer: 'gemini' })
+  assert.deepEqual(reviewOf(`Review: APPROVE \`${pr.head}\` by owner`), { kind: 'APPROVE', sha: pr.head, reviewer: 'owner' })
+  assert.deepEqual(reviewOf(`Review:\tAPPROVE\t${pr.head}\tby\tgemini`), { kind: 'APPROVE', sha: pr.head, reviewer: 'gemini' })
+  // A request for changes is read wherever main's pattern reads one, by the account when it names nobody.
+  const requests = [
+    [`Review: REQUEST CHANGES\u00a0${pr.head} by x`, 'x'],
+    [`Review: REQUEST CHANGES\n${pr.head} by x`, 'x'],
+    [`Review:\nREQUEST CHANGES\f${pr.head}`, 'shared-account'],
+    [`Review: REQUEST CHANGES ${pr.head}`, 'shared-account'],
+  ]
+  for (const [line, reviewer] of requests) {
+    const read = reviewOf(account(line))
+    assert.equal(read?.kind, 'REQUEST CHANGES', JSON.stringify(line))
+    assert.equal(read.reviewer, reviewer, JSON.stringify(line))
+  }
+  // So a later request for changes written that way still stops an earlier approval.
+  const found = problems([codexBotState(pr.head), { body: `Review: APPROVE ${pr.head} by sonnet_900, lane example` }, { body: `Review: REQUEST CHANGES\u00a0${pr.head} by x` }], 'normal')
+  assert.equal(found.length, 1)
+  assert.match(found[0].message, /requested changes/)
+  // The first verdict line in a comment is the one read, as on main, and the queue takes its name from the same reading.
+  const two = `Review: REQUEST CHANGES\u00a0${pr.head} by independent\nReview: APPROVE ${pr.head} by codex`
+  assert.deepEqual(reviewOf(two), { kind: 'REQUEST CHANGES', sha: pr.head, reviewer: 'independent' })
+  assert.equal(prCheck.verdictNameOf?.(two), 'independent')
+  assert.equal(prCheck.verdictNameOf?.(`Review: APPROVE ${pr.head} by \rcodex`), null)
+  assert.equal(reviewOf(`Review: APPROVE ${pr.head} by gemini\nReview: REQUEST CHANGES ${pr.head}`).kind, 'APPROVE')
+  // Over every line here and rounds 3 and 4: a request for changes wherever main reads one, an approval only where main reads one.
+  const mainReads = text => text.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?/mi)?.[1].toUpperCase() ?? null
+  const earlier = [
+    `Review: APPROVE ${pr.head} by codex (unfinished, lane example, checked by assistant (started new for this review)`,
+    `Review: APPROVE ${pr.head} by sonnet (read-only, started new for this review, model (desktop)), lane example`,
+    `Review: APPROVE ${pr.head} by codex\rAssistant (started new for this review)`,
+    `Review: APPROVE ${pr.head} by (started new for this review), lane x`,
+  ]
+  for (const line of [...unnamed, ...requests.map(([one]) => one), ...earlier, two]) {
+    const read = reviewOf(account(line))
+    if (mainReads(line) === 'REQUEST CHANGES') assert.equal(read?.kind, 'REQUEST CHANGES', JSON.stringify(line))
+    if (read?.kind === 'APPROVE' && read.isUnreadable !== true) assert.equal(mainReads(line), 'APPROVE', JSON.stringify(line))
+  }
 })
 
 test('approval gate: a ready pull request requires a qualifying review approval on the exact head (#1219)', () => {

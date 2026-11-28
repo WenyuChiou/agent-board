@@ -14,7 +14,8 @@ const pull = (number, fields = {}) => ({
 })
 const comment = (body, created_at = '2026-10-20T09:00:00Z', id = 1) => ({ body, created_at, id })
 const ready = (sha = head, at, id) => comment(`Ready for review ${sha}`, at, id)
-const verdict = (kind, sha = head, at, id) => comment(`Review: ${kind} ${sha}`, at, id)
+// A verdict names its reviewer, as RULES R2 asks; an approval with no name is none (#1974).
+const verdict = (kind, sha = head, at, id) => comment(`Review: ${kind} ${sha} by fixture-reviewer`, at, id)
 const by = (login, item) => ({ ...item, user: { login } })
 // The extra GitHub lookups and the bundle sources, empty: a test of the queue alone must not reach for them.
 const noContext = () => ({ roadmapComments: [], collaborators: [], claimed: [], notes: [] })
@@ -420,12 +421,16 @@ for (const [description, author, reviewer, isSame] of [
   })
 }
 
-test('an absent or empty approval name keeps its legacy reading and an empty Reviewing claims nobody', () => {
+test('an approval with an absent or empty reviewer name is no approval, as the PR check reads it, and an empty Reviewing claims nobody (#1974)', () => {
   const prs = [pull(1, { body: 'Author: Claude Code (desktop), branch', files: [] })]
-  for (const suffix of ['', ' by ', ' by ``', ' by , context']) {
+  for (const suffix of ['', ' by ', ' by ``', ' by , context', ' by \rcodex']) {
     const queue = classify(prs, { 1: [ready(), comment(`Review: APPROVE ${head}${suffix}`, '2026-10-20T10:00:00Z')] }, now)
-    assert.deepEqual(queue.approvedNow.map(item => item.number), [1])
+    assert.deepEqual(queue.approvedNow.map(item => item.number), [], JSON.stringify(suffix))
+    assert.deepEqual(queue.waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'the approval line cannot be read; write it in the R2 form']], JSON.stringify(suffix))
   }
+  // A request for changes main reads, with a space this check had stopped reading, is still one.
+  const split = classify([pull(2, { body: 'Author: codex, branch', files: [] })], { 2: [ready(), comment(`Review: REQUEST CHANGES\u00a0${head} by independent\nReview: APPROVE ${head} by codex`, '2026-10-20T10:00:00Z')] }, now)
+  assert.deepEqual(split.approvedNow, [])
   const queue = classify(prs, { 1: [ready(), taking('  ', '2026-10-20T10:00:00Z')] }, now)
   assert.equal(queue.needsReviewer[0].takenBy, null)
   assert.equal(queue.needsReviewer[0].lapsedBy, null)
