@@ -4131,9 +4131,10 @@ const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
   const s = await wordsOf($)
   // rewrite keeps an earlier attempt's write when a later attempt changes nothing. When that later
   // attempt refused the press, the earlier tick still counts only if the file still holds it where
-  // it was written: the ticked line, its task's heading and steps, and the heading of every task it
-  // could be taken for, each on its line and unchanged. Another writer's stale snapshot that moved
-  // lines put a twin there instead, and the tick is gone (#1228); text it changed elsewhere is not.
+  // it was written: the ticked line, its task's heading, and the heading (or first step) of every
+  // task it could be taken for, each on its line and unchanged. Another writer's stale snapshot that
+  // moved lines put a twin there instead, and the tick is gone (#1228); words it changed elsewhere,
+  // another step of the same task included, are not.
   const last: { ticked: { lines: string[]; at: number } | null; refused: string | null } = { ticked: null, refused: null }
   const wrote = await rewrite($, await progressPath($), async before => {
     const after = setManualStep(before, ref, 'x', await $.clock.now(), s)
@@ -4155,7 +4156,7 @@ const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
   const guard = ref.guard
   const held = guard === undefined
     ? ticked.lines.slice(0, ticked.at + 1).map((_line, index) => index)
-    : [ticked.at, guard.task.line, ...guard.steps, ...guard.lines].filter(index => index >= 0)
+    : [ticked.at, guard.task.line, ...guard.lines].filter(index => index >= 0)
   return ticked.at >= 0 && held.every(index => now[index] === ticked.lines[index])
 }
 
