@@ -791,14 +791,29 @@ test('a setup preview that also sets up a new agent starts no Codex found only o
   assert.match(preview, /--codex-trust/, `without a read the trust step stays\n${preview}`)
 })
 
-test('a setup repair preview reads the trust of a Codex found on PATH, where setup already asked it, and names no trust step (#1799)', { skip: process.platform === 'win32' && 'POSIX stand-in' }, async () => {
+test('a setup repair preview starts a Codex found only on PATH to read its trust, and names no trust step (#1806)', { skip: process.platform === 'win32' && 'POSIX stand-in' }, async () => {
   const f = fixture(['.codex'])
   const mock = mockCodex(f)
   await apply(f, ['codex'])
   checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'codex', '--codex-trust', '--apply', '--json', '--codex-bin', mock.executable], { timeoutMs: 60000 }), 'the board approves its hooks')
   rmSync(f.script)
+  // The repair starts the PATH-found Codex before the question, where main's doctor started none: this is the added
+  // start the round-2 P1 names, stated here so the maintainer-route reviewer can accept it explicitly.
   const codex = pathCodex(f, mock)
   const preview = await previewWith(f, codex.env)
+  assert.equal(existsSync(codex.log), true, `the preview read the Codex\n${preview}`)
+  assert.doesNotMatch(preview, /--codex-trust/, `no trust step while Codex trusts the hooks\n${preview}`)
+})
+
+test('a setup preview of an unchanged install reads the trust of a Codex found only on PATH, and names no trust step (#1806)', { skip: process.platform === 'win32' && 'POSIX stand-in' }, async () => {
+  const f = fixture(['.codex'])
+  const mock = mockCodex(f)
+  await apply(f, ['codex'])
+  checked(await run(f, [f.script, ...isolatedArgs(f), '--agent', 'codex', '--codex-trust', '--apply', '--json', '--codex-bin', mock.executable], { timeoutMs: 60000 }), 'the board approves its hooks')
+  // Nothing is removed: the plan has no pending changes, so the preview reads the PATH-found Codex as the doctor would.
+  const codex = pathCodex(f, mock)
+  const preview = await previewWith(f, codex.env)
+  assert.equal(existsSync(codex.log), true, `the preview read the Codex\n${preview}`)
   assert.doesNotMatch(preview, /--codex-trust/, `no trust step while Codex trusts the hooks\n${preview}`)
 })
 
