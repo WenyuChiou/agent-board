@@ -492,11 +492,11 @@ test('a DeepSeek take answered with no name while the board holds a named claim 
   } finally { await run.close() }
 }))
 
-test('a DeepSeek session that goes idle while a give-back is tried again still gets the kept claim inside its lease, once (#1870)', () => fixture(async f => {
+test('a DeepSeek session that goes idle inside the lease while a give-back is tried again gets the kept claim once, even when that try ends after the lease (#1870)', () => fixture(async f => {
   const run = await giveBackRig(f, 'deepseek-idle-during-retry', 'idle-retry-1', 'Synthetic answer kept through a slow give-back')
   try {
-    // The first give-back fails, with the board's claim made 14.4 s before it, so its lease ends 15.6 s later; the second
-    // never answers, and the session goes idle while it runs.
+    // The first give-back fails, with the board's claim made so that its lease ends 3.5 s later; the second never answers
+    // (it is stopped after 5 s, past the lease), and the session goes idle inside the lease while it runs.
     let releases = 0
     run.rig.onSpawn = action => {
       if (action === 'take') { run.root.status = 'running'; return undefined }
@@ -504,7 +504,7 @@ test('a DeepSeek session that goes idle while a give-back is tried again still g
       releases += 1
       if (releases === 1) {
         const state = run.store()
-        run.write({ ...state, messages: state.messages.map(one => ({ ...one, claimed: Date.now() - run.messaging.MAILBOX_LEASE_MS + 15_600 })) })
+        run.write({ ...state, messages: state.messages.map(one => ({ ...one, claimed: Date.now() - run.messaging.MAILBOX_LEASE_MS + 3_500 })) })
         return spawn(process.execPath, ['-e', 'process.exit(1)'])
       }
       setTimeout(() => { run.root.status = 'idle'; run.hooks.get('agent/status')({ agent: run.root, status: 'idle' }) }, 200)
@@ -515,6 +515,34 @@ test('a DeepSeek session that goes idle while a give-back is tried again still g
     await run.until(() => run.root.received.length === 1, 'the kept claim was handed over after the slow give-back')
     assert.match(run.root.received[0].content[0].text, /Synthetic answer kept through a slow give-back/)
     await run.until(() => run.message().status === 'accepted' && run.settled(), 'the kept claim was accepted')
+    assert.equal(run.root.received.length, 1)
+    assert.equal(run.message().error, '')
+  } finally { await run.close() }
+}))
+
+test('a DeepSeek give-back that fails until late in the lease is still tried until the lease ends, so the message is queued again while the session works (#1870)', () => fixture(async f => {
+  const run = await giveBackRig(f, 'deepseek-late-recovery', 'late-recovery-1', 'Synthetic answer given back late in the lease')
+  try {
+    // The board's claim is made so that its lease ends 12 s after the first give-back; the first three give-backs fail and
+    // the board is back for the fourth, about 3 s later. The session keeps working throughout.
+    let releases = 0
+    run.rig.onSpawn = action => {
+      if (action === 'take') { run.root.status = 'running'; return undefined }
+      if (action !== 'release') return undefined
+      releases += 1
+      if (releases === 1) {
+        const state = run.store()
+        run.write({ ...state, messages: state.messages.map(one => ({ ...one, claimed: Date.now() - run.messaging.MAILBOX_LEASE_MS + 12_000 })) })
+      }
+      return releases <= 3 ? spawn(process.execPath, ['-e', 'process.exit(1)']) : undefined
+    }
+    run.hooks.get('agent/created')({ agent: run.root })
+    await run.until(() => releases >= 4 && run.settled() && run.message().status === 'queued', 'the claim was given back late in the lease')
+    assert.deepEqual([run.message().error, run.message().ref, run.root.received.length], ['', undefined, 0])
+    run.rig.onSpawn = null
+    run.root.status = 'idle'
+    run.hooks.get('agent/status')({ agent: run.root, status: 'idle' })
+    await run.until(() => run.message().status === 'accepted' && run.settled(), 'the message was accepted at the next idle')
     assert.equal(run.root.received.length, 1)
   } finally { await run.close() }
 }))
