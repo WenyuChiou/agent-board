@@ -64,14 +64,19 @@ test('agent-board with no flag inside an agent opens the page and prints one bar
     const lines = result.stdout.trim().split(/\r?\n/)
     assert.equal(lines.length, 1)
     url = lines[0]
-    assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/)
+    assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
+    assert.doesNotMatch(result.stdout, /\?t=/)
     const alias = await run(script, ['--html', '--no-open'], env)
     assert.equal(alias.stderr, '')
-    assert.equal(alias.stdout.trim(), url)
+    const aliasUrl = alias.stdout.trim()
+    assert.match(aliasUrl, /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
+    assert.doesNotMatch(alias.stdout, /\?t=/)
+    assert.equal(new URL(aliasUrl).origin, new URL(url).origin)
+    assert.notEqual(aliasUrl, url)
     assert.equal(existsSync(join(root, 'progress.html')), false)
     const records = readdirSync(runtime, { recursive: true }).filter(name => String(name).endsWith('.json'))
     const record = records.map(name => join(runtime, String(name))).find(name => {
-      try { return JSON.parse(readFileSync(name, 'utf8')).url === url } catch { return false }
+      try { return new URL(JSON.parse(readFileSync(name, 'utf8')).url).origin === new URL(url).origin } catch { return false }
     })
     assert.ok(record, 'the live page address is recorded under the scratch runtime folder')
     pid = JSON.parse(readFileSync(record, 'utf8')).pid
@@ -214,7 +219,8 @@ test('--serve from an older command file opens the page and prints no text board
     assert.equal(result.stderr, '')
     const lines = result.stdout.trim().split(/\r?\n/)
     assert.equal(lines.length, 1, result.stdout)
-    assert.match(lines[0], /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/)
+    assert.match(lines[0], /http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
+    assert.doesNotMatch(result.stdout, /\?t=/)
     assert.ok(!result.stdout.includes('Entry plan') && !result.stdout.includes('Continue the entry work'), 'the board text is not printed')
   })
 })
@@ -223,7 +229,8 @@ test('--lan without --serve opens the page and shows the network address, as --s
   await withBoard(async ({ script, env }) => {
     const result = await run(script, ['--no-open', '--lan'], env)
     assert.equal(result.stderr, '')
-    assert.match(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)
+    assert.match(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)
+    assert.doesNotMatch(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
     assert.match(result.stdout, /open http:\/\/[\d.]+:\d+\/\?t=[\w-]+ or scan this code:|This computer has no address on a local network/)
     assert.ok(!result.stdout.includes('Entry plan'), 'no text board either')
   })
@@ -232,13 +239,16 @@ test('--lan without --serve opens the page and shows the network address, as --s
 test('--lan with the board page already open still shows the network address (#868)', { timeout: 30_000 }, async () => {
   await withBoard(async ({ script, env }) => {
     const first = await run(script, ['--no-open'], env)
-    const local = first.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
+    const local = first.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)?.[0]
     assert.ok(local, first.stdout)
+    assert.doesNotMatch(first.stdout, /\?t=/)
     // A page loading the address is what makes the board count it as open.
     await new Promise((done, fail) => request(local, res => { res.resume(); res.on('end', done) }).on('error', fail).end())
     const result = await run(script, ['--lan'], env)
     assert.equal(result.stderr, '')
-    assert.match(result.stdout, /already open in your browser/)
+    // "Already open" always comes with a fresh one-use link, never the page's reusable address.
+    assert.match(result.stdout, /already open in your browser\. If you do not see it, open this one-use link: http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)
+    assert.doesNotMatch(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
     assert.match(result.stdout, /open http:\/\/[\d.]+:\d+\/\?t=[\w-]+ or scan this code:|This computer has no address on a local network/)
   })
 })

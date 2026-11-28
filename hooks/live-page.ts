@@ -55,11 +55,41 @@ export const readPageState = (text: string, previous: PageState = { inboxDone: {
 // The page /progress hands out, read from the script's output. Only a last line that is this
 // language's address line, with a local address, is a link; any other output is data. `isKept`
 // says the script kept an open page because a reply may still be on its way.
-export const liveBoardPage = (stdout: string, s: Pick<Strings, 'serveAt' | 'serveKept'>): { url: string; isKept: boolean } | null => {
+// A last line saying a window opened is the one answer without a link: the board says it only
+// when that window loaded the page (#1650).
+export const liveBoardPage = (stdout: string, s: Pick<Strings, 'serveAt' | 'serveKept'> & Partial<Pick<Strings, 'boardPageWindowOpened'>>): { url: string; isKept: boolean; opened?: 'window' } | null => {
   const lines = stdout.trimEnd().split(/\r?\n/)
   const line = lines.at(-1) ?? ''
-  const match = /http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/\?t=[A-Za-z0-9_-]+$/.exec(line)
+  const isKept = lines.slice(0, -1).includes(s.serveKept)
+  if (typeof s.boardPageWindowOpened === 'string' && line === s.boardPageWindowOpened) return { url: '', isKept, opened: 'window' }
+  const match = /http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/(?:open\/[A-Za-z0-9_-]+|\?t=[A-Za-z0-9_-]+)$/.exec(line)
   const url = match?.[0]
   if (url === undefined || Number(match?.[1]) > 65535 || line !== s.serveAt(url)) return null
-  return { url, isKept: lines.slice(0, -1).includes(s.serveKept) }
+  return { url, isKept }
+}
+
+// The board's note beside the link it printed (#1650): a window it started that was not seen to load
+// the page, a page that looks open already, no browser, or over SSH how to forward the page's port
+// to the computer in front of the person. The board writes it to stderr so the address stays the last
+// line of stdout; /progress shows it with the link. Only a whole line this language words for this very
+// link counts, so no other text from the run reaches the reply. The forwarding line holds the SSH
+// target, which the plugin does not know: it takes one token there (a host, with `-p <port> ` before
+// it when the SSH port is not 22) and nothing else.
+const HOST_MARK = '\uE000'
+export const liveBoardNote = (stderr: string, url: string, s: Pick<Strings, 'boardPageLaunchedLink' | 'boardPageAlreadyOpenLink' | 'serveBrowserNone' | 'serveSshHint'>): string | null => {
+  const notes = [s.boardPageLaunchedLink(url), s.boardPageAlreadyOpenLink(url), s.serveBrowserNone(url)]
+  const port = Number(/^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\//.exec(url)?.[1])
+  const [head = '', tail = ''] = Number.isInteger(port) ? s.serveSshHint(port, HOST_MARK, url).split(HOST_MARK) : []
+  const isForward = (line: string): boolean =>
+    head !== '' && line.length > head.length + tail.length && line.startsWith(head) && line.endsWith(tail)
+    && /^(?:-p [1-9]\d{0,4} )?\S{1,255}$/.test(line.slice(head.length, line.length - tail.length))
+  return stderr.split(/\r?\n/).find(line => notes.includes(line) || isForward(line)) ?? null
+}
+
+// The board's own refusal, from a run that exited with an error: its last line when it is one the
+// board words for a page that gave no link (busy, or an older page kept), so /progress passes it on
+// as it is, with no retry command of its own (#1650).
+export const liveBoardRefusal = (stdout: string, s: Pick<Strings, 'serveBusy' | 'serveKeptNoLink'>): string | null => {
+  const line = stdout.trimEnd().split(/\r?\n/).at(-1) ?? ''
+  return line === s.serveBusy || line === s.serveKeptNoLink ? line : null
 }

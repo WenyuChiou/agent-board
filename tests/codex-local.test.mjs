@@ -10494,12 +10494,13 @@ test('the DeepSeek tool reports by session id, and opens the board detached with
   await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] One'] }, { agent }), { message: 'AGENT_BOARD_REPORT_FAILED: INVALID_STEP' })
   answer = { status: 1, stdout: '', stderr: 'free text\n' }
   await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] One'] }, { agent }), { message: 'AGENT_BOARD_REPORT_FAILED' })
-  // open starts the board's own command detached and returns the one line it prints.
+  // open starts the board's own command detached and returns the one line it prints: a link
+  // only, with no window that the model could not see (#1650).
   const link = 'http://127.0.0.1:43210/?t=synthetic-token'
   const opened = tool.execute({ action: 'open' }, { agent })
   const [child] = children
   assert.equal(child.command, process.execPath)
-  assert.deepEqual(child.args, [board, '--html'])
+  assert.deepEqual(child.args, [board, '--html', '--no-open'])
   assert.equal(child.options.detached, true)
   assert.equal(child.options.windowsHide, true)
   assert.equal(child.options.stdio[0], 'ignore')

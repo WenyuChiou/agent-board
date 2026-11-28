@@ -396,11 +396,11 @@ export const serve = {
         try { return [{ ...JSON.parse(readFileSync(file, 'utf8')), file }] } catch { return [] }
       })
     const discover = () => {
-      const record = records().find(one => url ? one.url === url.href : true)
+      const record = records().find(one => url ? new URL(one.url).origin === url.origin : true)
       if (!record) return
       pid ??= record.pid
       recordPath ??= record.file
-      url ??= new URL(record.url)
+      url = new URL(record.url)
     }
     const alive = () => {
       if (!Number.isInteger(pid) || pid <= 0) return false
@@ -445,7 +445,8 @@ export const serve = {
     world.cleanups.push(stop)
     try {
       const output = await command(world, ['--serve', '--no-open', '--idle-minutes', String(idleMinutes), ...args])
-      const match = output.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)
+      assert.doesNotMatch(output, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
+      const match = output.match(/http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)
       assert.ok(match, output)
       url = new URL(match[0])
       discover()
