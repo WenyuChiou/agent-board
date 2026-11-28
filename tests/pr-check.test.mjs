@@ -11,7 +11,7 @@ import {
   duplicateIssue, duplicatePr, findingLink, isOutsideAssociation, isSmallDocsFix, issueLine, issueTitleKeys,
   main, naming, needsBundle, outsideClaim, privateData, report, reportMarkdown, reviewOf, rulesPage, sections,
   riskPathsOf, ROUND_CAP, rounds, size, SIZE_FROM, SIZE_NORMAL, SIZE_RISK, stripComments, SURFACE_FROM, surface, testTitles,
-  tier, TIER_FROM, tierOf, titleKnown, verdict, FAIL_FIRST_FROM, caseRows,
+  tier, TIER_FROM, tierOf, titleKnown, verdict, FAIL_FIRST_FROM, caseRows, isLaneReviewer,
 } from '../scripts/pr-check.mjs'
 
 const script = fileURLToPath(new URL('../scripts/pr-check.mjs', import.meta.url))
@@ -591,15 +591,20 @@ test('pr-check reports the last review verdict and distinguishes current and old
   assert.match(verdict([{ body: `Checks complete\nReview: REQUEST CHANGES \`${head}\`` }], head).info[0], /REQUEST CHANGES.*current head/)
 })
 
-test('a reviewer the author\'s lane started new for this review may approve a light or normal pull request, never a risk one (#1375)', () => {
+test('a reviewer the author\'s lane started new for this review may approve a light, normal or risk pull request, never a release one (#1375, #1974)', () => {
   const head = syntheticPr().head
   const fresh = [{ body: `Review: APPROVE ${head} by codex (gpt-6.1-terra, read-only, started new for this review), lane codex` }]
   const named = [{ body: `Review: APPROVE ${head} by codex, lane codex` }]
-  const selfApproval = (comments, tier) => verdict(comments, head, { authorAgent: 'codex', number: 7, tier }).problems.filter(item => item.check === 'review').length
+  const selfApproval = (comments, tier, isRelease = false) => verdict(comments, head, { authorAgent: 'codex', number: 7, tier, isRelease }).problems.filter(item => item.check === 'review').length
   assert.equal(selfApproval(fresh, 'light'), 0)
   assert.equal(selfApproval(fresh, 'normal'), 0)
-  assert.equal(selfApproval(fresh, 'risk'), 1)
+  assert.equal(selfApproval(fresh, 'risk'), 0)
+  assert.equal(selfApproval(fresh, 'risk', true), 1)
   assert.equal(selfApproval(fresh, null), 1)
+  assert.equal(selfApproval(named, 'risk'), 1)
+  assert.equal(isLaneReviewer({ isFresh: true }, 'risk'), true)
+  assert.equal(isLaneReviewer({ isFresh: true }, 'risk', { isRelease: true }), false)
+  assert.equal(isLaneReviewer({ isFresh: true }, 'normal', { isRelease: true }), false)
   assert.equal(selfApproval(named, 'normal'), 1)
   // Only the whole note in the parentheses after the name counts: not a negation, and not the words elsewhere.
   const negated = [{ body: `Review: APPROVE ${head} by codex (not started new for this review), lane codex` }]
@@ -610,6 +615,15 @@ test('a reviewer the author\'s lane started new for this review may approve a li
   assert.equal(tierOf('Tier: `risk`, a release'), 'risk')
   assert.equal(tierOf('Tier: <risk, normal or light: the highest any change reaches>'), null)
   assert.equal(tierOf('<!--\nTier: light\n-->'), null)
+})
+
+test('the PR check takes a risk-tier approval from the lane of the author when it was started new for this review, but not on a release pull request (#1974)', () => {
+  const pr = syntheticPr()
+  const fresh = [{ body: `Review: APPROVE ${pr.head} by codex (read-only, started new for this review), lane codex` }]
+  const reviewProblems = extra => checkPr({ ...pr, body: `${body}Tier: risk
+`, prComments: fresh, ...extra }).problems.filter(item => item.check === 'review')
+  assert.deepEqual(reviewProblems({}), [])
+  assert.equal(reviewProblems({ title: 'chore(release): Agent Board 9.9.9' }).length, 1)
 })
 
 test('approval gate: a ready pull request requires a qualifying review approval on the exact head (#1219)', () => {
