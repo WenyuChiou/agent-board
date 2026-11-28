@@ -3521,6 +3521,160 @@ test('a pane Archive on an ended question rechecks its words before writing', as
   }
 })
 
+// #155: a question kept only for review (its block gone, not archived) can be resolved from the pane,
+// which closes its ledger record and leaves progress.md alone. Only a copy still kept for review is closed.
+const openedRetained = async ($: Parameters<Parameters<typeof test>[1]>[0], on: Parameters<Parameters<typeof test>[1]>[1]) => {
+  const { world, clock, ui } = await openedOlder($, on)
+  world.files.set(FILE, '## demo\n')
+  world.mtime += 1
+  await clock.advance(2_000)
+  const keys = JSON.stringify(await ui.drawn()).match(/"key":"ask::(retained::[^"]*)"/g) ?? []
+  expect(keys).toHaveLength(1)
+  const key = keys[0]!.slice(12, -1)
+  await ui.press({ key: `ask::${key}` })
+  const id = JSON.parse(world.files.get(QUESTIONS)!).records.find((row: { words: string }) => row.words === 'Notify the team, OK?').id as string
+  return { world, clock, ui, key, id }
+}
+type LedgerRow = { id: string; words: string; isUnresolved: boolean; resolvedAt?: number }
+const ledgerRows = (world: World): LedgerRow[] => JSON.parse(world.files.get(QUESTIONS)!).records
+const resolvedCaptures = (world: World, id: string): number => [...world.files].filter(([path, text]) => path.includes('-questions-source-') && JSON.parse(text).disposition === 'resolved' && JSON.parse(text).record.id === id).length
+
+test('the pane resolves a question kept only for review, closing its record and leaving the board file alone (#155)', async ($, on) => {
+  const { world, clock, ui, key, id } = await openedRetained($, on)
+  try {
+    expect(await ui.find({ type: 'Text', text: EN.questionReviewOnly })).toBeDefined()
+    await ui.press({ key: `${key}::resolve` })
+    await clock.advance(2_000)
+    expect(ledgerRows(world).find(row => row.id === id)?.isUnresolved).toBe(false)
+    expect(ledgerRows(world).find(row => row.id === id)?.resolvedAt).toBeDefined()
+    expect(resolvedCaptures(world, id)).toBe(1)
+    expect(world.files.get(FILE)).toBe('## demo\n')
+    expect(await ui.find({ type: 'Text', text: EN.resolveSucceeded })).toBeDefined()
+    expect(JSON.stringify(await ui.drawn())).not.toContain(`"ask::${key}"`)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('Resolve on a retained question whose session came back is refused as changed and the live question stays open', async ($, on) => {
+  const { world, clock, ui, key, id } = await openedRetained($, on)
+  try {
+    const back = ENDED_ASKING.replace('state=ended updated=2026-10-16T11:00:00Z', 'state=waiting updated=2026-10-16T12:00:00Z')
+    world.files.set(FILE, back)
+    await ui.press({ key: `${key}::resolve` })
+    await clock.advance(2_000)
+    expect(await ui.find({ type: 'Text', text: EN.resolveChanged })).toBeDefined()
+    expect(ledgerRows(world).find(row => row.id === id)?.isUnresolved).toBe(true)
+    expect(resolvedCaptures(world, id)).toBe(0)
+    expect(world.files.get(FILE)).toBe(back)
+    expect(await ui.find({ type: 'Button', key: 'demo::Stopped plan::1::hide' })).toBeDefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('Resolve on a retained question its producer already answered writes no resolution of its own', async ($, on) => {
+  const { world, clock, ui, key, id } = await openedRetained($, on)
+  try {
+    // Before the press, the session came back and answered the step itself; the pane has not redrawn yet.
+    const answered = ENDED_ASKING.replace('state=ended updated=2026-10-16T11:00:00Z', 'state=working updated=2026-10-16T12:00:00Z').replace('- [?] Notify', '- [x] Notify')
+    world.files.set(FILE, answered)
+    world.mtime += 1
+    await ui.press({ key: `${key}::resolve` })
+    await clock.advance(2_000)
+    // Closed by the producer's tick, which stamps no time; a Resolve from the pane would stamp its own.
+    expect(ledgerRows(world).find(row => row.id === id)?.isUnresolved).toBe(false)
+    expect(ledgerRows(world).find(row => row.id === id)?.resolvedAt).toBeUndefined()
+    expect(resolvedCaptures(world, id)).toBe(1)
+    expect(world.files.get(FILE)).toBe(answered)
+    expect(await ui.find({ type: 'Text', text: EN.resolveSucceeded })).toBeUndefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a retained question resolved from the pane stays closed on a stale replay, and the same words asked anew are a new question', async ($, on) => {
+  const { world, clock, ui, key, id } = await openedRetained($, on)
+  try {
+    await ui.press({ key: `${key}::resolve` })
+    await clock.advance(2_000)
+    // A sync tool puts the old ended block back.
+    world.files.set(FILE, ENDED_ASKING)
+    world.mtime += 1
+    await clock.advance(2_000)
+    expect(ledgerRows(world).find(row => row.id === id)?.isUnresolved).toBe(false)
+    expect(ledgerRows(world).filter(row => row.words === 'Notify the team, OK?' && row.isUnresolved)).toHaveLength(0)
+    expect(JSON.stringify(await ui.drawn())).not.toContain('"ask::retained::')
+    // The step is ticked, and the session itself asks the same words again later: a new question, open.
+    world.files.set(FILE, ENDED_ASKING.replace('- [?] Notify', '- [x] Notify'))
+    world.mtime += 1
+    await clock.advance(2_000)
+    world.files.set(FILE, ENDED_ASKING.replace('state=ended updated=2026-10-16T11:00:00Z', 'state=waiting updated=2026-10-16T12:00:00Z'))
+    world.mtime += 1
+    await clock.advance(2_000)
+    expect(ledgerRows(world).find(row => row.id === id)?.isUnresolved).toBe(false)
+    expect(ledgerRows(world).some(row => row.id !== id && row.words === 'Notify the team, OK?' && row.isUnresolved)).toBe(true)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a ledger written by another session during a retained Resolve loses neither its records nor the resolution', async ($, on) => {
+  const { world, clock, ui, key, id } = await openedRetained($, on)
+  try {
+    const ledger = JSON.parse(world.files.get(QUESTIONS)!)
+    const own = ledger.records.find((row: LedgerRow) => row.id === id)
+    // Another session's question, written as that session writes its records.
+    const scope = `${own.scope}-other`
+    const foreign = { ...own, scope, words: 'Ship the other build?', incarnation: 'other-session', id: `question:${sha256(JSON.stringify([scope, 'Ship the other build?', own.occurrence, own.copies, 'other-session']))}:${ledger.next}`, source: { ...own.source, task: 'Other plan', text: 'Ship the other build?' } }
+    let reads = 0
+    world.beforeRead = path => {
+      if (path !== QUESTIONS || ++reads !== 2) return
+      const now = JSON.parse(world.files.get(QUESTIONS)!)
+      world.files.set(QUESTIONS, JSON.stringify({ ...now, next: Math.max(now.next, ledger.next + 1), records: [...now.records, foreign] }))
+    }
+    await ui.press({ key: `${key}::resolve` })
+    await clock.advance(4_000)
+    world.beforeRead = undefined
+    expect(reads).toBeGreaterThanOrEqual(2)
+    expect(ledgerRows(world).find(row => row.id === id)?.isUnresolved).toBe(false)
+    expect(ledgerRows(world).some(row => row.id === foreign.id)).toBe(true)
+    expect(world.files.get(FILE)).toBe('## demo\n')
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('two Resolve presses on one retained question close it once', async ($, on) => {
+  const { world, clock, ui, key, id } = await openedRetained($, on)
+  try {
+    await ui.press({ key: `${key}::resolve` })
+    await ui.press({ key: `${key}::resolve` }).catch(() => undefined)
+    await clock.advance(2_000)
+    const closed = ledgerRows(world).find(row => row.id === id)
+    expect(closed?.isUnresolved).toBe(false)
+    expect(resolvedCaptures(world, id)).toBe(1)
+    await clock.advance(2_000)
+    expect(ledgerRows(world).find(row => row.id === id)).toEqual(closed)
+    expect(ledgerRows(world).filter(row => row.words === 'Notify the team, OK?')).toHaveLength(1)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a live question with the id of a retained one offers no Resolve on its card', async ($, on) => {
+  const { world, clock, ui, key } = await openedRetained($, on)
+  try {
+    world.files.set(FILE, ENDED_ASKING.replace('state=ended updated=2026-10-16T11:00:00Z', 'state=waiting updated=2026-10-16T12:00:00Z'))
+    world.mtime += 1
+    await clock.advance(2_000)
+    expect(JSON.stringify(await ui.drawn())).not.toContain(`"${key}::resolve"`)
+    expect(JSON.stringify(await ui.drawn())).not.toMatch(/"demo::Stopped plan::1::resolve"/)
+  } finally {
+    await ui.unmount()
+  }
+})
+
 test('the pane keeps stopped tasks behind one toggle and shows their actions when opened', async ($, on) => {
   const board = '## persona_framework\n<!-- auto session=a1b2c3d4 agent=claude state=ended updated=2026-10-16T11:00:00Z resume=stopped-session-123 -->\n### Stopped plan\n- [ ] Finish\n<!-- /auto session=a1b2c3d4 -->'
   const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true }
