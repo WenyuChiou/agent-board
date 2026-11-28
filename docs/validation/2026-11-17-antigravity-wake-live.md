@@ -15,7 +15,8 @@ The run also records what the board cannot see (the two Fable diagnoses on #1396
 - What the app does with `send-message` sent by hand into a conversation whose turn is still running: queues the line
   for after the turn, refuses it, or injects it into the running turn. The board approves a wake and the sidecar then
   calls `send-message`; a turn the person starts in between gets that call. Queued or refused: recorded here, and the
-  owner decides whether that meets his rule. Injected: the route stays off.
+  owner decides whether that meets his rule. Injected: the route stays off. (The live run on #1612 found it injects; the
+  owner's decision of 2026-11-18 then kept the route on with the two windows accepted: item 1 below.)
 - The order of the hook events in a turn with several steps: whether the app ever runs `Stop` inside a turn with no
   turn-start event after it. If it does, the board would read that turn as ended.
 - A turn whose turn-start hook never runs (killed or timed out) leaves no number in the turn order file and none with
@@ -55,8 +56,9 @@ The conversation's last turn had ended at 23:47:15 (its turn log's `E` line), ab
 
 The app showed one new turn: an "Agent Board" step holding the one fixed line, "Agent Board: a message from the board is
 attached to this turn. Follow it.", then the reply "ACK 26b662 woken". The turn log has one start and one end for it, and
-the store one `sent` report: the wake ran once. The row's receipt read "Read". The turn started 1.1 s after the send
-because the last turn had ended long before.
+the store one `sent` report: the wake ran once. The row's receipt read "Read". The board saved the wake's start 1.1 s
+after the send and the turn-start hook took the message 1.5 s after it (the app's own start time was not read); the
+10 s wait did not apply, because the last turn had ended long before.
 
 ## Run 2: a turn running
 
@@ -84,11 +86,12 @@ An earlier try in this run (a shorter count) ended before the row's button was p
 ## What the board cannot see
 
 1. `send-message` into a running turn: answered before this run. The live run on #1612 (comment 6932556611) found that
-   it injects the line into the running turn; the owner accepted the two windows that lead there, with a test and the
-   card's wording (#1396, 2026-11-18; `docs/validation/2026-11-18-c3-antigravity-wake-windows.md`). The D1 run on #1612
+   it injects the line into the running turn. The owner's decision of 2026-11-18 accepted the two windows that lead
+   there, with a test and the card's wording, and kept the route on in place of "the route stays off" above (#1396;
+   `docs/validation/2026-11-18-c3-antigravity-wake-windows.md`). The D1 run on #1612
    showed a call made while the `Stop` hook ran: the app held it and started the turn after the hook returned. In this
    run, the same call made by hand from a shell in the test home during a running turn exited with -1 and printed
-   nothing; the app showed no line, and no turn followed (20 s): a call from outside the app does not run.
+   nothing; the app showed no line, and no turn followed (20 s). Why that one call did not run was not looked into.
 2. Hook order in a turn with several steps: the typed turn with a tool step (the one that took message 2) wrote two start lines and
    one end line: the turn-start hook ran twice inside that turn and `Stop` once, at its end. No `Stop` ran inside the turn.
 3. A turn-start hook killed or timed out: not run. It is the first window the owner accepted (item 1).
@@ -100,8 +103,9 @@ An earlier try in this run (a shorter count) ended before the row's button was p
 ## Result
 
 For the 2.0 Desktop App on Windows: a board message to an idle conversation started a turn with the one fixed line and
-the message handed over by the turn-start hook, once, about 10 s after the conversation's last turn ended (runs 1 and 3),
-and the row read it as read. A message sent while a turn ran waited for the next turn and woke nothing (run 2).
+the message handed over by the turn-start hook, once, and the row read it as read: at once when the last turn had ended
+long before (run 1), and 10.6 s after the last turn's end for a message sent 4.8 s after it (run 3). A message sent while
+a turn ran waited for the next turn and woke nothing (run 2).
 
 Not covered: the editor (IDE) surface, a woken turn that fails or is never confirmed, Linux and macOS, other app
 versions, a second run.

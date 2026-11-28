@@ -298,7 +298,8 @@ What each side may rely on:
   could not be woken, is being woken with nothing confirmed yet (a start with no report), or that the sidecar is not on
   (a message sent for a wake whose sidecar has stopped).
 - **Live run.** `docs/validation/2026-11-17-antigravity-wake-live.md` records one run on the 2.0 Desktop App (2026-11-27):
-  idle wakes about 10 s after the turn ended, once, and a message sent during a turn held for the next one. The
+  an idle conversation woke once, at once when its last turn had ended long before and 10.6 s after the end for a message
+  sent 4.8 s after it, and a message sent during a turn held for the next one. The
   sidecar's surfaces do not name it as evidence yet, so the route's rows read Implemented.
 
 ## Local storage
