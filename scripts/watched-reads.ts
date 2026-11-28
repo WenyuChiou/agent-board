@@ -166,7 +166,7 @@ export const watchedReads = (options: { directories: readonly string[]; files: r
       // One kept file in turn: a write in place that no event reported moves its stamp.
       const keptFiles = [...folders].flatMap(([directory, folder]) => [...folder.files.keys()].filter(name => name !== LISTING).map(name => resolve(directory, name))).sort()
       if (keptFiles.length > 0) {
-        const file = keptFiles[turn % keptFiles.length]
+        const file = keptFiles[turn % keptFiles.length]!
         turn += 1
         const found = stampOf(file).stamp
         const before = turnStamps.get(file)
