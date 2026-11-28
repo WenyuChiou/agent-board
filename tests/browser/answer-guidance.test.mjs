@@ -22,9 +22,8 @@ test('the page Hidden notice restores only its question at desktop and phone wid
     for (const width of [1440, 375]) {
       await page.setViewportSize({ width, height: 1000 })
       const card = page.locator('article.card').filter({ hasText: 'Blue or green?' })
-      const more = card.locator('button.q-toggle')
-      if (await more.getAttribute('aria-expanded') !== 'true') await more.click()
-      await card.getByRole('button', { name: 'Already answered, hide', exact: true }).click()
+      const detail = await board.openQuestion('Blue or green?')
+      await detail.getByRole('button', { name: 'Already answered, hide', exact: true }).click()
       const notice = page.locator('article.lost > .press-result').filter({ hasText: 'Hidden:' })
       await notice.getByRole('button', { name: 'Show again', exact: true }).waitFor()
       await card.waitFor({ state: 'detached' })

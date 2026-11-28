@@ -192,6 +192,8 @@ export type ServeStep = {
   // The file line the step came from, so a press can tick exactly the line it showed; absent
   // on a folded summary line, which is no step. `line` above is the clipped text it shows.
   fileLine?: number
+  tickKey?: string
+  tickFp?: string
 }
 
 export type ServeAsk = {
@@ -225,6 +227,8 @@ export type ServeAsk = {
   fileLine: number | null
   canArchive?: true
   steps?: ServeStep[]
+  stepKey?: string
+  stepTickFp?: string
   // Another session's question can be marked answered: kept off the board until it changes.
   canHide: boolean
   unhideKey?: string
@@ -615,19 +619,32 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       // A question gone from its agent's report is kept until it is answered; one the person answered
       // here, and its session took, needs nothing more from the person.
       if (ask.key.startsWith('retained::') && ask.questionId !== undefined && isAnswerHanded(messaging?.messages ?? [], ask.questionId)) continue
+      const manualKey = ask.key.replace(/::\d+$/, '')
       const matchingRow = ask.key.startsWith('retained::')
         ? (ask.nativeSession !== undefined && ask.nativeSession !== ''
             ? items.find(one => one.type === 'row' && one.row.agent === ask.agent && one.row.nativeSession === ask.nativeSession)
             : undefined)
-        : items.find(one => one.type === 'row'
-            && one.row.agent === ask.agent
-            && (ask.nativeSession !== undefined && ask.nativeSession !== ''
-              ? one.row.nativeSession === ask.nativeSession
-              : (one.row.nativeSession ?? '') === '' && one.row.project === ask.project && one.row.title === ask.task))
+        : (ask.nativeSession !== undefined && ask.nativeSession !== ''
+            ? items.find(one => one.type === 'row' && one.row.agent === ask.agent && one.row.nativeSession === ask.nativeSession)
+            : items.find(one => one.type === 'row' && one.row.agent === ask.agent && one.row.key === manualKey)
+              ?? items.find(one => one.type === 'row' && one.row.agent === ask.agent && (one.row.nativeSession ?? '') === '' && one.row.project === ask.project && one.row.title === ask.task))
       const rawSteps = ask.steps ?? (matchingRow?.type === 'row' ? matchingRow.row.steps : undefined)
       const extraSteps = rawSteps?.filter(step => !(step.status === 'waiting' && step.text === ask.text)) ?? []
       const askSteps = extraSteps.length > 0
-        ? extraSteps.map(step => ({ text: step.text, note: step.note, status: step.status, isCurrent: step.isCurrent, ...lined(step.note ? `${step.text} — ${step.note}` : step.text), ...(step.line === null ? {} : { fileLine: step.line }) }))
+        ? extraSteps.map(step => {
+            const stepItem = step.line === null ? undefined
+              : matchingRow?.type === 'row' && matchingRow.row.steps.some(one => one.line === step.line) ? matchingRow
+              : items.find(one => one.type === 'ask' && one.ask.step?.line === step.line)
+            return {
+              text: step.text,
+              note: step.note,
+              status: step.status,
+              isCurrent: step.isCurrent,
+              ...lined(step.note ? `${step.text} — ${step.note}` : step.text),
+              ...(step.line === null ? {} : { fileLine: step.line }),
+              ...(stepItem === undefined ? {} : { tickKey: stepItem.key, tickFp: fingerprint(stepItem, items, true) }),
+            }
+          })
         : undefined
       const isManual = ask.where === 'manual'
       const found = isManual || isLan ? undefined : reachable(ask.agent, ask.nativeSession, ask.target, targets)
@@ -679,6 +696,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
         fileLine: ask.step?.line ?? null,
         ...(ask.archive !== undefined ? { canArchive: true as const } : {}),
         ...(askSteps === undefined ? {} : { steps: askSteps }),
+        ...(matchingRow?.type === 'row' ? { stepKey: matchingRow.key, stepTickFp: fingerprint(matchingRow, items, true) } : {}),
         canHide: ask.hideKey !== '' && ask.canHide !== false,
         ...(ask.hideKey !== '' && ask.canHide !== false ? { unhideKey: `hidden:${ask.hideKey}` } : {}),
         send,
@@ -1090,7 +1108,7 @@ const PAGE_WORDS = [
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressTimedOut', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
-  'pgPulse', 'pgPulseNeeds', 'pgPulseWorking', 'pgPulseStopped', 'pgPulseDone', 'pgSyncHint', 'pgStaleShort', 'pgStaleHint', 'justNow', 'minutesAgo',
+  'pgPulse', 'pgPulseNeeds', 'pgPulseWorking', 'pgPulseStopped', 'pgPulseDone', 'pgSyncHint', 'pgStaleShort', 'pgStaleHint', 'pgRouteQueue', 'pgRouteCopy', 'pgRowStaleHint', 'justNow', 'minutesAgo',
   'pgOlder', 'pgOlderOne', 'pgSeeAll', 'pgMore', 'pgWriteOwn', 'pgCopyAnswer', 'pgStuck', 'pgTodo', 'pgLast', 'pgStoppedAt', 'pgBarLabel', 'barStyleInk', 'barStyleBlue', 'barStyleGreen', 'barStyleHead', 'themeLight', 'themeDark', 'themeSystem', 'themeMenu',
   'settingsLanguageChanged', 'settingsLanguageOverridden', 'settingsNotifications', 'settingsOn', 'settingsOff', 'settingsDenied', 'settingsUnavailable', 'settingsChanged', 'settingsLanguage',
   'settingsAgentSetup', 'settingsAgentRemove', 'settingsAgentConfirm', 'settingsAgentCancel', 'settingsAgentsBusy', 'settingsAgentsReadFailed',
@@ -1155,6 +1173,7 @@ ${agentRowCss}
 #board{display:flex;flex-direction:column;gap:0;min-width:0}
 .shell[data-view="all"] #board>:not(.gone)~:not(.gone),.shell[data-view="needs"] #board>[data-sec="needs"]:not(.gone)~[data-sec="needs"]:not(.gone),.shell[data-view="others"] #board>[data-sec="others"]:not(.gone)~[data-sec="others"]:not(.gone){margin-top:var(--s5)}
 .sec>.fx.gone,.sheet>.fx.gone{display:none}
+.fold-in>.fx.gone,.row-open>.fx.gone{display:none}
 .sr-lbl,.drawer-btn .drawer-label,#settings-toggle>span,.c-meta .surf-pill .surf-lbl,.r-meta .surf-pill .surf-lbl{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 .t-alert{color:var(--alert)}.t-quiet{color:var(--muted)}
 ${sheetCss}
@@ -1172,11 +1191,17 @@ ${sheetCss}
 .c-meta,.r-meta,.note,.context{overflow-wrap:anywhere}
 .c-meta{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s1) var(--s3);font-size:var(--text-xs);line-height:1.4;color:var(--muted)}
 .c-meta .who{color:var(--ink);font-weight:600}
-.q-toggle{display:block;width:100%;max-width:100%;min-width:0;padding:0;border:0;background:transparent;text-align:left;cursor:pointer}
+.q-toggle{display:flex;align-items:baseline;gap:var(--s2);width:100%;max-width:100%;min-width:0;padding:0;border:0;background:transparent;text-align:left;cursor:pointer}
 .q-toggle:hover{background:transparent}
+.q-toggle::after{content:"▸";flex:none;font-size:var(--text-xs);color:var(--muted);transition:transform var(--dur-base) var(--ease-out)}
+.q-toggle[aria-expanded="true"]::after{transform:rotate(90deg)}
 .q{margin:0;font-size:var(--text-sm);line-height:1.3;font-weight:600;overflow-wrap:anywhere}
-.q-toggle .q{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.q-toggle .q{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .card.open .q-toggle .q{white-space:normal;overflow:visible;text-overflow:clip}
+.route-pill{display:inline-flex;align-items:center;padding:0 var(--s1);border:1px solid var(--line-strong);border-radius:var(--radius-s);background:var(--inset);color:var(--muted);font:600 var(--text-xs)/1.3 var(--font-mono);white-space:nowrap;flex:none}
+.route-pill.route-queue{border-color:color-mix(in srgb,var(--soon) 45%,var(--line-strong));color:var(--soon)}
+.route-pill.route-copy{border-color:var(--line-strong);color:var(--muted)}
+.route-pill.route-more{border-color:var(--line);color:var(--muted)}
 .c-line2{display:flex;align-items:center;gap:var(--s2);min-width:0;font-size:var(--text-xs);line-height:1.4;color:var(--muted)}
 .c-line2 .c-meta{flex:1 1 auto;min-width:0;flex-wrap:nowrap;gap:var(--s2);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .c-line2 .c-meta>span:not(.surf-pill):not(.ag){min-width:0;overflow:hidden;text-overflow:ellipsis}
@@ -1199,14 +1224,16 @@ button.quiet{border-color:transparent;background:transparent;color:var(--ink);te
 button.quiet:hover:not(:disabled),.side .pfoot .btn:hover:not(:disabled){background-color:var(--hover)}
 button.primary:hover:not(:disabled){background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 button.primary:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:1;cursor:not-allowed}
-button.chk{width:20px;height:20px;margin:2px;padding:0;border:1.5px solid var(--line-strong);border-radius:var(--radius-round);background:var(--surface);color:transparent;display:grid;place-items:center;cursor:pointer;font-size:var(--text-xs);line-height:1;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
+button.chk{position:relative;width:20px;height:20px;margin:2px;padding:0;border:1.5px solid var(--line-strong);border-radius:var(--radius-round);background:var(--surface);color:transparent;display:grid;place-items:center;cursor:pointer;font-size:var(--text-xs);line-height:1;transition:background-color var(--dur-fast) var(--ease-out),border-color var(--dur-fast) var(--ease-out),color var(--dur-fast) var(--ease-out)}
 button.chk:hover,button.chk:focus-visible{border-color:var(--done);color:var(--done);background-color:color-mix(in srgb,var(--done) 10%,var(--surface))}
 .ag.ag-sm{width:16px;height:16px;border-radius:var(--radius-s);font-size:var(--text-xs)}
 .answers button.choice[aria-pressed="true"],.acts button.choice[aria-pressed="true"]{border-color:var(--act);background:color-mix(in srgb,var(--act) 12%,var(--hover))}
 .answers button.answer-send{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);justify-content:center;margin-left:auto;padding:0;background:var(--act);border-color:var(--act);color:var(--on-act);font-size:var(--text-sm)}
 .c-line2 .answers button.answer-send{flex:0 0 28px;width:28px;min-width:28px;min-height:28px;padding:0}
-.answers button.answer-send[data-copy="1"]{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);padding:0}
+.answers button.answer-send[data-copy="1"]{flex:0 0 var(--hit);width:var(--hit);min-width:var(--hit);padding:0;background:var(--surface);border-color:var(--btn-line);color:var(--ink)}
 .c-line2 .answers button.answer-send[data-copy="1"]{flex:0 0 28px;width:28px;min-width:28px;min-height:28px;padding:0}
+.answers button.answer-send[data-copy="1"]:hover:not(:disabled){background:var(--hover);border-color:var(--btn-line);color:var(--ink)}
+.answers button.answer-send[data-copy="1"]:disabled{background:var(--surface);border-color:var(--line);color:var(--muted);opacity:.65}
 .answers button.answer-send:hover:not(:disabled){background:color-mix(in srgb,var(--ink) 84%,var(--surface));border-color:color-mix(in srgb,var(--ink) 84%,var(--surface))}
 .answers button.answer-send:disabled{background:var(--act);border-color:var(--act);color:var(--on-act);opacity:.35;cursor:default}
 .answers button.answer-send[data-sending="1"]:disabled{opacity:1;cursor:not-allowed}
@@ -1495,6 +1522,9 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
   .f-bar[data-hud-idle="1"]{display:none}
   .head .topbar{min-height:46px}
   .agents-in{padding-top:var(--s1);padding-bottom:var(--s1)}
+  .pbar{width:auto;min-width:52px}
+  .pbar.cont{width:52px}
+  .r-meta .r-proj{max-width:13ch}
 }
 @media (min-width:1440px){
   .shell[data-detail="1"]{grid-template-columns:232px minmax(0,1fr) 340px}
@@ -1529,12 +1559,17 @@ button.f-chip[aria-expanded="true"]::after{transform:translateY(2px) rotate(-135
 @media (pointer:coarse){
   .btn,.acts button,.state button,.composer button,.shelf-head,.row-btn,.pfoot #close,.s-item,.f-chip,.f-opt,.f-bar .quiet,.pulse-bar button{min-height:44px}
   .link{min-height:44px}
+  button.chk::after{content:"";position:absolute;top:50%;left:50%;width:44px;height:44px;transform:translate(-50%,-50%)}
+  .card{padding-top:var(--s3);padding-bottom:var(--s3)}
   .answers button,.answers .btn,.c-line2 .answers button{flex:1 1 auto;min-height:48px;justify-content:flex-start}
   .answers button.quiet,.c-line2 .answers button.quiet{flex:0 0 auto;min-height:44px}
   .answers button.answer-send,.c-line2 .answers button.answer-send{flex:0 0 48px;width:48px;min-width:48px;min-height:48px;justify-content:center}
-  .answers button.answer-send[data-copy="1"],.c-line2 .answers button.answer-send[data-copy="1"]{flex:0 0 48px;width:48px;min-width:48px;min-height:48px;justify-content:center;padding:0}
-  .pfoot #close,.pfoot #settings-toggle{height:48px;min-width:48px;min-height:48px}
+  .answers button.answer-send[data-copy="1"],.c-line2 .answers button.answer-send[data-copy="1"]{flex:0 0 auto;width:auto;min-width:48px;min-height:48px;justify-content:center;gap:var(--s1);padding:0 var(--s3)}
+  .answers button.answer-send[data-copy="1"] .sr-lbl,.done-archive-btn .sr-lbl,.pfoot #settings-toggle>span{position:static;width:auto;height:auto;overflow:visible;clip-path:none;white-space:nowrap;font-size:var(--text-xs);font-weight:600}
+  .pfoot #close,.pfoot #settings-toggle{width:auto;height:48px;min-width:48px;min-height:48px;gap:var(--s1);padding:0 var(--s3)}
+  .pfoot #close::after{content:attr(aria-label);font-size:var(--text-xs);font-weight:600;white-space:nowrap}
   .s-toggle,.d-close,.card-detail-btn,.done-archive-btn{width:44px;height:44px}
+  .done-archive-btn{width:auto;min-width:44px;padding:0 var(--s3);gap:var(--s1)}
   #away-line .away-x{width:44px;height:44px}
   textarea{min-height:96px}
 }
@@ -2426,10 +2461,11 @@ const PAGE_SCRIPT = String.raw`
   var cardParts = {};
   var cardChoices = Object.create(null);
   var selectedKey = '';
+  var railTriggerKind = '';
+  var railTransferredKey = '';
   var railItems = Object.create(null);
   function isWideDetail() { return typeof window.innerWidth === 'number' && window.innerWidth >= 1440; }
   var wasWideDetail = isWideDetail();
-  var wasNarrowHud = typeof window.innerWidth === 'number' && window.innerWidth > 0 && window.innerWidth < 800;
   var railDraftFocus = null;
   function syncRailDraftFocus() {
     var rail = document.getElementById('detail-rail');
@@ -2462,8 +2498,16 @@ const PAGE_SCRIPT = String.raw`
       railDraftFocus = null;
     }, true);
   }
+  function resetRailWriteState(key) {
+    var item = key && railItems[key];
+    var stateKey = item && item.stateKey || key;
+    if (stateKey && cardState[stateKey] && cardState[stateKey].mode === 'write') {
+      cardState[stateKey] = { mode: 'ask', text: cardState[stateKey].text || '' };
+    }
+  }
   function closeDetailRail(restoreFocus) {
     var prevKey = selectedKey;
+    resetRailWriteState(prevKey);
     var rail = document.getElementById('detail-rail');
     var active = document.activeElement;
     var wasInRail = false;
@@ -2471,22 +2515,36 @@ const PAGE_SCRIPT = String.raw`
       for (var node = active; node; node = node.parentNode) if (node === rail) { wasInRail = true; break; }
     }
     selectedKey = '';
+    if (prevKey) delete opened['card:' + prevKey];
+    if (railTransferredKey) { delete opened[railTransferredKey]; railTransferredKey = ''; }
     if (pg.model) draw(pg.model);
     else renderDetailRail();
     var restored = prevKey && railItems[prevKey];
     if (restoreFocus && wasInRail && restored && restored.trigger && typeof restored.trigger.focus === 'function') {
       restored.trigger.focus({ preventScroll: true });
     }
+    railTriggerKind = '';
   }
-  function selectDetailRail(key, focusRail) {
+  function selectDetailRail(key, focusRail, triggerKind) {
     if (selectedKey === key) {
+      if (triggerKind !== undefined) railTriggerKind = triggerKind;
       closeDetailRail(false);
       var restored = railItems[key];
       if (focusRail && restored && restored.trigger && typeof restored.trigger.focus === 'function') {
         restored.trigger.focus({ preventScroll: true });
       }
+      railTriggerKind = '';
       return;
     }
+    if (selectedKey) {
+      resetRailWriteState(selectedKey);
+      delete opened['card:' + selectedKey];
+      if (railTransferredKey === 'card:' + selectedKey || railTransferredKey === selectedKey) {
+        delete opened[railTransferredKey];
+        railTransferredKey = '';
+      }
+    }
+    railTriggerKind = triggerKind || '';
     selectedKey = key;
     if (pg.model) draw(pg.model);
     else renderDetailRail();
@@ -2733,11 +2791,12 @@ const PAGE_SCRIPT = String.raw`
     if (!parts) return;
     var hasReceiptAfter = parts.hasReceipt && (state.mode === 'sent' || state.mode === 'queued');
     var isAfter = state.mode === 'copied' || state.mode === 'sent' || state.mode === 'queued';
-    if (state.mode === 'write' && parts.openCard) parts.openCard();
+    if (state.mode === 'write' && !isWideDetail() && parts.openCard) parts.openCard();
     reveal(parts.ask, state.mode === 'ask');
     if (parts.askMore) reveal(parts.askMore, state.mode === 'ask');
     reveal(parts.reply, state.mode === 'write');
     reveal(parts.routeNote, !isAfter && !parts.hasReceipt);
+    if (parts.routePill) parts.routePill.hidden = isAfter || parts.hasReceipt;
     reveal(parts.after, isAfter && !hasReceiptAfter);
     if (isAfter && parts.hideBtn) {
       var target = hasReceiptAfter && parts.receiptActs ? parts.receiptActs : parts.afterRow;
@@ -2781,6 +2840,7 @@ const PAGE_SCRIPT = String.raw`
     paintMode(key);
     if (mode === 'write') {
       var parts = cardParts[key];
+      if (isWideDetail() && parts && parts.openCard) { parts.openCard(); parts = cardParts[key]; }
       var box = parts && parts.reply.querySelector('textarea');
       if (box) { if (moving()) setTimeout(function () { box.focus({ preventScroll: true }); }, 120); else box.focus({ preventScroll: true }); }
     }
@@ -2799,7 +2859,10 @@ const PAGE_SCRIPT = String.raw`
       var isNext = step.fileLine !== undefined ? step.fileLine === row.nextFileLine : step.text === row.next;
       if (row.isOwn && step.status !== 'done' && step.status !== 'cancelled' && !isNext) {
         // The page's button, as Confirm done and Copy; the label sits in a span so one line can end in an ellipsis.
-        var tick = button('', function () { act(row.key, 'tick', step.text, '', '', '', row.tickFp, undefined, step.fileLine); }, 'btn');
+        var stepFp = step.tickFp || row.tickFp || '';
+        var tick = button('', function () { act(step.tickKey || row.key, 'tick', step.text, '', '', '', stepFp, undefined, step.fileLine); }, 'btn');
+        if (step.fileLine !== undefined && step.fileLine !== null) tick.setAttribute('data-step-line', String(step.fileLine));
+        if (stepFp) tick.setAttribute('data-step-fp', String(stepFp));
         add(tick, el('span', '', w('serveTickNext', clean(step.text))));
         tick.title = step.text;
         add(line, tick);
@@ -2825,7 +2888,8 @@ const PAGE_SCRIPT = String.raw`
     var agent = ref.agent;
     var isOwnCard = !isStuck && !isOlder && !ask.native && !!ask.isOwn;
     var cardOpenKey = 'card:' + ref.key;
-    var isCardOpen = !isOlder && opened[cardOpenKey] === true;
+    var isCardRailSelected = !isOlder && isWideDetail() && selectedKey === ref.key;
+    var isCardOpen = !isOlder && !isCardRailSelected && opened[cardOpenKey] === true;
     var card = el('article', 'card' + (isCardOpen ? ' open' : ''));
     card.setAttribute('data-ref-key', ref.key);
     if (isOwnCard && ask.canTick) {
@@ -2851,7 +2915,7 @@ const PAGE_SCRIPT = String.raw`
     if (!isOlder) {
       card.setAttribute('data-rail-item', '1');
       detailBtn = navButton('', function () {
-        selectDetailRail(ref.key, true);
+        selectDetailRail(ref.key, true, '');
       });
       detailBtn.className = 'card-detail-btn';
       detailBtn.hidden = !isWideDetail();
@@ -2872,13 +2936,35 @@ const PAGE_SCRIPT = String.raw`
     if (isOlder) {
       add(body, question);
     } else {
-      qToggle = navButton('', function () { setCardOpen(!hasClass(card, 'open')); });
+      qToggle = navButton('', function () {
+        if (isWideDetail()) {
+          selectDetailRail(ref.key, true, 'q');
+          return;
+        }
+        setCardOpen(!hasClass(card, 'open'));
+      });
       qToggle.className = 'q-toggle';
-      qToggle.setAttribute('aria-expanded', String(isCardOpen));
+      qToggle.setAttribute('aria-expanded', String(isCardOpen || isCardRailSelected));
       add(qToggle, question);
       add(body, qToggle);
     }
     var cardSurf = surfaceBadge(interfaceOf(ref), false);
+    var mode = ask.send;
+    var routePill = null;
+    var morePill = null;
+    if (!isStuck && !isOlder && !ask.native && !ask.isOwn) {
+      var isDeferredRoute = sends(mode) && ((ask.line ? ask.line !== 'now' : mode === 'mailbox') || !!(ask.delivery && ask.delivery.isAfterAppQuit));
+      if (!sends(mode)) {
+        routePill = el('span', 'route-pill route-copy', w('pgRouteCopy'));
+        if (ask.info) routePill.setAttribute('title', ask.info);
+      } else if (isDeferredRoute) {
+        routePill = el('span', 'route-pill route-queue', w('pgRouteQueue'));
+        if (ask.lineText) routePill.setAttribute('title', ask.lineText);
+      }
+      if (Array.isArray(ask.answers) && ask.answers.length > 2) {
+        morePill = el('span', 'route-pill route-more', '+' + (ask.answers.length - 2));
+      }
+    }
     var meta;
     if (isOwnCard) {
       var smallMark = agent ? agentMark(agent, agentName(agent)) : null;
@@ -2886,9 +2972,9 @@ const PAGE_SCRIPT = String.raw`
       var age = ageOf(ref);
       meta = add(el('div', 'c-meta'), smallMark, cardSurf, project ? el('span', '', project) : null, age ? el('span', '', age) : null, detailBtn);
     } else {
-      meta = add(el('div', 'c-meta'), cardSurf, project ? el('span', '', project) : null, el('span', '', ageOf(ref)), detailBtn);
+      meta = add(el('div', 'c-meta'), cardSurf, routePill, morePill, project ? el('span', '', project) : null, el('span', '', ageOf(ref)), detailBtn);
     }
-    var detailIn = el('div', 'fold-in');
+    var detailIn = el('div', isCardRailSelected ? 'row-open' : 'fold-in');
     var detailHost = isOlder ? body : detailIn;
     if (!isOlder) {
       var rawAskTask = String(ask.task || '');
@@ -2904,11 +2990,10 @@ const PAGE_SCRIPT = String.raw`
       var askTask = clean(String(ask.task || ''));
       if (ask.context && (!ask.note || askTask && (pg.titleCounts && pg.titleCounts[askTask] || 0) > 1)) add(detailHost, clipped(clean(ask.contextLine || ask.context), ask.context, 'context', 'context:' + key));
     }
-    if (!isStuck && !isOlder && Array.isArray(ask.steps) && ask.steps.length) {
-      add(detailHost, stepList(ask.steps, { key: key, steps: ask.steps, isOwn: false, nextFileLine: null, next: null, tickFp: ask.tickFp }));
+    if ((!isStuck || isCardRailSelected) && !isOlder && Array.isArray(ask.steps) && ask.steps.length) {
+      add(detailHost, stepList(ask.steps, isCardRailSelected ? { key: ask.stepKey || key, steps: ask.steps, isOwn: ask.isOwn, nextFileLine: ask.nextFileLine, next: ask.next, tickFp: ask.stepTickFp || ask.tickFp } : { key: ask.stepKey || key, steps: ask.steps, isOwn: false, nextFileLine: null, next: null, tickFp: ask.stepTickFp || ask.tickFp }));
     }
     if (!isStuck && !isOlder && ask.command) add(detailHost, el('code', '', '$ ' + ask.command));
-    var mode = ask.send;
     var answers = el('div', 'answers');
     // A Codex card with no process to check, quiet past thirty minutes (#1092): it may be closed, never closed.
     if (!isStuck && !isOlder && ask.mayBeClosed === true) {
@@ -3014,12 +3099,19 @@ const PAGE_SCRIPT = String.raw`
       canHide: ask.canHide === true,
       late: lateWord(agentPresence[id]) !== '',
       routeNote: routeNote || null,
+      routePill: routePill || null,
       hideBtn: hideBtn || null,
       askMore: null,
       detailActs: null,
       hasReceipt: false,
       receiptActs: null,
-      openCard: function () { setCardOpen(true); },
+      openCard: function () {
+        if (isWideDetail()) {
+          if (selectedKey !== ref.key) selectDetailRail(ref.key, false, '');
+          return;
+        }
+        setCardOpen(true);
+      },
     };
     cardParts[key] = parts;
     if (pickerSend) add(answers, pickerSend);
@@ -3058,7 +3150,7 @@ const PAGE_SCRIPT = String.raw`
     if (!isOlder) {
       cardFold = el('div', 'fold card-fold');
       cardFold.inert = !isCardOpen;
-      add(cardFold, detailIn);
+      if (!isCardRailSelected) add(cardFold, detailIn);
       add(body, cardFold);
       if (qToggle) pg.mores.push({ openKey: cardOpenKey, key: ref.key, box: card, fold: cardFold, toggle: qToggle });
     }
@@ -3075,28 +3167,18 @@ const PAGE_SCRIPT = String.raw`
       add(body, receiptEl);
     }
     paintMode(key);
-    resultSlot(body, key, ask.fp || ask.text, ask.task || ask.title || ref.repo);
+    resultSlot(isCardRailSelected ? detailIn : body, key, ask.fp || ask.text, ask.task || ask.title || ref.repo);
     add(card, body);
     if (!isOlder) {
       railItems[ref.key] = {
         kind: 'card',
+        stateKey: key,
         ref: ref,
         node: card,
-        trigger: detailBtn,
+        trigger: railTriggerKind === 'q' ? qToggle : detailBtn,
         title: text,
         meta: [project, ageOf(ref)].filter(Boolean).join(' · '),
-        renderBody: function () {
-          var wrap = el('div', 'row-open');
-          if (ask.task && clean(String(ask.task)) !== text) add(wrap, el('p', 'context', clean(String(ask.task))));
-          if (isStuck && ask.stuck && ask.stuck.reason) add(wrap, el('p', 'note', clean(ask.stuck.reason)));
-          else if (ask.note) add(wrap, el('p', 'note', clean(ask.note)));
-          if (ask.context) add(wrap, el('p', 'context', clean(ask.context)));
-          if (Array.isArray(ask.steps) && ask.steps.length) add(wrap, stepList(ask.steps, { key: key, steps: ask.steps, isOwn: ask.isOwn, nextFileLine: ask.nextFileLine, next: ask.next, tickFp: ask.tickFp }));
-          if (!isStuck && ask.command) add(wrap, el('code', '', '$ ' + ask.command));
-          if (ask.lineText) add(wrap, el('p', 'note', ask.lineText));
-          else if (ask.info) add(wrap, el('p', 'note', ask.info));
-          return wrap;
-        },
+        renderBody: function () { return detailIn; },
       };
       card.addEventListener('click', function (event) {
         if (!isWideDetail()) return;
@@ -3104,7 +3186,7 @@ const PAGE_SCRIPT = String.raw`
         if (target && target.closest && target.closest('button, a, input, textarea, select, summary, label, details')) return;
         var sel = typeof window.getSelection === 'function' ? window.getSelection() : null;
         if (sel && String(sel)) return;
-        selectDetailRail(ref.key, false);
+        selectDetailRail(ref.key, false, '');
       });
     }
     return card;
@@ -3263,7 +3345,9 @@ const PAGE_SCRIPT = String.raw`
     if (isExpandable) head.setAttribute('aria-expanded', String(isOpen || isRailSelected));
     var isStaleWorking = section === 'working' && !dueOf(ref) && (isUnsureRow || (ref.at > 0 && pg.model && pg.model.view && pg.model.view.now - ref.at >= 10 * 60 * 1000));
     var rightCls = 'r-right' + (dueOf(ref) && source(ref).dueTone === 'alert' ? ' t-alert' : isStaleWorking ? ' t-stale' : '');
-    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), el('span', rightCls, dueOf(ref) || ageOf(ref)), el('span', 'r-chev'));
+    var rightEl = el('span', rightCls, dueOf(ref) || ageOf(ref));
+    if (isStaleWorking) rightEl.setAttribute('title', w('pgRowStaleHint'));
+    add(head, markOf(ref), add(el('span', 'r-text'), titleNode, meta), rightEl, el('span', 'r-chev'));
     var block = el('div', 'fx');
     add(block, add(el('div', 'fx-in'), head, isExpandable ? fold : null));
     add(li, block);
@@ -4089,10 +4173,6 @@ const PAGE_SCRIPT = String.raw`
   function isFreshAiRef(ref, now) {
     return !(source(ref).isOwn || ref.isOwn) && ref.at > 0 && now - ref.at <= 15 * 60 * 1000;
   }
-  function hasFreshAiDone(view) {
-    var list = view && view.all && view.all.done || [];
-    return list.some(function (ref) { return isFreshAiRef(ref, view.now); });
-  }
   function fitSide() {
     var width = window.innerWidth;
     var shell = document.getElementById('shell');
@@ -4117,15 +4197,23 @@ const PAGE_SCRIPT = String.raw`
       wasWideDetail = wideNow;
       if (board) board.querySelectorAll('.card-detail-btn').forEach(function (b) { b.hidden = !wideNow; });
       if (selectedKey) {
-        if (!wideNow && railItems[selectedKey] && railItems[selectedKey].kind === 'row') opened[selectedKey] = true;
+        if (!wideNow && railItems[selectedKey]) {
+          var selectedItem = railItems[selectedKey];
+          var openKey = selectedItem.kind === 'card' ? 'card:' + selectedKey : selectedKey;
+          if (!opened[openKey]) {
+            opened[openKey] = true;
+            railTransferredKey = openKey;
+          }
+        } else if (wideNow && railTransferredKey) {
+          delete opened[railTransferredKey];
+          railTransferredKey = '';
+        }
         if (pg.model) draw(pg.model);
+      } else if (wideNow && railTransferredKey) {
+        delete opened[railTransferredKey];
+        railTransferredKey = '';
       }
     }
-    var narrowHudNow = typeof width === 'number' && width > 0 && width < 800;
-    if (narrowHudNow && !wasNarrowHud && opened['shelf:done'] === undefined && pg.openShelf.done && pg.model && hasFreshAiDone(pg.model.view)) {
-      pg.openShelf.done(true);
-    }
-    wasNarrowHud = narrowHudNow;
     var foot = document.getElementById('pfoot');
     // The footer lives at the foot of the sidebar when it is shown full, or in the drawer when that is open; otherwise under the work.
     var inSide = (hasSide && !isRail) || (!hasSide && drawerOpen);
@@ -4625,6 +4713,48 @@ const PAGE_SCRIPT = String.raw`
     });
     var active = document.activeElement;
     var focused = active && active.getAttribute && active.getAttribute('data-key');
+    var railFocus = null;
+    var boardTriggerFocus = null;
+    if (detailRailEl && active && !focused) {
+      var inRailNow = false;
+      for (var dn = active; dn; dn = dn.parentNode) if (dn === detailRailEl) { inRailNow = true; break; }
+      if (inRailNow) {
+        var railTag = String(active.tagName || active.tag || '').toUpperCase();
+        if (active.id === 'detail-close') railFocus = { id: 'detail-close' };
+        else if (railTag === 'BUTTON' || railTag === 'A') {
+          var rCls = active.className || '';
+          var rText = String(active.textContent || '').trim();
+          var rHref = active.getAttribute ? (active.getAttribute('href') || '') : '';
+          var rOcc = -1;
+          var rDup = 0;
+          var curBtns = detailRailEl.querySelectorAll(railTag.toLowerCase());
+          for (var ci = 0; ci < curBtns.length; ci++) {
+            var cur = curBtns[ci];
+            var curHref = cur.getAttribute ? (cur.getAttribute('href') || '') : '';
+            if ((cur.className || '') === rCls && String(cur.textContent || '').trim() === rText && curHref === rHref) {
+              if (cur === active) rOcc = rDup;
+              rDup += 1;
+            }
+          }
+          railFocus = {
+            tag: railTag.toLowerCase(),
+            cls: rCls,
+            text: rText,
+            stepLine: active.getAttribute ? (active.getAttribute('data-step-line') || '') : '',
+            stepFp: active.getAttribute ? (active.getAttribute('data-step-fp') || '') : '',
+            href: rHref,
+            occ: rOcc,
+            dupCount: rDup,
+          };
+        }
+      }
+    }
+    if (board && active && !focused && !railFocus && String(active.tagName || active.tag || '').toUpperCase() === 'BUTTON' && (active.className === 'row-btn' || active.className === 'card-detail-btn' || active.className === 'q-toggle')) {
+      for (var bn = active; bn && bn !== board; bn = bn.parentNode) {
+        var refAttr = bn.getAttribute ? (bn.getAttribute('data-ref-key') || bn.getAttribute('data-k') || '') : '';
+        if (refAttr) { boardTriggerFocus = { key: refAttr, cls: active.className }; break; }
+      }
+    }
     var caret = focused ? [active.selectionStart, active.selectionEnd] : null;
     if (!focused && railDraftFocus && selectedKey && !isWideDetail()) {
       focused = railDraftFocus.key;
@@ -4716,8 +4846,7 @@ const PAGE_SCRIPT = String.raw`
         var justFinishedAi = priorDone !== null && finished.some(function (ref) {
           return !priorDone[ref.key] && isFreshAiRef(ref, view.now);
         });
-        var narrowFreshAi = typeof window.innerWidth === 'number' && window.innerWidth > 0 && window.innerWidth < 800 && hasFreshAiDone(view);
-        if (justFinishedAi || narrowFreshAi) opened['shelf:done'] = true;
+        if (justFinishedAi) opened['shelf:done'] = true;
       }
       var done = shelf('done', w('pgDone'), finished, 'done', finished.length ? doneExtra() : null);
       if (done) parts.push(sectionBlock(done, 'done'));
@@ -4795,6 +4924,32 @@ const PAGE_SCRIPT = String.raw`
     Object.keys(results).forEach(function (key) { if (!resultSlots[key]) results[key].orphaned = true; });
     if (selectedKey && !railItems[selectedKey]) selectedKey = '';
     renderDetailRail();
+    if (railFocus && selectedKey && isWideDetail() && detailRailEl) {
+      var nextRailTarget = railFocus.id ? document.getElementById(railFocus.id) : null;
+      if (!nextRailTarget && !railFocus.id) {
+        var nextBtns = detailRailEl.querySelectorAll(railFocus.tag || 'button');
+        var nextMatches = [];
+        for (var bi = 0; bi < nextBtns.length; bi++) {
+          var candidate = nextBtns[bi];
+          var candHref = candidate.getAttribute ? (candidate.getAttribute('href') || '') : '';
+          if ((candidate.className || '') === railFocus.cls && String(candidate.textContent || '').trim() === railFocus.text && candHref === railFocus.href) {
+            nextMatches.push(candidate);
+          }
+        }
+        var occMatch = nextMatches.length === railFocus.dupCount && railFocus.occ >= 0 ? nextMatches[railFocus.occ] : null;
+        var occStep = occMatch && occMatch.getAttribute ? (occMatch.getAttribute('data-step-line') || '') : '';
+        var occFp = occMatch && occMatch.getAttribute ? (occMatch.getAttribute('data-step-fp') || '') : '';
+        if (occMatch && occStep === railFocus.stepLine && occFp === railFocus.stepFp) nextRailTarget = occMatch;
+        if (!nextRailTarget) nextRailTarget = document.getElementById('detail-close');
+      }
+      if (nextRailTarget && typeof nextRailTarget.focus === 'function') nextRailTarget.focus({ preventScroll: true });
+    }
+    if (boardTriggerFocus && !railFocus && railItems[boardTriggerFocus.key] && railItems[boardTriggerFocus.key].node) {
+      var trgBtns = railItems[boardTriggerFocus.key].node.querySelectorAll('button');
+      for (var ti = 0; ti < trgBtns.length; ti++) {
+        if ((trgBtns[ti].className || '') === boardTriggerFocus.cls && !trgBtns[ti].hidden) { trgBtns[ti].focus({ preventScroll: true }); break; }
+      }
+    }
     [board, detailRailEl].forEach(function (rootEl) {
       if (!rootEl) return;
       rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) {

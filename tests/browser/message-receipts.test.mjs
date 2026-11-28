@@ -36,14 +36,21 @@ const withQuestion = async (name, run) => browserFixture(name, async fixture => 
     const board = new BoardPage(page)
     await board.open(url)
     const card = board.question(question)
+    const detailSurface = async () => (await page.locator('#detail-rail').isVisible()) ? page.locator('#detail-rail') : card
+    const countQueued = async () => {
+      const inCard = await card.getByText(/^Queued( · .*)?$/).count()
+      const inRail = (await page.locator('#detail-rail').isVisible()) ? await page.locator('#detail-rail .press-result').getByText(/^Queued( · .*)?$/).count() : 0
+      return inCard + inRail
+    }
     const send = async () => {
       await card.getByRole('button', { name: 'Write your own', exact: true }).click()
-      await card.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Use the synthetic blue plan.')
-      await card.getByRole('button', { name: 'Send to Codex', exact: true }).click()
+      const detail = await detailSurface()
+      await detail.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Use the synthetic blue plan.')
+      await detail.getByRole('button', { name: 'Send to Codex', exact: true }).click()
       // The durable paragraph distinguishes the receipt from the duplicate local status under test.
       await card.locator('p[role="status"]').filter({ hasText: /^Queued · / }).waitFor()
     }
-    await run({ ...fixture, card, send, deliveries, receive: () => { canReceive = true }, update: () => writeProgress(progress, block('Updated synthetic receipt context.')) })
+    await run({ ...fixture, card, detailSurface, countQueued, send, deliveries, receive: () => { canReceive = true }, update: () => writeProgress(progress, block('Updated synthetic receipt context.')) })
     assert.deepEqual(errors, [])
   } finally {
     await receiver.close()
@@ -51,30 +58,31 @@ const withQuestion = async (name, run) => browserFixture(name, async fixture => 
 })
 
 test('a durable replied receipt supersedes a local queued hint without another action', { concurrency: false, timeout: 120_000 }, async () => {
-  await withQuestion('receipt-replaces-hint', async ({ card, send, receive, deliveries }) => {
+  await withQuestion('receipt-replaces-hint', async ({ card, countQueued, send, receive, deliveries }) => {
     await send()
-    const queuedLines = await card.getByText(/^Queued( · .*)?$/).count()
+    const queuedLines = await countQueued()
     receive()
     await card.getByText('Read · Synthetic reply.', { exact: true }).waitFor()
     assert.equal(deliveries.length, 1)
-    assert.equal(await card.getByText(/^Queued( · .*)?$/).count(), 0, 'the earlier local enqueue result outlived its durable reply')
+    assert.equal(await countQueued(), 0, 'the earlier local enqueue result outlived its durable reply')
     assert.equal(queuedLines, 1, 'the queued receipt and local enqueue result were shown twice')
   })
 })
 
 test('an earlier receipt preserves a new send error on the same card', { concurrency: false, timeout: 120_000 }, async () => {
-  await withQuestion('receipt-preserves-error', async ({ page, card, send, receive, deliveries, update }) => {
+  await withQuestion('receipt-preserves-error', async ({ page, card, detailSurface, send, receive, deliveries, update }) => {
     await send()
     receive()
     await card.getByText('Read · Synthetic reply.', { exact: true }).waitFor()
     await page.reload()
     await card.getByRole('button', { name: 'Write your own', exact: true }).click()
-    await card.getByRole('button', { name: 'Send to Codex', exact: true }).click()
-    await card.getByRole('alert').filter({ hasText: 'Type something first.' }).waitFor()
+    const detail = await detailSurface()
+    await detail.getByRole('button', { name: 'Send to Codex', exact: true }).click()
+    await detail.getByRole('alert').filter({ hasText: 'Type something first.' }).waitFor()
     update()
     // The context appears in both its one-line and full copies; either visible copy proves the redraw.
-    await card.getByText('Updated synthetic receipt context.', { exact: true }).first().waitFor()
-    assert.equal(await card.getByRole('alert').innerText(), 'Type something first.')
+    await detail.getByText('Updated synthetic receipt context.', { exact: true }).first().waitFor()
+    assert.equal(await detail.getByRole('alert').innerText(), 'Type something first.')
     // The session reported again after the answer went in, so the board reads it Answered (owner, #1843 answer 5): the
     // card keeps one status line for the earlier answer beside the new error.
     assert.equal(await card.getByText('Answered · on the board', { exact: true }).count(), 1)
@@ -84,7 +92,7 @@ test('an earlier receipt preserves a new send error on the same card', { concurr
 })
 
 test('a delayed enqueue response cannot restore Queued after its receipt is already visible', { concurrency: false, timeout: 120_000 }, async () => {
-  await withQuestion('receipt-before-response', async ({ page, card, send, receive, deliveries, evidence }) => {
+  await withQuestion('receipt-before-response', async ({ page, card, countQueued, send, receive, deliveries, evidence }) => {
     // Each UI wait must settle inside the existing overall test deadline, including on failure.
     page.setDefaultTimeout(15_000)
     const phases = []
@@ -114,7 +122,7 @@ test('a delayed enqueue response cannot restore Queued after its receipt is alre
       await page.waitForFunction(() => document.querySelector('textarea[aria-label="Your answer…"]')?.value === '', undefined, { timeout: 15_000 })
       phase('successful send completed in the page')
       assert.equal(deliveries.length, 1)
-      assert.equal(await card.getByText(/^Queued( · .*)?$/).count(), 0, 'a late enqueue response restored feedback superseded by its visible receipt')
+      assert.equal(await countQueued(), 0, 'a late enqueue response restored feedback superseded by its visible receipt')
       phase('no stale enqueue feedback')
     } finally {
       releaseResponse()
@@ -187,11 +195,15 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
       const doneCard = board.question(qDone)
       const failCard = board.question(qFail)
 
+      const clickWriteOwn = async (cardLoc, detailLoc) => {
+        const inlineBtn = cardLoc.getByRole('button', { name: 'Write your own', exact: true })
+        await ((await inlineBtn.isVisible()) ? inlineBtn : detailLoc.getByRole('button', { name: 'Write your own', exact: true })).click()
+      }
       // Next-turn route card hint uses plain words.
-      await waitCard.locator('button.q-toggle').click()
-      await waitCard.getByText('Codex reads this when you next type in its window.', { exact: true }).waitFor()
-      await waitCard.getByRole('button', { name: 'Write your own', exact: true }).click()
-      await waitCard.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Queue this answer.')
+      const waitDetail = await board.openQuestion(qWait)
+      await waitDetail.getByText('Codex reads this when you next type in its window.', { exact: true }).waitFor()
+      await clickWriteOwn(waitCard, waitDetail)
+      await waitDetail.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Queue this answer.')
 
       // Hold the first enqueue POST to verify in-flight wording, button label and contrast.
       let releaseAct = () => {}, finishRoute = () => {}, holdAct = true
@@ -208,9 +220,9 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
         await route.fallback()
       }
       await page.route('**/api/act', actRoute)
-      const queueBtn = waitCard.locator('button.primary')
+      const queueBtn = waitDetail.locator('button.primary')
       await queueBtn.click()
-      const inFlight = waitCard.locator('.press-result.wait')
+      const inFlight = waitDetail.locator('.press-result.wait')
       await inFlight.waitFor()
       const inFlightText = await inFlight.innerText()
       // In flight every route reads Sending, the one word set the board reads from receipts (#1843, B4).
@@ -235,10 +247,10 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
       await waitReceipt.filter({ hasText: /^Queued · at its next turn · / }).waitFor()
 
       // Card 2 settles in handed-over (delivered) state.
-      await doneCard.locator('button.q-toggle').click()
-      await doneCard.getByRole('button', { name: 'Write your own', exact: true }).click()
-      await doneCard.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Hand over this answer.')
-      await doneCard.getByRole('button', { name: "Queue for Codex's next turn", exact: true }).click()
+      const doneDetail = await board.openQuestion(qDone)
+      await clickWriteOwn(doneCard, doneDetail)
+      await doneDetail.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Hand over this answer.')
+      await doneDetail.getByRole('button', { name: "Queue for Codex's next turn", exact: true }).click()
       await doneCard.locator('p.receipt.t-wait').waitFor()
       const taken = await postMsg('mailbox-turn', { agent: 'codex', session: sessionDone, surface: 'CLI' })
       assert.ok(taken.message?.id)
@@ -247,10 +259,10 @@ test('receipt states show distinct >= 4.5:1 colours and icons in both themes and
       await doneReceipt.filter({ hasText: /^Delivered · / }).waitFor()
 
       // Card 3 settles in failed/rejected state.
-      await failCard.locator('button.q-toggle').click()
-      await failCard.getByRole('button', { name: 'Write your own', exact: true }).click()
-      await failCard.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Trigger failure.')
-      await failCard.getByRole('button', { name: 'Send to Codex', exact: true }).click()
+      const failDetail = await board.openQuestion(qFail)
+      await clickWriteOwn(failCard, failDetail)
+      await failDetail.getByRole('textbox', { name: 'Your answer…', exact: true }).fill('Trigger failure.')
+      await failDetail.getByRole('button', { name: 'Send to Codex', exact: true }).click()
       const failReceipt = failCard.locator('p.receipt.t-alert')
       await failReceipt.filter({ hasText: /^Not delivered · / }).waitFor()
 
