@@ -334,6 +334,35 @@ const entryOf = (line: string): TranscriptEntry | null => {
     return typeof entry === 'object' && entry !== null && !Array.isArray(entry) ? entry as TranscriptEntry : null
   } catch { return null }
 }
+
+// Whether the turn's own input is already in the transcript at a hand-over (#1622): true when the last USER_INPUT or model
+// entry in the last 256 KiB before `size` is a USER_INPUT, since nothing of a new turn but its input can come before its
+// first invocation; false when it is a model entry (the turn's input is still to come); null when the file cannot be read
+// or holds neither. A hand-over at a later invocation of a turn knows its input is in without reading.
+export const antigravityInputIsIn = (path: unknown, size: number): boolean | null => {
+  if (!isKnownTranscript(path) || !Number.isSafeInteger(size) || size <= 0) return null
+  try {
+    if (!lstatSync(path).isFile()) return null
+    const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+    try {
+      const stat = fstatSync(fd)
+      if (!stat.isFile() || stat.size < size) return null
+      const start = Math.max(0, size - MAX_TRANSCRIPT_HEAD_BYTES)
+      const bytes = Buffer.alloc(size - start)
+      if (readSync(fd, bytes, 0, bytes.length, start) !== bytes.length) return null
+      let text = bytes.toString('utf8')
+      if (start > 0) text = text.slice(text.indexOf('\n') + 1)
+      let isIn: boolean | null = null
+      for (const line of text.split(/\r?\n/)) {
+        const entry = entryOf(line)
+        if (entry === null) continue
+        if (entry.type === 'USER_INPUT') isIn = true
+        else if (entry.source === 'MODEL') isIn = false
+      }
+      return isIn
+    } finally { closeSync(fd) }
+  } catch { return null }
+}
 const replyFirstLine = ({ type, source, content }: TranscriptEntry): string | null =>
   source === 'MODEL' && type === 'PLANNER_RESPONSE' && typeof content === 'string' && content.trim() !== '' ? content.split(/\r?\n/)[0]!.trim() : null
 
@@ -342,12 +371,13 @@ const replyFirstLine = ({ type, source, content }: TranscriptEntry): string | nu
 // that hand-over started count, read forward from it up to 8 MiB, so a long turn after the ACK line does not push it out
 // of reach. That turn ends at the first USER_INPUT after one of its replies, or at the second USER_INPUT after `from`
 // (the turn's own input may be written after the hand-over), so a later turn citing the code never counts, even for a
-// claim a Stop could not read and kept. Without `from`, or when the file is now shorter, only the last turn's replies
+// claim a Stop could not read and kept. With `isInputIn` (the hand-over found the turn's input already written, #1622),
+// the first USER_INPUT after `from` ends the turn, so a turn with no reply never reads the next turn's. Without `from`, or when the file is now shorter, only the last turn's replies
 // (after its last USER_INPUT) in the last 256 KiB count.
 // Only the reply's own first line is returned (a blank first line stays blank, so an ACK on the line after it does not
 // count), and only for a regular file under one of the known transcript names; a line that is not JSON is skipped.
 // A path that is missing, unknown or cannot be read returns null, so the caller can keep its claims.
-export const antigravityReplyFirstLines = (path: unknown, from?: number): string[] | null => {
+export const antigravityReplyFirstLines = (path: unknown, from?: number, isInputIn = false): string[] | null => {
   if (!isKnownTranscript(path)) return null
   try {
     if (!lstatSync(path).isFile()) return null
@@ -364,7 +394,7 @@ export const antigravityReplyFirstLines = (path: unknown, from?: number): string
           if (entry === null) return
           if (entry.type === 'USER_INPUT') {
             inputs += 1
-            if (replies.length > 0 || inputs > 1) isTurnEnded = true
+            if (replies.length > 0 || isInputIn || inputs > 1) isTurnEnded = true
             return
           }
           const first = replyFirstLine(entry)

@@ -10,7 +10,7 @@ import type { CodexReport } from '../hooks/codex.ts'
 import type { Strings } from '../hooks/i18n.ts'
 import type { CodexMeta } from '../hooks/runs.ts'
 import { hookMailbox } from './board-messaging.ts'
-import { antigravityReplyFirstLines, antigravityTranscriptSize } from './antigravity-meta.ts'
+import { antigravityInputIsIn, antigravityReplyFirstLines, antigravityTranscriptSize } from './antigravity-meta.ts'
 import { readSessionMeta } from './codex-history.ts'
 import { defaultMessagesDirectory } from './runtime-folder.ts'
 
@@ -26,7 +26,8 @@ type Json = Record<string, unknown>
 // a later Stop could not tell its turn from a later one.
 // The claims live in the board's folder; when that write fails they go beside the message store, a separate folder, so
 // one failed write does not lose an ACK. Both are read; a save writes one and removes the other.
-type AckClaim = { id: string; nonce: string; matched?: true; from?: number }
+// `input` says the turn's input was already in the transcript at the hand-over, so its window ends at the next one (#1622).
+type AckClaim = { id: string; nonce: string; matched?: true; from?: number; input?: true }
 const ACK_CLAIMS_KEEP = 8
 // Codex's Stop hook keeps its hand-overs the same way, in a folder of its own (#319); `owner` names the agent and session.
 const ackClaimsFiles = (root: string, messages: string, owner: string, folder = 'antigravity-acks'): string[] =>
@@ -37,8 +38,8 @@ const readAckClaimsFile = (file: string, readLocal: (file: string) => string | n
   try {
     const saved = readLocal(file)
     const parsed = saved === null ? null : JSON.parse(saved) as { claims?: unknown }
-    return Array.isArray(parsed?.claims) ? parsed.claims.filter(isAckClaim).map(({ id, nonce, matched, from }) => matched === true ? { id, nonce, matched }
-      : Number.isSafeInteger(from) && (from as number) >= 0 ? { id, nonce, from } : { id, nonce }) : []
+    return Array.isArray(parsed?.claims) ? parsed.claims.filter(isAckClaim).map(({ id, nonce, matched, from, input }) => matched === true ? { id, nonce, matched }
+      : Number.isSafeInteger(from) && (from as number) >= 0 ? { id, nonce, from, ...(input === true ? { input } : {}) } : { id, nonce }) : []
   } catch { return [] }
 }
 const readAckClaims = (files: string[], readLocal: (file: string) => string | null): AckClaim[] => {
@@ -157,16 +158,17 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
       const files = ackClaimsFiles(root, messages, hash(`${agent}:${session}`))
       const claims = readAckClaims(files, readLocal)
       if (claims.length > 0) {
-        const read = new Map<number | undefined, string[] | null>()
-        const repliesOf = (from: number | undefined): string[] | null => {
-          if (!read.has(from)) read.set(from, antigravityReplyFirstLines(raw.transcriptPath, from))
-          return read.get(from) ?? null
+        const read = new Map<string, string[] | null>()
+        const repliesOf = (from: number | undefined, isInputIn: boolean): string[] | null => {
+          const key = `${from}:${isInputIn}`
+          if (!read.has(key)) read.set(key, antigravityReplyFirstLines(raw.transcriptPath, from, isInputIn))
+          return read.get(key) ?? null
         }
         const kept: typeof claims = []
         let isAckFailed = false, isUnreadable = false
         for (const claim of claims) {
           if (claim.matched !== true) {
-            const lines = repliesOf(claim.from)
+            const lines = repliesOf(claim.from, claim.input === true)
             if (lines === null) {
               isUnreadable = true
               if (claim.from !== undefined) kept.push(claim)
@@ -280,7 +282,8 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
           hasWritten = true
         } catch {}
         if (hasWritten && message !== null && agent === 'antigravity' && /^[0-9a-f]{6}$/.test(message.nonce)) {
-          saveAntigravityAckClaim(root, messages, owner, raw.transcriptPath, message.id, message.nonce, readLocal, atomic, checkDeadline, s)
+          saveAntigravityAckClaim(root, messages, owner, raw.transcriptPath, message.id, message.nonce, readLocal, atomic, checkDeadline, s,
+            event === 'PreInvocation' && Number.isSafeInteger(raw.invocationNum) && (raw.invocationNum as number) > 0)
         }
         if (hasWritten && message !== null) try { await mailbox?.accept(agent, session, message.id, message.nonce, Date.now()) } catch {}
         if (hasWritten && pushResult.keys.length > 0) {
@@ -312,12 +315,15 @@ const saveAntigravityAckClaim = (
   atomic: TurnDelivery['atomic'],
   checkDeadline: () => void,
   s: Strings,
+  isLaterInvocation = false,
 ): void => {
   let isSaved = false
   try {
     const files = ackClaimsFiles(root, messages, owner)
     const size = antigravityTranscriptSize(transcriptPath)
-    const claim = size === null ? { id, nonce } : { id, nonce, from: size }
+    // An empty or missing transcript cannot hold the turn's input yet, even at a later invocation.
+    const isInputIn = size !== null && size > 0 && (isLaterInvocation || antigravityInputIsIn(transcriptPath, size) === true)
+    const claim = size === null ? { id, nonce } : { id, nonce, from: size, ...(isInputIn ? { input: true as const } : {}) }
     isSaved = saveAckClaims(files, [...readAckClaims(files, readLocal).filter(one => one.id !== id), claim].slice(-ACK_CLAIMS_KEEP), atomic, checkDeadline)
   } catch {}
   if (!isSaved) process.stderr.write(`${s.localAgentMailboxFailed('ACK_CLAIM_UNSAVED')}\n`)
