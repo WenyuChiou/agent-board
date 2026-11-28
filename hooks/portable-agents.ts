@@ -153,7 +153,8 @@ const openBoard = () => new Promise((resolve, reject) => {
     else resolve(text)
   }
   try {
-    child = spawn(${JSON.stringify(node)}, [${JSON.stringify(board)}, '--html'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
+    // The model gets a one-use link and nothing that claims a window it cannot see (#1650).
+    child = spawn(${JSON.stringify(node)}, [${JSON.stringify(board)}, '--html', '--no-open'], { detached: true, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
     child.unref()
   } catch { return reject(new Error('AGENT_BOARD_OPEN_FAILED')) }
   timer = setTimeout(() => finish(new Error('AGENT_BOARD_OPEN_FAILED: TIMEOUT')), 20000)

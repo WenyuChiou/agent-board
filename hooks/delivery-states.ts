@@ -454,7 +454,7 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     shapes: {
     } },
   unconfirmed: { holdsSend: false, holdsStart: false, status: 'unsure', on: {
-    claim: 'unconfirmed', claimLate: 'unconfirmed', pull: 'unconfirmed', accept: 'unconfirmed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'wakeStarted',
+    claim: 'unconfirmed', claimLate: 'unconfirmed', pull: 'unconfirmed', accept: 'unconfirmed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'unconfirmed', unsure: 'unconfirmed',
     attempt: 'CLAIM_LOST', release: 'unconfirmed', releaseUnsent: 'unconfirmed', dismiss: 'dismissed', disconnect: 'unconfirmed', leave: 'unconfirmed', rebind: 'unconfirmed', openLimit: 'unconfirmed', dayLimit: 'expired', restart: 'unconfirmed' },
     shapes: {
       acceptedBefore: { on: { dayLimit: 'wakeExpired' } },
@@ -495,8 +495,5 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
 }
 
 // Cells where today's code looks wrong; the table states what the code does.
-export const SUSPECT_CELLS: readonly (readonly [DeliveryState, DeliveryEvent])[] = [
-  // A wake that reads "sent, not confirmed" holds its session again on an uncertain receipt, while a late accept is kept
-  // from doing so (#1366 review). It breaks none of the three rules the test checks.
-  ['unconfirmed', 'unsure'], ['unconfirmed', 'timeout'],
-]
+// None today: a wake that reads "sent, not confirmed" keeps that line on an uncertain receipt, as on a late accept (#1553).
+export const SUSPECT_CELLS: readonly (readonly [DeliveryState, DeliveryEvent])[] = []

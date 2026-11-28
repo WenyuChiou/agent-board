@@ -160,7 +160,10 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
         if (line !== undefined) child.stdout.emit('data', `${JSON.stringify(line)}\n`)
         child.emit('close', code)
       }
-      setImmediate(() => {
+      // The answer comes in the same turn of the loop as the call (after the plugin has set its listeners and its limit timer),
+      // as no timer can fire between them: a test process held longer than the fixture's short board-call limit does not make
+      // the plugin give up a call the board applied (#1956). A test that wants a later answer says so ('slow', 'hang', a hold).
+      process.nextTick(() => {
         const fault = canned ? 'fail' : broken ?? calls.faults[action]?.shift()
         if (fault === 'hang') return
         if (fault === 'fail' || fault === 'error') return finish(0, { ok: false, code: 'BOARD_NOT_RUNNING', watch: directory, message: null })
@@ -183,7 +186,7 @@ const fixture = async (fn, { spawn: isSpawn = false, timing = {}, watch: isWatch
     let receiverOf = () => null
     const until = async (check, label) => {
       for (const end = Date.now() + 15_000; Date.now() < end; await wait(10)) if (check()) return
-      assert.fail(label)
+      assert.fail(typeof label === 'function' ? label() : label)
     }
     const client = {
       session: {
@@ -527,7 +530,11 @@ test('opencodePlugin keeps a session idle when a busy lookup returns after a new
   await slowBusy
   // A message queued now is taken: the late busy answer did not make the session busy again.
   f.queue('ses_order', 'order-message-1', 'Synthetic text after a late busy answer')
-  await f.until(() => f.calls.promptAsync.length === 1 && f.message('order-message-1').status === 'accepted' && f.settled(), 'the idle session was woken')
+  // The test process is held 260 ms, past the fixture's 200 ms board-call limit, as a slow runner holds it. The stand-in board
+  // answers in the same turn of the loop as the call, as no timer can come between them, so the take is not given up (#1956).
+  for (const end = Date.now() + 260; Date.now() < end;) { /* held */ }
+  await f.until(() => f.calls.promptAsync.length === 1 && f.message('order-message-1').status === 'accepted' && f.settled(),
+    () => `the idle session was woken: board calls ${JSON.stringify(f.calls.board)}, message ${f.message('order-message-1')?.status}, prompts ${f.calls.promptAsync.length}`)
 }))
 
 test('opencodePlugin holds the message when the host status lookup fails', () => fixture(async f => {

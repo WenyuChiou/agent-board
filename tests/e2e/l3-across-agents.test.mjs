@@ -6,6 +6,7 @@ import { block, hook } from './lib/writers.mjs'
 import { inspectSurfaces, terminal, seenPageWithin, serve, run, command } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
+import { readPrintedLink } from '../helpers/printed-link.mjs'
 
 const seedAsk = (world, agent, extra = {}) => block(world, { agent, state: 'waiting', title: `Publish ${agent} report`, steps: ['- [?] Publish the synthetic report, OK?'], ...extra })
 
@@ -84,8 +85,13 @@ describe('L3 across agents and sessions', () => {
         // A poll still on its way when the command ends must land before the test goes on, or it could arrive after the next step.
         try { return await run() } finally { clearInterval(timer); await Promise.all([...inFlight]) }
       }
-      const windows = output => (output.match(/E2E_BROWSER_REQUEST/g) ?? []).length
-      const serving = () => command(world, ['--serve', '--idle-minutes', '1'])
+      const windows = output => ((typeof output === 'string' ? output : output.stdout).match(/E2E_BROWSER_REQUEST/g) ?? []).length
+      // Both streams: the address line is on stdout, the note about the window on stderr.
+      const serving = async () => {
+        const result = await run(world, ['--serve', '--idle-minutes', '1'])
+        assert.equal(result.status, 0, result.stderr || result.stdout)
+        return result
+      }
       const outputs = []
       outputs.push(await serving())
       // The terminal board reads the board from the running page too; that is not a window.
@@ -95,13 +101,21 @@ describe('L3 across agents and sessions', () => {
       // The opened window loads the page and keeps asking, as a real one does.
       await server.page()
       outputs.push(await keeping([['page-zero', '1']], serving))
-      for (const output of outputs) assert.ok(output.includes(server.url), 'The same isolated server address must be reused')
+      // No window of this run loaded its page, so each start ends with a fresh one-use link, never
+      // the page's reusable address (#1650).
+      for (const [index, output] of outputs.entries()) {
+        const note = index === 2 ? EN.boardPageAlreadyOpenLink : EN.boardPageLaunchedLink
+        const { link } = readPrintedLink(output, { wordings: [EN.serveAt], copies: { stdout: 1, stderr: 1 }, secrets: [page.searchParams.get('t')] })
+        assert.equal(output.stderr.trim(), note(link), output.stderr)
+      }
       assert.equal(windows(outputs[0]), 1)
       assert.equal(windows(outputs[2]), 0, outputs[2])
       // The agent's own way to open the page (--html, the same code /agent-board uses) points at the open window too.
-      const html = await keeping([['page-zero', '1']], () => command(world, ['--html']))
+      const htmlRun = await keeping([['page-zero', '1']], () => run(world, ['--html']))
+      assert.equal(htmlRun.status, 0, htmlRun.stderr || htmlRun.stdout)
+      const html = htmlRun.stdout
       assert.equal(windows(html), 0, html)
-      assert.ok(html.includes(server.url), html)
+      readPrintedLink(htmlRun, { wordings: [EN.boardPageAlreadyOpenLink], secrets: [page.searchParams.get('t')] })
       // A page that says it is leaving is no longer an open window: the next open starts one.
       assert.equal((await leave('page-zero')).status, 200)
       assert.equal(windows(await serving()), 1)

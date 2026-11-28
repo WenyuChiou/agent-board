@@ -20,7 +20,7 @@ const posted = { issues: [{ number: 42, user: bot, body: `${issueMarker}\nSynthe
 
 // A GitHub stand-in for gh: it answers the reads the queue makes and records every write, so no test reaches the network.
 // It respects the requested --limit on a pull request list, as gh does, so a list longer than the cap reads back truncated.
-const gitHub = ({ prs = [], prComments = {}, claimed = [], issues = [], issueComments = {}, failOn = null } = {}) => {
+const gitHub = ({ prs = [], prComments = {}, claimed = [], issues = [], issueComments = {}, milestones = [], milestoneIssues = [], failOn = null } = {}) => {
   const calls = []
   const run = (command, args, options = {}) => {
     calls.push({ command, args, input: options.input === undefined ? undefined : JSON.parse(options.input) })
@@ -37,6 +37,8 @@ const gitHub = ({ prs = [], prComments = {}, claimed = [], issues = [], issueCom
     if (method) return JSON.stringify({ id: 1 })
     const lines = items => items.map(item => JSON.stringify(item)).join('\n')
     if (path.includes('/collaborators')) return ''
+    if (path.includes('/milestones?')) return lines(milestones)
+    if (path.includes('?milestone=')) return lines(milestoneIssues)
     if (path.startsWith(`repos/${repo}/issues?`)) return lines(issues)
     const number = Number(path.match(/issues\/(\d+)\/comments/)?.[1])
     return lines(prComments[number] ?? issueComments[number] ?? [])
@@ -180,6 +182,46 @@ test('a pull request whose body could not be read releases no claim', () => {
   assert.match(err, /Pull request list may be truncated.*so claimed was not taken off any issue; the next run tries again\./)
   assert.deepEqual(targets(github), [['PATCH', `repos/${repo}/issues/comments/8`]])
   assert.doesNotMatch(github.writes()[0][2].body, /claim expired: #12/)
+})
+
+test('the poster reads the clock after the GitHub reads, so a comment posted during them counts', () => {
+  // The clock starts before the reads and moves past the Working on comment on the first GitHub call.
+  let clock = Date.parse('2026-10-20T00:00:00Z')
+  const github = gitHub({
+    ...posted,
+    milestones: [{ number: 15, title: '0.26.0 The mainstream AIs end to end', state: 'open', created_at: '2026-10-01T00:00:00Z' }],
+    milestoneIssues: [
+      { number: 12, title: 'Synthetic task 12', labels: ['ready'], assignees: [], created_at: '2026-10-19T09:00:00Z' },
+      { number: 13, title: 'Synthetic task 13', labels: ['ready'], assignees: [{ login: 'ana' }], created_at: '2026-10-19T09:00:00Z' },
+    ],
+    issueComments: {
+      ...posted.issueComments,
+      12: [
+        { body: 'Ready check: READY by codex (x)', created_at: '2026-10-19T10:00:00Z', user: { login: 'li' } },
+        { body: 'Working on #12 now', created_at: '2026-10-20T06:00:00Z', user: { login: 'ana' } },
+      ],
+      13: [
+        { body: 'Ready check: READY by codex (x)', created_at: '2026-10-19T10:00:00Z', user: { login: 'li' } },
+        { body: 'Working on #13 now', created_at: '2026-10-20T06:00:00Z', user: { login: 'ana' } },
+      ],
+    },
+  })
+  let advanced = false
+  const run = (...args) => {
+    if (!advanced) {
+      advanced = true
+      clock = Date.parse('2026-10-20T12:00:00Z')
+    }
+    return github.run(...args)
+  }
+  const err = []
+  const code = main([], { run, now: () => new Date(clock), log: () => {}, error: text => err.push(text) })
+  assert.equal(code, 0, err.join('\n'))
+  assert.deepEqual(targets(github), [['PATCH', `repos/${repo}/issues/comments/8`]])
+  const body = github.writes()[0][2].body
+  assert.match(body, /Milestone 0\.26\.0 The mainstream AIs end to end \(#15\): open 2, ready 2, really free 0/)
+  assert.doesNotMatch(body, /no activity for over 24 hours/)
+  assert.match(body, /Updated 2026-10-20 12:00 UTC/)
 })
 
 test('a queue whose text fails the private-data check is not posted and the run fails', () => {

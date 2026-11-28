@@ -91,9 +91,9 @@ import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_M
 import { othersNote, sessionPushNote } from './others'
 import type { AgentClaim } from './session-liveness'
 import { goneBlocks, hostHashOf, withoutProcessIdentity } from './session-liveness'
-import type { ProgressProject } from '../types'
+import type { ProgressProject, ProgressTask } from '../types'
 import { boardRun } from './board-commands'
-import { peekInbox, redact, turnsFor } from './board'
+import { guardViewStep, peekInbox, redact, turnsFor } from './board'
 import type { PendingTurn, TurnCache } from './board'
 import { paletteFor } from './palette'
 import { drawPane, pressTarget, reviseKey } from './pane'
@@ -107,7 +107,7 @@ import { answerTurns, applyDigest, applyLateDigest, clearBackgroundJobs, cleanHa
 import type { Digest } from './digest'
 import { isNodeSupported, isOwnBoard, isSetupState,isWindowsHost, nodeVersionOf, openclawPrinted, openclawSavedBy, openclawTooOld, psQuote, setupLines, setupProblemText, setupSeed } from './connect'
 import type { SetupProblem } from './connect'
-import { liveBoardArgv, liveBoardPage, liveBoardScript, pageDoneHash, pageDonePath, pageStatePath, readPageDone, readPageState } from './live-page'
+import { liveBoardArgv, liveBoardNote, liveBoardPage, liveBoardRefusal, liveBoardScript, pageDoneHash, pageDonePath, pageStatePath, readPageDone, readPageState } from './live-page'
 import {
   ANSWER_KEEP,
   answerKey,
@@ -149,7 +149,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { withQueuedAnswers } from './board-status'
 import { messagesFolder, queuedMessagingOf } from './queued-store'
-import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
+import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, splitNote, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionProofJson, questionProofOf, questionProofPath, questionScope, questionStatsKey, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from './questions'
@@ -1569,7 +1569,7 @@ const warningOf = (snap: { size: number; projects: readonly ProgressProject[]; t
 
 let isInteractiveSession = true
 
-const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean } | null; needsInstall: boolean; reason?: string }> => {
+const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInteractive: boolean): Promise<{ page: { url: string; isKept: boolean; opened?: 'window'; note?: string } | null; needsInstall: boolean; reason?: string; refusal?: string }> => {
   // Use the connector's installed file so sessions and agents share the same script
   // and the CLI's existing running-page check.
   const script = liveBoardScript(path)
@@ -1583,12 +1583,17 @@ const openLiveBoard = async ($: EngineInterface, path: string, s: Strings, isInt
     if (ran.isStdoutTruncated) return { page: null, needsInstall: false, reason: s.livePageTruncated }
     if (ran.exitCode !== 0) {
       const output = `${ran.stdout}\n${ran.stderr}`
+      const refusal = liveBoardRefusal(ran.stdout, s)
+      if (refusal !== null) return { page: null, needsInstall: false, reason: refusal, refusal }
       const code = /\b(EACCES|EPERM|EROFS|ENOSPC|EBUSY|EAGAIN)\b/.exec(output)?.[1]
       const reason = output.includes(s.serveRuntimePrivate) ? s.serveRuntimePrivate : code ? plainReason(s, code) : s.livePageExit(ran.exitCode)
       return { page: null, needsInstall: false, reason }
     }
     const page = liveBoardPage(ran.stdout, s)
-    return { page, needsInstall: false, ...(page === null ? { reason: s.livePageNoAddress } : {}) }
+    if (page === null) return { page, needsInstall: false, reason: s.livePageNoAddress }
+    // What became of the window, which the board says beside its link (#1650).
+    const note = page.url === '' ? null : liveBoardNote(ran.stderr, page.url, s)
+    return { page: note === null ? page : { ...page, note }, needsInstall: false }
   } catch (error) {
     const text = messageOf(error)
     const code = /\b(EACCES|EPERM|EROFS|ENOSPC|EBUSY|EAGAIN)\b/.exec(text)?.[1]
@@ -1608,8 +1613,11 @@ const showBoardPage = async ($: EngineInterface, progress: string, s: Strings, h
       await isDoneWithin($, connecting, 5000)
       live = await openLiveBoard($, progress, s, isInteractive)
     }
-    const { page, needsInstall, reason } = live
-    if (page !== null) return { text: `${headline}\n<${page.url}>${page.isKept ? `\n${s.serveKept}` : ''}` }
+    const { page, needsInstall, reason, refusal } = live
+    if (page !== null && page.url === '') return { text: `${s.boardPageWindowOpened}${page.isKept ? `\n${s.serveKept}` : ''}` }
+    if (page !== null) return { text: `${headline}\n${page.note === undefined ? `<${page.url}>` : page.note.replace(page.url, `<${page.url}>`)}${page.isKept ? `\n${s.serveKept}` : ''}` }
+    // The board said what to do next; a command from here would only repeat it.
+    if (refusal !== undefined) return { text: refusal }
     return { text: `${s.livePageFallback}\n${needsInstall ? `${s.livePageNeedsInstall}\n` : `${s.serveFailed(reason ?? s.serveNotStarted)}\n`}${s.livePageCommand(boardRun(liveBoardScript(progress), ['--serve']))}` }
   } finally {
     startingPages -= 1
@@ -3586,7 +3594,10 @@ const appendArchive = async (
 
 // One task to the archive at the person's word, written the way archiveOld writes. False when
 // it could not be found for sure, so the file is left as it was.
-const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> => {
+const isSameAsked = (step: { text: string; note: string }, asked: { text: string; note: string }): boolean => step.text === asked.text && step.note === asked.note
+
+// `asked`: the press came from a question card, so the block must still ask those words (#155).
+const archiveOne = async ($: EngineInterface, ref: TaskRef, asked?: { text: string; note: string }): Promise<boolean> => {
   const path = await progressPath($)
   const at = await $.clock.now()
   const s = await wordsOf($)
@@ -3597,6 +3608,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const wrote = await rewrite($, path, async text => {
     currentBoardHash = sha256(text)
     const projects = parseProgress(text)
+    if (asked !== undefined && !refTasks(projects, ref).some(task => task.steps.some(step => step.status === 'waiting' && isSameAsked(splitNote(step.text), asked)))) return null
     const hasQuestions = refTasks(projects, ref).some(task => task.steps.some(step => step.status === 'waiting'))
     if (hasQuestions) {
       if (!(await keepAskedQuestions($, path, projects, ref))) throw new Error('QUESTION_RETENTION_FAILED')
@@ -4114,11 +4126,44 @@ const handOverPrompt = (row: TaskRow, s: Strings): string =>
 
 // A press on 完成: the step is ticked in the file, by the person's own hand, and journaled
 // like a step Claude finished.
+// A guarded ref names its task by the pane's own words, so the write reads it in them too.
 const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
-  const wrote = await rewrite($, await progressPath($), async before => setManualStep(before, ref, 'x', await $.clock.now()))
+  const s = await wordsOf($)
+  // rewrite keeps an earlier attempt's write when a later attempt changes nothing. When that later
+  // attempt refused the press, the earlier tick still counts only if the file still holds it where
+  // it was written and the drawn task still owns that line. Another writer's stale snapshot that
+  // moved lines put a twin there instead, or gave the line to another task, and the tick is gone
+  // (#1228); words it changed elsewhere, another step of the same task included, are not.
+  const last: { ticked: { lines: string[]; at: number } | null; refused: string | null } = { ticked: null, refused: null }
+  const wrote = await rewrite($, await progressPath($), async before => {
+    const after = setManualStep(before, ref, 'x', await $.clock.now(), s)
+    if (after === before) {
+      last.refused = before
+    } else {
+      const was = before.split(/\r?\n/)
+      const lines = after.split(/\r?\n/)
+      last.ticked = { lines, at: lines.findIndex((line, index) => line !== was[index]) }
+      last.refused = null
+    }
+    return after
+  })
   await poll($)
-
-  return wrote !== null
+  const { ticked, refused } = last
+  if (wrote === null || ticked === null) return false
+  if (refused === null) return true
+  const now = refused.split(/\r?\n/)
+  if (ticked.at < 0 || now[ticked.at] !== ticked.lines[ticked.at]) return false
+  const guard = ref.guard
+  if (guard === undefined) return ticked.lines.slice(0, ticked.at).every((line, index) => now[index] === line)
+  // The same task must still own the ticked line, at its drawn place, and the tasks it could be
+  // taken for must still start where they were drawn.
+  const anchor = (task: ProgressTask): number => task.line >= 0 ? task.line : task.steps[0]?.line ?? -1
+  const same = parseProgress(refused).filter(project => (project.name || s.uncategorized) === guard.task.project).flatMap(project => project.tasks)
+    .filter(task => task.title === guard.task.title && (task.auto?.session ?? null) === guard.task.session)
+  // Tasks with other steps can share the title; only those drawn as candidates must still be there.
+  const anchors = new Set(same.map(anchor))
+  if (guard.lines.some(line => !anchors.has(line))) return false
+  return same.some(task => task.line === guard.task.line && anchor(task) === (guard.task.line >= 0 ? guard.task.line : guard.steps[0]) && task.steps.some(step => step.line === ticked.at))
 }
 
 // A side question: answered over this session's transcript, without a turn of its own.
@@ -5048,6 +5093,18 @@ export const register: Register = (on, options) => {
           return s.archivedOne(row.title)
         }
       },
+      archiveAsk: async item => {
+        const ref = item.archive
+        if (ref === undefined) return failure(s.archiveGone)
+        const isTaken = await enqueue(() => archiveOne($, ref, { text: item.text, note: item.note }))
+        if (!isTaken) return failure(s.archiveGone)
+        try {
+          const count = keptQuestionCount(await paneView(), ref, s)
+          return count > 0 ? s.archivedKeptQuestions(item.task, count) : s.archivedOne(item.task)
+        } catch {
+          return s.archivedOne(item.task)
+        }
+      },
       confirmRow: async row => {
         if (row.confirm == null) return failure(s.boardLineChanged)
         const confirmed = await enqueue(() => confirmOne($, row.confirm!))
@@ -5058,7 +5115,8 @@ export const register: Register = (on, options) => {
       },
       takeOver: row => submitted(takeOverPrompt(row, s)),
       handOver: row => submitted(handOverPrompt(row, s)),
-      tick: async ref => {
+      tick: async drawn => {
+        const ref = guardViewStep(drawn, view)
         const ticked = await enqueue(() => tickStep($, ref))
         if (!ticked) return failure(s.boardTickGone)
         const outcome = { isSaved: true, isDeferred: false }

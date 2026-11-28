@@ -186,6 +186,11 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // Grew with #1680's eleven removal re-read tests: up to 49.0 s on Windows Node 24 (run 44650276536), over the 42 s
   // line of the 60 s default. By the rule of #1715: 49 x 1.3 / 0.7, rounded up to five seconds.
   'tests/setup-sidecar.test.mjs': 95_000, // slowest 49.0 s
+  // New with #1769 (M8a, #1650): 53.2 s on Windows Node 24 (run 45295627290) once round 4 added the case table's
+  // tests, over the 42 s line of the 60 s default. By the rule of #1715: 53.2 x 1.3 / 0.7, rounded up to five seconds.
+  // Grew again with #1955 (PR-b of #1650: 18 new tests; one waits the link request's real 5 s timeout at every entry point): 79.7 s
+  // on Windows Node 24 (run 46093905631), over the 70 s line of 100 s. By the rule of #1715: 79.7 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/page-one-use-open.test.mjs': 150_000, // slowest 79.7 s
   // Grew with #1881's test of the 20 s clock (#1843), which waits the real 20 s: 56.6 s on Windows Node 24 (run
   // 45763999753), over the 42 s line of the 60 s default. By the rule of #1715: 56.6 x 1.3 / 0.7, rounded up to five seconds.
   'tests/serve-watch.test.mjs': 110_000, // slowest 56.6 s
@@ -311,7 +316,7 @@ const listTests = (root, folder, pattern) => existsSync(join(root, folder))
   ? readdirSync(join(root, folder)).filter(name => pattern.test(name)).map(name => folder + '/' + name)
   : []
 
-export const buildPlan = async (files, { roots, forceFull = false }) => {
+export const buildPlan = async (files, { roots, forceFull = false, pairs }) => {
   if (!Array.isArray(roots) || !roots.length) throw new Error('base and head source roots are required')
   const tests = Object.fromEntries(GROUPS.map(group => [group, []]))
   const deps = Object.fromEntries(GROUPS.map(group => [group, new Set()]))
@@ -381,7 +386,7 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
   const finalPlan = plan.full && notes.length ? makePlan(files, { tests, deps, bundleSources, pluginRuntime, forceFull: true }) : plan
   // Changed paths include deletions; runnable files must always come from the head.
   for (const group of GROUPS) finalPlan.testFiles[group] = finalPlan.testFiles[group].filter(path => existsSync(join(head, path)))
-  return { ...finalPlan, notes }
+  return { ...finalPlan, notes, ...(pairs === undefined ? {} : { partMatrices: partMatrices(finalPlan, tests, pairs) }) }
 }
 
 const gitPaths = (root, base, head) => {
@@ -397,6 +402,7 @@ const emitPlan = plan => {
     const output = { plan: JSON.stringify(plan), full: String(plan.full), installers_os: JSON.stringify(plan.installerMatrix.length ? plan.installerMatrix : systems), plugin_os: JSON.stringify(plan.pluginMatrix.length ? plan.pluginMatrix : systems) }
     for (const group of GROUPS) output[group] = String(plan.checks[group])
     for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys', 'browser']) output[group + '_tests'] = JSON.stringify(plan.testFiles[group])
+    if (plan.partMatrices) for (const [group, matrix] of Object.entries(plan.partMatrices)) output[group + '_matrix'] = JSON.stringify(matrix)
     output.bundle = String(plan.generated.bundle)
     output.released = String(plan.generated.released)
     appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(output).map(([key, value]) => key + '=' + value).join('\n') + '\n')
@@ -548,6 +554,36 @@ export const partLoads = (files, total) => {
   return { shares, loads }
 }
 
+// Today's number of parts of each split job on each system, on every Node line (#1917): the counts test.yml falls back to
+// when the planner names no matrices, and the most a pull request's selection ever gets.
+export const PART_COUNTS = Object.freeze({
+  board: Object.freeze({ 'ubuntu-latest': 3, 'windows-latest': 10 }),
+  messaging: Object.freeze({ 'ubuntu-latest': 2, 'windows-latest': 3 }),
+  journeys: Object.freeze({ 'ubuntu-latest': 1, 'windows-latest': 3 }),
+})
+
+// How many of today's `total` parts a selection of a group needs (#1917): a part with no test file is a job started for
+// nothing, and each job is one more chance of a runner fault. The limit is the heaviest part of today's full run of the
+// group, `all`, which CI already runs, so no part gets longer than one CI runs today. A self-parted file deals its tests
+// into today's parts, and a file with no time of its own in the table weighs a guess, so either keeps today's count.
+export const partCount = (selected, all, total) => {
+  if (total <= 1 || !selected.length) return total
+  if (selected.some(path => selfPartedTests.includes(path) || TIMES.files[path] === undefined)) return total
+  const limit = Math.max(...partLoads(all, total).loads)
+  for (let count = 1; count < total; count++) if (Math.max(...partLoads(selected, count).loads) <= limit) return count
+  return total
+}
+
+// The matrices of the split jobs for the (system, Node) pairs the workflow runs: today's counts on a full plan, else the
+// count each pair's selection needs.
+export const partMatrices = (plan, tests, pairs) => {
+  if (!Array.isArray(pairs) || !pairs.length || pairs.some(pair => !systems.includes(pair?.os) || !Number.isInteger(pair?.node))) throw new Error('the Node pairs must be a list of {os, node}')
+  return Object.fromEntries(Object.entries(PART_COUNTS).map(([group, counts]) => [group, pairs.flatMap(({ os, node }) => {
+    const total = plan.full ? counts[os] : partCount(plan.testFiles[group], tests[group], counts[os])
+    return Array.from({ length: total }, (_, index) => ({ os, node, part: (index + 1) + '/' + total }))
+  })]))
+}
+
 // The Node run of one part: its share of the other files, and every self-parted file, which keeps its own
 // share of tests. One run, so its files run side by side as they do without parts, or one at a time when serial.
 export const partFiles = (files, part = '') => {
@@ -689,7 +725,9 @@ const main = async () => {
   if (process.argv[2] !== 'plan') throw new Error('use plan, run, check, summary or verify')
   const roots = JSON.parse(process.env.CI_SOURCE_ROOTS)
   const files = process.env.CI_CHANGED_FILES ? JSON.parse(process.env.CI_CHANGED_FILES) : process.env.CI_FORCE_FULL === 'true' ? [] : gitPaths(roots.at(-1), process.env.CI_BASE_SHA, process.env.CI_HEAD_SHA)
-  emitPlan(await buildPlan(files, { roots, forceFull: process.env.CI_FORCE_FULL === 'true' }))
+  // The workflow's (system, Node) pairs (#1917); without them the planner names no matrices and test.yml keeps today's.
+  const pairs = process.env.CI_NODE_PAIRS ? JSON.parse(process.env.CI_NODE_PAIRS) : undefined
+  emitPlan(await buildPlan(files, { roots, forceFull: process.env.CI_FORCE_FULL === 'true', pairs }))
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {

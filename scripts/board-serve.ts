@@ -22,13 +22,15 @@ import type { ReceiverRoutes } from '../hooks/messaging'
 import { address, agentOf, isRecordedRoute } from '../hooks/messaging'
 import type { SendDecision } from '../hooks/messaging'
 import { RECEIVER_ROUTES } from '../hooks/receiver-routes'
-import { cardSendKey, handledOnly, lanAddress, localHosts, pagePolicy, replyText, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
+import { cardSendKey, handledOnly, isSame, lanAddress, localHosts, pagePolicy, replyText, requestProblem, routeText, sendKey, sendPlan, serveAction, serveModel, servePage, sessionState, worktreeRepoName } from '../hooks/serve'
 import type { AgentTarget, View } from '../hooks/view'
 import { RELEASED } from '../hooks/released'
 import { isFolder, runSendPlan } from './background-resume'
-import { createMessaging } from './board-messaging'
+import { createMessaging, readTurnLog } from './board-messaging'
 import { messageStatus, nextStatusDeadline } from '../hooks/message-status'
 import { watchBoard } from './board-watch'
+import { IDLE_RETRY_MS, idleStep } from './board-idle'
+import type { IdleWatch } from './board-idle'
 import type { BoardWatch, WatchFn } from './board-watch'
 import { startCodexReceiver } from './codex-receiver.mjs'
 import { startCodexAppReceiver } from './codex-app-receiver'
@@ -54,7 +56,7 @@ export type ServeOptions = {
   // so nothing runs). A running turn is never steered (#1409). appSessions: the Codex desktop app conversations, for the
   // receiver that runs their next turn in the background once the app has let go of them (#557); none, no such receiver.
   // appHome: the Codex home `--codex-dir` named, where they were found, which those runs read too.
-  codex?: { threads: () => string[]; executable: string | null; unloadMs?: number; appSessions?: () => CodexAppSession[]; appHome?: string }
+  codex?: { threads: () => string[]; executable: string | null; unloadMs?: number; clients?: () => Promise<unknown[]>; appSessions?: () => CodexAppSession[]; appHome?: string }
   reports?: (isFresh?: boolean) => ProgressBinding[]
   s: Strings
   port: number
@@ -115,8 +117,13 @@ export type ServeOptions = {
   boardTimes?: { holdMs?: number; fallbackMs?: number }
   // Address file path used to locate sibling approvals-off and approvals-refused state files.
   addressFile?: string
-  // Wall clock override for deterministic hook-race ordering tests.
+  // Wall clock override and one-use open-link lifetime override for tests.
   now?: () => number
+  openLinkMs?: number
+  // The tests' shorter wait for a window to load the page /api/open opened; the board uses OPEN_REDEEM_MS.
+  openRedeemMs?: number
+  // The tests' smaller cap on one-use open links kept at once; the board keeps OPEN_LINK_MAX.
+  openLinkMax?: number
 }
 
 type Result = { ok: boolean; note: string }
@@ -144,6 +151,14 @@ const BOARD_PROBE_MS = 1500
 const HEADERS = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' }
 const REFUSAL_MAX_BYTES = 4096
 const REFUSAL_PROBE_MS = 5000
+const OPEN_LINK_MS = 10 * 60 * 1000
+const OPEN_LINK_MAX = 64
+// The board keeps this many page sessions, the least recently used going first; a session has no
+// other lifetime, so a page left open for days keeps working while its board runs (#1650).
+const PAGE_SESSION_MAX = 64
+// After its opener says yes, /api/open waits this long for the window to load the page, so a board
+// command says "opened" only when the page really was (#1650).
+const OPEN_REDEEM_MS = 5000
 
 type RawRefusal = { reason: ApprovalRefusalReason; at: string } | 'unreadable' | null
 
@@ -357,6 +372,8 @@ export const startServer = (o: ServeOptions): void => {
     try {
       return createMessaging(o.messagesDirectory, o.isDefaultMessagesDirectory, {
         routes: o.routes ?? RECEIVER_ROUTES, stateOfSession: (agent, session) => sessionState(o.view(), agent, session),
+        // An Antigravity conversation's turn log, read fresh at each wake call (#1396).
+        turnsOfSession: (agent, session) => readTurnLog(o.messagesDirectory, agent, session),
         // Read only when the board sends an answer to a question (#1843, B3.2).
         reportedAt: (agent, session) => Math.max(-1, ...(o.reports?.() ?? []).filter(one => one.agent === agent && one.session === session).map(one => one.updated)),
       })
@@ -581,12 +598,45 @@ export const startServer = (o: ServeOptions): void => {
   }
   // A pairing key used twice: no page answers approvals again until the board restarts.
   let isApprovalOff = false
+  // One-use page open links and the non-URL sessions they mint (M8a, #1650).
+  const openLinks = new Map<string, { until: number; used: boolean; pairKey: string }>()
+  const pageSessions = new Map<string, number>()
+  // /api/open waits on these to learn whether the window it opened loaded its code.
+  const redeemWaiters = new Map<string, () => void>()
+  const clockNow = o.now ?? Date.now
+  // Null when the table is full of codes that may still be wanted: the caller answers busy and opens nothing.
+  const mintOpenLink = (now: number, pairKey = ''): string | null => {
+    for (const [code, entry] of openLinks) if (entry.until < now) openLinks.delete(code)
+    // A used code with no key has nothing left to catch, so it goes first. A used code with a key is the
+    // record that tells a replay from the person's own window: it stays until it expires and does not
+    // count toward the cap (the 16 pair keys bound those). An unused code may be the link a command
+    // just printed, or one an /api/open waits on, so it is never pushed out: a full table says no (#1650).
+    for (const [code, entry] of openLinks) if (entry.used && entry.pairKey === '') openLinks.delete(code)
+    let unused = 0
+    for (const entry of openLinks.values()) if (!entry.used) unused += 1
+    if (unused >= (o.openLinkMax ?? OPEN_LINK_MAX)) return null
+    const code = randomBytes(24).toString('base64url')
+    openLinks.set(code, { until: now + (o.openLinkMs ?? OPEN_LINK_MS), used: false, pairKey })
+    return code
+  }
+  const mintPageSession = (now: number): string => {
+    if (pageSessions.size >= PAGE_SESSION_MAX) pageSessions.delete(pageSessions.keys().next().value as string)
+    const id = randomBytes(24).toString('base64url')
+    pageSessions.set(id, now)
+    return id
+  }
+  const livePageSession = (candidate: string, now: number): string => {
+    if (candidate === '') return ''
+    if (!pageSessions.has(candidate)) return ''
+    pageSessions.delete(candidate)
+    pageSessions.set(candidate, now)
+    return candidate
+  }
   // A host asked for an approval since the board started: only then does an open page that cannot
   // answer one make the board script open another.
   let hasAsked = false
   // A page that held no secret pressed the approvals switch: the next board command opens a keyed page.
   let isSwitchWanted = false
-  const clockNow = o.now ?? Date.now
   let lastPassedAskAt = 0
   let isUserOff = o.addressFile !== undefined && isOffMarkerAt(o.addressFile)
   let rawRefusal: RawRefusal = null
@@ -796,15 +846,79 @@ export const startServer = (o: ServeOptions): void => {
     const isPage = req.method === 'GET' && url.pathname === '/'
     const side = isLan ? lan : null
     if (isLan && side === null) return json(res, 404, {})
+    const hosts = side === null ? localHosts(port) : [side.host]
+    if (!isLan && url.pathname.startsWith('/open/')) {
+      if (!hosts.includes((req.headers.host ?? '').toLowerCase())) return json(res, 421, {})
+      if (req.method !== 'GET') return json(res, 405, {})
+      if (isMoved) return json(res, 410, { moved: true })
+      if (/prefetch/i.test(text(req.headers['sec-purpose']) || text(req.headers.purpose))) return json(res, 403, {})
+      // A link used, expired or never made (one from scrollback, or a model's earlier reply) gets the
+      // page with no session, which says how to get a fresh link, not a bare refusal (#1650).
+      const deadLink = (): void => {
+        const nonce = randomBytes(16).toString('base64')
+        res.writeHead(403, {
+          ...HEADERS,
+          'content-type': 'text/html; charset=utf-8',
+          'content-security-policy': pagePolicy(nonce),
+          'x-frame-options': 'DENY',
+        })
+        res.end(servePage(o.s, nonce, false, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, ''))
+      }
+      const code = url.pathname.slice('/open/'.length)
+      if (!/^[\w-]{16,128}$/.test(code)) return deadLink()
+      const now = clockNow()
+      const entry = openLinks.get(code)
+      if (entry === undefined) return deadLink()
+      if (entry.until < now) {
+        openLinks.delete(code)
+        return deadLink()
+      }
+      if (entry.used) {
+        if (entry.pairKey !== '') turnApprovalsOff()
+        return deadLink()
+      }
+      if (entry.pairKey !== '') entry.used = true
+      else openLinks.delete(code)
+      redeemWaiters.get(code)?.()
+      const session = mintPageSession(now)
+      loadedAt = Date.now()
+      lastSeen = loadedAt
+      const nonce = randomBytes(16).toString('base64')
+      res.writeHead(200, {
+        ...HEADERS,
+        'content-type': 'text/html; charset=utf-8',
+        'content-security-policy': pagePolicy(nonce),
+        'x-frame-options': 'DENY',
+      })
+      res.end(servePage(o.s, nonce, false, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, session))
+      return
+    }
+    if (!isLan && isPage && !url.searchParams.has('t')) {
+      if (!hosts.includes((req.headers.host ?? '').toLowerCase())) return json(res, 421, {})
+      if (isMoved) return json(res, 410, { moved: true })
+      const nonce = randomBytes(16).toString('base64')
+      res.writeHead(200, {
+        ...HEADERS,
+        'content-type': 'text/html; charset=utf-8',
+        'content-security-policy': pagePolicy(nonce),
+        'x-frame-options': 'DENY',
+      })
+      res.end(servePage(o.s, nonce, false, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, ''))
+      return
+    }
+    const authNow = clockNow()
+    const headerToken = isPage ? '' : text(req.headers['x-board-token'])
+    const pageSession = !isLan && !isPage ? livePageSession(headerToken, authNow) : ''
+    const isClientToken = side === null && !isPage && pageSession === '' && isSame(headerToken, token)
     const problem = requestProblem(
       {
         method: req.method ?? '',
         host: req.headers.host ?? '',
         origin: req.headers.origin ?? '',
         contentType: req.headers['content-type'] ?? '',
-        token: isPage ? (url.searchParams.get('t') ?? '') : text(req.headers['x-board-token']),
+        token: isPage ? (url.searchParams.get('t') ?? '') : (pageSession !== '' ? token : headerToken),
       },
-      side === null ? localHosts(port) : [side.host],
+      hosts,
       side === null ? token : side.token,
     )
     if (problem !== null) return json(res, problem, {})
@@ -813,7 +927,7 @@ export const startServer = (o: ServeOptions): void => {
     if (req.method !== 'GET' && url.pathname !== '/api/messages/poll') res.once('finish', wakeAll)
     const replyMessage = (action: string, payload: Record<string, unknown>): void => {
       // A browser can send or dismiss a message, but cannot impersonate a receiving host adapter.
-      if (!['send', 'dismiss'].includes(action) && req.headers.origin !== undefined) return json(res, 403, {})
+      if (!['send', 'dismiss'].includes(action) && (!isClientToken || req.headers.origin !== undefined)) return json(res, 403, {})
       try {
         const result = messaging.act(action, payload, Date.now(), action === 'expect' ? o.reports?.() : undefined)
         if (action === 'poll' && ((result as { messages?: unknown[] }).messages?.length ?? 0) > 0) res.once('finish', wakeAll)
@@ -910,7 +1024,7 @@ export const startServer = (o: ServeOptions): void => {
     if (isPage) {
       const nonce = randomBytes(16).toString('base64')
       res.writeHead(200, { ...HEADERS, 'content-type': 'text/html; charset=utf-8', 'content-security-policy': pagePolicy(nonce), 'x-frame-options': 'DENY' })
-      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false))
+      res.end(servePage(o.s, nonce, isLan, o.idleMs, o.language?.(), o.isLangOverridden?.() ?? false, ''))
       return
     }
     if (req.method === 'GET') {
@@ -982,11 +1096,20 @@ export const startServer = (o: ServeOptions): void => {
       // wantsKeyedPage: approvals are in use and no open page can answer them, so the board script
       // opens one with a key rather than pointing at a page that cannot. A paired page that is only
       // hidden still can; before any host asked, the page that is open is enough.
-      if (url.pathname === '/api/ping' && !isLan) return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0) + (codexAppReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserOff || isSwitchWanted) && !hasLiveSecret(Date.now()) })
+      if (url.pathname === '/api/ping' && !isLan) {
+        if (!isClientToken) return json(res, 403, {})
+        return json(res, 200, { ...o.ping, sending: [...sending].filter(one => !one.startsWith('card:')).length + (codexReceiver?.sending() ?? 0) + (codexAppReceiver?.sending() ?? 0), pageAgo: pageAgo(Date.now()), wantsKeyedPage: o.open !== undefined && !isApprovalOff && (hasAsked || isUserOff || isSwitchWanted) && !hasLiveSecret(Date.now()) })
+      }
       return json(res, 404, {})
     }
     const body = await readBody(req)
     if (body === null) return json(res, 400, {})
+    if (url.pathname === '/api/open-link') {
+      if (isLan || !isClientToken || req.headers.origin !== undefined) return json(res, 403, {})
+      const code = mintOpenLink(clockNow())
+      if (code === null) return json(res, 503, { error: 'busy' })
+      return json(res, 200, { url: `http://127.0.0.1:${port}/open/${code}` })
+    }
     if (url.pathname === '/api/page-gone' && !isLan) {
       // The page is gone for good: a poll of it that was already on its way must not bring it back as an open page.
       // Its approval secret retires at once so /api/ping asks for a keyed page right away (#1378).
@@ -1005,7 +1128,7 @@ export const startServer = (o: ServeOptions): void => {
       const now = Date.now()
       // The host's hook asks, as a script on the computer: a web page always sends an Origin.
       if (url.pathname === '/api/approvals/ask') {
-        if (req.headers.origin !== undefined) return json(res, 403, {})
+        if (!isClientToken || req.headers.origin !== undefined) return json(res, 403, {})
         const ask = readAsk(body)
         if (ask === null) return json(res, 400, {})
         // No decision where the host would not ask the person: refused, and nothing is shown.
@@ -1064,23 +1187,42 @@ export const startServer = (o: ServeOptions): void => {
       if (url.pathname === '/api/open') {
         // Only the board script on the computer asks the board to open its page.
         if (o.open === undefined) return json(res, 404, {})
-        if (req.headers.origin !== undefined) return json(res, 403, {})
+        if (!isClientToken || req.headers.origin !== undefined) return json(res, 403, {})
         for (const [key, one] of pairKeys) if (one.until < now) pairKeys.delete(key)
         // A used key stays known until it expires, so it is never pushed out early; past this many
         // in two minutes, or with approvals off, the page opens with no key.
         const key = isApprovalOff || pairKeys.size >= 16 ? '' : randomBytes(24).toString('base64url')
         if (key !== '') pairKeys.set(key, { until: now + APPROVAL_KEY_MS, secret: '' })
-        const tried = await o.open(`http://127.0.0.1:${port}/?t=${token}${key === '' ? '' : `#k=${key}`}`, body.asApp === true).catch(() => false)
-        const isOpen = tried === true
-        if (!isOpen && key !== '') {
-          // No window opened, yet the key was used: whoever read it from the opener's command line
-          // paired, and it was not the person's page. Approvals go off, as for a key used twice.
-          if (pairKeys.get(key)?.secret) turnApprovalsOff()
+        const openCode = mintOpenLink(clockNow(), key)
+        if (openCode === null) {
           pairKeys.delete(key)
+          return json(res, 503, { error: 'busy' })
+        }
+        let isRedeemed = false
+        const redeemed = new Promise<void>(done => redeemWaiters.set(openCode, () => { isRedeemed = true; done() }))
+        const tried = await o.open(`http://127.0.0.1:${port}/open/${openCode}${key === '' ? '' : `#k=${key}`}`, body.asApp === true).catch(() => false)
+        const isOpen = tried === true
+        // A launcher that said yes is no proof of a window: a caller that asks (`waitRedeem`) hears
+        // "opened" only when this window loaded its page, and prints a link otherwise. One that does
+        // not ask gets the answer at once.
+        if (isOpen && !isRedeemed && body.waitRedeem === true) {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          await Promise.race([redeemed, new Promise<void>(done => { timer = setTimeout(done, o.openRedeemMs ?? OPEN_REDEEM_MS) })])
+          clearTimeout(timer)
+        }
+        redeemWaiters.delete(openCode)
+        if (!isOpen) {
+          if (key !== '') {
+            // No window opened, yet the key or link was used: whoever read it from the opener's command line
+            // paired with it or redeemed it, and it was not the person's page. Approvals go off, as for a key used twice.
+            if (pairKeys.get(key)?.secret || openLinks.get(openCode)?.used) turnApprovalsOff()
+            pairKeys.delete(key)
+          }
+          openLinks.delete(openCode)
         }
         // `hasTried`: this computer's browsers were tried and none opened, so the caller does not
         // try them again (a second window when a launcher reported an error after all).
-        return json(res, 200, { isOpen, hasTried: tried !== null })
+        return json(res, 200, { isOpen, hasTried: tried !== null, isRedeemed })
       }
       // The rest are the page's own. The Origin check only turns away a careless caller, as any
       // program can send one: the one-time key and the page secret are what count.
@@ -1240,8 +1382,10 @@ export const startServer = (o: ServeOptions): void => {
         const view = o.view()
         // The press picks its target as the card did: a live connection hides the mailbox only on a recorded route (#318).
         const targets = deliveryTargets(state?.connections ?? [], state?.mailboxes, live => isRecordedRoute(live, (agent, session) => sessionState(view, agent, session), o.routes ?? RECEIVER_ROUTES))
-        // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
-        const action = serveAction(boardItems(view, o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, targets, true, o.allowResume, o.routes)
+        // Hiding a question on the reminder or Older shelf, or archiving an ended session's task from there (#155), names a line
+        // of that shelf; no other press needs it, and its fingerprints stay as drawn.
+        const isShelf = text(body.type) === 'hide' || text(body.type) === 'archive' && text(body.key).startsWith('older:')
+        const action = serveAction(boardItems(view, o.pending(), true, isShelf), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, targets, true, o.allowResume, o.routes)
         if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})
@@ -1315,7 +1459,7 @@ export const startServer = (o: ServeOptions): void => {
     // Only the board script on the computer opens the page to the network: it asks with the
     // computer's token and no Origin, which a script on a web page always sends.
     if (url.pathname === '/api/lan') {
-      if (isLan || req.headers.origin !== undefined) return json(res, 403, {})
+      if (isLan || !isClientToken || req.headers.origin !== undefined) return json(res, 403, {})
       const wanted = text(body.address)
       const opened = await openLan(wanted === '' ? null : wanted)
       return json(res, 'url' in opened ? 200 : 409, opened)
@@ -1324,7 +1468,7 @@ export const startServer = (o: ServeOptions): void => {
     // from: a reused server learns the newer package, and its page shows the notice (#1304).
     // A web page always sends an Origin, and the phone's page never sends this.
     if (url.pathname === '/api/package') {
-      if (isLan || req.headers.origin !== undefined) return json(res, 403, {})
+      if (isLan || !isClientToken || req.headers.origin !== undefined) return json(res, 403, {})
       const version = text(body.version)
       if (!/^\d+\.\d+\.\d+$/.test(version)) return json(res, 400, {})
       refreshPackageVersion(version)
@@ -1405,7 +1549,7 @@ export const startServer = (o: ServeOptions): void => {
     lastSeen = Date.now()
     if (o.codex?.executable) {
       // The address and token stay in this process: the Codex program is given neither.
-      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable, ...(o.codex.unloadMs === undefined ? {} : { unloadMs: o.codex.unloadMs, unloadMarginMs: o.codex.unloadMs }) })
+      codexReceiver = startCodexReceiver({ boardUrl: url, threads: o.codex.threads, executable: o.codex.executable, ...(o.codex.clients === undefined ? {} : { clients: o.codex.clients }), ...(o.codex.unloadMs === undefined ? {} : { unloadMs: o.codex.unloadMs, unloadMarginMs: o.codex.unloadMs }) })
       // A process that exits another way (Windows sends no SIGTERM) still ends the Codex program it started.
       process.once('exit', () => codexReceiver?.kill())
       if (o.codex.appSessions !== undefined) {
@@ -1427,13 +1571,32 @@ export const startServer = (o: ServeOptions): void => {
     // An open page keeps a board request open and asks again when it is answered (#359); a hidden tab's waiting requests
     // are not counted, so the server goes once no tab in sight has asked and nobody has loaded the page or pressed
     // anything for `idleMs`, and no reply is on its way.
+    // A stale reading stops nothing by itself: requests held by a stall of this process are read after the timers phase
+    // this check runs in, so it starts a chain of setImmediate hops over several poll phases, and only the last hop of a
+    // chain no stall broke stops the board (#1958, board-idle.ts).
+    let idlePending: { timer: ReturnType<typeof setTimeout> | null; immediate: ReturnType<typeof setImmediate> | null } | null = null
+    const judgeIdle = (watch: IdleWatch | null): void => {
+      idlePending = null
+      if (isStopping) return
+      const now = Date.now()
+      touchWaiting(now)
+      const step = idleStep(watch, now, lastSeen, isBusySending(), o.idleMs)
+      if (step.kind === 'stop') stop()
+      else if (step.kind === 'hop') idlePending = { timer: null, immediate: setImmediate(() => judgeIdle(step.watch)) }
+      else if (step.kind === 'retry') idlePending = { timer: setTimeout(() => judgeIdle(null), IDLE_RETRY_MS), immediate: null }
+    }
     const idle = setInterval(() => {
       if (isStopping) return
       touchWaiting(Date.now())
       if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
-      if (o.idleMs > 0 && !isBusySending() && Date.now() - lastSeen > o.idleMs) stop()
+      if (idlePending === null) judgeIdle(null)
     }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
-    server.on('close', () => clearInterval(idle))
+    server.on('close', () => {
+      clearInterval(idle)
+      if (idlePending?.timer) clearTimeout(idlePending.timer)
+      if (idlePending?.immediate) clearImmediate(idlePending.immediate)
+      idlePending = null
+    })
     const sweeper = setInterval(() => { if (!isStopping) try { o.sweep() } catch {} }, o.sweepMs)
     server.on('close', () => clearInterval(sweeper))
   })

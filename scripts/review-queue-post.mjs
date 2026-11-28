@@ -91,7 +91,6 @@ export const main = (argv = process.argv.slice(2), { run = execFileSync, now = (
     return 0
   }
   const { repo, isDryRun } = parsed
-  const current = now()
   // One read of GitHub serves both the claims and the queue text.
   let queue
   let context
@@ -103,6 +102,9 @@ export const main = (argv = process.argv.slice(2), { run = execFileSync, now = (
     error(readFailure)
     return 1
   }
+  // The clock is read after the GitHub reads: a comment posted during them is not newer
+  // than now, so its issue is not counted free and its assignee is not counted idle.
+  const current = now()
   let isFailed = false
   const fail = message => {
     error(safeLine(message))

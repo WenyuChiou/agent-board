@@ -11,7 +11,7 @@ export type StatusState = typeof MESSAGE_STATES[number]
 export type StatusTone = 'wait' | 'done' | 'alert'
 export type MessageStatus = { state: StatusState; line: string; tone: StatusTone; updatedAt: number }
 export type StatusMessage = Pick<Message, 'id' | 'status' | 'error' | 'reply' | 'updated' | 'claimed' | 'target'>
-  & Partial<Pick<Message, 'hasAccepted' | 'line' | 'answers'>> & { isSurfaceLost?: boolean }
+  & Partial<Pick<Message, 'hasAccepted' | 'line' | 'answers'>> & { isSurfaceLost?: boolean; wake?: 'sent' | 'failed' | 'started' | 'off' }
 
 // A claim, and a message on a route that goes in now, read Unsure this long after their last event. A route that waits
 // for a step's end or a turn has no clock and shows its age (owner, #1843 answers 2 and 3).
@@ -69,7 +69,11 @@ export const messageStatus = (one: StatusMessage, now: number, s: Strings = ZH_T
   // Given up at the open limit before anything took it: it never left the board.
   if (one.status === 'uncertain' && one.error === 'EXPIRED' && one.claimed === 0) return notDelivered(s.statusWhyHeldTooLong)
   if (one.status === 'uncertain' && one.error !== '') return unsure(unsureWhy(one, s))
-  const hasClock = one.status === 'uncertain' || isNowRoute(one)
+  // A message the Antigravity sidecar wakes is queued until the new turn takes it, so it says how the wake went (#1396). A
+  // wake that was sent or started is on a route that goes in now, so it keeps the 20 s clock (#1843); one that failed or
+  // has no sidecar waits for the next turn, which has none.
+  if (one.status === 'queued' && one.wake !== undefined && (one.wake === 'failed' || one.wake === 'off' || now - one.updated < NOW_ROUTE_MS)) return shown('queued', one.wake === 'sent' ? s.agyWoken : one.wake === 'failed' ? s.agyWakeFailed : one.wake === 'started' ? s.agyWaking : s.agySidecarOff, 'wait')
+  const hasClock = one.status === 'uncertain' || isNowRoute(one) || one.wake === 'sent' || one.wake === 'started'
   if (hasClock && now - one.updated >= NOW_ROUTE_MS) return unsure(s.statusWhyNoAnswer)
   return shown('queued', s.statusQueued(hasClock ? s.statusWhenNow : `${whenOf(one, s)} · ${relativeTime(one.updated, now, s)}`), 'wait')
 }

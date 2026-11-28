@@ -14,7 +14,7 @@ import type { BarRole, BarStyle } from './progress-bar'
 import type { Tone } from './palette'
 import { sha256 } from './sha256'
 import { agentLabel } from './strings'
-import { isSameName, questionHead, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
+import { isLiveAsk, isSameName, questionHead, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
 import type { TidyPreview } from './tidy'
@@ -415,7 +415,9 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
-  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty), '')
+  // An empty board names the command that connects the first agent (#256). A finished
+  // task counts even with no questions: `recent` holds it, not only `recentQuestions`.
+  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && view.recent.length === 0) lines.push(c('quiet', s.empty), c('quiet', s.boardNoAgents), '')
   // Runs agents started for themselves, with no session known: one folded line, never in the counts (#399).
   if (view.background) lines.push(c('quiet', cut(view.background, o.width)), '')
   for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2, isWide).map(part => c('quiet', part)))
@@ -772,6 +774,12 @@ export const guardStep = (ref: StepRef, items: readonly BoardItem[]): StepRef =>
   return { ...ref, guard: { task: item.row.stepTask, steps: item.row.stepLines ?? [], lines } }
 }
 
+// The native pane draws from the view itself, not from board items: its press takes the same
+// draw-time proof from the rows it drew, so a queued write refuses a moved step instead of
+// ticking an identical twin now on the drawn line (#1228).
+export const guardViewStep = (ref: StepRef, view: View): StepRef =>
+  guardStep(ref, [...view.due, ...view.active, ...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped, ...(view.recentAsking ?? [])].map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })))
+
 // What each key does on the selected line, so the footer lists only keys that do something.
 export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
   ask.native !== undefined ? [] : ask.kind === 'confirm' ? [s.yesAnswer, s.noAnswer] : ask.kind === 'choose' ? ask.options.slice(0, 9) : []
@@ -850,7 +858,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
     }
     // Said only when asked: a live session's question is that session's to take off the board.
     if (key === 'a' && ask.archive !== undefined) return { state, action: { type: 'archive', ref: ask.archive, title: ask.task } }
-    if (key === 'a' && ask.where !== 'manual' && ask.isKept !== true && ask.canHide !== false) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
+    if (key === 'a' && isLiveAsk(ask)) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
   }
   if (item.type === 'row') {
     const { row } = item

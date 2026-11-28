@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { authorKey, reviewOf, roundsOf, stripComments, verdictsOf } from './pr-check.mjs'
 import { safeLine } from './preflight.mjs'
+import { fetchMilestoneRaw, summarizeMilestoneWork } from './review-queue.mjs'
 
 const usage = 'Usage: node scripts/team-stats.mjs [--week] [--date YYYY-MM-DD] [--repo owner/name] [--help]'
 const day = 24 * 60 * 60 * 1000
@@ -47,7 +48,7 @@ export const reviewQueue = pullRequests => pullRequests.filter(pr => isOpen(pr) 
   return { number: pr.number, ready }
 }).filter(item => item.ready).sort((a, b) => byTime(a.ready, b.ready) || a.number - b.number).map(item => item.number)
 
-export const dailyLine = ({ issues, pullRequests }, date) => {
+export const dailyLine = ({ issues, pullRequests, milestoneWork }, date) => {
   const onlyIssues = issues.filter(issue => !issue.pull_request)
   const opened = onlyIssues.filter(issue => inWindow(issue.created_at, Date.parse(date), endOfDate(date))).length
   const closed = onlyIssues.filter(issue => inWindow(issue.closed_at, Date.parse(date), endOfDate(date))).length
@@ -60,7 +61,13 @@ export const dailyLine = ({ issues, pullRequests }, date) => {
   const milestoneText = [...milestones].sort(([a], [b]) => a === 'none' ? 1 : b === 'none' ? -1 : a.localeCompare(b, 'en', { numeric: true }))
     .map(([title, count]) => `${safeLine(title)} ${count}`).join(' · ')
   const queue = reviewQueue(pullRequests)
-  return `${date}: opened ${opened}, closed ${closed}, open ${open.length} (${milestoneText}), pull requests open ${pullRequests.filter(isOpen).length}, review queue ${queue.length ? queue.map(number => `#${number}`).join(' ') : 'empty'}`
+  // The milestone fragment reflects the live queue at generation time, not the --date window: it says how
+  // much of the newest open milestone (not Backlog) is open, ready and really free right now.
+  const milestoneFragment = milestoneWork === null ? ', milestone work uncertain'
+    : milestoneWork?.milestone
+      ? `, milestone ${safeLine(milestoneWork.milestone.title.trim().split(/\s+/)[0])}: open ${milestoneWork.open}, ready ${milestoneWork.ready}, really free ${milestoneWork.reallyFree}${milestoneWork.isUncertain ? ' (uncertain)' : ''}`
+      : ''
+  return `${date}: opened ${opened}, closed ${closed}, open ${open.length} (${milestoneText}), pull requests open ${pullRequests.filter(isOpen).length}, review queue ${queue.length ? queue.map(number => `#${number}`).join(' ') : 'empty'}${milestoneFragment}`
 }
 
 const emptyStats = () => ({ merged: 0, issues: new Set(), approved: 0, reviewed: 0, rounds: 0, regressions: new Set() })
@@ -187,7 +194,14 @@ export const fetchStats = ({ repo, date, isWeek }, run = execFileSync) => {
   for (const pr of pullRequests) {
     if (!pr.draft) pr.comments = fetchList(repo, `issues/${pr.number}/comments`, run)
   }
-  return { issues, pullRequests }
+  // The milestone fragment is a live read, not part of the --date window: a failure leaves the line
+  // standing with "uncertain" instead of failing the whole run.
+  let milestoneWork
+  try {
+    const raw = fetchMilestoneRaw({ repo }, { run })
+    milestoneWork = raw ? summarizeMilestoneWork(raw, { prs: pullRequests, prListComplete: true, now: new Date() }) : null
+  } catch { milestoneWork = null }
+  return { issues, pullRequests, milestoneWork }
 }
 
 export const main = (argv = process.argv.slice(2), { fetch = fetchStats, log = console.log, error = console.error } = {}) => {

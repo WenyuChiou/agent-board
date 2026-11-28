@@ -1268,6 +1268,45 @@ test('an English "Should X be A or B?" question offers A and B as the answers, w
   })
 })
 
+test('an inline "A or B?" choice of amounts offers the amounts, not the question words (#1640)', () => {
+  expect(askOf('Should the export keep 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days of history'] })
+  expect(askOf('History', 'Should the export keep 24 hours or 7 days of history?')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days of history'] })
+  expect(askOf('Should I set the retry limit to 3 or 5?', '')).toMatchObject({ kind: 'choose', options: ['3', '5'] })
+  expect(askOf('Should the cache hold 2 GB or 4 GB?', '')).toMatchObject({ kind: 'choose', options: ['2 GB', '4 GB'] })
+  // A short choice with no question frame stays as it was.
+  expect(askOf('Debug or info?', '')).toMatchObject({ kind: 'choose', options: ['Debug', 'info'] })
+  // A compound amount has no clear start: no buttons rather than a button that starts with the
+  // question or loses the earlier units; the reply box stays.
+  expect(askOf('Should the export keep 1 day 12 hours or 2 days of history?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep 1 day and 12 hours or 2 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  // A range or a bound gives no buttons either, so a button never drops the bound.
+  expect(askOf('Should I set the retry limit to between 3 and 5 or 10?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the cache hold up to 2 GB or 4 GB?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the cache hold at least 2 GB or 4 GB?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep 3 to 5 days or 10 days of history?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should I set the retry limit to between three and 5 or 10?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should I set the maximum retry limit to 3 or 5?', '').options).toEqual(['3', '5'])
+  expect(askOf('Should the export keep the minimum of 24 hours or 7 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export from staging keep 24 hours or 7 days of history?', '').options).toEqual(['24 hours', '7 days of history'])
+  expect(askOf('Should the job run for about the last 3 or 5 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep at least a full 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep roughly a full 24 hours or 7 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep at least the last 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should I set the limit to max 3 or 5?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should I set the retry limit to between few and 5 or 10?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep three to 5 days or 10 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the service wait 1h 30m or 2h?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep more than the usual 24 hours or 7 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  // A bound word in the subject, not leading into the amount, does not stop the cut.
+  expect(askOf('Should the service within the cluster wait 24 hours or 7 days?', '').options).toEqual(['24 hours', '7 days'])
+  // The last option keeps its own words: they may qualify it alone.
+  expect(askOf('Should the job run 2 hours or 4 hours with a sandbox?', '')).toMatchObject({ kind: 'choose', options: ['2 hours', '4 hours with a sandbox'] })
+  // A number in the subject is not part of the amount.
+  expect(askOf('Should worker 2 keep 24 hours or 7 days of history?', '')).toMatchObject({ kind: 'choose', options: ['24 hours', '7 days of history'] })
+  // A number inside the subject is not one of the amounts: the words stay whole, as before.
+  expect(askOf('Should the 2 workers keep running or stop?', '')).toMatchObject({ kind: 'choose', options: ['Should the 2 workers keep running', 'stop'] })
+})
+
 test('an English question with a relative clause keeps its words and does not strip to the clause\'s verb', () => {
   expect(askOf('Should I keep files that are backed up or delete them?', '')).toMatchObject({
     kind: 'choose',
@@ -5811,6 +5850,39 @@ test('a hand-kept task whose trailer is wrong or names no block still shows in n
     expect(card?.isOwn).toBe(true)
     expect(result.agents.find(group => group.agent === 'codex')?.cards.some(one => one.isOwn)).toBe(false)
   }
+})
+
+test('a hand-kept task whose trailer names a Claude block shows under Claude', () => {
+  const file = ['## demo', '<!-- auto session=ef56ab78 agent=claude state=working updated=2026-11-26T11:55:00Z -->', '### Port the parser', '- [~] Port it', '<!-- /auto session=ef56ab78 -->', '', '## Home', '### Check the synthetic mail <!-- session=ef56ab78 -->', '- [?] Reply to the synthetic mail', ''].join('\n')
+  const result = writerBoard(file)
+  const card = result.all.cards.find(one => one.task === 'Check the synthetic mail')
+  expect(card?.agent).toBe('claude')
+  expect(result.agents.find(group => group.agent === 'claude')?.cards.map(one => [one.task, one.isOwn])).toContainEqual(['Check the synthetic mail', true])
+  expect(result.needs.n).toBe(1)
+})
+
+test('a hand-kept task whose trailer matches blocks of two different AIs shows under no AI', () => {
+  const twoAgents = [
+    '## demo',
+    '<!-- auto session=ab12cd34 agent=codex state=working updated=2026-11-26T11:55:00Z -->',
+    '### Port the parser',
+    '- [~] Port it',
+    '<!-- /auto session=ab12cd34 -->',
+    '',
+    '## other',
+    '<!-- auto session=ab12cd34 agent=cursor state=working updated=2026-11-26T11:56:00Z -->',
+    '### Read the logs',
+    '- [~] Read them',
+    '<!-- /auto session=ab12cd34 -->',
+    '',
+  ]
+  const file = [...twoAgents, '## Home', '### Check the synthetic mail <!-- session=ab12cd34 -->', '- [?] Reply to the synthetic mail', ''].join('\n')
+  const result = writerBoard(file)
+  expect(result.agents.map(group => group.agent)).toEqual(expect.arrayContaining(['codex', 'cursor']))
+  const card = result.all.cards.find(one => one.task === 'Check the synthetic mail')
+  expect(card?.agent).toBe('')
+  expect(result.needs.n).toBe(1)
+  for (const group of result.agents) expect(group.cards.some(one => one.task === 'Check the synthetic mail')).toBe(false)
 })
 
 test('a trailer on a task inside an agent block is not a writer', () => {

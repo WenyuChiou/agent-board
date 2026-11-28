@@ -2248,19 +2248,19 @@ test('after setup --lang en --apply on a zh-TW system, a plain setup says alread
       return [file.slice(directory.length), { bytes: readFileSync(file), mtimeMs: statSync(file).mtimeMs }]
     }))
   const before = snapshot(f.home)
-  // Plain setup preview without --lang
+  // Plain setup preview without --lang: it keeps the language setup was given (#1245)
   const preview = setupAgent(zhTw, '--agent', 'codex')
   assert.equal(preview.status, 0, preview.stderr)
   assert.equal(preview.stderr, '')
-  assert.match(preview.stdout, /已設定完成/)
-  assert.doesNotMatch(preview.stdout, /將更新/)
+  assert.match(preview.stdout, /already set up/)
+  assert.doesNotMatch(preview.stdout, /would update|已設定完成/)
   assert.deepEqual(snapshot(f.home), before)
   // Plain setup apply without --lang
   const second = setupAgent(zhTw, '--agent', 'codex', '--apply')
   assert.equal(second.status, 0, second.stderr)
   assert.equal(second.stderr, '')
-  assert.match(second.stdout, /已設定完成/)
-  assert.doesNotMatch(second.stdout, /已更新/)
+  assert.match(second.stdout, /already set up/)
+  assert.doesNotMatch(second.stdout, /updated|已設定完成/)
   assert.deepEqual(snapshot(f.home), before)
   // Explicit --lang zh-TW preview names the updated files
   const langChange = setupAgent(zhTw, '--agent', 'codex', '--lang', 'zh-TW')
@@ -4156,22 +4156,43 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
     assert.ok(!raw.argv.includes('--home') && !raw.argv.includes('--hook-deadline'))
     assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /REPORTER_QUEUED/)
     f.save(f.script, real)
-    const next = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'raw-second' }))
+    // The second hook's reporter is held 2.6 s before it starts, past its 2.4 s cap, as on a slow runner: it may queue both events
+    // and exit 0, so its record is not written yet. The next hook of the same kind applies both, in order (#1956).
+    const slow = join(f.root, 'slow-reporter.cjs'), slowOnce = join(f.root, 'slow-reporter-once')
+    f.save(slow, `const fs = require('node:fs'), path = require('node:path')
+const same = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+if (process.argv[1] && same(path.resolve(process.argv[1]), ${JSON.stringify(resolve(f.script))}) && fs.existsSync(${JSON.stringify(slowOnce)})) {
+  fs.rmSync(${JSON.stringify(slowOnce)})
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2600)
+}
+`)
+    f.save(slowOnce, '')
+    const options = f.env.NODE_OPTIONS
+    f.env.NODE_OPTIONS = [options, `--require ${JSON.stringify(slow)}`].filter(Boolean).join(' ')
+    let next
+    try { next = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'raw-second' })) }
+    finally { if (options === undefined) delete f.env.NODE_OPTIONS; else f.env.NODE_OPTIONS = options }
     assert.equal(next.status, 0, hookFailure(next))
-    const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`codex:${session}`).digest('hex')}.json`)))
-    assert.equal(record.turn, 'raw-second')
+    assert.equal(existsSync(slowOnce), false, 'the second hook\'s reporter was not held')
+    const last = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'raw-third' }))
+    assert.equal(last.status, 0, hookFailure(last))
+    const seen = () => JSON.stringify({ pending: pendingFiles(f), log: existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(join(f.root, 'hook-errors.log'), 'utf8') : null })
+    const recordFile = join(f.root, 'sessions', `${createHash('sha256').update(`codex:${session}`).digest('hex')}.json`)
+    assert.ok(existsSync(recordFile), 'no session record after the next hook: ' + seen())
+    const record = JSON.parse(readFileSync(recordFile))
+    assert.equal(record.turn, 'raw-third', seen())
     assert.equal(record.title, 'raw-folder-project')
     assert.equal(record.project, 'raw-folder-project')
     for (const text of [readFileSync(f.progress, 'utf8'), JSON.stringify(record)]) assert.ok(!text.includes(join(f.root, 'work')), 'only the folder name reaches the board')
-    assert.ok(record.events.indexOf('UserPromptSubmit:raw-first') < record.events.indexOf('UserPromptSubmit:raw-second'))
-    assert.ok(record.events.includes('UserPromptSubmit:raw-first'))
-    assert.deepEqual(pendingFiles(f), [])
+    const order = ['raw-first', 'raw-second', 'raw-third'].map(turn => record.events.indexOf(`UserPromptSubmit:${turn}`))
+    assert.ok(order[0] >= 0 && order[0] < order[1] && order[1] < order[2], JSON.stringify(record.events) + ' ' + seen())
+    assert.deepEqual(pendingFiles(f), [], seen())
     // A late raw event from this very millisecond range cannot reopen an older turn.
     raw.at = record.appliedAt - 1
     raw.payload.turn_id = 'raw-stale'
     f.save(join(f.root, 'pending', `${String(raw.at).padStart(15, '0')}-stale.raw.json`), JSON.stringify(raw))
     assert.equal(f.event('SessionStart', null, { session_id: 'other-replay-session' }).status, 0)
-    assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`codex:${session}`).digest('hex')}.json`))).turn, 'raw-second')
+    assert.equal(JSON.parse(readFileSync(recordFile)).turn, 'raw-third')
     assert.deepEqual(pendingFiles(f), [])
   } finally {
     f.save(f.script, real)
@@ -9000,14 +9021,18 @@ test('local status preserves cached session and step validation after owned-slot
 
 test('Antigravity reads only a current closing question from a bounded transcript tail', () => fixture(f => {
   assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
-  const file = join(f.home, 'conversation', 'transcript.jsonl')
+  const fileOf = (id, name = 'transcript.jsonl') => join(f.home, '.gemini', 'antigravity', 'brain', id, name)
   const user = { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Closing question check\nSYNTHETIC-PRIVATE-PROMPT-BODY' }
   const model = content => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', content })
-  const save = entries => f.save(file, entries.map(entry => typeof entry === 'string' ? entry : JSON.stringify(entry)).join('\n') + '\n')
-  const send = (id, state, event, transcriptPath = file) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId: id, transcriptPath })
+  const save = (id, entries, name = 'transcript.jsonl') => {
+    const file = fileOf(id, name)
+    f.save(file, entries.map(entry => typeof entry === 'string' ? entry : JSON.stringify(entry)).join('\n') + '\n')
+    return file
+  }
+  const send = (id, state, event, transcriptPath = fileOf(id)) => f.command(['--agent-status', '--agent', 'antigravity', '--state', state, '--event', event], { conversationId: id, transcriptPath })
   const record = id => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`antigravity:${id}`).digest('hex') + '.json'), 'utf8'))
   const id = 'synthetic-agy-current-question'
-  save([user, model('SYNTHETIC-PRIVATE-REPLY\n\nReady to proceed?')])
+  save(id, [user, model('SYNTHETIC-PRIVATE-REPLY\n\nReady to proceed?')])
   assert.equal(send(id, 'waiting', 'Stop').status, 0)
   assert.ok(record(id).steps.includes('- [?] Ready to proceed?'))
   assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Ready to proceed\?/)
@@ -9015,19 +9040,19 @@ test('Antigravity reads only a current closing question from a bounded transcrip
   assert.ok(record(id).steps.includes('- [x] Ready to proceed?'))
   assert.match(readFileSync(f.progress, 'utf8'), /- \[x\] Ready to proceed\?/)
   assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-PRIVATE'))
-  save([user, model('Old question?'), user])
+  save('synthetic-agy-new-prompt', [user, model('Old question?'), user])
   assert.equal(send('synthetic-agy-new-prompt', 'waiting', 'Stop').status, 0)
   assert.equal(record('synthetic-agy-new-prompt').asked, undefined)
-  save([user, model('No question in this reply.')])
+  save('synthetic-agy-no-question', [user, model('No question in this reply.')])
   assert.equal(send('synthetic-agy-no-question', 'waiting', 'Stop').status, 0)
   assert.equal(record('synthetic-agy-no-question').asked, undefined)
-  save([user, 'not JSON', model('Do not retain this?')])
+  save('synthetic-agy-garbage', [user, 'not JSON', model('Do not retain this?')])
   assert.equal(send('synthetic-agy-garbage', 'waiting', 'Stop').status, 0)
   assert.equal(record('synthetic-agy-garbage').asked, undefined)
-  save([user, 42, model('Invalid shape?')])
+  save('synthetic-agy-bad-shape', [user, 42, model('Invalid shape?')])
   assert.equal(send('synthetic-agy-bad-shape', 'waiting', 'Stop').status, 0)
   assert.equal(record('synthetic-agy-bad-shape').asked, undefined)
-  save([user, model('Old question?'), { source: 'MODEL', type: 'PLANNER_RESPONSE', content: { text: 'Invalid reply shape' } }])
+  save('synthetic-agy-bad-reply', [user, model('Old question?'), { source: 'MODEL', type: 'PLANNER_RESPONSE', content: { text: 'Invalid reply shape' } }])
   assert.equal(send('synthetic-agy-bad-reply', 'waiting', 'Stop').status, 0)
   assert.equal(record('synthetic-agy-bad-reply').asked, undefined)
   const folder = join(f.home, 'directory', 'transcript.jsonl')
@@ -9038,15 +9063,140 @@ test('Antigravity reads only a current closing question from a bounded transcrip
     assert.equal(record(session).state, 'waiting')
     assert.equal(record(session).asked, undefined)
   }
-  save([model('a'.repeat(300000)), user, model('A long transcript.\n\nUse the blue one?')])
-  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting'], { conversationId: 'synthetic-agy-long-tail', transcriptPath: file }).status, 0)
+  const longFile = save('synthetic-agy-long-tail', [model('a'.repeat(300000)), user, model('A long transcript.\n\nUse the blue one?')])
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting'], { conversationId: 'synthetic-agy-long-tail', transcriptPath: longFile }).status, 0)
   assert.ok(record('synthetic-agy-long-tail').steps.includes('- [?] Use the blue one?'))
   // agy 1.5.2 hooks name transcript_full.jsonl, with the same line shape.
-  const full = join(f.home, 'conversation', 'transcript_full.jsonl')
-  f.save(full, [user, model('SYNTHETIC-PRIVATE-REPLY\n\nShould I pick a third name?')].map(entry => JSON.stringify(entry)).join('\n') + '\n')
-  assert.equal(send('synthetic-agy-full-transcript', 'waiting', 'Stop', full).status, 0)
-  assert.ok(record('synthetic-agy-full-transcript').steps.includes('- [?] Should I pick a third name?'))
+  const fullId = 'synthetic-agy-full-transcript'
+  const full = save(fullId, [user, model('SYNTHETIC-PRIVATE-REPLY\n\nShould I pick a third name?')], 'transcript_full.jsonl')
+  assert.equal(send(fullId, 'waiting', 'Stop', full).status, 0)
+  assert.ok(record(fullId).steps.includes('- [?] Should I pick a third name?'))
   assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-PRIVATE'))
+}))
+
+test('Antigravity closing question refuses transcripts outside the hook conversation folder (#1467)', () => fixture(f => {
+  assert.equal(f.install('--agent', 'antigravity', '--apply').status, 0)
+  const user = { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Synthetic question prompt' }
+  const model = content => ({ source: 'MODEL', type: 'PLANNER_RESPONSE', content })
+  const send = (conversationId, transcriptPath) => f.command(
+    ['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'],
+    { conversationId, transcriptPath },
+  )
+  const record = id => JSON.parse(readFileSync(join(f.root, 'sessions', createHash('sha256').update(`antigravity:${id}`).digest('hex') + '.json'), 'utf8'))
+
+  const outside = join(f.home, 'outside', 'transcript.jsonl')
+  f.save(outside, `${JSON.stringify(user)}\n${JSON.stringify(model('Should I leak this outside question?'))}\n`)
+  assert.equal(send('synthetic-outside-q-1467', outside).status, 0)
+  assert.equal(record('synthetic-outside-q-1467').asked, undefined)
+
+  const foreignId = 'synthetic-other-1467'
+  const selfId = 'synthetic-self-1467'
+  const foreign = join(f.home, '.gemini', 'antigravity', 'brain', foreignId, 'transcript.jsonl')
+  f.save(foreign, `${JSON.stringify(user)}\n${JSON.stringify(model('Should I leak a foreign question?'))}\n`)
+  assert.equal(send(selfId, foreign).status, 0)
+  assert.equal(record(selfId).asked, undefined)
+
+  const traversal = join(f.home, '.gemini', 'antigravity', 'brain', selfId, '..', foreignId, 'transcript.jsonl')
+  assert.equal(send(selfId, traversal).status, 0)
+  assert.equal(record(selfId).asked, undefined)
+
+  const symlinkPath = join(f.home, '.gemini', 'antigravity', 'brain', selfId, 'transcript.jsonl')
+  mkdirSync(dirname(symlinkPath), { recursive: true })
+  let symlinked = false
+  try {
+    symlinkSync(foreign, symlinkPath)
+    symlinked = true
+  } catch { /* Windows without symlink privilege */ }
+  if (symlinked) {
+    assert.equal(send(selfId, symlinkPath).status, 0)
+    assert.equal(record(selfId).asked, undefined)
+  }
+
+  const boardAfterRejected = readFileSync(f.progress, 'utf8')
+  assert.ok(!boardAfterRejected.includes('Should I leak this outside question?'))
+  assert.ok(!boardAfterRejected.includes('Should I leak a foreign question?'))
+
+  const ownTranscript = join(f.home, '.gemini', 'antigravity-cli', 'brain', selfId, '.system_generated', 'logs', 'transcript_full.jsonl')
+  f.save(ownTranscript, `${JSON.stringify(user)}\n${JSON.stringify(model('SYNTHETIC-OWN-BODY\n\nOwn session question?'))}\n`)
+  assert.equal(send(selfId, ownTranscript).status, 0)
+  assert.ok(record(selfId).steps.includes('- [?] Own session question?'))
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Own session question\?/)
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('SYNTHETIC-OWN-BODY'))
+
+  // Row 1: antigravity-ide/.system_generated/logs/transcript.jsonl is also accepted.
+  const ideId = 'synthetic-ide-1467'
+  const ideTranscript = join(f.home, '.gemini', 'antigravity-ide', 'brain', ideId, '.system_generated', 'logs', 'transcript.jsonl')
+  f.save(ideTranscript, `${JSON.stringify(user)}\n${JSON.stringify(model('IDE folder question?'))}\n`)
+  assert.equal(send(ideId, ideTranscript).status, 0)
+  assert.ok(record(ideId).steps.includes('- [?] IDE folder question?'))
+
+  // Row 3: two concurrent conversations each read only their own transcript question.
+  const convA = 'synthetic-pair-a-1467'
+  const convB = 'synthetic-pair-b-1467'
+  const txA = join(f.home, '.gemini', 'antigravity', 'brain', convA, 'transcript.jsonl')
+  const txB = join(f.home, '.gemini', 'antigravity', 'brain', convB, 'transcript.jsonl')
+  f.save(txA, `${JSON.stringify(user)}\n${JSON.stringify(model('Question for A?'))}\n`)
+  f.save(txB, `${JSON.stringify(user)}\n${JSON.stringify(model('Question for B?'))}\n`)
+  assert.equal(send(convA, txA).status, 0)
+  assert.equal(send(convB, txB).status, 0)
+  assert.ok(record(convA).steps.includes('- [?] Question for A?') && !record(convA).steps.includes('- [?] Question for B?'))
+  assert.ok(record(convB).steps.includes('- [?] Question for B?') && !record(convB).steps.includes('- [?] Question for A?'))
+
+  // Row 5: absent or non-string transcriptPath records waiting with no question and exits 0.
+  assert.equal(send('synthetic-missing-path-1467', undefined).status, 0)
+  assert.equal(record('synthetic-missing-path-1467').asked, undefined)
+  assert.equal(send('synthetic-nonstring-path-1467', 123).status, 0)
+  assert.equal(record('synthetic-nonstring-path-1467').asked, undefined)
+
+  // Row 6: fallback session_id binds to its own brain folder; invalid session_id exits non-zero before any read.
+  const fallbackId = 'synthetic-fallback-id-1467'
+  const fallbackTx = join(f.home, '.gemini', 'antigravity', 'brain', fallbackId, 'transcript.jsonl')
+  f.save(fallbackTx, `${JSON.stringify(user)}\n${JSON.stringify(model('Fallback session question?'))}\n`)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], { session_id: fallbackId, transcriptPath: fallbackTx }).status, 0)
+  assert.ok(record(fallbackId).steps.includes('- [?] Fallback session question?'))
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], { session_id: 'synthetic-fallback-other-1467', transcriptPath: fallbackTx }).status, 0)
+  assert.equal(record('synthetic-fallback-other-1467').asked, undefined)
+  assert.notEqual(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], { session_id: '../bad', transcriptPath: foreign }).status, 0)
+
+  // Row 7: another --home with no brain/<id> under it refuses the transcript even if it exists under another home.
+  const otherHome = mkdtempSync(join(tmpdir(), 'agy-other-home-'))
+  try {
+    const otherRes = spawnSync(process.execPath, [f.script, '--home', otherHome, '--data-dir', f.root, '--progress-file', f.progress, '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+      env: f.env, input: JSON.stringify({ conversationId: 'synthetic-other-home-1467', transcriptPath: fallbackTx }), encoding: 'utf8', windowsHide: true, timeout: 15000,
+    })
+    assert.equal(otherRes.status, 0, otherRes.stderr)
+    assert.equal(record('synthetic-other-home-1467').asked, undefined)
+  } finally {
+    rmSync(otherHome, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+
+  // Row 8 (Windows): differently-cased --home still matches realpathSync.native and extracts own question.
+  if (process.platform === 'win32' && /^[A-Za-z]:/.test(f.home)) {
+    const toggledHome = (f.home[0] === f.home[0].toUpperCase() ? f.home[0].toLowerCase() : f.home[0].toUpperCase()) + f.home.slice(1)
+    const winCaseId = 'synthetic-wincase-1467'
+    const winCaseTx = join(f.home, '.gemini', 'antigravity', 'brain', winCaseId, 'transcript.jsonl')
+    f.save(winCaseTx, `${JSON.stringify(user)}\n${JSON.stringify(model('Windows case question?'))}\n`)
+    const winRes = spawnSync(process.execPath, [f.script, '--home', toggledHome, '--data-dir', f.root, '--progress-file', f.progress, '--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'Stop'], {
+      env: f.env, input: JSON.stringify({ conversationId: winCaseId, transcriptPath: winCaseTx }), encoding: 'utf8', windowsHide: true, timeout: 15000,
+    })
+    assert.equal(winRes.status, 0, winRes.stderr)
+    assert.ok(record(winCaseId).steps.includes('- [?] Windows case question?'))
+  }
+
+  // Row 9: trailing USER_INPUT after an earlier question yields no closing question on Stop.
+  const trailingUserId = 'synthetic-trailing-user-1467'
+  const trailingUserTx = join(f.home, '.gemini', 'antigravity', 'brain', trailingUserId, 'transcript.jsonl')
+  f.save(trailingUserTx, `${JSON.stringify(user)}\n${JSON.stringify(model('Earlier turn question?'))}\n${JSON.stringify(user)}\n`)
+  assert.equal(send(trailingUserId, trailingUserTx).status, 0)
+  assert.equal(record(trailingUserId).asked, undefined)
+
+  // Row 10: StopWait never reads closing questions even from its own bound transcript.
+  const stopWaitId = 'synthetic-stopwait-1467'
+  const stopWaitTx = join(f.home, '.gemini', 'antigravity', 'brain', stopWaitId, 'transcript.jsonl')
+  f.save(stopWaitTx, `${JSON.stringify(user)}\n${JSON.stringify(model('Should StopWait ignore this?'))}\n`)
+  assert.equal(f.command(['--agent-status', '--agent', 'antigravity', '--state', 'waiting', '--event', 'StopWait'], { conversationId: stopWaitId, transcriptPath: stopWaitTx }).status, 0)
+  assert.equal(existsSync(join(f.root, 'sessions', createHash('sha256').update(`antigravity:${stopWaitId}`).digest('hex') + '.json')), false)
+  assert.ok(!readFileSync(f.progress, 'utf8').includes('Should StopWait ignore this?'))
 }))
 
 test('queued Grok status retains only the closing question and replays it', () => fixture(f => {
@@ -10365,12 +10515,13 @@ test('the DeepSeek tool reports by session id, and opens the board detached with
   await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] One'] }, { agent }), { message: 'AGENT_BOARD_REPORT_FAILED: INVALID_STEP' })
   answer = { status: 1, stdout: '', stderr: 'free text\n' }
   await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] One'] }, { agent }), { message: 'AGENT_BOARD_REPORT_FAILED' })
-  // open starts the board's own command detached and returns the one line it prints.
+  // open starts the board's own command detached and returns the one line it prints: a link
+  // only, with no window that the model could not see (#1650).
   const link = 'http://127.0.0.1:43210/?t=synthetic-token'
   const opened = tool.execute({ action: 'open' }, { agent })
   const [child] = children
   assert.equal(child.command, process.execPath)
-  assert.deepEqual(child.args, [board, '--html'])
+  assert.deepEqual(child.args, [board, '--html', '--no-open'])
   assert.equal(child.options.detached, true)
   assert.equal(child.options.windowsHide, true)
   assert.equal(child.options.stdio[0], 'ignore')

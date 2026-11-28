@@ -7,17 +7,29 @@ import test from 'node:test'
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { EN } from '../hooks/strings-en.ts'
 import { liveBoardPage } from '../hooks/live-page.ts'
+import { readPrintedLink, withoutSsh } from './helpers/printed-link.mjs'
 
-const closePage = async url => {
+const closePage = async (url, script) => {
+  if (script) {
+    spawnSync(process.execPath, [script, '--stop'], {
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      encoding: 'utf8',
+      timeout: 10000,
+      windowsHide: true,
+    })
+  }
   if (!url) return
   try {
     const address = new URL(url)
-    await fetch(new URL('/api/close', address), {
-      method: 'POST',
-      headers: { 'x-board-token': address.searchParams.get('t') ?? '', 'content-type': 'application/json' },
-      body: '{}',
-      signal: AbortSignal.timeout(3000),
-    })
+    const token = address.searchParams.get('t')
+    if (token) {
+      await fetch(new URL('/api/close', address), {
+        method: 'POST',
+        headers: { 'x-board-token': token, 'content-type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(3000),
+      })
+    }
   } catch {}
   for (let i = 0; i < 30; i++) {
     try {
@@ -31,6 +43,8 @@ const closePage = async url => {
 
 const cleanup = async (root, urls) => {
   const list = Array.isArray(urls) ? urls : [urls]
+  const script = join(root, 'agent-board.mjs')
+  await closePage(list.find(Boolean) ?? null, script)
   for (const u of list) await closePage(u)
   for (let tries = 0; tries < 40; tries++) {
     try {
@@ -60,16 +74,14 @@ test('synthetic opener spawn error produces an understandable manual-open instru
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
 
     assert.equal(result.status, 0, result.stderr)
     // Produces understandable manual instruction
     assert.match(result.stdout, /No browser found\. Open this address in your browser:/)
-    // Leaves the address usable and parseable
-    const match = /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/.exec(result.stdout)
-    assert.ok(match, 'the manual-open address is usable in stdout')
-    url = match[0]
+    // Leaves a one-use address in stdout without exposing the board token
+    url = readPrintedLink(result, { wordings: [EN.serveBrowserNone] }).link
     // Does not falsely claim the browser window was opened
     assert.doesNotMatch(result.stdout, /Opened Agent Board/)
   } finally {
@@ -95,7 +107,7 @@ test('opener failure in --serve outputs manual-open instruction to stderr and pr
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
 
     assert.equal(result.status, 0, result.stderr)
@@ -131,12 +143,11 @@ test('a board that tried the browsers and opened none is not followed by a secon
       encoding: 'utf8',
       timeout: 20000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
 
     assert.equal(result.status, 0, result.stderr)
-    url = /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/.exec(result.stdout)?.[0] ?? null
-    assert.ok(url, result.stdout)
+    url = readPrintedLink(result, { wordings: [EN.serveBrowserNone] }).link
     assert.match(result.stdout, /No browser found\. Open this address in your browser:/)
     // One try, by the board: the same browsers tried again from here fail the same way, or open a
     // second window when one came up but its launcher reported an error.
@@ -166,20 +177,20 @@ test('--no-open prints the address without starting an opener and keeps stderr c
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
     assert.equal(resultHtml.status, 0, resultHtml.stderr)
     assert.equal(resultHtml.stderr, '')
-    assert.match(resultHtml.stdout.trim(), /^http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+$/)
-    assert.doesNotMatch(resultHtml.stdout, /No browser found|Opened Agent Board/)
-    urls.push(resultHtml.stdout.trim())
+    const { link } = readPrintedLink(resultHtml, { wordings: [EN.boardPageLink] })
+    assert.equal(resultHtml.stdout.trim(), link)
+    urls.push(link)
 
     // 2. In --serve (--serve --no-open)
     const resultServe = spawnSync(process.execPath, [script, '--serve', '--no-open'], {
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
     assert.equal(resultServe.status, 0, resultServe.stderr)
     assert.equal(resultServe.stderr, '')
@@ -210,15 +221,14 @@ test('a launcher that starts or exits cleanly is not represented as confirmed br
       encoding: 'utf8',
       timeout: 10000,
       windowsHide: true,
-      env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
+      env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1' },
     })
     assert.equal(result.status, 0, result.stderr)
-    // When newly launched, it reports "Opened Agent Board in your browser",
-    // NOT "Agent Board is already open in your browser" (which is reserved exclusively for confirmed pageIsOpen)
-    assert.match(result.stdout, /Opened Agent Board in your browser/)
-    assert.doesNotMatch(result.stdout, /already open in your browser/)
-    const match = /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/.exec(result.stdout)
-    if (match) url = match[0]
+    // A launcher that said yes is no proof of a window: the window never loaded its page, so the
+    // command says a window was started and leaves a fresh one-use link for when none appears.
+    url = readPrintedLink(result, { wordings: [EN.boardPageLaunchedLink] }).link
+    assert.equal(result.stdout.trim(), EN.boardPageLaunchedLink(url))
+    assert.doesNotMatch(result.stdout, /Opened Agent Board in your browser|already open in your browser|\?t=/)
   } finally {
     await cleanup(root, url)
   }
@@ -226,8 +236,7 @@ test('a launcher that starts or exits cleanly is not represented as confirmed br
 
 test('printed local addresses and tokens are synthetic or sanitized, keeping secrets out of public logs', () => {
   // Acceptance criterion 5: verify that mock/fixture test logs do not leak real host addresses or credentials
-  const syntheticToken = 'synthetic-secret-token'
-  const url = `http://127.0.0.1:45678/?t=${syntheticToken}`
+  const url = 'http://127.0.0.1:45678/open/synthetic-open-code'
   const sampleStdout = `${EN.serveAt(url)}\n`
   // liveBoardPage parses the target URL cleanly without requiring token disclosure in telemetry or logs
   const parsed = liveBoardPage(sampleStdout, EN)
@@ -247,7 +256,8 @@ test('--serve asks openInBrowser for the app window like the plain command and -
     const opening = BOARD_SCRIPT.indexOf('var openInBrowser =')
     const opened = BOARD_SCRIPT.indexOf('var isRegularFile =', opening)
     assert.ok(opening > 0 && opened > opening, 'locates openInBrowser')
-    const mockedScript = `${BOARD_SCRIPT.slice(0, opening)}var openInBrowser = (target, done, asApp = false) => { process.getBuiltinModule('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ asApp: asApp === true }) + '\\n'); done(true) }\n${BOARD_SCRIPT.slice(opened)}`
+    // The stand-in browser loads the page it is handed, as a window that opened does.
+    const mockedScript = `${BOARD_SCRIPT.slice(0, opening)}var openInBrowser = (target, done, asApp = false) => { process.getBuiltinModule('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify({ asApp: asApp === true }) + '\\n'); fetch(String(target).split('#')[0]).then(res => res.text()).catch(() => {}); done(true) }\n${BOARD_SCRIPT.slice(opened)}`
     writeFileSync(script, `globalThis.AGENT_BOARD = ${JSON.stringify({ path: progress, lang: 'en' })}\n${mockedScript}`)
 
     for (const mode of [['--serve'], ['--html'], []]) {
@@ -255,13 +265,12 @@ test('--serve asks openInBrowser for the app window like the plain command and -
         encoding: 'utf8',
         timeout: 15000,
         windowsHide: true,
-        env: { ...process.env, CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1', CI: '' },
+        env: { ...withoutSsh(process.env), CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_TEST_PID: '', NO_COLOR: '1', CI: '' },
       })
       assert.equal(result.status, 0, `${mode.join(' ') || 'plain'}: ${result.stderr}`)
-      const match = /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/.exec(result.stdout)
-      assert.ok(match, `${mode.join(' ') || 'plain'} stdout address:\n${result.stdout}`)
-      urls.push(match[0])
-      await closePage(match[0])
+      assert.match(result.stdout, /Opened Agent Board in your browser/, `${mode.join(' ') || 'plain'} stdout:\n${result.stdout}`)
+      assert.doesNotMatch(result.stdout, /\?t=|http:\/\/127\.0\.0\.1:/)
+      await closePage(null, script)
     }
 
     const calls = readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line))

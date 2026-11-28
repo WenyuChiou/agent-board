@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url'
 import { bundleFiles, bundleFromDir } from '../scripts/bundle-text.mjs'
 import { privateRuntimeFolder, writePrivateRuntimeFile } from '../scripts/runtime-folder.ts'
 import { setupPrograms } from './helpers/setup-programs.mjs'
+import { readPrintedLink, withoutSsh } from './helpers/printed-link.mjs'
+import { EN } from '../hooks/strings-en.ts'
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
 const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
@@ -28,8 +30,9 @@ const makeBox = () => {
   const tmp = join(box, 'tmp')
   const cache = join(box, 'npm-cache')
   for (const dir of [home, tmp, cache]) mkdirSync(dir)
+  // Over SSH the launcher prints the forward note before the link (#1283): left out here (#1970).
   const env = {
-    ...process.env,
+    ...withoutSsh(process.env),
     HOME: home, USERPROFILE: home, TEMP: tmp, TMP: tmp,
     CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
     CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
@@ -987,6 +990,93 @@ test('the launcher tells the board script which package version it runs from', (
   assert.equal(JSON.parse(result.stdout), manifest.version)
 }))
 
+// A language given to setup stays until the person gives another, as the board, its page and stop keep it (#1245).
+const chosenWords = {
+  en: ['a local board for coding agents', 'Next steps:'],
+  'zh-TW': ['給程式 agent 用的本機看板', '接下來：'],
+  'zh-CN': ['给编程 agent 用的本机看板', '接下来：'],
+}
+const assertWords = (result, lang, at) => {
+  success(result)
+  const others = Object.keys(chosenWords).filter(one => one !== lang)
+  assert.ok(result.stdout.includes(chosenWords[lang][at]), `${lang}: ${result.stdout}`)
+  for (const other of others) assert.equal(result.stdout.includes(chosenWords[other][at]), false, `${lang} printed ${other}: ${result.stdout}`)
+}
+
+test('after setup --lang <lang> --apply, a bare setup, --help and remove print <lang>', () => fixture(f => {
+  const pkg = packed(f)
+  for (const [lang, LANG] of [['zh-CN', 'zh_TW.UTF-8'], ['en', 'zh_TW.UTF-8'], ['zh-TW', 'en_US.UTF-8']]) {
+    const env = { LANG }
+    success(f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--lang', lang, '--apply'], env))
+    for (const args of [['--help'], ['setup', '--help'], ['remove', '--help']]) assertWords(f.run(pkg, args, env), lang, 0)
+    for (const args of [['setup', '--home', f.home], ['remove', '--home', f.home]]) assertWords(f.run(pkg, args, env), lang, 1)
+  }
+}))
+
+test("a language chosen on the board's page is the one setup, --help and remove use", () => fixture(f => {
+  const pkg = packed(f)
+  const env = { LANG: 'zh_TW.UTF-8' }
+  success(f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--lang', 'en', '--apply'], env))
+  const progress = JSON.parse(readFileSync(boardPath(f), 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, '')).path
+  const settings = `${progress.replace(/\.md$/i, '')}-settings.json`
+  save(settings, `${JSON.stringify({ lang: 'zh-CN' })}\n`)
+  for (const args of [['--help'], ['setup', '--help']]) assertWords(f.run(pkg, args, env), 'zh-CN', 0)
+  for (const args of [['setup', '--home', f.home], ['remove', '--home', f.home]]) assertWords(f.run(pkg, args, env), 'zh-CN', 1)
+  // Automatic follows the system, as on the page; a --lang on the command still wins.
+  save(settings, `${JSON.stringify({ lang: 'auto' })}\n`)
+  assertWords(f.run(pkg, ['--help'], env), 'zh-TW', 0)
+  assertWords(f.run(pkg, ['setup', '--home', f.home], env), 'zh-TW', 1)
+  assertWords(f.run(pkg, ['--help', '--lang', 'en'], env), 'en', 0)
+  assertWords(f.run(pkg, ['setup', '--home', f.home, '--lang', 'en'], env), 'en', 1)
+}))
+
+test('setup --help and remove --help with --home read the language of that home, not the running account', () => fixture(f => {
+  const pkg = packed(f)
+  const other = join(f.box, 'other home')
+  mkdirSync(other)
+  const env = { LANG: 'en_US.UTF-8' }
+  success(f.run(pkg, ['setup', '--agent', 'codex', '--home', other, '--lang', 'zh-CN', '--apply'], env))
+  assertWords(f.run(pkg, ['--help'], env), 'en', 0)
+  for (const args of [['setup', '--home', other, '--help'], ['remove', '--home', other, '--help'], ['setup', '--data-dir', join(other, '.agent-board'), '--help']]) assertWords(f.run(pkg, args, env), 'zh-CN', 0)
+  assertWords(f.run(pkg, ['setup', '--home', other], env), 'zh-CN', 1)
+}))
+
+test('the language saved for the progress file a command picks is the one help and setup use', () => fixture(f => {
+  const pkg = packed(f)
+  const env = { LANG: 'en_US.UTF-8' }
+  success(f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--lang', 'en', '--apply'], env))
+  const progress = JSON.parse(readFileSync(boardPath(f), 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, '')).path
+  save(`${progress.replace(/\.md$/i, '')}-settings.json`, `${JSON.stringify({ lang: 'en' })}\n`)
+  const second = join(dirname(progress), 'second.md')
+  save(join(dirname(progress), 'second-settings.json'), `${JSON.stringify({ lang: 'zh-CN' })}\n`)
+  assertWords(f.run(pkg, ['--help'], env), 'en', 0)
+  assertWords(f.run(pkg, ['--help', '--progress-file', second], env), 'zh-CN', 0)
+  assertWords(f.run(pkg, ['--help'], { ...env, CLAUDE_PROGRESS_FILE: second }), 'zh-CN', 0)
+  assertWords(f.run(pkg, ['setup', '--home', f.home], { ...env, CLAUDE_PROGRESS_FILE: second }), 'zh-CN', 1)
+}))
+
+test('a board command with --data-dir reads that board\'s saved language, not CLAUDE_PROGRESS_FILE\'s', () => fixture(f => {
+  const pkg = packed(f)
+  const env = { LANG: 'en_US.UTF-8' }
+  const data = join(f.box, 'other data')
+  success(f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--data-dir', data, '--lang', 'en', '--apply'], env))
+  const progress = JSON.parse(readFileSync(join(data, 'agent-board.mjs'), 'utf8').split('\n', 1)[0].replace(/^globalThis\.AGENT_BOARD = /, '')).path
+  save(`${progress.replace(/\.md$/i, '')}-settings.json`, `${JSON.stringify({ lang: 'en' })}\n`)
+  const elsewhere = join(f.box, 'elsewhere', 'progress.md')
+  save(join(dirname(elsewhere), 'progress-settings.json'), `${JSON.stringify({ lang: 'zh-CN' })}\n`)
+  assertWords(f.run(pkg, ['--help', '--data-dir', data], { ...env, CLAUDE_PROGRESS_FILE: elsewhere }), 'en', 0)
+  assertWords(f.run(pkg, ['--help'], { ...env, CLAUDE_PROGRESS_FILE: elsewhere }), 'zh-CN', 0)
+}))
+
+test('--lang auto follows the system over a saved language in help and setup', () => fixture(f => {
+  const pkg = packed(f)
+  const env = { LANG: 'zh_TW.UTF-8' }
+  success(f.run(pkg, ['setup', '--agent', 'codex', '--home', f.home, '--lang', 'en', '--apply'], env))
+  assertWords(f.run(pkg, ['--help'], env), 'en', 0)
+  assertWords(f.run(pkg, ['--help', '--lang', 'auto'], env), 'zh-TW', 0)
+  assertWords(f.run(pkg, ['setup', '--home', f.home, '--lang', 'auto'], env), 'zh-TW', 1)
+}))
+
 test('agent-board setup with no agent found says how to name one, without a stack trace', () => fixture(f => {
   const pkg = packed(f)
   for (const [lang, hint, unknown] of [['en', 'Setup found no agent', '--agent named an agent setup does not know'], ['zh-TW', 'setup 在這台電腦沒有找到 agent', '--agent 寫了 setup 不認得的 agent 名稱'], ['zh-CN', 'setup 在这台电脑没有找到 agent', '--agent 写了 setup 不认识的 agent 名称']]) {
@@ -1139,10 +1229,8 @@ test('a later launcher that reuses a server without its address record still ref
       // surface: run the launcher as a non-CI call so it opens the page and prints its address.
       const second = f.run(pkg, [], { CI: '0' })
       success(second)
-      const found = second.stdout.match(/https?:\/\/\S+/)
-      assert.ok(found, `the launcher printed no address: ${second.stdout}`)
-      const secondUrl = new URL(found[0])
-      assert.equal(secondUrl.href, firstUrl.href)
+      const { link } = readPrintedLink(second, { wordings: [EN.boardPageAlreadyOpenLink] })
+      assert.equal(second.stdout.trim(), EN.boardPageAlreadyOpenLink(link))
       const after = await board()
       assert.equal(after.view.versions.package, manifest.version)
       // The package is the board's own version, so there is no update to name.
@@ -1190,6 +1278,7 @@ test('a later launcher that reuses a server through the retry wait or the claim 
     // package version the launcher tells it. A hanging /api/ping stands in for a page still
     // starting, so the launcher's wait loop cannot find it until the test lets it answer.
     const posts = []
+    let openCount = 0
     let answerPing = true
     const sockets = new Set()
     const fake = createServer((req, res) => {
@@ -1198,6 +1287,16 @@ test('a later launcher that reuses a server through the retry wait or the claim 
         if (!answerPing) return
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ path: resolve(progressPath), built, allowResume: false, codexSend: true, messagesDirectory: resolve(messagesDir) }))
+        return
+      }
+      if (req.method === 'POST' && url.pathname === '/api/open-link') {
+        if (req.headers['x-board-token'] !== 'retrytesttoken') {
+          res.writeHead(403, { 'content-type': 'application/json' })
+          res.end('{}')
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ url: `http://127.0.0.1:${fake.address().port}/open/synthetic-open-${String(++openCount).padStart(4, '0')}` }))
         return
       }
       if (req.method === 'POST' && url.pathname === '/api/package') {
@@ -1293,7 +1392,7 @@ test('a later launcher that reuses a server through the retry wait or the claim 
       writeRecord()
       const waited = await run
       assert.equal(waited.code, 0, waited.stderr)
-      assert.ok(waited.stdout.includes(fakeUrl), waited.stdout)
+      readPrintedLink(waited, { wordings: [EN.boardPageLink], secrets: ['retrytesttoken'] })
       assert.equal(posts.length, 1, JSON.stringify(posts))
       assert.equal(posts[0]?.version, manifest.version)
       assert.ok(claimCreates - before <= 1, `the launcher started ${claimCreates - before} children in the wait scenario`)
@@ -1318,7 +1417,7 @@ test('a later launcher that reuses a server through the retry wait or the claim 
       writeRecord()
       const backedOff = await run
       assert.equal(backedOff.code, 0, backedOff.stderr)
-      assert.ok(backedOff.stdout.includes(fakeUrl), backedOff.stdout)
+      readPrintedLink(backedOff, { wordings: [EN.boardPageLink], secrets: ['retrytesttoken'] })
       assert.equal(posts.length, 1, JSON.stringify(posts))
       assert.equal(posts[0]?.version, manifest.version)
       assert.ok(claimCreates - before <= 1, `the launcher started ${claimCreates - before} children in the backoff scenario`)
