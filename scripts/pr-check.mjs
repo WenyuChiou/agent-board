@@ -826,6 +826,35 @@ const readVerdictLine = (line, fieldStart, kind) => {
   const isUnreadable = kind === 'APPROVE' && noteOf(line).includes(FRESH_NOTE) && !isFresh && !(!isBroken && notes.includes(MAINTAINER_NOTE))
   return { isFresh, isUnreadable }
 }
+// Main's pattern alone says whether a comment holds a verdict, its kind and its sha, so every change request it reads
+// still counts (#1974; the second Fable diagnosis on #1975, after rounds 3 to 5 each found a reading that kept an
+// approval or lost a change request).
+const VERDICT = /^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi
+// An approval counts only in the R2 form on its own line: spaces or tabs between the words, the sha alone (in backticks
+// on both sides or none), then ` by ` and a name with a letter or digit before any parenthesis. Anything else is an
+// approval that cannot be read, never one by the account that posted it.
+const APPROVAL_LINE = /^Review:[ \t]*APPROVE[ \t]+(`?)[0-9a-fA-F]{7,40}\1[ \t]+by[ \t]+([^,]+)/i
+const LINE_END = /\r\n|[\r\n\p{Zl}\p{Zp}]/u
+const verdictName = (body, match) => {
+  // The verdict's line runs from `Review:` to its first line break of any kind, so its name, notes and route end there.
+  const line = body.slice(match.index).split(LINE_END, 1)[0]
+  if (match[1].toUpperCase() === 'APPROVE') {
+    const approval = line.match(APPROVAL_LINE)
+    const name = approval?.[2].trim() ?? ''
+    return /[\p{L}\p{N}]/u.test(name.split('(')[0])
+      ? { name, line, fieldStart: approval[0].length - approval[2].length }
+      : { name: null, line, fieldStart: null }
+  }
+  const name = match[3]?.split(LINE_END, 1)[0].trim() || null
+  const fieldStart = match[3] === undefined ? null : match[0].length - match[3].length
+  return { name, line, fieldStart: fieldStart !== null && fieldStart <= line.length ? fieldStart : null }
+}
+// The reviewer's name as the verdict writes it, read the way the PR check reads it, for the review queue.
+export const verdictNameOf = body => {
+  const text = body ?? ''
+  const match = text.match(VERDICT)
+  return match ? verdictName(text, match).name : null
+}
 
 // On every named tier a reviewer the author's lane started new for this review may approve, whatever its name; on the
 // risk tier the Codex review bot's review of the same head is the other model family's check (owner, 2026-11-28;
@@ -885,29 +914,24 @@ const readReview = item => {
   if (!item) return { review: null, ignored: null }
   const blocked = ignoredApprovalReason(item)
   const body = typeof item === 'string' ? item : item.body ?? ''
-  // The verdict is read from one line, cut at any line break, so the name, the notes and the route all end where the
-  // line does (#1974): a note after a lone carriage return belongs to the next line, and a verdict split over lines is
-  // none.
-  let match = null
-  let verdictLine = ''
-  for (const line of body.split(/\r\n|\r|\n|\u2028|\u2029/)) {
-    match = line.match(/^Review:[ \t]*(APPROVE|REQUEST CHANGES)[ \t]+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/i)
-    if (match) {
-      verdictLine = line
-      break
-    }
-  }
+  const match = body.match(VERDICT)
   if (match) {
     const kind = match[1].toUpperCase()
-    const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
+    const { name, line: verdictLine, fieldStart } = verdictName(body, match)
+    const isNameless = kind === 'APPROVE' && name === null
+    const login = typeof item === 'object' ? item.user?.login ?? null : null
+    // A change request falls back to the account that posted it, as it always did; an approval names its reviewer or
+    // is none, since one account posts for many agents (RULES R2).
+    const reviewer = kind === 'APPROVE' ? name : name ?? login
     if (kind === 'APPROVE' && blocked) {
       if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
         return { review: { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(item.user?.login ? { reviewer: item.user.login } : {}) }, ignored: null }
       }
-      return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
+      return { review: null, ignored: { who: name || login || 'unknown account', reason: blocked } }
     }
-    // The reviewer field starts where the name does, right after the ` by ` that follows the sha.
-    const { isFresh, isUnreadable } = readVerdictLine(verdictLine, match[3] === undefined ? null : match[0].length - match[3].length, kind)
+    const notes = readVerdictLine(verdictLine, fieldStart, kind)
+    const isFresh = !isNameless && notes.isFresh
+    const isUnreadable = isNameless || notes.isUnreadable
     // The maintainer route's verdict ends `, maintainer route` (RULES R2); tied to the end of the line, it cannot bind
     // to a later part of it.
     const isMaintainerRoute = /,[ \t]*maintainer route[ \t.]*$/i.test(verdictLine)
@@ -919,6 +943,7 @@ const readReview = item => {
         ...(isFresh ? { isFresh } : {}),
         ...(isMaintainerRoute ? { isMaintainerRoute } : {}),
         ...(isUnreadable ? { isUnreadable } : {}),
+        ...(isNameless ? { isNameless } : {}),
       },
       ignored: null,
     }
@@ -1602,7 +1627,9 @@ export const verdict = (comments, head, options = {}) => {
 
   if (last.isUnreadable) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head, in a line that cannot be read.`)
-    if (!isDraft && number !== null) {
+    if (!isDraft && number !== null && last.isNameless) {
+      output.problems.push(problem('review', 'the approval line cannot be read: it does not name its reviewer after the sha, as `by <reviewer>` on the same line (RULES.md, R2).', 'post the verdict again in the R2 form, `Review: APPROVE <full head sha> by <reviewer>, lane <lane>`, on one line.'))
+    } else if (!isDraft && number !== null) {
       output.problems.push(problem('review', 'the approval line cannot be read: it says "started new for this review", but not as one note in the parentheses right after the reviewer\'s name (RULES.md, R2).', 'post the verdict again in the R2 form, `Review: APPROVE <full head sha> by <reviewer> (read-only, started new for this review), lane <lane>`, with no parenthesis inside another.'))
     }
     return output

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { authorKey, codexStateOf, isLaneReviewer, isSurfaceNone, reviewOf, riskApprovalGap, tierOf } from './pr-check.mjs'
+import { authorKey, codexStateOf, isLaneReviewer, isSurfaceNone, reviewOf, riskApprovalGap, tierOf, verdictNameOf } from './pr-check.mjs'
 import { bundleSources, safeLine } from './preflight.mjs'
 
 const usage = 'Usage: node scripts/review-queue.mjs [--repo owner/name] [--roadmap N] [--json] [--help]'
@@ -39,8 +39,9 @@ const nameOf = text => (text ?? '').match(/[A-Za-z0-9][A-Za-z0-9_-]*/)?.[0].toLo
 // countOpenReviews keys its counts by a claim's first word, since the reviewers file lists first-word names;
 // the author comparisons in classify use the full identity below, and only the same full name answers a claim.
 const fullName = text => (text ?? '').replace(/`/g, '').split(',')[0].replace(/\s+/g, ' ').trim().toLowerCase() || null
-// The name ends where the PR check's verdict line does, at any line break (U+2028 and U+2029 are \p{Zl} and \p{Zp}; #1974).
-const verdictFullName = body => fullName((body ?? '').match(/^Review:[ \t]*(?:APPROVE|REQUEST CHANGES)\b[^\r\n\p{Zl}\p{Zp}]*?\bby[ \t]+(\S[^\r\n\p{Zl}\p{Zp}]*)/mu)?.[1])
+// The reviewer's name comes from the PR check's own reader, so the queue and the check never name different reviewers
+// for one verdict (#1974).
+const verdictFullName = body => fullName(verdictNameOf(body))
 // A claim is "Reviewing: <head sha> by <reviewer>" and holds that head only (team-process, From claim to merge).
 // Only that form is a claim: the head's full sha, or 7 or more of its first characters as a Ready line may give,
 // in backticks only as a pair; then `by` between spaces; then a name with a letter or digit before any comma.
