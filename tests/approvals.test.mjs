@@ -3002,9 +3002,13 @@ test('a refusal record with unreadable permissions returns 200 with reason unrea
   assert.equal(await boardAs(board, page), undefined)
 })
 
+// The refusal tests below need an ask that passed, not a wait for the page: with the default 3 s draw window each ask
+// waited it out unseen, 3 s a test on every run (#1957). The page in these tests never draws, so a short window passes it.
+const PASS_DRAW_MS = 100
+
 test('a stale refusal older than the latest passing ask is not reported while a newer refusal is', async () => {
   let fakeNow = 1_700_000_010_000
-  const board = await startBoard({ now: () => fakeNow })
+  const board = await startBoard({ now: () => fakeNow, drawMs: PASS_DRAW_MS })
   const page = await openPage(board)
   const t1 = new Date(fakeNow - 5_000).toISOString()
   assert.equal((await board.call('/api/approvals/ask', hook.askBody(request('echo synthetic-pass')))).status, 200)
@@ -3018,7 +3022,7 @@ test('a stale refusal older than the latest passing ask is not reported while a 
 
 test('a refusal timestamped equal to the latest passing ask is not reported', async () => {
   let fakeNow = 1_700_000_020_000
-  const board = await startBoard({ now: () => fakeNow })
+  const board = await startBoard({ now: () => fakeNow, drawMs: PASS_DRAW_MS })
   const page = await openPage(board)
   assert.equal((await board.call('/api/approvals/ask', hook.askBody(request('echo synthetic-tie')))).status, 200)
   const t2 = new Date(fakeNow).toISOString()
@@ -3032,7 +3036,7 @@ test('a refusal timestamped equal to the latest passing ask is not reported', as
 
 test('a genuine refusal newer than the latest passing ask is reported on the board', async () => {
   let fakeNow = 1_700_000_030_000
-  const board = await startBoard({ now: () => fakeNow })
+  const board = await startBoard({ now: () => fakeNow, drawMs: PASS_DRAW_MS })
   const page = await openPage(board)
   assert.equal((await board.call('/api/approvals/ask', hook.askBody(request('echo synthetic-first-pass')))).status, 200)
   fakeNow += 2_000

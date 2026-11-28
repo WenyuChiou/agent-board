@@ -191,6 +191,21 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/serve-watch.test.mjs': 110_000, // slowest 56.6 s
 })
 export const BOARD_FILE_BUDGET_DEFAULT_MS = 60_000
+
+// The rule the budgets above are set by (#1715), as a check (#1957): a board file's 70% line is at least 1.3x its slowest
+// recorded Windows time, so a pull request fails on it only when it runs 30% slower than that. `slowest` is the time table's
+// (tests/ci-test-times.json, written by scripts/ci-test-times.mjs --slowest): each file's largest time in one Windows job,
+// one part's share for a self-parted file. The answer names every board file over its line, and every one with no time.
+export const checkBudgetRule = (slowest, files) => {
+  const errors = []
+  for (const path of files.filter(file => groupForTest(file) === 'board')) {
+    const ms = slowest?.[path]
+    if (typeof ms !== 'number') { errors.push(path + ': no slowest Windows time recorded'); continue }
+    const budget = BOARD_FILE_BUDGETS_MS[path] ?? BOARD_FILE_BUDGET_DEFAULT_MS
+    if (budget * 7 / 10 < ms * 13 / 10) errors.push(path + ': slowest ' + seconds(ms) + 's x 1.3 = ' + seconds(Math.round(ms * 1.3)) + 's, over the 70% line ' + seconds(budget * 7 / 10) + 's of its ' + seconds(budget) + 's budget')
+  }
+  return { ok: errors.length === 0, errors }
+}
 // Re-derived, not the issue's 420 s: Windows board part job walls across the last four main runs
 // (3485740, 4617bc1, e30fe0a, 01cdc5a) run 206-504 s, the slowest part (1/4) 347-504 s, so a 420 s
 // threshold on the job wall already fails on main. Checkout, Node setup and the first PowerShell and
