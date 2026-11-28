@@ -877,15 +877,25 @@ const main = () => {
       && !hasSidecar([antigravityPlan])
       && (will.length ? !(isRepair && !changedAgents.includes('antigravity')) : isLoneSidecar)
     // What a yes adds: the plan with the sidecar, less the files the main plan already changes. Where the connector manages
-    // Antigravity this includes the sidecar's own install record. A plan that cannot be read offers no question.
+    // Antigravity this includes the sidecar's own install record. A sidecar plan that fails or stops on a conflict offers no
+    // question; the preview says so, with the command that writes the sidecar once the cause is fixed.
     let sidecarChanges = []
+    let sidecarUnplanned = ''
     if (isSidecarOffered) {
+      const retry = setupCommand(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'])
       try {
         const planned = new Set(antigravityPlan.changes.map(change => change.file))
         const withSidecar = run('antigravity', false, ['--antigravity-sidecar'])
-        sidecarChanges = withSidecar.conflicts.length ? [] : withSidecar.changes.filter(change => !planned.has(change.file))
-      } catch {}
+        if (withSidecar.conflicts.length) sidecarUnplanned = `${words('sidecarPart')}: ${words('skipped', { files: withSidecar.conflicts.map(shortPath).join(', ') })}\n${words('retry', { command: retry })}`
+        else sidecarChanges = withSidecar.changes.filter(change => !planned.has(change.file))
+      } catch (error) {
+        sidecarUnplanned = `${words('partFailed', { part: words('sidecarPart'), command: retry })}${error?.message ? `\n  ${error.message}` : ''}`
+      }
       if (!hasSidecar([{ conflicts: [], changes: sidecarChanges }])) isSidecarOffered = false
+      if (sidecarUnplanned) {
+        const at = lines.findIndex(line => line.startsWith('Claude Code: '))
+        lines.splice(at < 0 ? lines.length : at, 0, sidecarUnplanned)
+      }
     }
     if (isSidecarOffered) {
       const optional = words('sidecarOptional', { status: describe(sidecarChanges) })

@@ -269,6 +269,16 @@ test('a sidecar.json deleted after an earlier setup wrote it comes back with the
   assert.ok(existsSync(join(dir, 'sidecar.json')), asked.stdout)
 }))
 
+test('a sidecar plan that fails asks no sidecar question, and the preview says it failed with the command to run (#1642)', () => withHome(({ home, run, dir }) => {
+  connectorHome(home)
+  // A folder where sidecar.mjs would go: the main plan has no sidecar file, and the sidecar's own plan cannot write it.
+  mkdirSync(join(dir, 'sidecar.mjs'), { recursive: true })
+  const asked = run(['--agent', 'antigravity'], { input: 'y\n', env: TTY })
+  assert.ok(!asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.match(asked.stdout, /Antigravity sidecar files: (?:failed|skipped)[^\n]*(?:\n.*)*--agent antigravity --antigravity-sidecar --apply/, asked.stdout + asked.stderr)
+  assert.ok(!existsSync(join(dir, 'sidecar.json')), asked.stdout)
+}))
+
 test('piped setup and terminal --apply ask no sidecar question and write no sidecar (#1642)', () => withHome(({ home, run, dir }) => {
   const piped = run(['--agent', 'antigravity'], { input: 'y\ny\n' })
   assert.equal(piped.status, 0, piped.stderr)
