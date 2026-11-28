@@ -101,7 +101,13 @@ const createBoardFixture = () => {
     ])
     return ports
   }
-  const urlOf = out => out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0] ?? null
+  // #1650: the command prints a one-use link and never the page's token, so the page a command
+  // left running is the one its served record names (the record keeps the token).
+  const urlOf = out => {
+    assert.match(out, /http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/, `the command prints a one-use link: ${out}`)
+    assert.doesNotMatch(out, /[?&]t=/, `the command prints no page token: ${out}`)
+    return existsSync(served) ? JSON.parse(readFileSync(served, 'utf8')).url ?? null : null
+  }
   const pingOf = async url => (await requestJson(url, 'GET', '/api/ping')).json
   const boardPoll = (url, pageId) => requestJson(url, 'GET', '/api/board', { 'x-board-page': pageId, 'x-board-visible': '1' })
   const end = async urls => {
