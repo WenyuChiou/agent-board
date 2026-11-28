@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, sep } from 'node:path'
+import { basename, dirname, join, relative, sep } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { antigravitySidecarSource } from '../hooks/antigravity-sidecar.ts'
@@ -128,6 +128,8 @@ const onFirstAnswer = (home, change) => {
   writeFileSync(preload, `const fs = require('node:fs')\nconst read = fs.readSync\nfs.readSync = (fd, ...rest) => {\n  if (fd === 0 && !fs.existsSync(${JSON.stringify(mark)})) { fs.writeFileSync(${JSON.stringify(mark)}, ''); ${change} }\n  return read(fd, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
   return { NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, mark }
 }
+// Every file under a folder, as absolute paths.
+const filesUnder = folder => readdirSync(folder, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile()).map(entry => join(entry.parentPath ?? entry.path, entry.name))
 const runChanging = (home, run, args, input, change) => {
   const { mark, ...env } = onFirstAnswer(home, change)
   const result = run(args, { input, env: { ...TTY, ...env } })
@@ -223,9 +225,15 @@ test('the lone sidecar question follows a line naming sidecar.json and sidecar.m
 
 test('where the connector manages Antigravity the preview names the sidecar files as optional before the question (#1642)', () => withHome(({ home, run, dir }) => {
   const { root } = connectorHome(home)
+  const before = new Set(filesUnder(home))
   const asked = run(['--agent', 'antigravity'], { input: 'y\n', env: TTY })
   assert.equal(asked.status, 0, asked.stderr)
-  assert.ok(namesSidecarFiles(beforeSidecarQuestion(asked.stdout)), asked.stdout)
+  const preview = beforeSidecarQuestion(asked.stdout)
+  assert.ok(namesSidecarFiles(preview), asked.stdout)
+  // Every file the yes adds is one the preview named, the sidecar's own install record included.
+  const added = filesUnder(home).filter(file => !before.has(file))
+  assert.ok(added.some(file => basename(file) === 'install-antigravity-sidecar.json'), added.join('\n'))
+  for (const file of added) assert.ok(preview.includes(join('~', relative(home, file))), `${file} is not in the preview:\n${preview}`)
   assert.ok(existsSync(join(dir, 'sidecar.json')) && existsSync(join(dir, 'sidecar.mjs')), asked.stdout)
   assert.ok(!existsSync(join(home, '.gemini', 'config', 'hooks.json')) && !existsSync(join(root, 'install-antigravity.json')))
 }))

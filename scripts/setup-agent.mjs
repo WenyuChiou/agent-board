@@ -866,19 +866,31 @@ const main = () => {
     // The sidecar is a second, separate question that defaults to no. A yes only writes its files (the person
     // switches it on in Antigravity's Automations); with the flag, its files were part of the plan above. It is
     // asked of an installed Antigravity that has no sidecar yet, whether or not the main question was asked. The
-    // preview names its two files as an optional part, and the question comes right after the main yes, before
-    // anything is written or called done; a yes writes them after the agents' own files (#1642).
-    const sidecarFiles = ['sidecar.json', 'sidecar.mjs'].map(name => join(home, '.gemini', 'config', 'sidecars', 'agent-board', name))
-    const isLoneSidecar = !will.length && available.includes('antigravity') && !plans[selected.indexOf('antigravity')].changes.length
+    // preview names every file a yes adds to the plan as an optional part, and the question comes right after the
+    // main yes, before anything is written or called done; a yes writes them after the agents' own files (#1642).
+    const sidecarJson = join(home, '.gemini', 'config', 'sidecars', 'agent-board', 'sidecar.json')
+    const antigravityPlan = plans[selected.indexOf('antigravity')]
+    const isLoneSidecar = !will.length && available.includes('antigravity') && !antigravityPlan.changes.length
     // On a run with other work, Antigravity has its part line, so the sidecar can follow it: not on a repair that leaves it out.
     // A plan that already writes a sidecar file (an earlier setup's sidecar.json was deleted) restores it with the main yes.
-    const isSidecarOffered = available.includes('antigravity') && !args.includes('--antigravity-sidecar') && !existsSync(sidecarFiles[0])
-      && !hasSidecar([plans[selected.indexOf('antigravity')]])
+    let isSidecarOffered = available.includes('antigravity') && !args.includes('--antigravity-sidecar') && !existsSync(sidecarJson)
+      && !hasSidecar([antigravityPlan])
       && (will.length ? !(isRepair && !changedAgents.includes('antigravity')) : isLoneSidecar)
+    // What a yes adds: the plan with the sidecar, less the files the main plan already changes. Where the connector manages
+    // Antigravity this includes the sidecar's own install record. A plan that cannot be read offers no question.
+    let sidecarChanges = []
     if (isSidecarOffered) {
-      const optional = words('sidecarOptional', { status: words('previewCreate', { count: sidecarFiles.length }) })
+      try {
+        const planned = new Set(antigravityPlan.changes.map(change => change.file))
+        const withSidecar = run('antigravity', false, ['--antigravity-sidecar'])
+        sidecarChanges = withSidecar.conflicts.length ? [] : withSidecar.changes.filter(change => !planned.has(change.file))
+      } catch {}
+      if (!hasSidecar([{ conflicts: [], changes: sidecarChanges }])) isSidecarOffered = false
+    }
+    if (isSidecarOffered) {
+      const optional = words('sidecarOptional', { status: describe(sidecarChanges) })
       const at = lines.findIndex(line => line.startsWith('Claude Code: '))
-      lines.splice(at < 0 ? lines.length : at, 0, optional, ...sidecarFiles.map(file => `  ${shortPath(file)}`))
+      lines.splice(at < 0 ? lines.length : at, 0, optional, ...sidecarChanges.map(change => `  ${shortPath(change.file)}`))
       if (will.length) will.push(optional)
     }
     // Writes the sidecar a yes asked for, once Antigravity's own part is done; else its part says how to write it later.
