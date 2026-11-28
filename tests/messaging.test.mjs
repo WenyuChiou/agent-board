@@ -8480,18 +8480,45 @@ test('a page that stops, is replaced, or reaches idle while a Codex delivery is 
   process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
   process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
   codexShortWait()
+  // The process list reads as unreadable here, so the receiver gives its first claim straight back, and claims the message again
+  // about 2 s later to wait on the thread (#1652). That first claim lasts some 20 ms. The board's give-back request for it is
+  // held until the test has seen that claim, so step 1 meets it on every run and must tell it from the claim held after the join:
+  // only that one comes after a thread/resume (#1956).
+  const unsentHeld = join(dir, 'unsent-held'), unsentGo = join(dir, 'unsent-go'), unsentDone = join(dir, 'unsent-done')
+  const holdFirstGiveBack = `
+const held = ${JSON.stringify(unsentHeld)}, go = ${JSON.stringify(unsentGo)}, done = ${JSON.stringify(unsentDone)}
+const realFetch = globalThis.fetch
+let isHeld = false
+globalThis.fetch = async (url, init) => {
+  if (isHeld || !String(url).includes('/api/messages/receipt') || !String(init?.body).includes('"status":"unsent"')) return realFetch(url, init)
+  isHeld = true
+  fs.writeFileSync(held, '')
+  while (!fs.existsSync(go)) await new Promise(next => setTimeout(next, 10))
+  // The request's own 5 s limit started before the hold; it gets a fresh one, as if it had been sent now.
+  try { return await realFetch(url, { ...init, signal: AbortSignal.timeout(5000) }) } finally { fs.writeFileSync(done, '') }
+}
+`
   let board
   try {
-    board = await start(dir, '', ['--messages-dir', messagesDir, '--codex-send', '--idle-minutes', '0.03'], codexRoutes)
+    board = await start(dir, holdFirstGiveBack, ['--messages-dir', messagesDir, '--codex-send', '--idle-minutes', '0.03'], codexRoutes)
     delete process.env.AGENT_BOARD_CODEX_BIN
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
 
-    // 1. Held claim waiting on a busy thread before turn/start.
-    await waitFor(async () => {
+    // 1. Held claim waiting on a busy thread before turn/start: the claim after the join, not the first one given back.
+    let seenFirst = null
+    const givenBack = (async () => {
+      await waitFor(async () => existsSync(unsentHeld) && seenFirst)
+      writeFileSync(unsentGo, '')
+      await waitFor(async () => existsSync(unsentDone))
+    })()
+    const held = await waitFor(async () => {
       const one = await codexMessage(board, 'AB-CX-001')
-      return one?.status === 'uncertain' && one.claimed > 0 && one
+      if (one?.status === 'uncertain' && one.claimed > 0 && existsSync(unsentHeld) && !existsSync(unsentGo)) seenFirst ??= one
+      return one?.status === 'uncertain' && one.claimed > 0 && daemon.calls().some(call => call.method === 'thread/resume') && one
     })
+    await givenBack
+    assert.ok(seenFirst, 'the first, given-back claim was never seen: ' + JSON.stringify(held))
     assert.equal(codexStarts(daemon), 0)
     assert.equal((await board.call('/api/ping')).body.sending, 1)
     assert.equal((await board.call('/api/close', {})).status, 409)
