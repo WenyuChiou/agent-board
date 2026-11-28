@@ -18,10 +18,17 @@ export class BoardPage {
 
   async openQuestion(words) {
     const card = this.question(words)
+    const rail = this.page.locator('#detail-rail')
+    const isWide = await this.page.evaluate(() => window.innerWidth >= 1440)
+    if (isWide) {
+      if (!(await card.evaluate(node => node.classList.contains('selected')))) {
+        await card.locator('button.q-toggle').click()
+      }
+      await rail.waitFor({ state: 'visible' })
+      return rail
+    }
     const more = card.locator('button.q-toggle')
     if ((await more.getAttribute('aria-expanded')) !== 'true') await more.click()
-    const rail = this.page.locator('#detail-rail')
-    if (await rail.isVisible()) return rail
     return card
   }
 

@@ -37,6 +37,11 @@ const withQuestion = async (name, run) => browserFixture(name, async fixture => 
     await board.open(url)
     const card = board.question(question)
     const detailSurface = async () => (await page.locator('#detail-rail').isVisible()) ? page.locator('#detail-rail') : card
+    const countQueued = async () => {
+      const inCard = await card.getByText(/^Queued( · .*)?$/).count()
+      const inRail = (await page.locator('#detail-rail').isVisible()) ? await page.locator('#detail-rail .press-result').getByText(/^Queued( · .*)?$/).count() : 0
+      return inCard + inRail
+    }
     const send = async () => {
       await card.getByRole('button', { name: 'Write your own', exact: true }).click()
       const detail = await detailSurface()
@@ -45,7 +50,7 @@ const withQuestion = async (name, run) => browserFixture(name, async fixture => 
       // The durable paragraph distinguishes the receipt from the duplicate local status under test.
       await card.locator('p[role="status"]').filter({ hasText: /^Queued · / }).waitFor()
     }
-    await run({ ...fixture, card, detailSurface, send, deliveries, receive: () => { canReceive = true }, update: () => writeProgress(progress, block('Updated synthetic receipt context.')) })
+    await run({ ...fixture, card, detailSurface, countQueued, send, deliveries, receive: () => { canReceive = true }, update: () => writeProgress(progress, block('Updated synthetic receipt context.')) })
     assert.deepEqual(errors, [])
   } finally {
     await receiver.close()
@@ -53,13 +58,13 @@ const withQuestion = async (name, run) => browserFixture(name, async fixture => 
 })
 
 test('a durable replied receipt supersedes a local queued hint without another action', { concurrency: false, timeout: 120_000 }, async () => {
-  await withQuestion('receipt-replaces-hint', async ({ card, send, receive, deliveries }) => {
+  await withQuestion('receipt-replaces-hint', async ({ card, countQueued, send, receive, deliveries }) => {
     await send()
-    const queuedLines = await card.getByText(/^Queued( · .*)?$/).count()
+    const queuedLines = await countQueued()
     receive()
     await card.getByText('Read · Synthetic reply.', { exact: true }).waitFor()
     assert.equal(deliveries.length, 1)
-    assert.equal(await card.getByText(/^Queued( · .*)?$/).count(), 0, 'the earlier local enqueue result outlived its durable reply')
+    assert.equal(await countQueued(), 0, 'the earlier local enqueue result outlived its durable reply')
     assert.equal(queuedLines, 1, 'the queued receipt and local enqueue result were shown twice')
   })
 })
@@ -87,7 +92,7 @@ test('an earlier receipt preserves a new send error on the same card', { concurr
 })
 
 test('a delayed enqueue response cannot restore Queued after its receipt is already visible', { concurrency: false, timeout: 120_000 }, async () => {
-  await withQuestion('receipt-before-response', async ({ page, card, send, receive, deliveries, evidence }) => {
+  await withQuestion('receipt-before-response', async ({ page, card, countQueued, send, receive, deliveries, evidence }) => {
     // Each UI wait must settle inside the existing overall test deadline, including on failure.
     page.setDefaultTimeout(15_000)
     const phases = []
@@ -117,7 +122,7 @@ test('a delayed enqueue response cannot restore Queued after its receipt is alre
       await page.waitForFunction(() => document.querySelector('textarea[aria-label="Your answer…"]')?.value === '', undefined, { timeout: 15_000 })
       phase('successful send completed in the page')
       assert.equal(deliveries.length, 1)
-      assert.equal(await card.getByText(/^Queued( · .*)?$/).count(), 0, 'a late enqueue response restored feedback superseded by its visible receipt')
+      assert.equal(await countQueued(), 0, 'a late enqueue response restored feedback superseded by its visible receipt')
       phase('no stale enqueue feedback')
     } finally {
       releaseResponse()
