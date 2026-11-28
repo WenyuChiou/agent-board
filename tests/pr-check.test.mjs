@@ -591,6 +591,12 @@ test('pr-check reports the last review verdict and distinguishes current and old
   assert.match(verdict([{ body: `Checks complete\nReview: REQUEST CHANGES \`${head}\`` }], head).info[0], /REQUEST CHANGES.*current head/)
 })
 
+// The Codex review bot's state comment for a head, as it posts it on the pull request.
+const codexBotState = (sha, hasFindings = false) => ({
+  user: { login: 'chatgpt-codex-connector[bot]', type: 'Bot' },
+  body: `Codex review\n<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { commit_sha: sha, has_unresolved_findings: hasFindings } })} -->`,
+})
+
 test('a reviewer the author\'s lane started new for this review may approve a light, normal or risk pull request, never a release one (#1375, #1974)', () => {
   const head = syntheticPr().head
   const fresh = [{ body: `Review: APPROVE ${head} by codex (gpt-6.1-terra, read-only, started new for this review), lane codex` }]
@@ -598,8 +604,8 @@ test('a reviewer the author\'s lane started new for this review may approve a li
   const selfApproval = (comments, tier, isRelease = false) => verdict(comments, head, { authorAgent: 'codex', number: 7, tier, isRelease }).problems.filter(item => item.check === 'review').length
   assert.equal(selfApproval(fresh, 'light'), 0)
   assert.equal(selfApproval(fresh, 'normal'), 0)
-  assert.equal(selfApproval(fresh, 'risk'), 0)
-  assert.equal(selfApproval(fresh, 'risk', true), 1)
+  assert.equal(selfApproval([codexBotState(head), ...fresh], 'risk'), 0)
+  assert.equal(selfApproval([codexBotState(head), ...fresh], 'risk', true), 1)
   assert.equal(selfApproval(fresh, null), 1)
   assert.equal(selfApproval(named, 'risk'), 1)
   assert.equal(isLaneReviewer({ isFresh: true }, 'risk'), true)
@@ -619,11 +625,37 @@ test('a reviewer the author\'s lane started new for this review may approve a li
 
 test('the PR check takes a risk-tier approval from the lane of the author when it was started new for this review, but not on a release pull request (#1974)', () => {
   const pr = syntheticPr()
-  const fresh = [{ body: `Review: APPROVE ${pr.head} by codex (read-only, started new for this review), lane codex` }]
+  const fresh = [codexBotState(pr.head), { body: `Review: APPROVE ${pr.head} by codex (read-only, started new for this review), lane codex` }]
   const reviewProblems = extra => checkPr({ ...pr, body: `${body}Tier: risk
 `, prComments: fresh, ...extra }).problems.filter(item => item.check === 'review')
   assert.deepEqual(reviewProblems({}), [])
   assert.equal(reviewProblems({ title: 'chore(release): Agent Board 9.9.9' }).length, 1)
+})
+
+test('a risk-tier approval by a reviewer started new for this review counts only once the Codex review bot reviewed that head, and never for a lane under risk-tier review; a maintainer-route verdict is read as before (#1974)', () => {
+  const pr = syntheticPr()
+  const line = (who, suffix = '') => ({ body: `Review: APPROVE ${pr.head} by ${who} (read-only, started new for this review), lane codex${suffix}` })
+  const problems = (comments, surface = 'delivery') => checkPr({ ...pr, body: `${body}Tier: risk\nSurface: ${surface}\n`, prComments: comments }).problems.filter(item => item.check === 'review')
+  assert.equal(problems([line('codex')]).length, 1)
+  assert.match(problems([line('codex')])[0].message, /Codex review bot has not reviewed/)
+  assert.equal(problems([codexBotState('1234567'), line('codex')]).length, 1)
+  assert.deepEqual(problems([codexBotState(pr.head), line('codex')]), [])
+  assert.deepEqual(problems([codexBotState(pr.head.slice(0, 10), true), line('codex')]), [])
+  // The newest state comment decides: a later one for an older head means this head was not reviewed.
+  assert.equal(problems([codexBotState(pr.head), codexBotState('1234567'), line('codex')]).length, 1)
+  // A state comment from anyone but the bot is not the bot's review.
+  assert.equal(problems([{ ...codexBotState(pr.head), user: { login: 'alice' } }, line('codex')]).length, 1)
+  // A reviewer whose name is not the author's is held to the same condition.
+  assert.equal(problems([line('sonnet_900')]).length, 1)
+  // A lane under risk-tier review takes the maintainer route, even with the bot's review of the head.
+  assert.equal(problems([codexBotState(pr.head), line('codex')], 'none').length, 1)
+  assert.match(problems([codexBotState(pr.head), line('codex')], 'none')[0].message, /maintainer route/)
+  // The maintainer route's verdict, and a draft, are read as before.
+  assert.deepEqual(problems([line('codex_900', ', maintainer route')], 'none'), [])
+  assert.deepEqual(problems([line('codex_900', ', maintainer route')]), [])
+  assert.deepEqual(checkPr({ ...pr, isDraft: true, body: `${body}Tier: risk\nSurface: delivery\n`, prComments: [line('codex')] }).problems.filter(item => item.check === 'review'), [])
+  // Off the risk tier nothing changes.
+  assert.deepEqual(checkPr({ ...pr, body: `${body}Tier: normal\n`, prComments: [line('codex')] }).problems.filter(item => item.check === 'review'), [])
 })
 
 test('approval gate: a ready pull request requires a qualifying review approval on the exact head (#1219)', () => {

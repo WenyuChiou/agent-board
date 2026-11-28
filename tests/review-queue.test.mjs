@@ -256,12 +256,20 @@ test('an approval named for the pull request author does not count as approved',
 test('a reviewer the author\'s lane started new for this review counts as an approval on every tier but a release pull request, as the PR check reads it (#1375, #1974)', () => {
   // The queue reads a one-note lane as the author's own lane, so this shape is the one it would hold as self-approval.
   const fresh = by('WenyuChiou', answered('codex (started new for this review), lane codex'))
-  const queue = (tier, title) => classify([pull(1, { body: `Author: codex, branch\nTier: ${tier}`, files: [], ...(title ? { title } : {}) })], { 1: [ready(head, '2026-10-20T08:00:00Z'), fresh] }, now)
+  // On the risk tier the Codex review bot's review of the head comes first (#1974).
+  const bot = codexState(head, false, '2026-10-20T10:00:00Z', 5)
+  const queue = (tier, title, extra = '', items = [bot, fresh]) => classify([pull(1, { body: `Author: codex, branch\nTier: ${tier}${extra}`, files: [], ...(title ? { title } : {}) })], { 1: [ready(head, '2026-10-20T08:00:00Z'), ...items] }, now)
   for (const tier of ['light', 'normal', 'risk']) {
     assert.deepEqual(queue(tier).approvedNow.map(item => item.number), [1], tier)
     assert.deepEqual(queue(tier).waitingForAuthor, [], tier)
   }
   assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9').waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approval is by the author']])
+  for (const tier of ['light', 'normal']) assert.deepEqual(queue(tier, undefined, '', [fresh]).approvedNow.map(item => item.number), [1], tier)
+  assert.deepEqual(queue('risk', undefined, '', [fresh]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approved; the Codex review bot has not reviewed this head']])
+  assert.deepEqual(queue('risk', undefined, '', [codexState(oldHead, false, '2026-10-20T10:00:00Z', 5), fresh]).waitingForAuthor.map(item => item.detail), ['approved; the Codex review bot has not reviewed this head'])
+  assert.deepEqual(queue('risk', undefined, '\nSurface: none').waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approved by the lane; a lane under risk-tier review takes the maintainer route']])
+  const maintainer = by('WenyuChiou', answered('codex (started new for this review), lane codex, maintainer route'))
+  assert.deepEqual(queue('risk', undefined, '\nSurface: none', [maintainer]).approvedNow.map(item => item.number), [1])
   const plain = classify([pull(1, { body: 'Author: codex, branch\nTier: normal', files: [] })], { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('codex'))] }, now)
   assert.deepEqual(plain.waitingForAuthor.map(item => item.detail), ['approval is by the author'])
 })
