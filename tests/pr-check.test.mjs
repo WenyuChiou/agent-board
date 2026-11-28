@@ -676,6 +676,51 @@ test('a reviewer whose name carries a note in parentheses of its own still reads
   assert.equal(problems([codexBotState(pr.head), { body: `Review: APPROVE ${pr.head} by codex (local), lane example (started new for this review)` }], 'normal').length, 1)
 })
 
+test('a verdict line that carries the words started new for this review but does not read as that one note in the parentheses after the reviewer\'s name is no approval, and the PR check says to write it in the R2 form (#1974)', () => {
+  const pr = syntheticPr()
+  const read = rest => reviewOf(`Review: APPROVE ${pr.head} ${rest}`)
+  // The forms in use read as before: the name up to the first comma, the note, the route.
+  assert.deepEqual(read('by AB01 PM-main, lane AB01 PM-main'), { kind: 'APPROVE', sha: pr.head, reviewer: 'AB01 PM-main' })
+  assert.deepEqual(read('by codex_824 (read-only, GPT Terra 6.1, started new for this review), lane AB01 PM-main'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex_824 (read-only', isFresh: true })
+  assert.deepEqual(read('by codex_826 (read-only, GPT Terra 6.1, started new for this review by the maintainer), lane AB01 PM-main, maintainer route'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex_826 (read-only', isMaintainerRoute: true })
+  assert.deepEqual(read('by codex_827 (read-only, started new for this review by the maintainer), lane AB01 PM-main'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex_827 (read-only' })
+  assert.deepEqual(read("by Muse's pr-reviewer subagent (Claude Opus 5.5, read-only, started new for this review), lane AB03"), { kind: 'APPROVE', sha: pr.head, reviewer: "Muse's pr-reviewer subagent (Claude Opus 5.5", isFresh: true })
+  assert.deepEqual(read('by codex (desktop) (read-only, started new for this review), lane x'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex (desktop) (read-only', isFresh: true })
+  assert.deepEqual(read('by  codex ( read-only ,  started  new for this review ) , lane x'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex ( read-only', isFresh: true })
+  assert.deepEqual(read('by codex (READ-ONLY, STARTED NEW FOR THIS REVIEW), LANE X, MAINTAINER ROUTE.'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex (READ-ONLY', isFresh: true, isMaintainerRoute: true })
+  assert.deepEqual(read('by codex_900, lane x, maintainer route.'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex_900', isMaintainerRoute: true })
+  // Without the words, a loose line reads as it always did.
+  assert.deepEqual(read('by independent reviewer'), { kind: 'APPROVE', sha: pr.head, reviewer: 'independent reviewer' })
+  assert.deepEqual(read('by codex (cloud, lane x'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex (cloud' })
+  // With the words anywhere but as that one note, cleanly placed, the line cannot be read.
+  for (const rest of [
+    'by codex (desktop) (unfinished, lane example, started new for this review, (note)',
+    'by codex (unfinished, lane example, checked by assistant (started new for this review)',
+    'by sonnet (read-only, started new for this review, model (desktop)), lane example',
+    'by codex (not started new for this review), lane codex',
+    'by codex (local), lane x (started new for this review)',
+    'by codex, lane codex, started new for this review',
+    'by codex (read-only), lane x, checked by bot (started new for this review)',
+    ', checked by codex (started new for this review)',
+    'by sonnet (read-only; started new for this review), lane x',
+    'by codex (read-only, started new for this review)) , lane x',
+  ]) assert.equal(read(rest)?.isUnreadable, true, rest)
+  // A request for changes always counts, however it is written.
+  assert.equal(reviewOf(`Review: REQUEST CHANGES ${pr.head} by sonnet (read-only, started new for this review, model (desktop)), lane example`).isUnreadable, undefined)
+  const problems = (comments, tier) => checkPr({ ...pr, body: `${body}Tier: ${tier}\nSurface: delivery\n`, prComments: comments }).problems.filter(item => item.check === 'review')
+  const line = rest => ({ body: `Review: APPROVE ${pr.head} ${rest}` })
+  // Round 3's two lines: the author's own name on a normal-tier pull request, and a nested note on a risk-tier one.
+  const own = line('by codex (unfinished, lane example, checked by assistant (started new for this review)')
+  const nested = line('by sonnet (read-only, started new for this review, model (desktop)), lane example')
+  for (const [comments, tier] of [[[codexBotState(pr.head), own], 'normal'], [[codexBotState(pr.head), nested], 'risk'], [[codexBotState(pr.head), line('by sonnet_900, lane example'), nested], 'risk']]) {
+    const found = problems(comments, tier)
+    assert.equal(found.length, 1, tier)
+    assert.match(found[0].message, /cannot be read/)
+    assert.match(found[0].fix, /started new for this review\), lane/)
+  }
+  assert.deepEqual(problems([codexBotState(pr.head), nested, line('by sonnet_900, lane example')], 'risk'), [])
+})
+
 test('approval gate: a ready pull request requires a qualifying review approval on the exact head (#1219)', () => {
   const head = syntheticPr().head
   const basePr = { ...syntheticPr(), prComments: [] }

@@ -272,6 +272,12 @@ test('a reviewer the author\'s lane started new for this review counts as an app
   assert.deepEqual(queue('risk', undefined, '\nSurface: none', [maintainer]).approvedNow.map(item => item.number), [1])
   const plain = classify([pull(1, { body: 'Author: codex, branch\nTier: normal', files: [] })], { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('codex'))] }, now)
   assert.deepEqual(plain.waitingForAuthor.map(item => item.detail), ['approval is by the author'])
+  // A line with the words that does not read as that one note is no approval, as the PR check reads it (#1974).
+  const unreadable = by('WenyuChiou', answered('codex (unfinished, lane example, checked by assistant (started new for this review)'))
+  for (const tier of ['normal', 'risk']) {
+    assert.deepEqual(queue(tier, undefined, '', [bot, unreadable]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'the approval line cannot be read; write it in the R2 form']], tier)
+    assert.deepEqual(queue(tier, undefined, '', [bot, unreadable]).approvedNow, [], tier)
+  }
 })
 
 test('a different lane of the same base name is a different agent, not the author', () => {
