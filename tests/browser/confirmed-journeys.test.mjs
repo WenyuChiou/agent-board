@@ -783,4 +783,48 @@ process.stdout.write('Redis it is; wiring it up now.\\n')
       assert.ok(Math.abs(phone.bottom - phone.innerHeight) <= 1, `phone footer bottom (${phone.bottom}) did not equal window height (${phone.innerHeight})`)
     })
   })
+
+  test('Archive and Confirm done offer Undo for 8 s', { concurrency: false, timeout: 120_000 }, async () => {
+    await browserFixture('undo-archive-confirm', async ({ page, progress, startServer }) => {
+      const stoppedTitle = 'Stopped synthetic task for undo'
+      const liveTitle = 'Active synthetic sibling'
+      const stoppedBlock = block('a566cafe', 'codex', 'ended', 'Synthetic undo', stoppedTitle, ['- [x] Initial check', '- [ ] Finish synthetic handoff'])
+      const liveBlock = block('b566cafe', 'muse', 'working', 'Synthetic undo', liveTitle, ['- [~] Keep board populated'])
+      writeProgress(progress, `# Progress\n\n${stoppedBlock}\n${liveBlock}`)
+      const board = new BoardPage(page)
+      await board.open(await startServer())
+
+      // 1. Confirm done on a stopped row offers Undo for 8 s and restores the task when pressed.
+      await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
+      await board.openTask(stoppedTitle)
+      await page.getByRole('button', { name: 'Confirm done', exact: true }).click()
+      const undoFromDone = page.locator('#detail-rail, article.lost').getByRole('button', { name: 'Undo', exact: true }).first()
+      await undoFromDone.waitFor({ state: 'visible' })
+      await undoFromDone.click()
+      await waitFor(() => /state=ended/.test(readFileSync(progress, 'utf8')) && /- \[ \] Finish synthetic handoff/.test(readFileSync(progress, 'utf8')))
+      await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).waitFor()
+      if ((await board.task(stoppedTitle).count()) === 0) await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
+      await board.task(stoppedTitle).waitFor({ state: 'visible' })
+
+      // 2. Archive removes the stopped row, surfaces Undo on a lost result card, and restores both board and archive.
+      await board.openTask(stoppedTitle)
+      await page.getByRole('button', { name: 'Archive', exact: true }).click()
+      const lostNotice = page.locator('article.lost > .press-result').filter({ hasText: `Archived “${stoppedTitle}”` })
+      const undoFromArchive = lostNotice.getByRole('button', { name: 'Undo', exact: true })
+      await undoFromArchive.waitFor({ state: 'visible' })
+      assert.match(monthlyArchive(progress), /Stopped synthetic task for undo/)
+      await undoFromArchive.click()
+      await waitFor(() => !monthlyArchive(progress).includes(stoppedTitle))
+      if ((await board.task(stoppedTitle).count()) === 0) await page.locator('.shelf-head').filter({ hasText: 'Stopped' }).click()
+      await board.task(stoppedTitle).waitFor({ state: 'visible' })
+
+      // 3. The Undo offer expires automatically after 8 s.
+      await board.openTask(stoppedTitle)
+      await page.getByRole('button', { name: 'Archive', exact: true }).click()
+      const secondUndo = page.locator('article.lost').getByRole('button', { name: 'Undo', exact: true })
+      await secondUndo.waitFor({ state: 'visible' })
+      await secondUndo.waitFor({ state: 'detached', timeout: 12_000 })
+      await page.locator('article.lost > .press-result').filter({ hasText: `Archived “${stoppedTitle}”` }).waitFor({ state: 'visible' })
+    })
+  })
 })
