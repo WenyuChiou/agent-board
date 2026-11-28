@@ -11,7 +11,7 @@ registerHooks({ resolve(specifier, context, next) {
 } })
 
 const { DELIVERY_EVENTS, DELIVERY_STATES, DELIVERY_TABLE, SAMPLE_NOW, SUSPECT_CELLS, applyEvent, observe, observeHolds, rowOf, sampleBinding, sampleOf, shapesOf, stateOf } = await import('../hooks/delivery-states.ts')
-const { FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MAILBOX_REDELIVERIES, MCP_SURFACE, OPEN_LIMIT_MS, claimMessages, disconnectMessages, dismissMessage, isMailboxSurfaceLost, isMailboxTarget, isOpen, messageReceipt, pruneMessages, queueMessage, rebindMessages, shownMessage } = await import('../hooks/messaging.ts')
+const { FINISHED_KEEP_MS, MAILBOX_LEASE_MS, MCP_SURFACE, OPEN_LIMIT_MS, claimMessages, disconnectMessages, dismissMessage, isMailboxSurfaceLost, isMailboxTarget, isOpen, messageReceipt, pruneMessages, queueMessage, rebindMessages, shownMessage } = await import('../hooks/messaging.ts')
 const { releaseMailboxMessage } = await import('../hooks/hook-messages.ts')
 const { restartMessages } = await import('../hooks/messaging.ts')
 const { mailboxAction } = await import('../scripts/board-messaging.ts')
@@ -277,9 +277,9 @@ test('nothing a hook was handed goes out again after its lease, whatever receipt
   for (const name of DELIVERY_STATES) {
     for (const shape of shapeNames(name)) {
       const { message, binding, state } = sampleOf(name, shape)
-      // A claim a hook holds: a mailbox message with an ACK code, not queued. OpenCode's keep their own rules (#724, #1366),
-      // and DeepSeek's keep the lease rule for now (#1843 answer 3, #1870).
-      if (!isMailboxTarget(message.target) || message.nonce === '' || message.status === 'queued' || /^(opencode|deepseek):/.test(message.to) || !isOpen(message)) continue
+      // A claim a hook holds: a mailbox message with an ACK code, not queued. OpenCode's keep their own rules (#724, #1366);
+      // DeepSeek's follow this one since its plugin gives a claim back while its session works (#1870).
+      if (!isMailboxTarget(message.target) || message.nonce === '' || message.status === 'queued' || message.to.startsWith('opencode:') || !isOpen(message)) continue
       for (const errors of [[undefined], ['TIMEOUT', undefined], ['TURN_ABORTED', undefined]]) {
         // Any write after the lease prunes the store first.
         const lapsed = Math.max(message.claimed, message.updated) + MAILBOX_LEASE_MS
@@ -331,7 +331,11 @@ test('combined flag shapes predict both card and transitions when independent fl
   assert.equal(hookAfterAccept.on.unsure, 'leased')
   assert.equal(observe('turnEnded', 'accept', 'acceptedBefore+onHook'), 'handed')
 
-  assert.equal(rowOf('leased', 'otherSurface+lastRepeat').on.claimLate, 'leased')
+  // DeepSeek's claim, and one an earlier release handed out again, is no longer handed out after its lease (#1870).
+  for (const shape of ['onDeepSeek', 'repeated', 'otherSurface+onDeepSeek', 'acceptedBefore+repeated']) {
+    assert.equal(rowOf('leased', shape).on.claimLate, 'leased', shape)
+    assert.equal(observe('leased', 'claimLate', shape), 'leased', shape)
+  }
   assert.equal(rowOf('inDoubt', 'acceptedBefore+otherError').status, 'unsure')
   assert.equal(rowOf('acceptedLost', 'awaitsAck+otherError').status, 'unsure')
   // Refused after something took it: Unsure, whether it was stopped or refused.
@@ -376,11 +380,11 @@ test('short random event orders never lose a message, never send one twice, neve
     let live = sampleBinding('codex', 'live')
     let state = { messages: [], mailboxes: [codexBox, opencodeBox, deepseekBox] }
     let now = SAMPLE_NOW
-    // Each order sends and takes through some of the receivers: all of them, or one alone, so a DeepSeek claim can lapse to its
-    // last repeat and another hook's claim can read HOLDER_LOST.
+    // Each order sends and takes through some of the receivers: all of them, or one alone, so a hook's claim, DeepSeek's
+    // too (#1870), can read HOLDER_LOST.
     const using = pick([['live', 'codexBox', 'opencodeBox', 'deepseekBox'], ['live', 'codexBox'], ['codexBox'], ['opencodeBox'], ['deepseekBox']])
     const receiver = () => ({ live, codexBox, opencodeBox, deepseekBox })[pick(using)]
-    // Some orders only send, claim and wait, so a DeepSeek claim can lapse to its last repeat.
+    // Some orders only send, claim and wait, so a claim can lapse past its lease.
     const kinds = pick([EVERY_KIND, EVERY_KIND, EVERY_KIND, ['send', 'claim', 'claim', 'tick']])
     const seen = new Map()
     for (let step = 0; step < 40; step++) {
@@ -481,9 +485,8 @@ test('short random event orders never lose a message, never send one twice, neve
           if (earlier.status === 'queued') assert.equal(one.redelivered ?? 0, record.redelivered, `${where}: ${one.id} came back with ${one.redelivered} repeats`)
           else {
             assert.equal(earlier.attempted, undefined, `${where}: ${one.id}, a started wake, went out again`)
-            // Only DeepSeek's and OpenCode's claims are taken again; any other hook's reads HOLDER_LOST after its lease (#1843).
-            assert.ok(/^(opencode|deepseek):/.test(one.to), `${where}: ${one.id}, a hook's claim, went out again after its lease`)
-            if (!one.to.startsWith('opencode:')) assert.ok(one.redelivered === record.redelivered + 1 && one.redelivered <= MAILBOX_REDELIVERIES, `${where}: ${one.id} went out again ${one.redelivered} times`)
+            // Only OpenCode's claims are taken again; any other hook's, DeepSeek's too, reads HOLDER_LOST after its lease (#1843, #1870).
+            assert.ok(one.to.startsWith('opencode:'), `${where}: ${one.id}, a hook's claim, went out again after its lease`)
           }
         }
         // Never started in a running turn: no other message of the session is in a state the table says may still run.
@@ -501,7 +504,8 @@ test('short random event orders never lose a message, never send one twice, neve
       }
     }
   }
-  // The orders reach every state of the table.
-  assert.deepEqual(DELIVERY_STATES.filter(name => !reached.has(name)), [])
+  // The orders reach every state of the table but leaseSpent, which only a store an earlier release saved holds: nothing
+  // hands a claim out again now (#1870).
+  assert.deepEqual(DELIVERY_STATES.filter(name => !reached.has(name)), ['leaseSpent'])
   assert.ok(handOuts > 300, `only ${handOuts} hand-outs`)
 })

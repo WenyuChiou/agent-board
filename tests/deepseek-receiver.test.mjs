@@ -278,3 +278,127 @@ test('a late DeepSeek watcher event or error cannot close its replacement', () =
     await new Promise(done => setImmediate(done))
   }
 }))
+
+// A DeepSeek receiver wired to a real board script, for the give-back tests (#1870). `onSpawn(action, args)` may answer a
+// call itself with another command, as a board that refuses it would.
+const giveBackRig = async (f, session, id, text) => {
+  const portable = await importTs('../hooks/portable-agents.ts')
+  const { defaultMessagesDirectory } = await importTs('../scripts/runtime-folder.ts')
+  const { enrollMailbox, mailboxId } = await importTs('../hooks/hook-messages.ts')
+  const messaging = await importTs('../hooks/messaging.ts')
+  const board = join(f.home, 'deepseek-board.mjs')
+  f.save(board, bundleFromDir(new URL('..', import.meta.url)))
+  const progress = join(f.home, 'deepseek-progress.md')
+  f.save(progress, '')
+  const directory = defaultMessagesDirectory(progress, f.home, process.env, process.platform)
+  const file = join(directory, 'messages.json')
+  const store = () => JSON.parse(readFileSync(file, 'utf8'))
+  const message = () => store().messages.find(one => one.id === id)
+  const write = state => f.save(file, JSON.stringify({ version: 2, ...state }))
+  const now = Date.now()
+  const enrolled = enrollMailbox({ messages: [] }, 'deepseek', session, 'dsh', now, 43_200_000)
+  const target = enrolled.mailboxes.find(one => one.id === mailboxId('deepseek', session))
+  write(messaging.queueMessage(enrolled, { id, target: target.id, turn: 'session', text }, 'board', target, now).state)
+  const children = [], calls = []
+  const rig = { onSpawn: null }
+  const spawnMailbox = (node, args, options) => {
+    calls.push(args[2])
+    const child = rig.onSpawn?.(args[2], args) ?? spawn(node, args, options)
+    children.push(child)
+    child.on('close', () => { child.isClosed = true })
+    return child
+  }
+  const settled = () => children.every(child => child.isClosed)
+  const until = async (check, label) => {
+    for (const end = Date.now() + 30_000; Date.now() < end; await new Promise(done => setTimeout(done, 50))) if (check()) return
+    assert.fail(label)
+  }
+  const source = portable.deepseekLocalPlugin(process.execPath, join(f.root, 'agent-board-hook.mjs'), progress, f.home, board)
+  const names = ['createRequire', 'spawnSync', 'spawn', 'spawnMailbox', 'randomUUID', 'readFileSync', 'existsSync', 'watch', 'join']
+  const { apply } = new Function(...names, `${source.replace(/^import .*\n/gm, '').replaceAll('import.meta.url', JSON.stringify(import.meta.url)).replace(/^export /gm, '')}\nreturn { apply }`)(createRequire, () => ({ status: 0, stdout: '', stderr: '' }), () => { throw new Error('UNUSED') }, spawnMailbox, randomUUID, readFileSync, existsSync, watch, join)
+  const root = { session: { header: { id: session } }, status: 'idle', received: [], followup(one) { root.received.push(one); root.status = 'running' } }
+  const hooks = new Map()
+  apply({ on: (event, handler) => hooks.set(event, handler) })
+  const close = async () => {
+    hooks.get('agent/disposed')({ agent: root })
+    for (const end = Date.now() + 10_000; !settled() && Date.now() < end;) await new Promise(done => setTimeout(done, 50))
+    for (const child of children) if (!child.isClosed) child.kill()
+  }
+  return { ...rig, rig, root, hooks, calls, store, message, write, settled, until, close, messaging }
+}
+
+test('a DeepSeek session that works longer than the lease gets the message once, at its next idle, with no Unsure and no second copy: the receiver gives its claim back (#1870)', () => fixture(async f => {
+  const run = await giveBackRig(f, 'deepseek-long-turn', 'long-turn-1', 'Synthetic answer for a long turn')
+  try {
+    // The session starts a turn while its take runs, so the take lands on a working session.
+    run.rig.onSpawn = action => { if (action === 'take') run.root.status = 'running' }
+    run.hooks.get('agent/created')({ agent: run.root })
+    await run.until(() => run.calls.includes('take') && run.settled(), 'the take finished while the session worked')
+    await run.until(() => run.settled() && run.message().status === 'queued', 'the claim was given back while the session worked')
+    assert.equal(run.root.received.length, 0)
+    // Given back: queued again with no claim on it, so no lease runs.
+    assert.deepEqual([run.message().status, run.message().error, run.message().ref, run.message().claimed], ['queued', '', undefined, 0])
+    // A write long after the lease leaves it queued: nothing reads Unsure (HOLDER_LOST).
+    const later = run.messaging.pruneMessages(run.store(), Date.now() + 2 * run.messaging.MAILBOX_LEASE_MS)
+    assert.deepEqual([later.messages[0].status, later.messages[0].error], ['queued', ''])
+    run.write(later)
+    // The turn ends: the next idle takes it again and hands it over once.
+    run.rig.onSpawn = null
+    run.root.status = 'idle'
+    run.hooks.get('agent/status')({ agent: run.root, status: 'idle' })
+    await run.until(() => run.message().status === 'accepted' && run.settled(), 'the message was accepted at the next idle')
+    assert.equal(run.root.received.length, 1)
+    assert.match(run.root.received[0].content[0].text, /Synthetic answer for a long turn/)
+    assert.doesNotMatch(run.root.received[0].content[0].text, /Sent again/)
+    assert.equal(run.message().redelivered, undefined)
+    // Nothing more is handed over at a later idle.
+    run.root.status = 'idle'
+    run.hooks.get('agent/status')({ agent: run.root, status: 'idle' })
+    await new Promise(done => setTimeout(done, 300))
+    await run.until(run.settled, 'the later take finished')
+    assert.equal(run.root.received.length, 1)
+  } finally { await run.close() }
+}))
+
+test('a DeepSeek claim whose give-back fails is handed over at the next idle inside its lease, once (#1870)', () => fixture(async f => {
+  const run = await giveBackRig(f, 'deepseek-give-back-fails', 'kept-claim-1', 'Synthetic answer kept by the plugin')
+  try {
+    // The board refuses the give-back: the command exits with no answer.
+    run.rig.onSpawn = action => {
+      if (action === 'take') { run.root.status = 'running'; return undefined }
+      return action === 'release' ? spawn(process.execPath, ['-e', 'process.exit(1)']) : undefined
+    }
+    run.hooks.get('agent/created')({ agent: run.root })
+    await run.until(() => run.calls.includes('release') && run.settled(), 'the receiver tried to give the claim back')
+    assert.equal(run.message().status, 'uncertain')
+    assert.equal(run.root.received.length, 0)
+    run.root.status = 'idle'
+    run.hooks.get('agent/status')({ agent: run.root, status: 'idle' })
+    await run.until(() => run.message().status === 'accepted' && run.settled(), 'the kept claim was accepted at the next idle')
+    assert.equal(run.root.received.length, 1)
+    assert.match(run.root.received[0].content[0].text, /Synthetic answer kept by the plugin/)
+  } finally { await run.close() }
+}))
+
+test('a DeepSeek claim whose give-back failed and whose lease ran out is not handed over at the next idle (#1870)', () => fixture(async f => {
+  const run = await giveBackRig(f, 'deepseek-lease-out', 'lease-out-1', 'Synthetic answer past its lease')
+  try {
+    run.rig.onSpawn = action => {
+      if (action === 'take') { run.root.status = 'running'; return undefined }
+      return action === 'release' ? spawn(process.execPath, ['-e', 'process.exit(1)']) : undefined
+    }
+    run.hooks.get('agent/created')({ agent: run.root })
+    await run.until(() => run.calls.includes('release') && run.settled(), 'the receiver tried to give the claim back')
+    assert.equal(run.message().status, 'uncertain')
+    // The lease runs out before any write prunes the store: the claim is no longer the plugin's to hand over.
+    const state = run.store()
+    run.write({ ...state, messages: state.messages.map(one => ({ ...one, claimed: Date.now() - run.messaging.MAILBOX_LEASE_MS - 1000 })) })
+    run.rig.onSpawn = null
+    run.root.status = 'idle'
+    run.hooks.get('agent/status')({ agent: run.root, status: 'idle' })
+    await new Promise(done => setTimeout(done, 300))
+    await run.until(run.settled, 'the idle check finished')
+    assert.equal(run.root.received.length, 0)
+    assert.notEqual(run.message().status, 'accepted')
+  } finally { await run.close() }
+}))

@@ -131,47 +131,38 @@ test('claimed mailbox messages transition to accepted after turn-start delivery 
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('a DeepSeek hook claim nobody accepted is still handed out again after the lease, with its ACK code and a repeat line, at most three times, while a Codex claim reads HOLDER_LOST', () => {
+test('a DeepSeek hook claim nobody accepted reads HOLDER_LOST after its lease, as a Codex claim does, and is never handed out again (#1870)', () => {
   const now = Date.now()
-  // DeepSeek's plugin holds a claim while its session works and delivers it at the next idle, so its claims keep the lease
-  // rule until it can give one back (#1843 answer 3, #1870). Every other hook's claim reads HOLDER_LOST instead.
+  // DeepSeek's plugin gives a claim back while its session works (#1870), so its claims follow the rule every hook's do (#1843).
   const seed = agent => enrollMailbox({ messages: [] }, agent, 'mailbox-session', 'CLI', now, 43_200_000)
   const queue = (state, agent, id, from) => queueMessage(state, { id, target: mailboxId(agent, 'mailbox-session'), turn: 'session', text: id }, from, state.mailboxes[0], now).state
-  const codex = pruneMessages(takeMailboxMessage(queue(seed('codex'), 'codex', 'codex-lapsed', 'board'), 'codex', 'mailbox-session', 'CLI', now, 43_200_000, 'abcdef', 'a1b2c3d4e5f6').state, now + MAILBOX_LEASE_MS)
-  assert.equal(codex.messages[0].error, 'HOLDER_LOST')
-  assert.equal(takeMailboxMessage(codex, 'codex', 'mailbox-session', 'CLI', now + MAILBOX_LEASE_MS, 43_200_000, '222222', 'a1b2c3d4e5f6').message, null)
-  let state = queue(queue(seed('deepseek'), 'deepseek', 'mailbox-lapsed', 'board'), 'deepseek', 'mailbox-behind', 'gemini:sender-session')
-  const take = (at, nonce, ref = 'a1b2c3d4e5f6') => takeMailboxMessage(state, 'deepseek', 'mailbox-session', 'CLI', at, 43_200_000, nonce, ref)
-  let taken = take(now, 'abcdef')
-  state = taken.state
-  // Never accepted, so the accepted-once rule (#1407) does not hold it back.
-  assert.equal(isAcceptedOnce(state.messages[0]), false)
-  assert.equal(taken.message.redelivered, undefined)
-  assert.doesNotMatch(deliveryText(taken.message), /Sent again/)
-  // Inside the lease the session waits, and the message behind it does too.
-  assert.equal(take(now + MAILBOX_LEASE_MS - 1, '111111').message, null)
-  // A live poller of the same session cannot take the lapsed claim, so it keeps waiting behind it.
-  const live = { id: 'live1', agent: 'deepseek', session: 'mailbox-session', surface: 'CLI', turn: 'turn1', expires: now + 10 * MAILBOX_LEASE_MS }
-  const withLive = queueMessage(state, { id: 'live-behind', target: live.id, turn: live.turn, text: 'live' }, 'gemini:live-sender', live, now).state
-  assert.deepEqual(claimMessages(withLive, live, now + MAILBOX_LEASE_MS, '666666').messages, [])
-  for (let round = 1; round <= MAILBOX_REDELIVERIES; round++) {
-    // A write's prune leaves a DeepSeek claim as it was.
-    state = pruneMessages(state, now + round * MAILBOX_LEASE_MS)
-    assert.equal(state.messages[0].error, '')
-    taken = take(now + round * MAILBOX_LEASE_MS, '222222')
+  for (const agent of ['codex', 'deepseek']) {
+    let state = queue(queue(seed(agent), agent, 'mailbox-lapsed', 'board'), agent, 'mailbox-behind', 'gemini:sender-session')
+    const take = (at, nonce) => takeMailboxMessage(state, agent, 'mailbox-session', 'CLI', at, 43_200_000, nonce, 'a1b2c3d4e5f6')
+    const taken = take(now, 'abcdef')
     state = taken.state
-    assert.deepEqual([taken.message.id, taken.message.nonce, taken.message.redelivered], ['mailbox-lapsed', 'abcdef', round])
-    assert.match(deliveryText(taken.message), /\nSent again: [^\n]+\nReply first with this line alone: ACK abcdef\n/)
+    assert.equal(taken.message.id, 'mailbox-lapsed')
+    // Never accepted, so the accepted-once rule (#1407) does not hold it back.
+    assert.equal(isAcceptedOnce(state.messages[0]), false)
+    // Inside the lease the session waits, and the message behind it does too.
+    assert.equal(take(now + MAILBOX_LEASE_MS - 1, '111111').message, null, agent)
+    // A take after the lease and before any prune is handed nothing: the claim is not taken again.
+    assert.equal(take(now + MAILBOX_LEASE_MS, '222222').message, null, agent)
+    // A write's prune after the lease makes it Unsure.
+    state = pruneMessages(state, now + MAILBOX_LEASE_MS)
+    assert.deepEqual([state.messages[0].status, state.messages[0].error, state.messages[0].redelivered], ['uncertain', 'HOLDER_LOST', undefined], agent)
+    for (let round = 1; round <= MAILBOX_REDELIVERIES + 1; round++) assert.equal(take(now + round * MAILBOX_LEASE_MS, '333333').message, null, `${agent} round ${round}`)
   }
-  assert.equal(take(now + (MAILBOX_REDELIVERIES + 1) * MAILBOX_LEASE_MS, '333333').message, null)
-  const saved = parseMessageStore(JSON.stringify({ version: 2, ...state }), now)
-  assert.deepEqual([saved.messages[0].ref, saved.messages[0].redelivered], ['a1b2c3d4e5f6', MAILBOX_REDELIVERIES])
+  // A store an earlier release saved with a DeepSeek repeat count still loads, and its message is not handed out again.
+  const repeated = takeMailboxMessage(queue(seed('deepseek'), 'deepseek', 'mailbox-old', 'board'), 'deepseek', 'mailbox-session', 'CLI', now, 43_200_000, 'abcdef', 'a1b2c3d4e5f6').state
+  const old = { ...repeated, messages: [{ ...repeated.messages[0], redelivered: MAILBOX_REDELIVERIES - 1 }] }
+  const saved = parseMessageStore(JSON.stringify({ version: 2, ...old }), now)
+  assert.deepEqual([saved.messages[0].ref, saved.messages[0].redelivered], ['a1b2c3d4e5f6', MAILBOX_REDELIVERIES - 1])
   for (const bad of [{ ref: 'not-a-ref' }, { redelivered: 0 }, { redelivered: MAILBOX_REDELIVERIES + 1 }]) {
-    assert.throws(() => parseMessageStore(JSON.stringify({ version: 2, ...state, messages: [{ ...state.messages[0], ...bad }] }), now), /INVALID_MESSAGE_STORE/)
+    assert.throws(() => parseMessageStore(JSON.stringify({ version: 2, ...old, messages: [{ ...old.messages[0], ...bad }] }), now), /INVALID_MESSAGE_STORE/)
   }
-  // The late accept still lands with the one ACK code, and the next message goes out.
-  state = acceptMailboxMessage(state, 'deepseek', 'mailbox-session', 'mailbox-lapsed', 'abcdef', now + 4 * MAILBOX_LEASE_MS)
-  assert.equal(take(now + 4 * MAILBOX_LEASE_MS, '444444').message.id, 'mailbox-behind')
+  assert.equal(takeMailboxMessage(old, 'deepseek', 'mailbox-session', 'CLI', now + MAILBOX_LEASE_MS, 43_200_000, '444444', 'a1b2c3d4e5f6').message, null)
+  assert.equal(pruneMessages(old, now + MAILBOX_LEASE_MS).messages[0].error, 'HOLDER_LOST')
   // A claim no hook named (board_inbox) is handed over once.
   const inbox = takeMailboxMessage(mailboxQueue(mailboxSeed(now), 'mailbox-once', 'board', now), 'codex', 'mailbox-session', 'CLI', now, 43_200_000, 'abcdef').state
   assert.equal(takeMailboxMessage(inbox, 'codex', 'mailbox-session', 'CLI', now + 10 * MAILBOX_LEASE_MS, '555555', 'a1b2c3d4e5f6').message, null)
@@ -249,35 +240,20 @@ test('a store whose bound turn or mailbox turn is not a turn id is refused', () 
 const mailboxAt = (id, agent = 'codex') => ({ id, target: mailboxId(agent, 'mailbox-session'), turn: 'session', text: id })
 const mailboxBound = (state, id, surface, now, agent = 'codex') => queueMessage(state, mailboxAt(id, agent), 'board', state.mailboxes[0], now, 'local', undefined, undefined, surface).state
 const mailboxHook = (state, surface, at, nonce, agent = 'codex') => takeMailboxMessage(state, agent, 'mailbox-session', surface, at, 43_200_000, nonce, 'a1b2c3d4e5f6')
-// Only DeepSeek's claims are still handed out again after the lease (#1843 answer 3).
-const deepseekSeed = now => enrollMailbox({ messages: [] }, 'deepseek', 'mailbox-session', 'CLI', now, 43_200_000)
-const deepseekQueue = (state, id, from, now) => queueMessage(state, mailboxAt(id, 'deepseek'), from, state.mailboxes[0], now).state
-
-test('a lapsed DeepSeek claim saved for one surface holds back its session for a hook on another, and only a hook on its own surface takes it again', () => {
+test('a lapsed DeepSeek claim saved for one surface is not taken again by a hook on that surface or another (#1870)', () => {
   const now = Date.now()
-  let state = deepseekQueue(mailboxBound(deepseekSeed(now), 'bound-first', SURFACE_IDS.cli, now, 'deepseek'), 'unbound-later', 'gemini:sender-session', now)
+  const seed = enrollMailbox({ messages: [] }, 'deepseek', 'mailbox-session', 'CLI', now, 43_200_000)
+  let state = queueMessage(mailboxBound(seed, 'bound-first', SURFACE_IDS.cli, now, 'deepseek'), mailboxAt('unbound-later', 'deepseek'), 'gemini:sender-session', seed.mailboxes[0], now).state
   let taken = mailboxHook(state, SURFACE_IDS.cli, now, 'abcdef', 'deepseek')
   state = taken.state
   assert.equal(taken.message.id, 'bound-first')
-  // The claim lapses and the next hook reads unknown: it cannot take the claim, and nothing else goes out meanwhile.
-  taken = mailboxHook(state, SURFACE_IDS.unknown, now + MAILBOX_LEASE_MS, '111111', 'deepseek')
-  assert.equal(taken.message, null)
-  state = taken.state
+  // The claim lapses: a hook on another surface and one on its own surface both take nothing, and nothing else goes out meanwhile.
+  for (const surface of [SURFACE_IDS.unknown, SURFACE_IDS.cli]) {
+    taken = mailboxHook(state, surface, now + MAILBOX_LEASE_MS + 1, '222222', 'deepseek')
+    assert.equal(taken.message, null, surface)
+    state = taken.state
+  }
   assert.deepEqual(state.messages.map(one => [one.id, one.status]), [['bound-first', 'uncertain'], ['unbound-later', 'queued']])
-  taken = mailboxHook(state, SURFACE_IDS.cli, now + MAILBOX_LEASE_MS + 1, '222222', 'deepseek')
-  assert.deepEqual([taken.message.id, taken.message.nonce, taken.message.redelivered], ['bound-first', 'abcdef', 1])
-})
-
-test("a DeepSeek hook takes its session's lapsed claim again before a queued message, even one queued earlier", () => {
-  const now = Date.now()
-  let state = deepseekQueue(mailboxBound(deepseekSeed(now), 'bound-queued', SURFACE_IDS.cli, now, 'deepseek'), 'unbound-claimed', 'gemini:sender-session', now)
-  // A hook reading unknown cannot take the bound message, so it takes the unbound one behind it.
-  let taken = mailboxHook(state, SURFACE_IDS.unknown, now, 'abcdef', 'deepseek')
-  state = taken.state
-  assert.equal(taken.message.id, 'unbound-claimed')
-  taken = mailboxHook(state, SURFACE_IDS.cli, now + MAILBOX_LEASE_MS, '222222', 'deepseek')
-  assert.deepEqual([taken.message.id, taken.message.redelivered], ['unbound-claimed', 1])
-  assert.equal(taken.state.messages.find(one => one.id === 'bound-queued').status, 'queued')
 })
 
 test('a mailbox message its host accepted is not handed out again after an uncertain receipt with no error, once the lease has passed', () => {
