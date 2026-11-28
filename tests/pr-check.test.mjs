@@ -660,11 +660,15 @@ test('a risk-tier approval by a reviewer started new for this review counts only
 
 test('a reviewer whose name carries a note in parentheses of its own still reads as started new for this review from a later parenthesis, so the risk-tier conditions hold for it too (#1974)', () => {
   const pr = syntheticPr()
-  const problems = (comments, tier = 'risk') => checkPr({ ...pr, body: `${body}Tier: ${tier}\nSurface: delivery\n`, prComments: comments }).problems.filter(item => item.check === 'review')
+  const problems = (comments, tier = 'risk', surface = 'delivery') => checkPr({ ...pr, body: `${body}Tier: ${tier}\nSurface: ${surface}\n`, prComments: comments }).problems.filter(item => item.check === 'review')
   const named = who => ({ body: `Review: APPROVE ${pr.head} by ${who} (read-only, started new for this review), lane example` })
   // Not named like the author: without the bot's review of the head it does not count.
   assert.equal(problems([named('sonnet (desktop)')]).length, 1)
   assert.deepEqual(problems([codexBotState(pr.head), named('sonnet (desktop)')]), [])
+  assert.equal(problems([codexBotState(pr.head), named('sonnet (desktop)')], 'risk', 'none').length, 1)
+  // A parenthesis that does not close before another opens is no note: the line reads as the author approving.
+  const unclosed = { body: `Review: APPROVE ${pr.head} by codex (desktop) (unfinished, lane example, started new for this review, (note)` }
+  assert.equal(problems([codexBotState(pr.head), unclosed], 'normal').length, 1)
   // Named like the author: it is the lane's own reviewer, not the author approving.
   assert.deepEqual(problems([codexBotState(pr.head), named('codex (local)')]), [])
   assert.deepEqual(problems([named('codex (local)')], 'normal'), [])
