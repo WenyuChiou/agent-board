@@ -7,6 +7,7 @@ import { BOARD_SCRIPT } from '../../hooks/board-script.ts'
 import { makeWorld } from './lib/world.mjs'
 import { spawnIsolated } from './lib/spawn.mjs'
 import { processList } from './lib/processes.mjs'
+import { noAddress, readPrintedLink, wordingsOf } from '../helpers/printed-link.mjs'
 
 const wait = ms => new Promise(done => setTimeout(done, ms))
 
@@ -255,17 +256,14 @@ test('three real --serve starts on the default store collide and every start pri
       for (let i = 0; i < 3; i++) {
         assert.equal(outcomes[i].code, 0, `Round ${r} start ${i} failed (code ${outcomes[i].code}): stdout=${JSON.stringify(outcomes[i].stdout)} stderr=${JSON.stringify(outcomes[i].stderr)}`)
       }
-      const urls = outcomes.map(o => {
-        const match = /(http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/.exec(o.stdout)
-        return match?.[1]
-      })
+      const urls = outcomes.map(o => readPrintedLink(o, { wordings: wordingsOf(['serveAt']) }).link)
       for (let i = 0; i < 3; i++) {
         assert.ok(urls[i], `Round ${r} start ${i} printed no URL: stdout=${JSON.stringify(outcomes[i].stdout)} stderr=${JSON.stringify(outcomes[i].stderr)}`)
       }
-      assert.equal(urls[0], urls[1], `Round ${r} starts 0 and 1 printed different URLs`)
-      assert.equal(urls[1], urls[2], `Round ${r} starts 1 and 2 printed different URLs`)
+      assert.equal(new URL(urls[0]).origin, new URL(urls[1]).origin, `Round ${r} starts 0 and 1 printed different server origins`)
+      assert.equal(new URL(urls[1]).origin, new URL(urls[2]).origin, `Round ${r} starts 1 and 2 printed different server origins`)
       const page = running
-      assert.equal(page?.url, urls[0], `Round ${r}: the running page is not the one every start printed`)
+      assert.equal(new URL(page?.url).origin, new URL(urls[0]).origin, `Round ${r}: the running page is not the one every start printed`)
 
       // Each round's page must stop, or the next round only finds it again.
       const closed = await closePage(page)
@@ -343,10 +341,39 @@ const holderWorld = ageMs => {
       await wait(50)
     }
   }
-  const linkOf = text => /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/.exec(text)?.[0]
+  const tokensByOrigin = new Map()
+  const rememberTokens = () => {
+    try {
+      for (const entry of readdirSync(world.root, { recursive: true, withFileTypes: true })) {
+        if (!entry.isFile() || (!entry.name.endsWith('.json') && entry.name !== 'server.owner')) continue
+        try {
+          const parsed = JSON.parse(readFileSync(join(entry.parentPath ?? entry.path, entry.name), 'utf8'))
+          if (typeof parsed.url !== 'string') continue
+          const u = new URL(parsed.url)
+          const t = u.searchParams.get('t')
+          if (t) tokensByOrigin.set(u.origin, t)
+        } catch {}
+      }
+    } catch {}
+  }
+  // A run's link, read whole and per stream, or undefined when it printed no address at all.
+  const linkOf = result => {
+    if (!`${result.stdout}${result.stderr}`.includes('/open/')) {
+      noAddress(result)
+      return undefined
+    }
+    const { link } = readPrintedLink(result, { wordings: wordingsOf(['serveAt', 'boardPageLink', 'boardPageAlreadyOpenLink', 'boardPageLaunchedLink', 'serveBrowserNone']) })
+    rememberTokens()
+    return link
+  }
   const pingOf = async link => {
     const uri = new URL(link)
-    const res = await fetch(new URL('/api/ping', uri), { headers: { 'x-board-token': uri.searchParams.get('t') }, signal: AbortSignal.timeout(5000) })
+    let token = uri.searchParams.get('t') ?? tokensByOrigin.get(uri.origin)
+    if (!token) {
+      rememberTokens()
+      token = tokensByOrigin.get(uri.origin) ?? ''
+    }
+    const res = await fetch(new URL('/api/ping', uri), { headers: { 'x-board-token': token }, signal: AbortSignal.timeout(5000) })
     return res.ok ? res.json() : null
   }
   return { world, env, kids, deadPage, board, linkOf, pingOf }
@@ -364,7 +391,7 @@ test('a lock holder that listens nowhere is replaced', { timeout: 180_000 }, () 
   await wait(1500)
   // While it could still be a page starting, it is waited for and never ended.
   const early = await h.board([], { AGENT_BOARD_HOLDER_AGE_MS: '600000' })
-  assert.equal(h.linkOf(early.stdout), undefined, early.stdout)
+  assert.equal(h.linkOf(early), undefined, early.stdout)
   assert.equal(isAlive(dead.pid), true, 'a holder that may still be starting was ended')
   // A page on a folder given with --messages-dir is never looked up or taken over, however old.
   const store = join(h.world.root, 'given-store')
@@ -372,13 +399,13 @@ test('a lock holder that listens nowhere is replaced', { timeout: 180_000 }, () 
   const given = await h.deadPage(['--messages-dir', store])
   await wait(1500)
   const onGiven = await h.board(['--messages-dir', store])
-  assert.equal(h.linkOf(onGiven.stdout), undefined, onGiven.stdout)
+  assert.equal(h.linkOf(onGiven), undefined, onGiven.stdout)
   assert.equal(isAlive(given.pid), true, 'a page on a given folder was ended')
   assert.equal(readFileSync(join(store, 'server.lock'), 'utf8'), String(given.pid))
   // Old enough, proven to be the board, and proof B: no owner record while its own claim is there.
   assert.ok(readdirSync(dead.folder).some(name => name.startsWith(`.message-claim-${dead.pid}-`)), 'the dead page holds no claim')
   const opened = await h.board()
-  const link = h.linkOf(opened.stdout)
+  const link = h.linkOf(opened)
   assert.ok(link, JSON.stringify(opened))
   assert.ok(opened.ms < 10_000, `took ${opened.ms} ms`)
   assert.equal(await untilGone(dead.pid), true, 'the dead page still runs')
@@ -391,7 +418,7 @@ test('a stopped page is ended and replaced', { timeout: 120_000, skip: noStop &&
   await wait(1500)
   process.kill(dead.pid, 'SIGSTOP')
   const opened = await h.board()
-  assert.ok(h.linkOf(opened.stdout), JSON.stringify(opened))
+  assert.ok(h.linkOf(opened), JSON.stringify(opened))
   assert.equal(await untilGone(dead.pid), true)
 }))
 
@@ -400,7 +427,7 @@ test('an old owner that resumes after replacement cannot write', { timeout: 120_
   await wait(1500)
   process.kill(dead.pid, 'SIGSTOP')
   const opened = await h.board()
-  const link = h.linkOf(opened.stdout)
+  const link = h.linkOf(opened)
   assert.ok(link, JSON.stringify(opened))
   const lock = readFileSync(join(dead.folder, 'server.lock'), 'utf8')
   try { process.kill(dead.pid, 'SIGCONT') } catch {}
@@ -414,14 +441,14 @@ test('an old owner that resumes after replacement cannot write', { timeout: 120_
 test('a page still starting is waited for, not ended', { timeout: 120_000 }, () => withHolderWorld(60_000, async h => {
   const starting = await h.deadPage([], 4000)
   const opened = await h.board()
-  assert.ok(h.linkOf(opened.stdout), JSON.stringify(opened))
+  assert.ok(h.linkOf(opened), JSON.stringify(opened))
   assert.equal(isAlive(starting.pid), true, 'a starting page was ended')
 }))
 
 // A program that is not the board, holding the store's lock: the board names it and ends nothing.
 const foreignHolder = async h => {
   const first = await h.board(['--serve', '--no-open'])
-  assert.ok(h.linkOf(first.stdout), JSON.stringify(first))
+  assert.ok(h.linkOf(first), JSON.stringify(first))
   await h.board(['stop'])
   const folder = storeOf(h.world)
   const other = spawnIsolated(process.execPath, ['-e', 'setInterval(() => {}, 1e8)'], { cwd: h.world.root, env: h.env, windowsHide: true, stdio: 'ignore', detached: true })
@@ -437,7 +464,7 @@ test('a lock holder not proven to be the board is refused', { timeout: 120_000 }
   assert.notEqual(opened.code, 0)
   assert.match(opened.stdout.trim(), /^Agent Board did not open/, opened.stdout)
   assert.ok(opened.stdout.includes(String(other.pid)), opened.stdout)
-  assert.equal(h.linkOf(opened.stdout), undefined)
+  assert.equal(h.linkOf(opened), undefined)
   assert.ok(opened.ms < 10_000, `took ${opened.ms} ms`)
   assert.equal(isAlive(other.pid), true)
   assert.equal(readFileSync(join(other.folder, 'server.lock'), 'utf8'), String(other.pid))
@@ -462,9 +489,9 @@ test('two starts that find the same dead page end with one page', { timeout: 120
   const dead = await h.deadPage()
   await wait(1500)
   const [a, b] = await Promise.all([h.board(), h.board()])
-  const links = [h.linkOf(a.stdout), h.linkOf(b.stdout)]
+  const links = [h.linkOf(a), h.linkOf(b)]
   assert.ok(links[0] && links[1], JSON.stringify([a, b]))
-  assert.equal(links[0], links[1])
+  assert.equal(new URL(links[0]).origin, new URL(links[1]).origin)
   assert.equal(await untilGone(dead.pid), true)
 }))
 
@@ -474,14 +501,14 @@ test('a folder given with --messages-dir is never looked up or taken over', { ti
   const dead = await h.deadPage(['--messages-dir', store])
   await wait(1500)
   const opened = await h.board(['--messages-dir', store])
-  assert.equal(h.linkOf(opened.stdout), undefined, opened.stdout)
+  assert.equal(h.linkOf(opened), undefined, opened.stdout)
   assert.equal(isAlive(dead.pid), true, 'a page on a given folder was ended')
   assert.equal(readFileSync(join(store, 'server.lock'), 'utf8'), String(dead.pid))
 }))
 
 test('a start while the page runs reaches that page', { timeout: 120_000 }, () => withHolderWorld(1000, async h => {
   const first = await h.board(['--serve', '--no-open'])
-  const link = h.linkOf(first.stdout)
+  const link = h.linkOf(first)
   assert.ok(link, JSON.stringify(first))
   // The page's address file sits beside its store folder, under the same name.
   const store = storeOf(h.world)
@@ -491,12 +518,14 @@ test('a start while the page runs reaches that page', { timeout: 120_000 }, () =
   // An address file this start will not use never leads it to the page behind it, and that page is not ended.
   for (const name of addresses) writeFileSync(join(run, name), '{"not":"an address"}')
   const unusable = await h.board()
-  assert.equal(h.linkOf(unusable.stdout), undefined, JSON.stringify(unusable))
+  assert.equal(h.linkOf(unusable), undefined, JSON.stringify(unusable))
   assert.ok(await h.pingOf(link), 'the page behind an unusable address file was ended')
   // As a child run with another runtime folder sees it (#1587): the page's address file is not where it looks.
   for (const name of addresses) unlinkSync(join(run, name))
   const again = await h.board()
-  assert.equal(h.linkOf(again.stdout), link, JSON.stringify(again))
+  const againLink = h.linkOf(again)
+  assert.ok(againLink, JSON.stringify(again))
+  assert.equal(new URL(againLink).origin, new URL(link).origin, JSON.stringify(again))
   assert.ok(await h.pingOf(link))
 }))
 
@@ -512,7 +541,7 @@ test('a page slow to answer is reached, never ended', { timeout: 120_000 }, () =
   const address = join(dirname(page.folder), basename(page.folder).replace(/-messages$/, '.json'))
   if (existsSync(address)) unlinkSync(address)
   const opened = await h.board()
-  const link = h.linkOf(opened.stdout)
+  const link = h.linkOf(opened)
   assert.ok(link, JSON.stringify(opened))
   assert.equal(isAlive(page.pid), true, 'a page slow to answer was ended')
   assert.equal(new URL(link).port, String(JSON.parse(readFileSync(join(page.folder, 'server.owner'), 'utf8')).port))
@@ -520,7 +549,7 @@ test('a page slow to answer is reached, never ended', { timeout: 120_000 }, () =
 
 // A healthy page the board cannot prove dead: after the board's run, the five things that must still hold.
 const assertUntouched = async (h, run, page) => {
-  assert.equal(h.linkOf(run.stdout), undefined, run.stdout)
+  assert.equal(h.linkOf(run), undefined, run.stdout)
   assert.match(run.stdout.trim(), /^Agent Board did not open/, run.stdout)
   assert.ok(run.stdout.includes(String(page.pid)), run.stdout)
   assert.equal(isAlive(page.pid), true, 'a healthy page was ended')
@@ -623,7 +652,7 @@ process.exit = () => {}
   assert.ok(existsSync(owner), 'the page never recorded its address')
   await wait(4500)
   const opened = await h.board()
-  const link = h.linkOf(opened.stdout)
+  const link = h.linkOf(opened)
   assert.ok(link, JSON.stringify(opened))
   assert.equal(await untilGone(page.pid), true, 'the page that stopped serving still runs')
   assert.equal((await h.pingOf(link))?.messagesDirectory, page.folder)

@@ -4,6 +4,9 @@ import type { RowStateInput } from '../hooks/row-state'
 import { emptyMirror } from '../hooks/mirror'
 import { blockKey, hostHashOf } from '../hooks/session-liveness'
 import type { ProgressAuto, ProgressStep } from '../types'
+import { parseProgress } from '../hooks/parse'
+import { buildView } from '../hooks/view'
+import { EN } from '../hooks/strings-en'
 
 // One row per (events + steps + mirror + liveness) combination → exactly one
 // state (#1317). The states 'stopped', 'toCheck' and 'waitingElsewhere' are
@@ -199,4 +202,66 @@ test('livenessOf reads dead, alive and unknown from the gone set', () => {
   expect(livenessOf(claimed, new Set())).toBe('alive')
   expect(livenessOf(auto('waiting', NOW - 31 * MIN, { agent: 'antigravity' }), new Set())).toBe('unknown')
   expect(livenessOf(null, new Set())).toBe('unknown')
+})
+
+// #1839: an Antigravity block as the Stop hook leaves it. The hook rewrites its own placeholder step to open at
+// every turn's end and writes state=waiting, so a block whose last real step was ticked still holds one open step.
+const antigravityFile = (state: string, steps: string[]): string =>
+  ['## proj', '', `<!-- auto session=a4000001 agent=antigravity source=antigravity-local owner=x state=${state} updated=${new Date(NOW - 5 * MIN).toISOString()} -->`, '### Task', ...steps, '<!-- /auto -->', ''].join('\n')
+const TICKED = ['- [ ] Waiting for the next instruction', '- [x] Read the file', '- [x] Count the lines']
+const viewOf = (state: string, steps: string[] = TICKED) => buildView(parseProgress(antigravityFile(state, steps)), [], null, NOW, 0, {}, EN)
+
+test('a block leaves waiting when its last real step is ticked, whatever the hook placeholder says', () => {
+  expect(deriveRowState(input({ steps: [placeholder, step('Read the file', 'done'), step('Count the lines', 'done')] }))).toBe('toCheck')
+  // The placeholder alone keeps the row waiting, and a real step still open reads stopped.
+  expect(deriveRowState(input({ steps: [placeholder] }))).toBe('waiting')
+  expect(deriveRowState(input({ steps: [placeholder, step('Read the file', 'done'), step('Count the lines', 'todo')] }))).toBe('stopped')
+  const view = viewOf('waiting')
+  expect(view.groups.flatMap(group => group.rows)).toEqual([])
+  expect(view.overview.active).toBe(0)
+})
+
+test('a finished waiting block is Done, not Stopped, and leaves no live row to read Still running', () => {
+  const view = viewOf('waiting')
+  // Done, and on no other shelf: not Stopped, not Idle, no live row that could say Still running.
+  expect(view.finished).toHaveLength(1)
+  expect(view.stopped).toEqual([])
+  expect(view.idle).toEqual([])
+  expect(view.groups.flatMap(group => group.rows)).toEqual([])
+  // A block that still has real work open keeps its row, a block at work keeps it even with its steps ticked,
+  // and an ended block keeps its Stopped row, which carries its Archive (see the next test for stale and gone ones).
+  const live = viewOf('waiting', ['- [ ] Waiting for the next instruction', '- [x] Read the file', '- [ ] Count the lines'])
+  expect(live.finished ?? []).toEqual([])
+  expect(live.groups.flatMap(group => group.rows)[0]?.auto).toBe('waiting')
+  expect(viewOf('working').finished ?? []).toEqual([])
+  const ended = viewOf('ended')
+  expect(ended.finished ?? []).toEqual([])
+  expect(ended.stopped).toHaveLength(1)
+  expect(ended.stopped[0]?.archive).not.toBeNull()
+})
+
+test('a finished waiting block whose session went quiet or lost its process stays Stopped, with its Archive', () => {
+  // As on main: a stale or process-gone block is Stopped, and Done has no Archive until the write side lands.
+  const old = buildView(parseProgress(antigravityFile('waiting', TICKED).replace(/updated=\S+/, `updated=${new Date(NOW - 13 * 60 * MIN).toISOString()}`)), [], null, NOW, 0, {}, EN)
+  expect(old.finished ?? []).toEqual([])
+  expect(old.stopped).toHaveLength(1)
+  expect(old.stopped[0]?.archive).not.toBeNull()
+  const projects = parseProgress(antigravityFile('waiting', TICKED))
+  const block = projects[0]?.tasks[0]?.auto ?? null
+  expect(block).not.toBeNull()
+  const lost = buildView(projects, [], null, NOW, 0, {}, EN, [], {}, undefined, undefined, undefined, undefined, undefined, undefined, undefined, new Set(block === null ? [] : [blockKey(block)]))
+  expect(lost.finished ?? []).toEqual([])
+  expect(lost.stopped).toHaveLength(1)
+  expect(lost.stopped[0]?.archive).not.toBeNull()
+})
+
+test('a done block holding only its ticked placeholder still reads toCheck', () => {
+  // As on main: the session already ended done, so the placeholder-only branches below do not apply.
+  const quiet = input({ auto: auto('done', NOW - 60 * MIN), steps: [step('Waiting for the next instruction', 'done')], events: { hasSessionEnd: false, lastEventAt: NOW - 60 * MIN, host: 'antigravity' }, liveness: 'unknown' })
+  expect(deriveRowState(quiet)).toBe('toCheck')
+  const noAge = input({ auto: auto('done', NOW - 60 * MIN), steps: [step('Waiting for the next instruction', 'done')], events: { hasSessionEnd: false, lastEventAt: 0, host: 'antigravity' }, liveness: 'unknown' })
+  expect(deriveRowState(noAge)).toBe('toCheck')
+  // An open placeholder on a done block keeps the older reading: the session may still be settling.
+  const open = input({ auto: auto('done', NOW - 60 * MIN), steps: [step('Waiting for the next instruction', 'todo')], events: { hasSessionEnd: false, lastEventAt: NOW - 60 * MIN, host: 'antigravity' }, liveness: 'unknown' })
+  expect(deriveRowState(open)).toBe('unsure')
 })

@@ -1875,9 +1875,12 @@ const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messa
   const routesFile = join(dir, 'routes.json'); writeFileSync(routesFile, JSON.stringify(routes))
   const child = spawn(process.execPath, ['-r', tracer, ...(fault ? ['-r', preload] : []), script, '--serve-child', ...args], { windowsHide: true, env: { ...process.env, AGENT_BOARD_CODEX_BIN: process.env.AGENT_BOARD_CODEX_BIN ?? '', CLAUDE_PROGRESS_FILE: '', AGENT_BOARD_ROUTES: routesFile, HOME: dir, USERPROFILE: dir, TEMP: dir, TMP: dir, TMPDIR: dir, APPDATA: dir, LOCALAPPDATA: dir, XDG_CONFIG_HOME: dir, XDG_DATA_HOME: dir, XDG_STATE_HOME: dir, XDG_CACHE_HOME: dir, CLAUDE_CONFIG_DIR: dir, HERMES_HOME: dir, CODEX_HOME: dir, GROK_HOME: dir, OPENCLAW_STATE_DIR: dir, XDG_RUNTIME_DIR: runtime, AGENT_BOARD_TEST_START_TRACE: trace, ...(handoff === undefined ? {} : { [RUNTIME_FOLDER_ENV]: handoff }), ...env }, stdio: ['ignore', 'pipe', 'pipe'] })
   const exited = new Promise(done => child.once('exit', done))
+  // The child's stderr, kept for the whole run: a call that cannot reach the board names why it went (#1958).
+  let err = ''
+  child.stderr.on('data', b => { err += b })
   let address
   try { address = await new Promise((done, fail) => {
-    let out = '', err = ''
+    let out = ''
     const report = () => `after ${Math.round(performance.now() - startedAt)} ms${prepared}; stdout ${out.length} bytes; stderr ${JSON.stringify(err.slice(-2000))}; child: ${startTrace(trace)}`
     // The start's time and the phases the child logged, kept for the summary line at the end. Only
     // the first outcome counts: the child exits normally when its test closes the page.
@@ -1888,7 +1891,6 @@ const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messa
       startTimes.push({ ms: Math.round(performance.now() - startedAt), ok, phases: startTrace(trace) })
     }
     const timer = setTimeout(() => { note(false); fail(new Error('start timeout ' + report())); child.kill() }, 10000)
-    child.stderr.on('data', b => { err += b })
     child.stdout.on('data', b => {
       out += b
       if (!out.includes('\n')) return
@@ -1900,8 +1902,17 @@ const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messa
   })
   } catch (error) { child.kill(); await exited; throw error }
   const url = new URL(address)
+  // A call that cannot reach the board (ECONNREFUSED: the board went) says how the child ended and what it last wrote to
+  // stderr, so a CI failure shows why the board stopped (#1958). A child still running a moment later is said to be.
+  const childReport = async () => {
+    if (child.exitCode === null && child.signalCode === null) await Promise.race([exited, pause(1000)])
+    const state = child.exitCode === null && child.signalCode === null ? 'still running' : `exit code ${child.exitCode}, signal ${child.signalCode}`
+    return `board child ${state}; stderr ${JSON.stringify(err.slice(-2000))}`
+  }
   const call = async (path, body, headers = {}) => {
-    const response = await fetch(new URL(path, url), { method: body === undefined ? 'GET' : 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) })
+    let response
+    try { response = await fetch(new URL(path, url), { method: body === undefined ? 'GET' : 'POST', headers: { 'x-board-token': url.searchParams.get('t'), 'content-type': 'application/json', ...headers }, body: body === undefined ? undefined : JSON.stringify(body) }) }
+    catch (error) { throw new Error(`${error.message}${error.cause?.code ? ' (' + error.cause.code + ')' : ''} on ${path}; ${await childReport()}`, { cause: error }) }
     return { status: response.status, body: await response.json() }
   }
   const close = async () => {
@@ -1913,7 +1924,7 @@ const start = async (dir, fault = '', args = ['--messages-dir', join(dir, 'messa
     }
     finally { if (child.exitCode === null && child.signalCode === null) child.kill(); await exited }
   }
-  return { address, call, close, exited }
+  return { address, call, close, exited, kill: signal => child.kill(signal) }
 }
 const readFileSyncSafe = file => { try { return readFileSync(file, 'utf8') } catch { return null } }
 // Transport sends need an exact progress row so the board can establish the receiver's state.
@@ -3304,6 +3315,116 @@ test('receiver polls do not keep an idle page open', async () => fixture(async b
   const timer = setInterval(() => { void board.call('/api/messages/poll', { connection: one.id, secret: one.secret, turn: one.turn }).catch(() => undefined) }, 80)
   try { await waitFor(() => isExited) } finally { clearInterval(timer) }
 }, '', ['--idle-minutes', '0.01']))
+
+// #1958: a call to a board that went names how the child ended and what it last wrote to stderr.
+const endOnFlag = `const flag = path.join(directory, 'end-now')
+const check = setInterval(() => { if (!fs.existsSync(flag)) return; clearInterval(check); process.stderr.write('synthetic board end note\\n'); process.exit(7) }, 20)
+check.unref()
+`
+test('a call to a board child that exited on its own names its exit code and stderr (#1958)', async () => fixture(async (board, dir) => {
+  assert.equal((await board.call('/api/ping')).status, 200)
+  writeFileSync(join(dir, 'end-now'), '')
+  await board.exited
+  await assert.rejects(board.call('/api/ping'), error => {
+    assert.match(error.message, /ECONNREFUSED/)
+    assert.match(error.message, /exit code 7, signal null/)
+    assert.match(error.message, /synthetic board end note/)
+    return true
+  })
+}, endOnFlag))
+
+test('a call to a board child ended by a signal names the signal (#1958)', async () => fixture(async board => {
+  assert.equal((await board.call('/api/ping')).status, 200)
+  board.kill('SIGKILL')
+  await board.exited
+  await assert.rejects(board.call('/api/ping'), error => {
+    assert.match(error.message, /exit code null, signal SIGKILL/)
+    return true
+  })
+}))
+
+// #1958: stalls of the board's own event loop, from a preload. Each starts when the board's server listens, the moment its
+// idle timer starts (--idle-minutes 0.03: 1.8 s, checked every 1.8 s). The first busy-waits 2 s from a setImmediate 1.5 s
+// in, so the idle check at 1.8 s runs late, in the timers phase, before the polls queued in the stall are read.
+const stallFault = (stalls = '') => `const http = require('node:http')
+const hold = ms => { const until = Date.now() + ms; while (Date.now() < until) {} }
+let isArmed = false
+const listen = http.Server.prototype.listen
+http.Server.prototype.listen = function (...rest) {
+  if (!isArmed) {
+    isArmed = true
+    this.once('listening', () => setTimeout(() => setImmediate(() => { ${stalls}; hold(2000) }), 1500).unref())
+  }
+  return listen.apply(this, rest)
+}
+`
+const pollEvery100 = async (board, ms) => {
+  let calls = 0
+  for (const until = Date.now() + ms; Date.now() < until; calls++) {
+    assert.equal((await board.call('/api/ping')).status, 200)
+    await pause(100)
+  }
+  return calls
+}
+
+// A ping on a connection of its own (no keep-alive): after a stall the server accepts it in one poll phase and reads it
+// in a later one, so a check that runs between the two must not take the board for idle.
+const freshPing = address => new Promise((done, fail) => {
+  const url = new URL(address)
+  const req = request({ hostname: url.hostname, port: url.port, path: '/api/ping', agent: false, headers: { 'x-board-token': url.searchParams.get('t') } }, res => {
+    res.resume()
+    res.on('end', () => done(res.statusCode))
+  })
+  req.on('error', fail)
+  req.end()
+})
+
+test('a board held 2 s while it is polled every 100 ms answers every call and does not stop as idle (#1958)', async () => fixture(async board => {
+  assert.ok(await pollEvery100(board, 5000) > 10)
+  assert.equal((await board.call('/api/ping')).status, 200)
+}, stallFault(), ['--idle-minutes', '0.03']))
+
+test('a second stall after the idle re-check is set up, in the timers phase and after the poll phase, does not stop a polled board (#1958)', async () => fixture(async board => {
+  // Every poll on a new connection: none is read in the poll phase that accepts it, so only a re-check that saw the
+  // stalls waits for the phase that serves them.
+  let calls = 0
+  for (const until = Date.now() + 7000; Date.now() < until; calls++) {
+    assert.equal(await freshPing(board.address), 200)
+    await pause(100)
+  }
+  assert.ok(calls > 10)
+  assert.equal((await board.call('/api/ping')).status, 200)
+  // The second stall is a timer due after the idle check, so it runs right after it in the same timers phase, once the
+  // re-check is set up; the third is a setImmediate it schedules, which runs after the next poll phase.
+}, stallFault('setTimeout(() => { hold(1000); setImmediate(() => hold(1000)) }, 1000)'), ['--idle-minutes', '0.03']))
+
+test('a short second stall of 80 ms in a callback after the poll phase, once the idle re-check is set up, does not stop a polled board (#1958)', async () => fixture(async board => {
+  // The 80 ms is under any timer's lateness margin, so only a re-check that sees the stall itself waits for the poll
+  // phase that reads the new connections accepted before it.
+  let calls = 0
+  for (const until = Date.now() + 6000; Date.now() < until; calls++) {
+    assert.equal(await freshPing(board.address), 200)
+    await pause(100)
+  }
+  assert.ok(calls > 10)
+  // The second stall is a setImmediate that a timer due after the idle check queues in the same timers phase, so it
+  // runs in the check phase right after the re-check is set up.
+}, stallFault('setTimeout(() => setImmediate(() => hold(80)), 1000)'), ['--idle-minutes', '0.03']))
+
+test('a board closed by a request that waited out a stall, while its idle re-check is pending, stops once and cleanly (#1958)', async () => fixture(async board => {
+  // Sent 2 s after the start, inside the stall (1.5 s to 3.5 s after the server listens): it is read after the idle check
+  // that set up the re-check, so the close and the re-check meet.
+  await pause(2000)
+  assert.equal((await board.call('/api/close', {})).status, 200)
+  const ended = await Promise.race([board.exited.then(code => 'exited ' + code), pause(10000).then(() => 'still running')])
+  assert.equal(ended, 'exited 0')
+  await assert.rejects(board.call('/api/ping'), /exit code 0, signal null; stderr ""/)
+}, stallFault(), ['--idle-minutes', '0.03']))
+
+test('a board held 2 s that nobody polls still stops as idle (#1958)', async () => fixture(async board => {
+  const ended = await Promise.race([board.exited.then(code => 'exited ' + code), pause(15000).then(() => 'still running')])
+  assert.equal(ended, 'exited 0')
+}, stallFault(), ['--idle-minutes', '0.03']))
 
 // The flag file holds an error code and how many renames of the claimed store fail with it.
 const failingRename = `const original = fs.renameSync
@@ -8359,18 +8480,45 @@ test('a page that stops, is replaced, or reaches idle while a Codex delivery is 
   process.env.AGENT_BOARD_CODEX_BIN = daemon.executable
   process.env.CODEX_MOCK_CONFIG = daemon.env.CODEX_MOCK_CONFIG
   codexShortWait()
+  // The process list reads as unreadable here, so the receiver gives its first claim straight back, and claims the message again
+  // about 2 s later to wait on the thread (#1652). That first claim lasts some 20 ms. The board's give-back request for it is
+  // held until the test has seen that claim, so step 1 meets it on every run and must tell it from the claim held after the join:
+  // only that one comes after a thread/resume (#1956).
+  const unsentHeld = join(dir, 'unsent-held'), unsentGo = join(dir, 'unsent-go'), unsentDone = join(dir, 'unsent-done')
+  const holdFirstGiveBack = `
+const held = ${JSON.stringify(unsentHeld)}, go = ${JSON.stringify(unsentGo)}, done = ${JSON.stringify(unsentDone)}
+const realFetch = globalThis.fetch
+let isHeld = false
+globalThis.fetch = async (url, init) => {
+  if (isHeld || !String(url).includes('/api/messages/receipt') || !String(init?.body).includes('"status":"unsent"')) return realFetch(url, init)
+  isHeld = true
+  fs.writeFileSync(held, '')
+  while (!fs.existsSync(go)) await new Promise(next => setTimeout(next, 10))
+  // The request's own 5 s limit started before the hold; it gets a fresh one, as if it had been sent now.
+  try { return await realFetch(url, { ...init, signal: AbortSignal.timeout(5000) }) } finally { fs.writeFileSync(done, '') }
+}
+`
   let board
   try {
-    board = await start(dir, '', ['--messages-dir', messagesDir, '--codex-send', '--idle-minutes', '0.03'], codexRoutes)
+    board = await start(dir, holdFirstGiveBack, ['--messages-dir', messagesDir, '--codex-send', '--idle-minutes', '0.03'], codexRoutes)
     delete process.env.AGENT_BOARD_CODEX_BIN
     const connection = await codexConnection(board)
     assert.equal(await codexSend(board, connection), 200)
 
-    // 1. Held claim waiting on a busy thread before turn/start.
-    await waitFor(async () => {
+    // 1. Held claim waiting on a busy thread before turn/start: the claim after the join, not the first one given back.
+    let seenFirst = null
+    const givenBack = (async () => {
+      await waitFor(async () => existsSync(unsentHeld) && seenFirst)
+      writeFileSync(unsentGo, '')
+      await waitFor(async () => existsSync(unsentDone))
+    })()
+    const held = await waitFor(async () => {
       const one = await codexMessage(board, 'AB-CX-001')
-      return one?.status === 'uncertain' && one.claimed > 0 && one
+      if (one?.status === 'uncertain' && one.claimed > 0 && existsSync(unsentHeld) && !existsSync(unsentGo)) seenFirst ??= one
+      return one?.status === 'uncertain' && one.claimed > 0 && daemon.calls().some(call => call.method === 'thread/resume') && one
     })
+    await givenBack
+    assert.ok(seenFirst, 'the first, given-back claim was never seen: ' + JSON.stringify(held))
     assert.equal(codexStarts(daemon), 0)
     assert.equal((await board.call('/api/ping')).body.sending, 1)
     assert.equal((await board.call('/api/close', {})).status, 409)

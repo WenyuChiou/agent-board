@@ -14,6 +14,7 @@ import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { setupAgents } from '../scripts/setup-discovery.mjs'
 import { setupPrograms } from './helpers/setup-programs.mjs'
+import { readPrintedLink, withoutSsh } from './helpers/printed-link.mjs'
 
 const installer = fileURLToPath(new URL('../scripts/setup-agent.mjs', import.meta.url))
 const sourceLoader = registerHooks({
@@ -44,7 +45,7 @@ const transport = (url, method, path, body, headers = {}) => new Promise((done, 
 const fixture = (isLan = false) => {
   const root = mkdtempSync(join(tmpdir(), 'agent-board-settings-agents-'))
   const home = join(root, 'home')
-  const env = { ...process.env, HOME: home, USERPROFILE: home }
+  const env = { ...withoutSsh(process.env), HOME: home, USERPROFILE: home }
   mkdirSync(home)
   for (const name of ['APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'XDG_STATE_HOME', 'XDG_CACHE_HOME', 'XDG_RUNTIME_DIR', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'OPENCODE_CONFIG_DIR', 'HERMES_HOME', 'GROK_HOME', 'OPENCLAW_STATE_DIR', 'DSH_HOME', 'TMP', 'TEMP', 'TMPDIR']) {
     env[name] = join(home, name)
@@ -269,10 +270,11 @@ test('Settings sets up an agent in the home and data folder a normal --serve sta
   mkdirSync(join(other, '.cursor'), { recursive: true })
   mkdirSync(otherData)
   writeFileSync(otherProgress, '# Progress\n\n## Synthetic project\n')
-  const out = await new Promise((done, fail) => execFile(process.execPath, [f.script, '--serve', '--no-open', '--home', other, '--data-dir', otherData, '--progress-file', otherProgress, '--lang', 'en'], { env: f.env, encoding: 'utf8', timeout: 20_000, windowsHide: true }, (error, stdout) => (error ? fail(error) : done(stdout))))
-  const address = out.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
-  assert.ok(address, out)
-  const url = new URL(address)
+  const out = await new Promise((done, fail) => execFile(process.execPath, [f.script, '--serve', '--no-open', '--home', other, '--data-dir', otherData, '--progress-file', otherProgress, '--lang', 'en'], { env: f.env, encoding: 'utf8', timeout: 20_000, windowsHide: true }, (error, stdout, stderr) => (error ? fail(error) : done({ stdout, stderr }))))
+  const { link: address } = readPrintedLink(out, { wordings: [EN.serveAt] })
+  const pageHtml = await (await fetch(address)).text()
+  const pageSession = JSON.parse(pageHtml.match(/<script type="application\/json" id="page-session">([^<]+)<\/script>/)[1])
+  const url = new URL(`/?t=${pageSession}`, address)
   try {
     const added = await transport(url, 'POST', '/api/agents/setup', { agent: 'cursor' })
     assert.equal(added.status, 200, added.text)

@@ -7,6 +7,7 @@ import type { AskKind } from './ask'
 import { confirmKey, matchesSpan, shortId, stepWords, upsertAutoBlock } from './blocks'
 import type { ConfirmRef } from './blocks'
 import { isLifecycleStep } from './codex'
+import { isWorkDone } from './lifecycle-steps'
 import { recordStepWords } from './digest'
 import { ciWords, prWords } from './github'
 import { doingTask, fallbackTitle, isAnswered, waitsOnYou } from './mirror'
@@ -1015,12 +1016,17 @@ export const buildView = (
   // The AI that wrote a hand-kept task: its `<!-- session=<id> -->` trailer, matched to the block with
   // that session (or its full resume id). A trailer that matches no block names no one, and so does a
   // task with none: both stay '' and show only in Needs you and the full list (#1866). A Claude block
-  // gives 'claude', not '', because '' on a hand-kept task means no writer.
+  // gives 'claude', not '', because '' on a hand-kept task means no writer. An id that blocks of two
+  // different AIs carry names no one either, so the task stays in Needs you under no AI (#1916).
   const writerAgents = new Map<string, string>()
   for (const project of projects) {
     for (const task of project.tasks) {
       if (task.auto === null) continue
-      for (const id of [task.auto.session, task.auto.resume]) if (id !== null && id !== '' && !writerAgents.has(id)) writerAgents.set(id, task.auto.agent)
+      for (const id of [task.auto.session, task.auto.resume]) {
+        if (id === null || id === '') continue
+        const known = writerAgents.get(id)
+        writerAgents.set(id, known === undefined || known === task.auto.agent ? task.auto.agent : '')
+      }
     }
   }
   const agentOf = (task: ProgressTask): string =>
@@ -1046,7 +1052,12 @@ export const buildView = (
       const clock = observedTime(task.auto, now, seen)
       const updated = clock.updated
       const when = clock.isFuture ? updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(updated, now, s)) : relativeTime(updated, now, s)
-      const isComplete = isTaskComplete(task) || task.auto?.state === 'done'
+      // A hook-written block still holds its own placeholder step open at turn end (state=waiting), so its finished work
+      // counts without it (#1839). One at work keeps its row (the agent may tick the last step and carry on), and one that
+      // ended, went quiet past the stale time or lost its process keeps its Stopped row, which holds its Archive and resume.
+      const isGone = isStopped(task.auto, now, updated, staleMs, gone)
+      const isWorkFinished = task.auto !== null && task.auto.state === 'waiting' && !isGone && isWorkDone(task.steps)
+      const isComplete = isTaskComplete(task) || task.auto?.state === 'done' || isWorkFinished
       const isManual = task.auto === null
       const scope = scopeOf(project.name, task.auto?.agent ?? 'manual', task.auto?.session ?? task.title, task.auto?.resume)
       // With nothing frozen, neither half can match, so the scope string is never built.
@@ -1057,7 +1068,6 @@ export const buildView = (
       const isIdle = !isComplete && !isDue && hasTime(lastActive) && now - lastActive > IDLE_MS
       const context = contextOf(task)
       // Questions travel with an inactive or gone session rather than asking for a live reply.
-      const isGone = isStopped(task.auto, now, updated, staleMs, gone)
       const isSilence = task.auto?.state === 'working' && isSilenceTask(task.steps, hasTime(lastActive) ? lastActive : 0, now)
       const isInactive = !isManual && (isComplete || isGone || isSilence || task.auto?.state === 'ended')
       const mayBeClosed = !isInactive && task.auto !== null && isMaybeClosed(task.auto, task.steps, now, updated, clock.isFuture)

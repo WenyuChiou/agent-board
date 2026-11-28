@@ -2086,6 +2086,13 @@ const PAGE_SCRIPT = String.raw`
     lostMain.textContent = '';
     add(lostMain, el('p', '', w('serveSessionLost')));
     document.getElementById('side').hidden = true;
+    // The wide-window detail panel sits outside main, with the reply controls of the row it shows: it
+    // goes too, and no row stays selected, so a redraw (a resize across the wide width) cannot open it again.
+    selectedKey = '';
+    var lostRail = document.getElementById('detail-rail');
+    if (lostRail) { lostRail.textContent = ''; lostRail.hidden = true; }
+    var lostShell = document.getElementById('shell');
+    if (lostShell) lostShell.setAttribute('data-detail', '');
   }
   // A page that is going away tells the board, so opening the board again opens a window instead of pointing at this one (#265).
   if (typeof window.addEventListener === 'function') window.addEventListener('pagehide', function () {
@@ -2322,16 +2329,19 @@ const PAGE_SCRIPT = String.raw`
   }
   // A draft that was sent is gone from the box on the page now, whatever redraw happened since it was pressed.
   // Only text equal to what was sent goes: words typed after the press, or kept across a new connection, stay (#782).
+  // A card can be drawn in the board and in the detail rail: when one of its boxes keeps newer words, the other
+  // boxes take those words instead of being emptied, so the next draw cannot copy an empty box over them (#1906).
   function clearDraft(draftKey, sentText) {
     var detailRailEl = document.getElementById('detail-rail');
-    var kept = null;
+    var boxes = [];
     [board, detailRailEl].forEach(function (rootEl) {
       if (rootEl) rootEl.querySelectorAll('textarea[data-key]').forEach(function (box) {
-        if (box.getAttribute('data-key') !== draftKey) return;
-        if (box.value.trim() === sentText) box.value = '';
-        else kept = box.value;
+        if (box.getAttribute('data-key') === draftKey) boxes.push(box);
       });
     });
+    var kept = null;
+    boxes.forEach(function (box) { if (box.value.trim() !== sentText && (kept === null || box.value.trim() !== '')) kept = box.value; });
+    boxes.forEach(function (box) { if (box.value.trim() === sentText) box.value = kept === null ? '' : kept; });
     if (kept !== null) pg.drafts[draftKey] = kept;
     else if (String(pg.drafts[draftKey] || '').trim() === sentText || pg.drafts[draftKey] === undefined) pg.drafts[draftKey] = '';
   }
