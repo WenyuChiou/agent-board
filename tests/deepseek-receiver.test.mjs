@@ -520,6 +520,36 @@ test('a DeepSeek session that goes idle inside the lease while a give-back is tr
   } finally { await run.close() }
 }))
 
+test('a DeepSeek give-back the board handles only after the lease keeps the claim for an idle that came inside the lease, once (#1870)', () => fixture(async f => {
+  const run = await giveBackRig(f, 'deepseek-late-release', 'late-release-1', 'Synthetic answer whose give-back landed after the lease')
+  try {
+    // The first give-back fails, with the board's claim made so that its lease ends 3.5 s later; the board handles the
+    // second only 3 s after it starts, past the lease, and the session goes idle inside the lease while it waits.
+    let releases = 0
+    run.rig.onSpawn = (action, args) => {
+      if (action === 'take') { run.root.status = 'running'; return undefined }
+      if (action !== 'release') return undefined
+      releases += 1
+      if (releases === 1) {
+        const state = run.store()
+        run.write({ ...state, messages: state.messages.map(one => ({ ...one, claimed: Date.now() - run.messaging.MAILBOX_LEASE_MS + 3_500 })) })
+        return spawn(process.execPath, ['-e', 'process.exit(1)'])
+      }
+      if (releases === 2) {
+        setTimeout(() => { run.root.status = 'idle'; run.hooks.get('agent/status')({ agent: run.root, status: 'idle' }) }, 200)
+        return spawn(process.execPath, ['-e', `setTimeout(() => { const done = require('node:child_process').spawnSync(process.execPath, ${JSON.stringify(args)}, { encoding: 'utf8' }); process.stdout.write(done.stdout); process.exit(done.status) }, 3000)`])
+      }
+      return undefined
+    }
+    run.hooks.get('agent/created')({ agent: run.root })
+    await run.until(() => releases >= 2, 'the give-back was tried again')
+    await run.until(() => run.root.received.length === 1, 'the kept claim was handed over after the late give-back')
+    assert.match(run.root.received[0].content[0].text, /Synthetic answer whose give-back landed after the lease/)
+    await run.until(() => run.message().status === 'accepted' && run.settled(), 'the kept claim was accepted')
+    assert.equal(run.root.received.length, 1)
+  } finally { await run.close() }
+}))
+
 test('a DeepSeek give-back that fails until late in the lease is still tried until the lease ends, so the message is queued again while the session works (#1870)', () => fixture(async f => {
   const run = await giveBackRig(f, 'deepseek-late-recovery', 'late-recovery-1', 'Synthetic answer given back late in the lease')
   try {
