@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
-import { authorKey, reviewOf, roundsOf, stripComments, verdictsOf } from './pr-check.mjs'
+import { authorKey, roundsOf, stripComments, verdictsOf } from './pr-check.mjs'
 import { safeLine } from './preflight.mjs'
 
 const usage = 'Usage: node scripts/team-stats.mjs [--week] [--date YYYY-MM-DD] [--repo owner/name] [--help]'
@@ -41,7 +41,8 @@ export const reviewQueue = pullRequests => pullRequests.filter(pr => isOpen(pr) 
     const body = comment.body ?? ''
     const sha = body.match(/^[ \t]*`?Ready for review `?([a-f0-9]{7,40})(?![A-Za-z0-9])`?/i)?.[1]?.toLowerCase()
     if (sha && head.startsWith(sha) && !ready) ready = comment
-    const review = reviewOf(body)
+    // A bot's line, an outside approval and a line in a code fence or an HTML comment are no verdict (#1926).
+    const review = verdictsOf([comment])[0]
     if (review && head.startsWith(review.sha)) ready = undefined
   }
   return { number: pr.number, ready }

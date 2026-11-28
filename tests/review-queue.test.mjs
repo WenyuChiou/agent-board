@@ -1119,3 +1119,36 @@ test('a reviewers file that starts with a byte order mark is read', () => {
   assert.equal(loaded.map.maxOpenReviews, 2)
 })
 
+
+test('the queue reads only a team verdict a reader sees: a bot line or a fenced or hidden line is no verdict (#1926)', () => {
+  const at = '2026-10-20T10:00:00Z'
+  const botLine = kind => ({ ...verdict(kind, head, at), user: { login: 'review-helper[bot]', type: 'Bot' } })
+  const fenced = kind => comment(`An example:\n\`\`\`\nReview: ${kind} ${head}\n\`\`\``, at)
+  const hidden = kind => comment(`<!-- Review: ${kind} ${head} -->`, at)
+  for (const item of [botLine('APPROVE'), botLine('REQUEST CHANGES'), fenced('APPROVE'), hidden('APPROVE'), fenced('REQUEST CHANGES')]) {
+    const queue = classify([pull(1)], { 1: [ready(head, '2026-10-20T08:00:00Z'), item] }, now)
+    assert.deepEqual(queue.needsReviewer.map(entry => entry.number), [1])
+    assert.deepEqual(queue.approved, [])
+  }
+  // An outside approval is no verdict; an outside request for changes is one.
+  const outside = kind => ({ ...verdict(kind, head, at), author_association: 'CONTRIBUTOR' })
+  assert.deepEqual(classify([pull(1)], { 1: [ready(head, '2026-10-20T08:00:00Z'), outside('APPROVE')] }, now).needsReviewer.map(entry => entry.number), [1])
+  const changes = classify([pull(1)], { 1: [ready(head, '2026-10-20T08:00:00Z'), outside('REQUEST CHANGES')] }, now)
+  assert.deepEqual(changes.waitingForAuthor.map(entry => [entry.number, entry.detail]), [[1, 'changes requested']])
+  // A team verdict on the head still counts.
+  assert.deepEqual(classify([pull(1)], { 1: [ready(head, '2026-10-20T08:00:00Z'), verdict('APPROVE', head, at)] }, now).approved.map(entry => entry.number), [1])
+})
+
+test('a fenced or bot verdict line does not answer a Reviewing claim, so the review stays taken (#1926)', () => {
+  const claim = comment(`Reviewing: ${head} by muse, lane AB03`, '2026-10-20T11:00:00Z')
+  const lines = [
+    comment(`\`\`\`\nReview: APPROVE ${head} by muse, lane AB03\n\`\`\``, '2026-10-20T11:30:00Z'),
+    { ...comment(`Review: APPROVE ${head} by muse, lane AB03`, '2026-10-20T11:30:00Z'), user: { login: 'review-helper[bot]', type: 'Bot' } },
+  ]
+  for (const line of lines) {
+    const queue = classify([pull(1)], { 1: [ready(head, '2026-10-20T10:00:00Z'), claim, line] }, now)
+    assert.equal(queue.needsReviewer[0].takenBy, 'muse, lane AB03')
+  }
+  const answered = classify([pull(1)], { 1: [ready(head, '2026-10-20T10:00:00Z'), claim, comment(`Review: REQUEST CHANGES ${head} by muse, lane AB03`, '2026-10-20T11:30:00Z')] }, now)
+  assert.deepEqual(answered.needsReviewer, [])
+})

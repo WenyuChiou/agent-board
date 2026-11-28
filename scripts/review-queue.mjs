@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { authorKey, isLaneReviewer, reviewOf, tierOf } from './pr-check.mjs'
+import { authorKey, isLaneReviewer, reviewOf, tierOf, verdictsOf, visibleBody } from './pr-check.mjs'
 import { bundleSources, safeLine } from './preflight.mjs'
 
 const usage = 'Usage: node scripts/review-queue.mjs [--repo owner/name] [--roadmap N] [--json] [--help]'
@@ -174,14 +174,23 @@ const isLapsed = (time, nowMs) => Number.isFinite(nowMs) && Number.isFinite(time
 // A second claim by the same name on the head does not restart its two hours (owner, 2026-11-12; #1358).
 // Each `Review:` line of a comment is read on its own, so a verdict's head and its reviewer come from one line.
 // The split uses every line end the `m` flag knows (LF, CRLF, CR, U+2028, U+2029), so no chunk holds two lines.
-const headVerdictNames = (body, head) => (body ?? '').split(/\r\n|[\n\r\u2028\u2029]/)
-  .filter(line => matchesHead(head, reviewOf(line)?.sha)).map(verdictFullName).filter(Boolean)
+// The lines are the ones a reader sees: a verdict in a code fence or an HTML comment is an example, and a bot's or an
+// outside approval is no verdict, as pr-check's verdictsOf reads them (#1926).
+const headVerdictNames = (comment, head) => visibleBody(comment?.body).split(/\r\n|[\n\r\u2028\u2029]/)
+  .filter(line => matchesHead(head, verdictsOf([{ ...comment, body: line }])[0]?.sha)).map(verdictFullName).filter(Boolean)
+// The verdict a comment gives, as verdictsOf reads it (#1926), with the isFresh mark of the same visible line that
+// isLaneReviewer needs. Null when the comment gives none.
+const verdictOf = comment => {
+  const verdict = verdictsOf([comment])[0]
+  if (!verdict) return null
+  return reviewOf(visibleBody(comment?.body))?.isFresh ? { ...verdict, isFresh: true } : verdict
+}
 const openClaims = (entries, head) => {
   let open = []
   for (const { comment, time } of entries) {
     const claim = claimOf(comment.body)
     if (claim && matchesHead(head, claim.sha) && !open.some(item => item.key === claim.key)) open.push({ ...claim, time })
-    const names = headVerdictNames(comment.body, head)
+    const names = headVerdictNames(comment, head)
     if (names.length) open = open.filter(item => !names.includes(item.key))
   }
   return open
@@ -237,7 +246,7 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     const comments = entriesOf(commentsFor(commentsByNumber, pr.number))
     const ready = comments.map((entry, index) => ({ ...entry, order: index }))
       .filter(entry => matchesHead(head, readySha(entry.comment.body))).at(-1)
-    const verdicts = comments.map((entry, index) => ({ ...entry, order: index, verdict: reviewOf(entry.comment.body), by: verdictFullName(entry.comment.body) }))
+    const verdicts = comments.map((entry, index) => ({ ...entry, order: index, verdict: verdictOf(entry.comment), by: verdictFullName(visibleBody(entry.comment.body)) }))
       .filter(entry => entry.verdict)
     const headVerdicts = verdicts.filter(entry => matchesHead(head, entry.verdict.sha))
     const latestHeadVerdict = headVerdicts.at(-1)
