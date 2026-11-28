@@ -188,7 +188,11 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
   }
   const color = (tone: Tone): string => toneColor(palette, tone)
   const isOpen = (id: string): boolean => model.opened.includes(id)
-  const resultTask = model.resolveResult?.key.replace(/::[^:]*$/, '') ?? ''
+  // A question kept only for review (#155) shows its Resolve result in its own card, and once it is
+  // closed and gone, on a line of its own where the question lists were.
+  const isReviewResult = model.resolveResult?.key.startsWith('retained::') === true
+  const isReviewDrawn = isReviewResult && [...view.waiting, ...(view.reminder ?? []), ...(view.older ?? [])].some(item => item.key === model.resolveResult?.key)
+  const resultTask = isReviewResult ? '' : model.resolveResult?.key.replace(/::[^:]*$/, '') ?? ''
   const hasInlineReplyResult = resultTask !== '' && (view.provisional ?? []).some(item => item.key === model.resolveResult?.key && item.questionId === model.resolveResult?.questionId)
     && (resultTask === 'mine' ? view.current !== null : model.expanded === resultTask && (
       isOpen('due') && view.due.some(row => row.key === resultTask)
@@ -454,6 +458,12 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
       {item.when !== '' && muted(item.when)}
       {item.canHide === false ? muted(s.questionReviewOnly) : isLiveAsk(item) && muted(s.archiveLive)}
       {askActions(item)}
+      {item.canHide === false && item.questionId !== undefined && item.key.startsWith('retained::') && (
+        <Box marginTop={1} flexDirection="column">
+          <Button key={`${item.key}::resolve`} onPress={() => actions.resolve(item)}>{s.resolveQuestion}</Button>
+          {model.resolveResult?.key === item.key && muted(model.resolveResult.text)}
+        </Box>
+      )}
       {item.archive !== undefined && (
         <Box marginTop={1}>
           <Button key={`${item.key}::archive`} onPress={buttonPress(`${item.key}::archive`, () => actions.archiveAsk(item))}>
@@ -846,6 +856,12 @@ export const drawPane = (ui: PaneUi, model: PaneModel, actions: PaneActions): Re
           {cardResult('section::olderAll')}
         </Box>
       })}
+      {isReviewResult && !isReviewDrawn && (
+        <Box key={`${model.resolveResult?.key}::question`} flexDirection="column" marginTop={1}>
+          {muted([model.resolveResult?.project, model.resolveResult?.title].filter(Boolean).join(' · '))}
+          {muted(model.resolveResult?.text ?? '')}
+        </Box>
+      )}
       {view.hidden.length > 0 && (
         <Box flexDirection="column" marginTop={1}>
           <Button key="section::hidden" plain onPress={buttonPress('section::hidden', () => actions.toggleSection('hidden'), true)}>

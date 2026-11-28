@@ -775,6 +775,8 @@ const paneEngineFixture = (cell: MatrixCell): MatrixFixture => {
         if (ask.reopen !== null) { buttons.push(`${target}::resume`); resume = ask.reopen }
       }
       if (ask.hideKey !== '' && ask.canHide !== false) buttons.push(`${target}::hide`)
+      // A question kept only for review is resolved from its card (#155).
+      if (ask.key.startsWith('retained::') && ask.canHide === false && ask.questionId !== undefined) buttons.push(`${target}::resolve`)
     }
   } else if (row !== undefined) {
     target = row.key; opener = row.key; buttons.push(row.key)
@@ -820,6 +822,7 @@ const ENGINE_MATRIX: readonly EngineMatrixCase[] = [...ENGINE_GROUPS.values()].f
   else if (cell.kind === 'hidden') verb = 'unhide'
   else if (cell.kind === 'ended') verb = cell.source === 'this-session' ? 'take' : 'archive'
   else if (cell.kind === 'live-ask') verb = cell.source === 'this-session' ? 'copy' : 'resume'
+  else if (cell.kind === 'retained') verb = 'resolve'
   else if (cell.kind === 'needs-you' && cell.source === 'this-session') {
     const answers = { choose: 'First', review: EN.looksGood, wait: EN.ready, text: 'hide', confirm: EN.yes }
     verb = answers[cell.askKind ?? 'confirm']
@@ -864,7 +867,11 @@ const engineMatrixTest = ({ cell, button, isFailing }: EngineMatrixCase) => asyn
     expect(await ui.find({ type: 'Button', key: button })).toBeDefined()
     const before = JSON.stringify(await ui.findAll({ type: 'Text' }))
     if (isFailing) world.unwritable = new Set([FILE, FILE.replace('.md', '-answered.json'), FILE.replace('.md', '-archive-2026-10.md')])
+    // A Resolve saves the question's resolved copy beside the ledger, and shows its result once that is done.
+    const isResolve = button.endsWith('::resolve')
+    if (isFailing && isResolve) world.failQuestionCapture = 'write'
     await ui.press({ key: button })
+    if (isResolve) await clock.advance(2100)
     const isToggle = button === fixture.opener || button === 'section::steps'
     if (button.endsWith('::revise')) {
       expect(await ui.find({ type: 'Input', key: `${fixture.target}::reply` })).toBeDefined()
@@ -877,7 +884,8 @@ const engineMatrixTest = ({ cell, button, isFailing }: EngineMatrixCase) => asyn
       return
     }
     let expected: string
-    if (button.endsWith('::copy') || button.endsWith('::resume')) expected = isFailing ? EN.pressCopyFallback : EN.copied
+    if (isResolve) expected = isFailing ? EN.resolveFailed : EN.resolveSucceeded
+    else if (button.endsWith('::copy') || button.endsWith('::resume')) expected = isFailing ? EN.pressCopyFallback : EN.copied
     else if (button.endsWith('::hide')) expected = isFailing ? EN.hideFailed : EN.pressHidden
     else if (button.endsWith('::unhide')) expected = isFailing ? EN.hideFailed : EN.pressShown
     else if (button === 'continue' || button.endsWith('::take') || button.endsWith('::hand') || button.endsWith(`::${EN.yes}`) || button.endsWith(`::${EN.no}`) || button.endsWith('::did') || button.endsWith('::First') || button.endsWith('::Second') || button.endsWith(`::${EN.looksGood}`) || button.endsWith(`::${EN.ready}`)) expected = isFailing ? EN.pressSessionGone : EN.pressSent
@@ -889,7 +897,8 @@ const engineMatrixTest = ({ cell, button, isFailing }: EngineMatrixCase) => asyn
     if (hasButton !== undefined) expect(besideButton(await ui.findAll({ type: 'Box' }), button)).toContain(expected)
     else {
       const nodes = await ui.findAll({ type: 'Box' })
-      expect(besideButton(nodes, button, false).includes(expected) || besideLabel(nodes, cell.name, expected)).toBe(true)
+      // A resolved question kept for review leaves its card; its result stays on a line with its project and task.
+      expect(besideButton(nodes, button, false).includes(expected) || besideLabel(nodes, isResolve ? `persona_framework · ${cell.name}` : cell.name, expected)).toBe(true)
     }
     expect(await ui.find({ type: 'Text', text: EN.pressPending })).toBeUndefined()
     if (isFailing && (button.endsWith('::copy') || button.endsWith('::resume'))) {
@@ -900,7 +909,8 @@ const engineMatrixTest = ({ cell, button, isFailing }: EngineMatrixCase) => asyn
     if (await ui.find({ type: 'Button', key: button }) !== undefined) expect(besideButton(await ui.findAll({ type: 'Box' }), button)).toContain(expected)
     else {
       const nodes = await ui.findAll({ type: 'Box' })
-      expect(besideButton(nodes, button, false).includes(expected) || besideLabel(nodes, cell.name, expected)).toBe(true)
+      // A resolved question kept for review leaves its card; its result stays on a line with its project and task.
+      expect(besideButton(nodes, button, false).includes(expected) || besideLabel(nodes, isResolve ? `persona_framework · ${cell.name}` : cell.name, expected)).toBe(true)
     }
   } finally { await ui.unmount() }
 }
