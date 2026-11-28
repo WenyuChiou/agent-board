@@ -97,11 +97,11 @@ const createBoardFixture = () => {
   const serve = (scriptFile, extra = []) => new Promise((done, fail) => {
     execFile(process.execPath, [scriptFile, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out, err) => {
       if (error) return fail(new Error(`${error.message}\nstdout: ${out}\nstderr: ${err}`))
-      done(`${out}${err}`)
+      done({ stdout: out, stderr: err })
     })
   })
   const serveFailing = (scriptFile, extra = []) => new Promise(done => {
-    execFile(process.execPath, [scriptFile, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out, err) => done({ status: error?.code ?? 1, out, err }))
+    execFile(process.execPath, [scriptFile, '--serve', '--no-open', ...extra], { env, encoding: 'utf8', timeout: 20_000 }, (error, out, err) => done({ status: error?.code ?? 1, stdout: out, stderr: err }))
   })
   const distinctPorts = async () => {
     const s1 = createNetServer()
@@ -118,18 +118,31 @@ const createBoardFixture = () => {
   // #1650: the command prints a one-use link and never the page's token. The page a command left
   // running is the one its served record names (the record keeps the token); the printed link must
   // be that page's, and it must open it once.
-  const urlOf = async out => {
-    const links = [...out.matchAll(/http:\/\/127\.0\.0\.1:(\d+)\/open\/[\w-]+/g)]
-    assert.ok(links.length > 0, `the command prints a one-use link: ${out}`)
+  const tokens = new Set()
+  const WORDINGS = [EN.serveAt, ZH_TW.serveAt, ZH_CN.serveAt]
+  // The served record names the page the command left running; its token is one every output must lack.
+  const recordOf = () => {
     const record = existsSync(served) ? JSON.parse(readFileSync(served, 'utf8')) : null
     assert.ok(typeof record?.url === 'string', `the running page has a served record: ${JSON.stringify(record)}`)
-    const page = new URL(record.url)
-    const token = page.searchParams.get('t')
+    const token = new URL(record.url).searchParams.get('t')
     assert.ok(token, record.url)
-    assert.equal(out.includes(token), false, `the command prints no page token: ${out}`)
-    assert.doesNotMatch(out, /[?&]t=/, `the command prints no page token: ${out}`)
-    const [link, port] = links.at(-1)
-    assert.equal(port, page.port, `the printed link is for the page the record names: ${link} vs ${record.url}`)
+    tokens.add(token)
+    return record
+  }
+  // Reads the link the command printed, whole and per stream. Redeems nothing.
+  const linkOf = result => readPrintedLink(result, { wordings: WORDINGS, secrets: [...tokens] })
+  // The printed link must be the recorded page's: same port, the record's server answers there, and
+  // the link opens the page once. Redeeming sets the page's loaded time; every command here runs with
+  // --no-open, which never reads it.
+  const pageOf = async result => {
+    const record = recordOf()
+    const { link, port } = linkOf(result)
+    const page = new URL(record.url)
+    assert.equal(port, Number(page.port), `the printed link is for the page the record names: ${link} vs ${record.url}`)
+    assert.equal(port, record.port, `the printed link is for the record's port: ${link} vs ${JSON.stringify(record)}`)
+    const ping = await requestJson(record.url, 'GET', '/api/ping')
+    assert.equal(ping.status, 200, `the record's server answers on the printed port: ${link}`)
+    assert.equal(ping.json.path, boardPath, `the page on the printed port serves this board: ${link}`)
     assert.equal(await statusOf(link), 200, `the printed link opens the page: ${link}`)
     assert.equal(await statusOf(link), 403, `the printed link opens it once: ${link}`)
     return record.url
@@ -146,7 +159,7 @@ const createBoardFixture = () => {
     for (let tries = 0; isAlive(pid) && tries < 50; tries++) await new Promise(done => setTimeout(done, 100))
     try { rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }) } catch {}
   }
-  return { dir, home, boardPath, served, writeCopy, serve, serveFailing, distinctPorts, urlOf, pingOf, boardPoll, end }
+  return { dir, home, boardPath, served, writeCopy, serve, serveFailing, distinctPorts, tokens, recordOf, linkOf, pageOf, pingOf, boardPoll, end }
 }
 
 test('two copies of the same release with different mtimes, preludes, and line endings reuse the running page (#1831)', { timeout: 60_000 }, async () => {
@@ -160,16 +173,26 @@ test('two copies of the same release with different mtimes, preludes, and line e
     const standaloneCopy = board.writeCopy('standalone-copy.mjs', { path: board.boardPath, lang: 'en', codexRoot: join(board.home, '.agent-board') }, BOARD_SCRIPT, t2, true)
     const rawCopy = board.writeCopy('raw-copy.mjs', null, BOARD_SCRIPT, t3)
 
-    const url1 = await board.urlOf(await board.serve(pluginCopy, ['--quiet-board']))
+    // The first command's link is read and left unredeemed: a reuse hands out a new link and the
+    // earlier one still opens the page, once.
+    const firstRun = await board.serve(pluginCopy, ['--quiet-board'])
+    const url1 = board.recordOf().url
     assert.ok(url1)
     urls.push(url1)
+    const first = board.linkOf(firstRun)
     const pid1 = JSON.parse(readFileSync(board.served, 'utf8')).pid
 
-    const url2 = await board.urlOf(await board.serve(standaloneCopy, ['--quiet-board']))
+    const secondRun = await board.serve(standaloneCopy, ['--quiet-board'])
+    const second = board.linkOf(secondRun)
+    const url2 = await board.pageOf(secondRun)
     assert.equal(url2, url1, 'standalone copy with different mtime/prelude/CRLF must reuse the plugin page')
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).pid, pid1)
+    assert.notEqual(second.link, first.link, 'a reuse prints a new one-use link')
+    assert.equal(second.port, first.port, 'a reuse prints a link on the same page')
+    assert.equal(await statusOf(first.link), 200, 'the first, unredeemed link still opens the page')
+    assert.equal(await statusOf(first.link), 403, 'and only once')
 
-    const url3 = await board.urlOf(await board.serve(rawCopy, ['--quiet-board', '--progress-file', board.boardPath]))
+    const url3 = await board.pageOf(await board.serve(rawCopy, ['--quiet-board', '--progress-file', board.boardPath]))
     assert.equal(url3, url1, 'raw copy without AGENT_BOARD prelude must reuse the same-release page')
     assert.equal(JSON.parse(readFileSync(board.served, 'utf8')).pid, pid1)
   } finally {
@@ -185,7 +208,7 @@ test('a copy with different script bytes and the same mtime replaces the running
     const copyA = board.writeCopy('release-a.mjs', { path: board.boardPath, lang: 'en' }, BOARD_SCRIPT, sameTime)
     const copyB = board.writeCopy('release-b.mjs', { path: board.boardPath, lang: 'en' }, `${BOARD_SCRIPT}\n// synthetic-next-release\n`, sameTime)
 
-    const first = await board.urlOf(await board.serve(copyA, ['--quiet-board']))
+    const first = await board.pageOf(await board.serve(copyA, ['--quiet-board']))
     assert.ok(first)
     urls.push(first)
 
@@ -193,7 +216,7 @@ test('a copy with different script bytes and the same mtime replaces the running
     assert.equal(initialPoll.status, 200)
     assert.ok(initialPoll.json.model)
 
-    const second = await board.urlOf(await board.serve(copyB, ['--quiet-board']))
+    const second = await board.pageOf(await board.serve(copyB, ['--quiet-board']))
     assert.ok(second)
     assert.notEqual(second, first, 'different script bytes must replace the running page even when mtimes match')
     urls.push(second)
@@ -213,22 +236,22 @@ test('same-release copies still replace the running page when launch options dif
     const copyA = board.writeCopy('copy-a.mjs', { path: board.boardPath, lang: 'en' }, BOARD_SCRIPT, new Date('2026-11-26T03:00:00Z'))
     const copyB = board.writeCopy('copy-b.mjs', { path: board.boardPath, lang: 'en', codexRoot: join(board.home, '.agent-board') }, BOARD_SCRIPT, new Date('2026-11-26T03:05:00Z'))
 
-    const url1 = await board.urlOf(await board.serve(copyA, ['--quiet-board']))
+    const url1 = await board.pageOf(await board.serve(copyA, ['--quiet-board']))
     assert.ok(url1)
     urls.push(url1)
     assert.equal((await board.pingOf(url1)).codexSend, true)
 
-    assert.equal(await board.urlOf(await board.serve(copyB, ['--quiet-board'])), url1)
+    assert.equal(await board.pageOf(await board.serve(copyB, ['--quiet-board'])), url1)
 
-    const url2 = await board.urlOf(await board.serve(copyB, ['--quiet-board', '--no-codex-send']))
+    const url2 = await board.pageOf(await board.serve(copyB, ['--quiet-board', '--no-codex-send']))
     assert.ok(url2)
     assert.notEqual(url2, url1)
     urls.push(url2)
     assert.equal((await board.pingOf(url2)).codexSend, false)
 
-    assert.equal(await board.urlOf(await board.serve(copyA, ['--quiet-board'])), url2, 'plain command from another copy keeps --no-codex-send page')
+    assert.equal(await board.pageOf(await board.serve(copyA, ['--quiet-board'])), url2, 'plain command from another copy keeps --no-codex-send page')
 
-    const url3 = await board.urlOf(await board.serve(copyA, ['--quiet-board', '--allow-resume']))
+    const url3 = await board.pageOf(await board.serve(copyA, ['--quiet-board', '--allow-resume']))
     assert.ok(url3)
     assert.notEqual(url3, url2)
     urls.push(url3)
@@ -248,14 +271,14 @@ test('an explicit --port replaces a running same-release page on another port ac
     const copyA = board.writeCopy('port-copy-a.mjs', { path: board.boardPath, lang: 'en' }, BOARD_SCRIPT, new Date('2026-11-26T04:00:00Z'))
     const copyB = board.writeCopy('port-copy-b.mjs', { path: board.boardPath, lang: 'en', codexRoot: join(board.home, '.agent-board') }, BOARD_SCRIPT, new Date('2026-11-26T04:05:00Z'))
 
-    const url1 = await board.urlOf(await board.serve(copyA, ['--quiet-board', '--port', String(port1)]))
+    const url1 = await board.pageOf(await board.serve(copyA, ['--quiet-board', '--port', String(port1)]))
     assert.ok(url1)
     assert.equal(Number(new URL(url1).port), port1)
     urls.push(url1)
 
-    assert.equal(await board.urlOf(await board.serve(copyB, ['--quiet-board', '--port', String(port1)])), url1, 'same explicit --port must reuse running page across copies')
+    assert.equal(await board.pageOf(await board.serve(copyB, ['--quiet-board', '--port', String(port1)])), url1, 'same explicit --port must reuse running page across copies')
 
-    const url2 = await board.urlOf(await board.serve(copyB, ['--quiet-board', '--port', String(port2)]))
+    const url2 = await board.pageOf(await board.serve(copyB, ['--quiet-board', '--port', String(port2)]))
     assert.ok(url2)
     assert.notEqual(url2, url1)
     assert.equal(Number(new URL(url2).port), port2, 'different explicit --port must replace running same-release page')
@@ -263,6 +286,7 @@ test('an explicit --port replaces a running same-release page on another port ac
 
     const bad = await board.serveFailing(copyA, ['--quiet-board', '--port', 'not-a-port'])
     assert.equal(bad.status, 1)
+    noAddress(bad, [...board.tokens])
     assert.equal((await board.pingOf(url2)).codexSend, true, 'invalid --port must fail without closing the running page')
   } finally {
     await board.end(urls)
@@ -277,20 +301,20 @@ test('a same-release copy with a changed baked language replaces the running pag
     const copyZhCn = board.writeCopy('lang-zh-cn.mjs', { path: board.boardPath, lang: 'zh-CN' }, BOARD_SCRIPT, new Date('2026-11-26T05:05:00Z'))
     const copyZhCn2 = board.writeCopy('lang-zh-cn-2.mjs', { path: board.boardPath, lang: 'zh-CN', codexRoot: join(board.home, '.agent-board') }, BOARD_SCRIPT, new Date('2026-11-26T05:10:00Z'))
 
-    const url1 = await board.urlOf(await board.serve(copyEn, ['--quiet-board']))
+    const url1 = await board.pageOf(await board.serve(copyEn, ['--quiet-board']))
     assert.ok(url1)
     urls.push(url1)
     assert.equal((await board.pingOf(url1)).lang, 'en')
 
-    const url2 = await board.urlOf(await board.serve(copyZhCn, ['--quiet-board']))
+    const url2 = await board.pageOf(await board.serve(copyZhCn, ['--quiet-board']))
     assert.ok(url2)
     assert.notEqual(url2, url1, 'changed baked language must replace running page')
     urls.push(url2)
     assert.equal((await board.pingOf(url2)).lang, 'zh-CN')
     assert.equal((await board.boardPoll(url2, 'tab-lang')).json.lang, 'zh-CN')
 
-    assert.equal(await board.urlOf(await board.serve(copyZhCn, ['--quiet-board', '--lang', 'en'])), url2, 'different --lang flag must keep reusing running page')
-    assert.equal(await board.urlOf(await board.serve(copyZhCn2, ['--quiet-board'])), url2, 'same effective language and different mtime/prelude must reuse running page')
+    assert.equal(await board.pageOf(await board.serve(copyZhCn, ['--quiet-board', '--lang', 'en'])), url2, 'different --lang flag must keep reusing running page')
+    assert.equal(await board.pageOf(await board.serve(copyZhCn2, ['--quiet-board'])), url2, 'same effective language and different mtime/prelude must reuse running page')
   } finally {
     await board.end(urls)
   }
@@ -305,17 +329,17 @@ test('a same-release copy with a different baked codexRoot replaces the running 
     const copyB = board.writeCopy('data-copy-b.mjs', { path: board.boardPath, lang: 'en', codexRoot: otherData }, BOARD_SCRIPT, new Date('2026-11-26T06:05:00Z'))
     const copyC = board.writeCopy('data-copy-c.mjs', { path: board.boardPath, lang: 'en', codexRoot: otherData }, BOARD_SCRIPT, new Date('2026-11-26T06:10:00Z'))
 
-    const url1 = await board.urlOf(await board.serve(copyA, ['--quiet-board']))
+    const url1 = await board.pageOf(await board.serve(copyA, ['--quiet-board']))
     assert.ok(url1)
     urls.push(url1)
 
-    const url2 = await board.urlOf(await board.serve(copyB, ['--quiet-board']))
+    const url2 = await board.pageOf(await board.serve(copyB, ['--quiet-board']))
     assert.ok(url2)
     assert.notEqual(url2, url1, 'different baked codexRoot must replace running page')
     urls.push(url2)
     assert.equal((await board.pingOf(url2)).dataDirectory, otherData)
 
-    assert.equal(await board.urlOf(await board.serve(copyC, ['--quiet-board'])), url2, 'matching baked codexRoot must reuse running page')
+    assert.equal(await board.pageOf(await board.serve(copyC, ['--quiet-board'])), url2, 'matching baked codexRoot must reuse running page')
   } finally {
     await board.end(urls)
   }
