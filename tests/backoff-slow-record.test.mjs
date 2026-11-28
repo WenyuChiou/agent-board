@@ -213,7 +213,7 @@ test('launcher waits for a slow 0-byte address record after claim backoff and re
       assert.equal(result.code, 0, result.stderr)
       // The reused server's one-use link is printed, never the page's token (#1650).
       assert.ok(result.stdout.includes(`http://127.0.0.1:${port}/open/slowrecordlink`), result.stdout)
-      assert.ok(!result.stdout.includes('slowrecordtoken'), result.stdout)
+      assert.ok(!`${result.stdout}${result.stderr}`.includes('slowrecordtoken'), `${result.stdout}${result.stderr}`)
       assert.ok(linkTokens.length >= 1 && linkTokens.every(token => token === 'slowrecordtoken'), JSON.stringify(linkTokens))
       assert.equal(posts.length, 1, JSON.stringify(posts))
       assert.equal(posts[0]?.version, manifest.version)
