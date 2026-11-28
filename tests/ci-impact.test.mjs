@@ -1562,3 +1562,58 @@ test('the planner writes the part matrices for the workflow only when it is give
     await rm(dir, { recursive: true, force: true })
   }
 })
+
+test('the time table keeps each file\'s slowest time in one Windows job, one part\'s share for a self-parted file (#1957)', async () => {
+  const { readJob, buildTable } = await import('../scripts/ci-test-times.mjs')
+  const parted = 'tests/board.test.mjs'
+  const plain = 'tests/approvals.test.mjs'
+  const read = text => readJob(text, { name: 'synthetic', partFiles: files => files, selfPartedTests: [parted], readSource: () => '' })
+  // Two jobs of the same part, as Node 22 and Node 24 run it: a serial run of a plain file and a self-parted file's share.
+  const fast = read(jobLog([plain, parted], { isSerial: true, lines: ['✔ a plain test (40ms)', 'ℹ duration_ms 50', '✔ one share test (100ms)', '✔ another share test (200ms)', 'ℹ duration_ms 310'] }))
+  const slow = read(jobLog([plain, parted], { isSerial: true, lines: ['✔ a plain test (70ms)', 'ℹ duration_ms 80', '✔ one share test (150ms)', '✔ another share test (250ms)', 'ℹ duration_ms 420'] }))
+  const table = JSON.parse(JSON.stringify(buildTable([fast, slow])))
+  // The scheduling times keep the faster job; the slowest times keep the slower one, the share with its file's start.
+  assert.equal(table.files[plain], 50)
+  assert.equal(table.files[parted], 300)
+  assert.deepEqual(table.slowest, { [parted]: 420, [plain]: 80 })
+})
+
+test('the budget rule check names a board file whose 70% line is under 1.3x its slowest time, and one with no time (#1957)', async () => {
+  const { checkBudgetRule, BOARD_FILE_BUDGETS_MS } = await import('../scripts/ci-impact.mjs')
+  const approvals = 'tests/approvals.test.mjs'
+  const line = BOARD_FILE_BUDGETS_MS[approvals] * 7 / 10
+  // At the line it passes; a millisecond over 1.3x fails. Files outside the board group are not judged.
+  assert.deepEqual(checkBudgetRule({ [approvals]: Math.floor(line / 1.3) }, [approvals, 'tests/messaging.test.mjs']), { ok: true, errors: [] })
+  const over = checkBudgetRule({ [approvals]: Math.floor(line / 1.3) + 1 }, [approvals])
+  assert.equal(over.ok, false)
+  assert.match(over.errors[0], /^tests\/approvals\.test\.mjs: slowest .* over the 70% line 63s of its 90s budget$/)
+  assert.deepEqual(checkBudgetRule({}, ['tests/tidy.test.mjs']).errors, ['tests/tidy.test.mjs: no slowest Windows time recorded'])
+})
+
+test('every board file\'s budget holds 1.3x its slowest recorded Windows time, by the rule of #1715 (#1957)', async () => {
+  const { checkBudgetRule } = await import('../scripts/ci-impact.mjs')
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  const table = JSON.parse(await readFile(join(root, 'tests', 'ci-test-times.json'), 'utf8'))
+  const files = (await readdir(join(root, 'tests'))).filter(name => name.endsWith('.test.mjs')).map(name => 'tests/' + name)
+  assert.ok(files.includes('tests/approvals.test.mjs'))
+  const result = checkBudgetRule(table.slowest, files)
+  const overOf = error => error.slice(0, error.indexOf(':'))
+  const over = result.errors.map(overOf)
+  // The files over their line when the check came in, each until the issue that finds what made it slower lands. The list
+  // only shrinks: a file back under its line fails here until it is taken out, and a file not listed fails when it is over.
+  const KNOWN_OVER = {
+    'tests/antigravity-wake.test.mjs': '#1957, no time recorded yet',
+    'tests/approvals.test.mjs': '#1957',
+    'tests/codex-fallback.test.mjs': '#1957',
+    'tests/merge-check.test.mjs': '#1957',
+    'tests/page-one-use-open.test.mjs': '#1957, no time recorded yet',
+    'tests/settings-agents.test.mjs': '#1957',
+    'tests/settings-symlink.test.mjs': '#1957',
+    'tests/setup-guidance.test.mjs': '#1957',
+    'tests/setup-sidecar.test.mjs': '#1957',
+    'tests/setup-terminal.test.mjs': '#1957',
+  }
+  const unlisted = result.errors.filter(error => !(overOf(error) in KNOWN_OVER))
+  assert.deepEqual(unlisted, [], 'refresh the slowest times with scripts/ci-test-times.mjs --slowest, then fix what made a file slower:\n' + unlisted.join('\n'))
+  assert.deepEqual(Object.keys(KNOWN_OVER).filter(path => !over.includes(path)), [], 'back under its line: take it out of KNOWN_OVER')
+})

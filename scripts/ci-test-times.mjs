@@ -12,7 +12,8 @@ import { codeTokens } from './ci-impact.mjs'
 // Node 22 and 24 both: the faster of an item's times is kept, so a slow runner does not inflate the table). Fetch a log
 // with `gh api repos/<owner>/<repo>/actions/jobs/<job id>/logs`. Refresh the table, in the pull request that does it, when
 // a pull request adds or removes many tests or a test file: from the logs of the newest main run, or of the pull request's
-// own run once it is green. `--deal-from <module>` names another copy of scripts/ci-impact.mjs to read the files of each
+// own run once it is green. `--slowest` keeps the table's times and writes only its slowest ones (#1957), from the logs of
+// one or more runs: the time budgets' check reads those, and the parts keep their dealing. `--deal-from <module>` names another copy of scripts/ci-impact.mjs to read the files of each
 // part from, for logs of a run that used the earlier dealing of files to parts.
 
 export const TABLE_PATH = join(dirname(dirname(fileURLToPath(import.meta.url))), 'tests', 'ci-test-times.json')
@@ -96,7 +97,7 @@ export const readJob = (text, { name, partFiles, selfPartedTests, readSource }) 
   const job = parseJob(text, name)
   const runs = parseRuns(text)
   // A Map and objects with no prototype, so a test named `constructor` or `__proto__` is counted and kept like any other.
-  const items = { files: Object.create(null), tests: Object.create(null) }
+  const items = { files: Object.create(null), tests: Object.create(null), slowest: Object.create(null) }
   const add = (title, ms, seen) => {
     seen.set(title, (seen.get(title) ?? 0) + 1)
     return { key: seen.get(title) === 1 ? title : title + ' #' + seen.get(title), ms }
@@ -106,13 +107,14 @@ export const readJob = (text, { name, partFiles, selfPartedTests, readSource }) 
     if (runs.length !== filesOfRun.length) throw new Error(name + ': ' + runs.length + ' test runs in the log, ' + filesOfRun.length + ' files in the part ' + job.part)
     filesOfRun.forEach((file, i) => {
       const run = runs[i]
-      if (!selfPartedTests.includes(file)) { items.files[file] = run.wallMs ?? run.totalMs; return }
+      if (!selfPartedTests.includes(file)) { items.files[file] = items.slowest[file] = run.wallMs ?? run.totalMs; return }
       const seen = new Map()
       items.tests[file] = Object.create(null)
       for (const test of run.tests) {
         const { key, ms } = add(test.title, test.ms, seen)
         if (!test.isSkipped) items.tests[file][key] = ms
       }
+      items.slowest[file] = run.wallMs ?? run.totalMs
     })
     return items
   }
@@ -128,16 +130,21 @@ export const readJob = (text, { name, partFiles, selfPartedTests, readSource }) 
     const { key, ms } = add(test.title, test.ms, seenOf.get(file))
     if (!test.isSkipped) items.tests[file][key] = ms
   }
+  for (const [file, own] of Object.entries(items.tests)) items.slowest[file] = Object.values(own).reduce((sum, ms) => sum + ms, 0)
   return items
 }
 
 const sorted = object => Object.fromEntries(Object.keys(object).sort().map(key => [key, object[key]]))
 
 // The table of the smallest time of every item over the jobs. A self-parted file's total is the sum of its tests.
+// `slowest` is the other end, for the time budgets (#1957): each file's largest time in one job over the jobs, which for a
+// self-parted file is one part's share (its tests in that job, with the file's start when the job ran it on its own).
 export const buildTable = jobItems => {
   const files = Object.create(null)
   const tests = Object.create(null)
+  const slowest = Object.create(null)
   for (const items of jobItems) {
+    for (const [file, ms] of Object.entries(items.slowest ?? {})) slowest[file] = Math.max(slowest[file] ?? 0, ms)
     for (const [file, ms] of Object.entries(items.files)) files[file] = Math.min(files[file] ?? Infinity, ms)
     for (const [file, own] of Object.entries(items.tests)) for (const [key, ms] of Object.entries(own)) {
       tests[file] ??= Object.create(null)
@@ -148,18 +155,22 @@ export const buildTable = jobItems => {
     tests[file] = sorted(Object.fromEntries(Object.entries(tests[file]).map(([key, ms]) => [key, Math.round(ms)])))
     files[file] = Object.values(tests[file]).reduce((sum, ms) => sum + ms, 0)
   }
-  return { version: 1, files: sorted(Object.fromEntries(Object.entries(files).map(([file, ms]) => [file, Math.round(ms)]))), tests: sorted(tests) }
+  const rounded = object => sorted(Object.fromEntries(Object.entries(object).map(([file, ms]) => [file, Math.round(ms)])))
+  return { version: 1, files: rounded(files), tests: sorted(tests), slowest: rounded(slowest) }
 }
 
 const main = async () => {
   const args = process.argv.slice(2)
+  const isSlowestOnly = args.includes('--slowest')
+  if (isSlowestOnly) args.splice(args.indexOf('--slowest'), 1)
   const at = args.indexOf('--deal-from')
   const dealFrom = at === -1 ? join(dirname(fileURLToPath(import.meta.url)), 'ci-impact.mjs') : resolve(args.splice(at, 2)[1])
-  if (!args.length) throw new Error('usage: node scripts/ci-test-times.mjs [--deal-from <ci-impact.mjs>] <job log>...')
+  if (!args.length) throw new Error('usage: node scripts/ci-test-times.mjs [--slowest] [--deal-from <ci-impact.mjs>] <job log>...')
   const { partFiles, selfPartedTests } = await import(pathToFileURL(dealFrom).href)
   const root = dirname(dirname(fileURLToPath(import.meta.url)))
   const readSource = file => readFileSync(join(root, file), 'utf8')
-  const table = buildTable(args.map(path => readJob(readFileSync(path, 'utf8'), { name: path, partFiles, selfPartedTests, readSource })))
+  const built = buildTable(args.map(path => readJob(readFileSync(path, 'utf8'), { name: path, partFiles, selfPartedTests, readSource })))
+  const table = isSlowestOnly ? { ...JSON.parse(readFileSync(TABLE_PATH, 'utf8')), slowest: built.slowest } : built
   writeFileSync(TABLE_PATH, JSON.stringify(table, null, 2) + '\n')
   const count = Object.values(table.tests).reduce((sum, own) => sum + Object.keys(own).length, 0)
   console.log('wrote ' + TABLE_PATH + ': ' + Object.keys(table.files).length + ' files, ' + count + ' tests of ' + Object.keys(table.tests).length + ' self-parted files, from ' + args.length + ' logs')
