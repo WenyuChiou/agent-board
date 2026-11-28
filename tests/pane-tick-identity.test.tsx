@@ -16,6 +16,8 @@ type Case = {
   changeOnRetry?: (text: string) => string
   // What another writer, working from the file it read before the press, writes right after the tick lands.
   changeAfterWrite?: (drawn: string) => string
+  // The other writer works from the file with the tick in it, not from the drawn file.
+  keepTick?: boolean
   lang?: 'en'
 }
 
@@ -57,7 +59,7 @@ const pressAfter = async ($: Engine, on: On, one: Case): Promise<{ world: World;
   }
   if (one.changeAfterWrite !== undefined) {
     const stale = one.changeAfterWrite(world.files.get(FILE) ?? '')
-    world.afterWrite = () => stale
+    world.afterWrite = one.keepTick === true ? () => one.changeAfterWrite!(world.files.get(FILE) ?? '') : () => stale
   }
   await ui.press({ key: key! })
   world.afterRead = undefined
@@ -113,6 +115,15 @@ test('a retried pane tick that reads a newer file refuses instead of ticking the
 test('a pane tick written over by a stale snapshot that moved its identical sibling reports the tick gone and journals nothing', async ($, on) => {
   const { world, ui, key } = await pressAfter($, on, { before: TWIN_STEPS, open: CHECKLIST, press: CHECKLIST_TICK, changeAfterWrite: removeEarlier })
   await expectRefused(world, ui, key, removeEarlier(TWIN_STEPS), 'Same step')
+  await ui.unmount()
+})
+
+test('a pane tick still counts when a stale snapshot that kept every line in place changed text above it', async ($, on) => {
+  const edited = (text: string): string => text.replace('- [ ] Earlier line\n', '- [ ] Earlier line, reworded\n')
+  const { world, ui } = await pressAfter($, on, { before: TWIN_STEPS, open: CHECKLIST, press: CHECKLIST_TICK, changeAfterWrite: edited, keepTick: true })
+  expect(world.files.get(FILE)).toMatch(/^## Demo\n### Other\n- \[ \] Earlier line, reworded\n### Checklist\n- \[x\] Same step[^\n]*\n- \[ \] Same step\n$/)
+  expect(journalOf(world).split(' · Same step\n')).toHaveLength(2)
+  expect(await ui.find({ type: 'Text', text: ZH_TW.boardTicked('Same step') })).toBeDefined()
   await ui.unmount()
 })
 
