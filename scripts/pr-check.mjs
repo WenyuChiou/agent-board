@@ -777,10 +777,10 @@ export const binaryImages = paths => {
 // `by codex (read-only, started new for this review), lane x` (RULES R2). A name that carries a parenthesis of its own,
 // `by sonnet (desktop) (read-only, started new for this review)`, is read through each parenthesis that follows it
 // (#1974). Only that whole note counts, so a line that says "not started new for this review", or says it anywhere
-// else, is not one.
+// else, is not one; nor does a parenthesis that does not close before another opens.
 const isFreshLine = line => {
-  const groups = line.match(/[ \t]by[ \t]+[^\r\n(,]*((?:\([^)\r\n]*\)[ \t]*)+)/i)?.[1] ?? ''
-  return [...groups.matchAll(/\(([^)]*)\)/g)].some(([, notes]) => notes.split(',').some(note => note.trim().toLowerCase() === 'started new for this review'))
+  const groups = line.match(/[ \t]by[ \t]+[^\r\n(,]*((?:\([^()\r\n]*\)[ \t]*)+)/i)?.[1] ?? ''
+  return [...groups.matchAll(/\(([^()]*)\)/g)].some(([, notes]) => notes.split(',').some(note => note.trim().toLowerCase() === 'started new for this review'))
 }
 
 // On every named tier a reviewer the author's lane started new for this review may approve, whatever its name; on the
