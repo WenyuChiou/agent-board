@@ -1104,7 +1104,7 @@ const PAGE_WORDS = [
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
   'archiveNow', 'cleanUp', 'boardLarge', 'stoppedCount',
   'tidyBulk', 'tidyStopped', 'tidyAgent', 'tidyOlder', 'tidyValue', 'tidyPreviewButton', 'tidyConfirmButton', 'tidyCancelButton', 'tidyCancelled', 'tidyExpired', 'tidyInvalid', 'tidyNeedsTerminal', 'tidyConfirmPrompt', 'tidyConfirmKey', 'tidyPreviewCount', 'tidyResult', 'tidyPartial',
-  'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveSessionLost', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveCopyResume', 'serveCopyCommand',
+  'serveClosed', 'serveMoved', 'serveClose', 'serveOffline', 'serveSessionLost', 'serveTickNext', 'serveArchive', 'confirmDone', 'serveUndo', 'serveCopyResume', 'serveCopyCommand',
   'serveOpenLink', 'serveMore', 'serveReplyPlaceholder', 'serveMessagePlaceholder', 'serveSend', 'serveSending',
   'copied', 'pressDone', 'pressFailed', 'pressTimedOut', 'pressEmpty', 'pressPending', 'boardCopyFailedBelow',
   'pgNeeds', 'pgAgents', 'pgDone', 'pgTabTitle', 'pgWorking', 'pgNoWorking', 'pgQuietAsking', 'pgQuietStopped', 'pgNothing', 'pgNothingHint',
@@ -1815,6 +1815,7 @@ const PAGE_SCRIPT = String.raw`
   // The hidden-list key of each hide press still waiting for its answer (#1830).
   var hideWaiting = {};
   var ACT_WAIT_MS = 10000;
+  var UNDO_MS = 8000, undoTimer = 0, undoKey = '', pressSeq = 0;
   // The last message sent from each card or row, so a failed one can go again or be copied.
   var sentLast = {};
   // The board's answer to a card's last press, its status line and tone, until the board's next read brings the receipt (#1843, B4).
@@ -1842,7 +1843,7 @@ const PAGE_SCRIPT = String.raw`
     var previous = results[key];
     // A result whose card was gone for a whole update belongs to the showing that went
     // away: when the card comes back, its line is drawn fresh, without the old notice (#815).
-    if (previous && previous.orphaned && !previous.pending) delete results[key];
+    if (previous && previous.orphaned && !previous.pending && !previous.canUndo) delete results[key];
     else if (previous && previous.awaitingRefresh) { previous.revision = revision; previous.awaitingRefresh = false; }
     else if (previous && !previous.pending && previous.tone !== 'alert' && previous.revision && revision && previous.revision !== revision) delete results[key];
     var slot = el('div', 'press-result');
@@ -1877,14 +1878,53 @@ const PAGE_SCRIPT = String.raw`
       }
     }
   }
+  function isSlotHidden(node) {
+    if (!node) return true;
+    for (var cur = node; cur; cur = cur.parentNode) {
+      if (cur === document.body) return false;
+      if (cur.hidden || cur.inert || hasClass(cur, 'gone')) return true;
+    }
+    return true;
+  }
+  function clearUndoOffer() { clearTimeout(undoTimer); undoTimer = 0; undoKey = ''; }
+  function expireUndo() {
+    if (!undoKey) return;
+    if (isHeld()) { undoTimer = setTimeout(expireUndo, 200); return; }
+    var key = undoKey;
+    clearUndoOffer();
+    if (results[key] && results[key].canUndo) {
+      results[key].canUndo = false;
+      if (resultSlots[key]) paintResult(key);
+      keepCopyFocus(drawLostResults);
+    }
+  }
+  function undoAction(targetKey, label, token, go) {
+    if (isUnreachable) return;
+    busyOn(go);
+    if (targetKey && label && !results[targetKey]) results[targetKey] = { label: label };
+    say(w('pressPending'), 'wait', targetKey);
+    call('/api/undo', { token: token }).then(function (data) {
+      var ok = !!(data && data.ok);
+      var retry = !ok && data && data.retryUndo && token;
+      say(data && data.note || w(ok ? 'pressDone' : 'pressFailed'), ok ? 'done' : 'alert', targetKey, undefined, undefined, undefined, retry ? targetKey : undefined, retry ? token : undefined);
+      busyOff(go, ok);
+      refresh();
+    }, function () {
+      say(w('serveOffline'), 'alert', targetKey); busyOff(go, false); unreachable(); refresh();
+    });
+  }
   function restoreNotice(node, result) {
-    if (typeof result.unhideKey !== 'string' || result.unhideKey.indexOf('hidden:') !== 0) return;
-    add(node, add(el('div', 'acts'), button(w('showAgain'), function () { act(result.unhideKey, 'unhide'); })));
+    var acts = el('div', 'acts');
+    if (result.canUndo) { var undoBtn = button(w('serveUndo'), function () { undoAction(result.undoTargetKey || '', result.label || '', result.undoToken || '', undoBtn); }); acts.appendChild(undoBtn); }
+    if (typeof result.unhideKey === 'string' && result.unhideKey.indexOf('hidden:') === 0) acts.appendChild(button(w('showAgain'), function () { act(result.unhideKey, 'unhide'); }));
+    if (acts.firstChild) add(node, acts);
   }
   function hideQuestion(key, unhideKey) {
     return act(key, 'hide', '', '', '', '', '', null, undefined, unhideKey);
   }
   function beginPress() {
+    pressSeq += 1;
+    clearUndoOffer();
     resetTidy(false);
     note.textContent = '';
     note.className = '';
@@ -1899,13 +1939,16 @@ const PAGE_SCRIPT = String.raw`
   }
   // unhideKey: a written hide's Show again. It is part of the result before the first paint, because a card the
   // board already drew away paints the result once, as a lost card, and never again (#1786).
-  function say(text, tone, key, copyText, canRetry, unhideKey) {
+  function say(text, tone, key, copyText, canRetry, unhideKey, undoTargetKey, undoToken) {
     if (key) {
       var slot = resultSlots[key];
       var previous = results[key];
-      results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, canRetry: canRetry === true, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '', unhideKey: unhideKey };
+      var canUndo = typeof undoTargetKey === 'string' && undoTargetKey !== '' && typeof undoToken === 'string' && undoToken !== '';
+      if (canUndo) { undoKey = key; clearTimeout(undoTimer); undoTimer = setTimeout(expireUndo, UNDO_MS); }
+      else if (undoKey === key) clearUndoOffer();
+      results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, canRetry: canRetry === true, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '', unhideKey: unhideKey, canUndo: canUndo, undoTargetKey: undoTargetKey || '', undoToken: undoToken || '' };
       paintResult(key);
-      if (!slot) keepCopyFocus(drawLostResults);
+      if (!slot || (canUndo && isSlotHidden(slot.node))) keepCopyFocus(drawLostResults);
       return;
     }
     note.textContent = text || '';
@@ -2140,6 +2183,7 @@ const PAGE_SCRIPT = String.raw`
   // that sent it. A failed send keeps the message for Send again and Copy message.
   function act(key, type, text, waiting, session, asked, fp, go, line, unhideKey) {
     if (isUnreachable) return Promise.resolve();
+    var myPress = pressSeq;
     busyOn(go);
     say(waiting || w('pressPending'), 'wait', key);
     // A hide the board wrote may be drawn away before its answer comes: that draw settles it (#1830).
@@ -2158,7 +2202,8 @@ const PAGE_SCRIPT = String.raw`
       answered = true;
       clearTimeout(waitTimer);
       delete hideWaiting[key];
-      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok, data.ok && type === 'hide' && unhideKey ? unhideKey : undefined);
+      var offerUndo = myPress === pressSeq && data.ok && data.canUndo && (type === 'archive' || type === 'done') && data.undoToken;
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok, data.ok && type === 'hide' && unhideKey ? unhideKey : undefined, offerUndo ? key : undefined, offerUndo ? data.undoToken : undefined);
       busyOff(go, data.ok);
       return data.ok;
     }, function () {
@@ -2528,7 +2573,7 @@ const PAGE_SCRIPT = String.raw`
     if (prevKey) delete opened['card:' + prevKey];
     if (railTransferredKey) { delete opened[railTransferredKey]; railTransferredKey = ''; }
     if (pg.model) draw(pg.model);
-    else renderDetailRail();
+    else { renderDetailRail(); keepCopyFocus(drawLostResults); }
     var restored = prevKey && railItems[prevKey];
     if (restoreFocus && wasInRail && restored && restored.trigger && typeof restored.trigger.focus === 'function') {
       restored.trigger.focus({ preventScroll: true });
@@ -2557,7 +2602,7 @@ const PAGE_SCRIPT = String.raw`
     railTriggerKind = triggerKind || '';
     selectedKey = key;
     if (pg.model) draw(pg.model);
-    else renderDetailRail();
+    else { renderDetailRail(); keepCopyFocus(drawLostResults); }
     if (focusRail) {
       var closeBtn = document.getElementById('detail-close');
       if (closeBtn && typeof closeBtn.focus === 'function') closeBtn.focus({ preventScroll: true });
@@ -4928,12 +4973,12 @@ const PAGE_SCRIPT = String.raw`
       delete hideWaiting[key];
       if (!resultSlots[key] && results[key] && (results[key].pending || results[key].text === w('pressTimedOut'))) delete results[key];
     });
+    if (selectedKey && !railItems[selectedKey]) selectedKey = '';
+    renderDetailRail();
     drawLostResults();
     // A result with no slot in this update was drawn apart from its card, if at all. It
     // stays for this update, and is dropped when a slot for its card is drawn again.
-    Object.keys(results).forEach(function (key) { if (!resultSlots[key]) results[key].orphaned = true; });
-    if (selectedKey && !railItems[selectedKey]) selectedKey = '';
-    renderDetailRail();
+    Object.keys(results).forEach(function (key) { if (!resultSlots[key] || isSlotHidden(resultSlots[key].node)) results[key].orphaned = true; });
     if (railFocus && selectedKey && isWideDetail() && detailRailEl) {
       var nextRailTarget = railFocus.id ? document.getElementById(railFocus.id) : null;
       if (!nextRailTarget && !railFocus.id) {
@@ -4984,8 +5029,8 @@ const PAGE_SCRIPT = String.raw`
     lostResults.forEach(function (card) { card.remove(); });
     lostResults = [];
     Object.keys(results).reverse().forEach(function (key) {
-      if (resultSlots[key]) return;
       var result = results[key];
+      if (resultSlots[key] && !(result && result.canUndo && isSlotHidden(resultSlots[key].node))) return;
       if (!result.pending && result.tone !== 'alert' && result.tone !== 'done') { delete results[key]; return; }
       var card = add(el('article', 'lost'), el('div', 'where', result.label));
       var slot = el('div', 'press-result');

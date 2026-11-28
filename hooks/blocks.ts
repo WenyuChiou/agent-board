@@ -492,7 +492,7 @@ export const isArchivable = (span: BlockSpan, now: number, isNow = false): boole
   return age > STOPPED_ARCHIVE_MS
 }
 
-export type Archived = { text: string; entries: string[] }
+export type Archived = { text: string; entries: string[]; span?: BlockSpan }
 
 export type ConfirmRef = TaskRef & { expected: string }
 
@@ -516,7 +516,17 @@ export const confirmedTarget = (text: string, ref: ConfirmRef, s: Strings): Prog
 
 export const confirmMatches = (text: string, ref: ConfirmRef, s: Strings = ZH_TW): boolean => confirmedTarget(text, ref, s) !== null
 
-export type ConfirmedTask = { text: string; ref: ConfirmRef; entries: Array<Omit<JournalEntry, 'at'>>; auto: ProgressTask['auto'] }
+export type ConfirmedTask = { text: string; ref: ConfirmRef; entries: Array<Omit<JournalEntry, 'at'>>; auto: ProgressTask['auto']; span: { start: number; end: number } }
+
+export const manualTaskLast = (lines: readonly string[], seen: readonly string[], at: number): number => {
+  let end = at
+  for (let index = at + 1; index < lines.length; index += 1) {
+    const line = seen[index] ?? ''
+    if (PROJECT.test(line) || TASK.test(line) || AUTO_START.test(line)) break
+    if ((lines[index] ?? '').trim() !== '') end = index
+  }
+  return end
+}
 
 // A person's completion changes only the exact task drawn, and only after its agent
 // stopped. Recheck here, inside each caller's read/change/write retry.
@@ -562,7 +572,8 @@ export const confirmTask = (text: string, ref: ConfirmRef, now: number, s: Strin
   const changed = parseProgress(after).flatMap(project => project.tasks).find(one => one.line === task.line)
   if (changed === undefined || changed.steps.some(step => step.status !== 'done' && step.status !== 'cancelled')) return null
   const twins = parseProgress(after).filter(project => (project.name || s.uncategorized) === ref.project).flatMap(project => project.tasks).filter(one => one.title === ref.title).length
-  return { text: after, ref: { ...ref, expected: confirmKey(ref.project, changed, twins) }, auto: task.auto, entries: open.map(step => ({ project: ref.project, task: ref.title, step: step.text })) }
+  const end = span !== undefined ? span.end : manualTaskLast(lines, seenOf(lines), task.line)
+  return { text: after, ref: { ...ref, expected: confirmKey(ref.project, changed, twins) }, auto: task.auto, entries: open.map(step => ({ project: ref.project, task: ref.title, step: step.text })), span: { start: span?.start ?? task.line, end } }
 }
 
 // The block still asks something of the person: a visible `[?]` step.
@@ -738,7 +749,7 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       if (auto === null || !stopped) return null
     }
 
-    return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }
+    return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')], span }
   }
   const isHeading = (line: string | undefined): boolean => TASK.exec(line ?? '')?.[1] === ref.title
   let at = isHeading(seen[ref.line]) ? ref.line : -1
@@ -747,17 +758,12 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
     if (same.length === 1) at = same[0] ?? -1
   }
   if (at < 0 || spans.some(span => at >= span.start && at <= span.end)) return null
-  let end = at
-  for (let index = at + 1; index < lines.length; index += 1) {
-    const line = seen[index] ?? ''
-    if (PROJECT.test(line) || TASK.test(line) || AUTO_START.test(line)) break
-    if ((lines[index] ?? '').trim() !== '') end = index
-  }
-  const last = end
+  const last = manualTaskLast(lines, seen, at)
+  let end = last
   while (end + 1 < lines.length && lines[end + 1]?.trim() === '') end += 1
   const span: BlockSpan = { session: '', state: 'done', updated: now, project: ref.project, start: at, end, isClosed: true }
 
-  return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(at, last + 1)].join('\n')] }
+  return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(at, last + 1)].join('\n')], span: { ...span, end: last } }
 }
 
 // A quick add from the pane: a hand-kept task at the end of its project's section (made

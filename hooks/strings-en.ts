@@ -679,6 +679,11 @@ export const EN: Strings = {
     ? `Archived “${title}”. Its unanswered question stays under Older unanswered questions; hide it there once it is answered.`
     : `Archived “${title}”. Its ${count} unanswered questions stay under Older unanswered questions; hide them there once they are answered.`,
   archiveGone: 'Could not find that task; it may have changed or been archived already.',
+  serveUndo: 'Undo',
+  undoneOne: (title: string): string => `Restored “${title}”.`,
+  undoChanged: 'Could not undo: that task changed since your press.',
+  undoGone: 'Could not undo: that task is no longer on the board.',
+  undoNothing: 'Nothing to undo.',
   journalNoticeTitle: 'Step history not saved',
   journalFailed: 'The steps are done, but their history was not saved. We’ll try again the next time a step finishes or when you send your next message.',
   askPlaceholder: 'Ask something; start with + to add a task',
