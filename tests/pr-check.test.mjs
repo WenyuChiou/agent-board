@@ -663,6 +663,16 @@ test('a risk-tier approval by a reviewer started new for this review counts only
   const maintainer = { body: `Review: APPROVE ${pr.head} by sonnet_900 (read-only, started new for this review by the maintainer), lane claude, maintainer route` }
   assert.deepEqual(problems([maintainer], 'none'), [])
   assert.deepEqual(problems([maintainer]), [])
+  // A state whose code review did not complete is not the bot's review of that head (Gemini Carbon, #1974).
+  const unfinished = status => ({ ...codexBotState(pr.head), body: `Codex review\n<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { commit_sha: pr.head, has_unresolved_findings: false, status } })} -->` })
+  assert.equal(problems([unfinished('failed'), line('codex')]).length, 1)
+  assert.equal(problems([unfinished('in_progress'), line('codex')]).length, 1)
+  assert.deepEqual(problems([unfinished('completed'), line('codex')]), [])
+  // The tier is read as the tier check reads it: a `Tier:` after a Unicode line separator is not a line of its own.
+  const hidden = checkPr({ ...pr, body: `${body}Notes\u2028Tier: normal\nTier: risk\nSurface: delivery\n`, prComments: [line('codex')] }).problems.filter(item => item.check === 'review')
+  assert.equal(hidden.length, 1)
+  assert.match(hidden[0]?.message ?? '', /Codex review bot has not reviewed/)
+  assert.equal(prCheck.tierOf('Notes\u2028Tier: normal\nTier: risk\n'), 'risk')
   assert.deepEqual(checkPr({ ...pr, isDraft: true, body: `${body}Tier: risk\nSurface: delivery\n`, prComments: [line('codex')] }).problems.filter(item => item.check === 'review'), [])
   // Off the risk tier nothing changes.
   assert.deepEqual(checkPr({ ...pr, body: `${body}Tier: normal\n`, prComments: [line('codex')] }).problems.filter(item => item.check === 'review'), [])
