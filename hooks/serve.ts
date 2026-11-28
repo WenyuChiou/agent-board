@@ -1098,7 +1098,7 @@ export const requestProblem = (request: PageRequest, hosts: readonly string[], t
 // The words the page's script fills in itself, each with its blanks as \u0001 and \u0002.
 const PAGE_WORDS = [
   'importNoBlock', 'pasteReview',
-  'claudeSendWorking', 'messageTakeBack', 'messageDismiss',
+  'claudeSendWorking', 'messageTakeBack', 'messageDismiss', 'boardQueuedCount',
   'serveLineStepEnd', 'serveReopenRunning', 'serveReopenWaitingCodexApp', 'serveQueueNextTurn', 'serveQueuingNextTurn', 'serveQueuedNextTurn', 'serveQueueNextOpen', 'serveQueuingNextOpen', 'serveQueuedNextOpen', 'pressFailed', 'messagesQueued', 'messagesFailed', 'statusSending', 'statusRetrying', 'statusUnreachable',
   'sessionsTitle', 'sessionsWaiting', 'sessionsTimedOut',
   'questionReviewOnly', 'hiddenCount', 'showAgain', 'answeredHide', 'answeredWaiting', 'rowUnsure', 'windowMayBeClosed',
@@ -1819,6 +1819,8 @@ const PAGE_SCRIPT = String.raw`
   var sentLast = {};
   // The board's answer to a card's last press, its status line and tone, until the board's next read brings the receipt (#1843, B4).
   var pressNotes = {};
+  // The id of the message each card sent last, so its card can tell that message's receipt from an earlier one (#1579).
+  var sentIds = {};
   var agentPresence = {};
   var resultSlots = {};
   var lostResults = [];
@@ -2264,7 +2266,10 @@ const PAGE_SCRIPT = String.raw`
               : w('messagesQueued');
       var noteText = data.note && !(data.ok && line === 'nextTurn' && data.note === w('messagesQueued')) ? data.note : fallback;
       say(noteText, tone, key, undefined, !data.ok);
-      if (data.ok) pressNotes[key] = { text: noteText, tone: tone };
+      if (data.ok) {
+        pressNotes[key] = { text: noteText, tone: tone };
+        sentIds[key] = attempt.id;
+      }
       if (data.ok && results[key]) {
         results[key].messageId = attempt.id;
         clearEnqueueResult(key, pg.sources[key] && pg.sources[key].receipt);
@@ -2273,8 +2278,9 @@ const PAGE_SCRIPT = String.raw`
       return data.ok;
     }, function () {
       // No answer in 30 s, but a read of the board drew this message's receipt: the board has it and answers, so the
-      // press went in and the page stays online.
-      if (isReceiptShown(key, attempt.id)) { busyOff(go, false); return true; }
+      // press went in and the page stays online. The receipt is this message's, so remember its id: the card's reset
+      // matches it once the receipt is acknowledged, the same as the POST-reply path (#1579).
+      if (isReceiptShown(key, attempt.id)) { sentIds[key] = attempt.id; busyOff(go, false); return true; }
       // No answer in 30 s: the board cannot be reached, the words stay in the box, and the board may still have stored
       // the message, so its receipt replaces this line once the board answers again (owner, #1843 B4).
       say(w('statusUnreachable'), 'alert', key, undefined, true);
@@ -3163,6 +3169,12 @@ const PAGE_SCRIPT = String.raw`
     }
     add(body, parts.after);
     if (ask.receipt && (ask.receipt.error === 'DISMISSED' || ask.receipt.isSurfaceLost === true || !isClaudeAgent(ask.agent) && (ask.receipt.status === 'rejected' || isEndedUncertainReceipt(ask.receipt))) && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) delete cardState[key];
+    // The message this card sent was taken and its turn is over, yet the question is still open and the board counts
+    // it as waiting again (#1334, #1296): the card offers its answers again rather than Already answered, hide (#1579).
+    if (ask.receipt && ask.receipt.status === 'acknowledged' && ask.receipt.id === sentIds[key] && !isSent(ref) && cardState[key] && (cardState[key].mode === 'sent' || cardState[key].mode === 'queued')) {
+      delete cardState[key];
+      delete pressNotes[key];
+    }
     var receiptEl = ask.receipt ? receiptLine(ask.receipt, key, ask.agent, !!ask.delivery) : null;
     if (receiptEl) {
       parts.hasReceipt = true;
@@ -3901,6 +3913,11 @@ const PAGE_SCRIPT = String.raw`
     });
     setText(pg.nodes.needsCount, count.cards);
     if (pg.nodes.needsCount) pg.nodes.needsFlag.setAttribute('data-needs-count', String(count.cards));
+    if (pg.nodes.needsOnWay) {
+      var onWay = count.shown - count.cards;
+      setText(pg.nodes.needsOnWay, onWay > 0 ? w('boardQueuedCount', onWay) : '');
+      pg.nodes.needsOnWay.hidden = onWay <= 0;
+    }
     var isFiltered = hasActiveFilters();
     // A filter that hides every question must not read as "nothing needs you" while some wait elsewhere (#1144).
     var scope = pg.filters.agents.length
@@ -4268,8 +4285,14 @@ const PAGE_SCRIPT = String.raw`
     var flag = el('h2', 'flag', w('pgNeeds'));
     var total = el('b', '', String(Math.max(0, view.needs.n - pg.sentTotal)));
     add(flag, total);
+    // A question whose answer is on its way leaves the count (#1296); the heading says how many, in the status line's
+    // words, so a 0 does not read as the question gone (#1579).
+    var onWay = el('span', 'count', pg.sentTotal ? w('boardQueuedCount', pg.sentTotal) : '');
+    onWay.hidden = !pg.sentTotal;
+    add(flag, onWay);
     flag.setAttribute('data-needs-count', String(Math.max(0, view.needs.n - pg.sentTotal)));
     pg.nodes.needsCount = total;
+    pg.nodes.needsOnWay = onWay;
     pg.nodes.needsFlag = flag;
     var sheet = el('div', 'sheet');
     var list = el('ul', 'cards');

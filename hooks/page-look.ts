@@ -299,6 +299,7 @@ export const sheetCss = `
 .sheet-tab h2{margin:0}
 .flag{display:inline-flex;align-items:center;justify-content:center;min-height:36px;padding:0 var(--s4) 0 var(--s3);background:var(--waiting-fill);color:var(--waiting-on);font-size:var(--text-lg);font-weight:600;line-height:1.4;font-variant-numeric:tabular-nums;clip-path:polygon(0 0,100% 0,calc(100% - 8px) 50%,100% 100%,0 100%);border-radius:var(--radius-s) 0 0 0}
 .flag b{font-weight:600;margin-left:var(--s2)}
+.flag .count{font-size:var(--text-xs);font-weight:400;margin-left:var(--s2)}
 .sheet{background:var(--surface);border:1px solid var(--line-strong);border-radius:0 var(--radius-m) var(--radius-m) var(--radius-m)}
 `
 
