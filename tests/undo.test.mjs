@@ -170,6 +170,19 @@ test('Undo after Confirm done puts the block back as it was', { timeout: 30_000 
     assert.equal(undone.status, 200, undone.body)
     assert.equal(readFileSync(uncat.path, 'utf8'), beforeUncat)
   } finally { await uncat.close() }
+
+  // Regression Greptile #2: manual task inside second repeated ## alpha section restores via Confirm done + Undo.
+  const dupSec = await startBoard(`# Progress\n\n## alpha\n### Alpha first\n- [ ] Keep\n\n## alpha\n### Alpha second\n- [x] Step 1\n- [ ] Open second\n`)
+  try {
+    const beforeDup = readFileSync(dupSec.path, 'utf8')
+    const row = await dupSec.rowOf('Alpha second')
+    assert.ok(row && row.canConfirm)
+    const pDup = await dupSec.call('POST', '/api/act', { key: row.key, type: 'done', fp: row.fp })
+    assert.equal(pDup.status, 200)
+    const uDup = await dupSec.call('POST', '/api/undo', { token: pDup.json().undoToken })
+    assert.equal(uDup.status, 200, uDup.body)
+    assert.equal(readFileSync(dupSec.path, 'utf8'), beforeDup)
+  } finally { await dupSec.close() }
 })
 
 test('Undo after Archive puts the task back and removes its archive entry', { timeout: 30_000 }, async () => {
@@ -221,6 +234,36 @@ test('Undo after Archive puts the task back and removes its archive entry', { ti
     const afterSolo = readFileSync(soloOrder.path, 'utf8')
     assert.ok(afterSolo.indexOf('## alpha') >= 0 && afterSolo.indexOf('## alpha') < afterSolo.indexOf('## beta'), afterSolo)
   } finally { await soloOrder.close() }
+
+  // Regression Greptile #1: archiving one of two blocks sharing a session still allows Undo.
+  const shared = await startBoard(
+    `# Progress\n\n## alpha\n<!-- auto session=55aa66bb agent=claude state=working updated=${RECENT} -->\n### Shared live\n- [~] Working\n<!-- /auto session=55aa66bb -->\n\n${autoStopped('55aa66bb', 'alpha', 'Shared ended')}\n`,
+  )
+  try {
+    const beforeShared = readFileSync(shared.path, 'utf8')
+    const rowShared = await shared.rowOf('Shared ended')
+    assert.ok(rowShared && rowShared.canArchive)
+    const pShared = await shared.call('POST', '/api/act', { key: rowShared.key, type: 'archive', fp: rowShared.fp })
+    assert.equal(pShared.status, 200, pShared.body)
+    const uShared = await shared.call('POST', '/api/undo', { token: pShared.json().undoToken })
+    assert.equal(uShared.status, 200, uShared.body)
+    assert.equal(readFileSync(shared.path, 'utf8'), beforeShared)
+  } finally { await shared.close() }
+
+  // Regression Greptile #4: repeated ### Repeat sibling headings restore archived target between them.
+  const repSib = await startBoard(
+    `# Progress\n\n## alpha\n### Repeat\n- [ ] First\n\n${autoStopped('77cc88dd', 'alpha', 'Middle target')}\n\n### Repeat\n- [ ] Second\n\n## beta\n### Beta task\n- [ ] Open\n`,
+  )
+  try {
+    const rowMid = await repSib.rowOf('Middle target')
+    const pMid = await repSib.call('POST', '/api/act', { key: rowMid.key, type: 'archive', fp: rowMid.fp })
+    assert.equal(pMid.status, 200)
+    writeFileSync(repSib.path, readFileSync(repSib.path, 'utf8').replace('- [ ] Open', '- [ ] Beta moved'))
+    const uMid = await repSib.call('POST', '/api/undo', { token: pMid.json().undoToken })
+    assert.equal(uMid.status, 200, uMid.body)
+    const txtMid = readFileSync(repSib.path, 'utf8')
+    assert.ok(txtMid.indexOf('### Repeat') < txtMid.indexOf('Middle target') && txtMid.indexOf('Middle target') < txtMid.lastIndexOf('### Repeat'), txtMid)
+  } finally { await repSib.close() }
 })
 
 test('Undo refuses with the reason when the block changed after the press', { timeout: 30_000 }, async () => {
@@ -332,6 +375,27 @@ test('Undo after Archive refuses when the archive entry changed since', { timeou
     assert.equal(refused.json().note, 'Could not undo: that task changed since your press.')
     assert.equal(readFileSync(archFile, 'utf8'), appendedArchive)
   } finally { await ext.close() }
+
+  // Regression Greptile #3: two identical tasks archived same day -> editing newest copy refuses 409 and preserves older copy.
+  const dupArch = await startBoard(
+    `# Progress\n\n## api-gateway\n${autoStopped('d1110001', 'api-gateway', 'Twin task', ['- [x] Twin step', '- [ ] Shared step'])}\n\n${autoStopped('d1110002', 'api-gateway', 'Twin task', ['- [x] Twin step', '- [ ] Shared step'])}\n`,
+  )
+  try {
+    const r1 = await dupArch.rowOf('Twin task')
+    assert.equal((await dupArch.call('POST', '/api/act', { key: r1.key, type: 'archive', fp: r1.fp })).status, 200)
+    const r2 = await dupArch.rowOf('Twin task')
+    const p2 = await dupArch.call('POST', '/api/act', { key: r2.key, type: 'archive', fp: r2.fp })
+    assert.equal(p2.status, 200)
+    const archFile = join(dupArch.dir, archiveName())
+    const archText = readFileSync(archFile, 'utf8')
+    const cut = archText.lastIndexOf('Twin step')
+    const editedNewest = archText.slice(0, cut) + 'Edited newest' + archText.slice(cut + 'Twin step'.length)
+    writeFileSync(archFile, editedNewest)
+    const refusedDup = await dupArch.call('POST', '/api/undo', { token: p2.json().undoToken })
+    assert.equal(refusedDup.status, 409, refusedDup.body)
+    assert.equal(refusedDup.json().note, 'Could not undo: that task changed since your press.')
+    assert.ok(readFileSync(archFile, 'utf8').includes('Twin step'), 'older identical archive entry must remain untouched')
+  } finally { await dupArch.close() }
 })
 
 test('Undo after Confirm done or Archive keeps an unrelated block written meanwhile', { timeout: 30_000 }, async () => {

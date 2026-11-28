@@ -1310,7 +1310,7 @@ const isSymlinkOrNonRegular = (file: string): boolean => {
 // when a file could not be written.
 // Entries are counted with their number: two done blocks with the same title and steps make
 // the same entry text, and both leave (#231).
-type ArchiveCapture = { before: string; after: string; span?: BlockSpan; archiveFile?: string; entries: string[] }
+type ArchiveCapture = { before: string; after: string; span?: BlockSpan; archiveFile?: string; archiveAfter?: string; entries: string[] }
 
 const archiveOut = (take: (text: string, isLast: boolean) => { text: string; entries: string[]; span?: BlockSpan } | null | typeof AGAIN, now: number, onReplaced?: () => void, onArchived?: (details: ArchiveCapture) => void): number | null => {
   const archived = new Map<string, number>()
@@ -1323,6 +1323,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
   }
   let didRemove = false
   let archiveFile: string | undefined
+  let archiveAfter: string | undefined
   const writtenAll: string[] = []
   let lastCapture: ArchiveCapture | null = null
   const wrote = rewrite(path, (text, isLast) => {
@@ -1365,10 +1366,11 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
         return planned.missing.length === 0 ? past : `${past.trim() === '' ? `${s.archiveTitle}\n\n` : past.replace(/\s*$/, '\n\n')}${planned.missing.join('\n\n')}\n`
       })
       if (kept === null) return null
+      archiveAfter = kept
       writtenAll.push(...batchMissing)
       for (const entry of fresh) archived.set(entry, (archived.get(entry) ?? 0) + 1)
     }
-    lastCapture = { before: text, after: taken.text, ...(taken.span === undefined ? {} : { span: taken.span }), ...(archiveFile === undefined ? {} : { archiveFile }), entries: [...writtenAll] }
+    lastCapture = { before: text, after: taken.text, ...(taken.span === undefined ? {} : { span: taken.span }), ...(archiveFile === undefined ? {} : { archiveFile }), ...(archiveAfter === undefined ? {} : { archiveAfter }), entries: [...writtenAll] }
     return taken.text
   }, () => { onReplaced?.(); if (lastCapture !== null) onArchived?.(lastCapture) })
 
@@ -1572,8 +1574,8 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     if (count === null) return s.boardWriteFailed
     if (count === 0) return s.archiveGone
     if (captured !== null) {
-      const { before, after, span, archiveFile, entries } = captured as ArchiveCapture
-      if (span !== undefined) lastUndo = { token: randomUUID(), record: recordUndo(before, after, { kind: 'archive', title: action.title, project: undoProject(before, action.ref.project), session: action.ref.session, start: span.start, end: span.end, ...(archiveFile === undefined ? {} : { archiveFile }), archiveEntries: entries }) }
+      const { before, after, span, archiveFile, archiveAfter, entries } = captured as ArchiveCapture
+      if (span !== undefined) lastUndo = { token: randomUUID(), record: recordUndo(before, after, { kind: 'archive', title: action.title, project: undoProject(before, action.ref.project), session: action.ref.session, start: span.start, end: span.end, ...(archiveFile === undefined ? {} : { archiveFile }), ...(archiveAfter === undefined ? {} : { archiveAfter }), archiveEntries: entries }) }
     }
     // Not through view(), which may rewrite the question list and throw: a list another process holds
     // for a moment must not change what is said about an archive that has already happened.

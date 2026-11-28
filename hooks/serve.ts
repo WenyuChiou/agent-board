@@ -1815,9 +1815,7 @@ const PAGE_SCRIPT = String.raw`
   // The hidden-list key of each hide press still waiting for its answer (#1830).
   var hideWaiting = {};
   var ACT_WAIT_MS = 10000;
-  var UNDO_MS = 8000;
-  var undoTimer = 0;
-  var undoKey = '';
+  var UNDO_MS = 8000, undoTimer = 0, undoKey = '', pressSeq = 0;
   // The last message sent from each card or row, so a failed one can go again or be copied.
   var sentLast = {};
   // The board's answer to a card's last press, its status line and tone, until the board's next read brings the receipt (#1843, B4).
@@ -1925,6 +1923,7 @@ const PAGE_SCRIPT = String.raw`
     return act(key, 'hide', '', '', '', '', '', null, undefined, unhideKey);
   }
   function beginPress() {
+    pressSeq += 1;
     clearUndoOffer();
     resetTidy(false);
     note.textContent = '';
@@ -1945,13 +1944,8 @@ const PAGE_SCRIPT = String.raw`
       var slot = resultSlots[key];
       var previous = results[key];
       var canUndo = typeof undoTargetKey === 'string' && undoTargetKey !== '' && typeof undoToken === 'string' && undoToken !== '';
-      if (canUndo) {
-        undoKey = key;
-        clearTimeout(undoTimer);
-        undoTimer = setTimeout(expireUndo, UNDO_MS);
-      } else if (undoKey === key) {
-        clearUndoOffer();
-      }
+      if (canUndo) { undoKey = key; clearTimeout(undoTimer); undoTimer = setTimeout(expireUndo, UNDO_MS); }
+      else if (undoKey === key) clearUndoOffer();
       results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, canRetry: canRetry === true, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '', unhideKey: unhideKey, canUndo: canUndo, undoTargetKey: undoTargetKey || '', undoToken: undoToken || '' };
       paintResult(key);
       if (!slot || (canUndo && isSlotHidden(slot.node))) keepCopyFocus(drawLostResults);
@@ -2182,6 +2176,7 @@ const PAGE_SCRIPT = String.raw`
   // that sent it. A failed send keeps the message for Send again and Copy message.
   function act(key, type, text, waiting, session, asked, fp, go, line, unhideKey) {
     if (isUnreachable) return Promise.resolve();
+    var myPress = pressSeq;
     busyOn(go);
     say(waiting || w('pressPending'), 'wait', key);
     // A hide the board wrote may be drawn away before its answer comes: that draw settles it (#1830).
@@ -2200,7 +2195,8 @@ const PAGE_SCRIPT = String.raw`
       answered = true;
       clearTimeout(waitTimer);
       delete hideWaiting[key];
-      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok, data.ok && type === 'hide' && unhideKey ? unhideKey : undefined, data.ok && data.canUndo && (type === 'archive' || type === 'done') ? key : undefined, data.ok && data.undoToken ? data.undoToken : undefined);
+      var offerUndo = myPress === pressSeq && data.ok && data.canUndo && (type === 'archive' || type === 'done') && data.undoToken;
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok, data.ok && type === 'hide' && unhideKey ? unhideKey : undefined, offerUndo ? key : undefined, offerUndo ? data.undoToken : undefined);
       busyOff(go, data.ok);
       return data.ok;
     }, function () {
