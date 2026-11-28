@@ -249,3 +249,31 @@ test('a file outside the watched folders is always read', () => {
     assert.equal(looks, 2)
   } finally { w.close() }
 })
+
+test('a file written in place while the watch says nothing is found by the turn of kept-file stamps', () => {
+  const w = world()
+  const answered = join(w.folder, 'progress-answered.json')
+  writeFileSync(answered, '{"answered":[]}')
+  try {
+    w.reads.check()
+    const readAnswered = () => w.reads.get(answered, 'read', () => readFileSync(answered, 'utf8'))
+    assert.equal(readAnswered(), '{"answered":[]}')
+    w.readSeen()
+    // Two kept files: each is stamped once within two checks.
+    w.tick(100); w.reads.check()
+    w.tick(100); w.reads.check()
+    // A pane hides a question by writing the list in place; the watch is silent.
+    writeFileSync(answered, '{"answered":["q1","q2"]}')
+    let seenNew = false
+    for (let poll = 0; poll < 2 && !seenNew; poll += 1) {
+      w.tick(100)
+      w.reads.check()
+      seenNew = readAnswered() === '{"answered":["q1","q2"]}'
+      w.readSeen()
+    }
+    assert.ok(seenNew, 'the in-place write must show within one round of the kept files')
+    // No event came for it: the watch counts as deaf and the cache goes off.
+    for (let poll = 0; poll < 3; poll += 1) { w.tick(DEAF_AFTER_MS); w.reads.check() }
+    assert.equal(w.reads.isOn(), false)
+  } finally { w.close() }
+})

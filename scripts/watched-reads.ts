@@ -11,10 +11,11 @@ import { basename, dirname, resolve } from 'node:path'
 //
 // The watch is not trusted alone. Each check() stats the folders and the stamp files (progress.md): a
 // stamp that moved forgets every file, so a file added, removed, renamed over another or appended to
-// shows on that poll. A folder replaced or removed is watched again from its new identity. A watch can
-// set up fine and never report (WSL's /mnt/c, some network mounts): a stamp that moved with no event,
-// and still none DEAF_AFTER_MS later, turns the cache off for good, and every read goes to the file as
-// before. A watch error on a folder that is still there does the same. Only a missing file is kept as
+// shows on that poll. It also stats one kept file in turn, so a file written in place with no event is
+// found within one round of the kept files. A folder replaced or removed is watched again from its new
+// identity. A watch can set up fine and never report (WSL's /mnt/c, some network mounts): a stamp that
+// moved with no event, and still none DEAF_AFTER_MS later, turns the cache off for good, and every read
+// goes to the file as before. A watch error on a folder that is still there does the same. Only a missing file is kept as
 // an answer; any other failure (a file another program holds) is read again next time, since no event
 // says when it ends.
 
@@ -50,13 +51,19 @@ export const watchedReads = (options: { directories: readonly string[]; files: r
   const now = options.now ?? Date.now
   const folders = new Map<string, Folder>(options.directories.map(directory => [resolve(directory), { files: new Map(), watcher: null, identity: '' }]))
   let isOff = false
+  // The kept files' stamps as the turn last saw them, and where the turn is.
+  const turnStamps = new Map<string, string>()
+  let turn = 0
   let events = 0
   let eventsAtCheck = 0
   let lastStamp: string | null = null
   // A stamp that moved while no event came, and the events seen by then.
   let suspect: { at: number; events: number } | null = null
 
-  const clear = (): void => { for (const folder of folders.values()) folder.files.clear() }
+  const clear = (): void => {
+    for (const folder of folders.values()) folder.files.clear()
+    turnStamps.clear()
+  }
   const disarm = (folder: Folder): void => {
     const previous = folder.watcher
     folder.watcher = null
@@ -74,9 +81,14 @@ export const watchedReads = (options: { directories: readonly string[]; files: r
       current = watch(directory, (_event, name) => {
         if (folder.watcher !== current) return
         events += 1
-        if (name === null || name === undefined) { folder.files.clear(); return }
+        if (name === null || name === undefined) {
+          folder.files.clear()
+          for (const file of [...turnStamps.keys()]) if (dirname(file) === directory) turnStamps.delete(file)
+          return
+        }
         folder.files.delete(String(name))
         folder.files.delete(LISTING)
+        turnStamps.delete(resolve(directory, String(name)))
       })
     } catch (error) {
       // A folder removed between its stat and its watch is armed again on a later check.
@@ -150,7 +162,18 @@ export const watchedReads = (options: { directories: readonly string[]; files: r
       for (const file of options.files) stamps.push(stampOf(file).stamp)
       const stamp = stamps.join('|')
       const at = now()
-      if (lastStamp !== null && stamp !== lastStamp) {
+      let isMoved = lastStamp !== null && stamp !== lastStamp
+      // One kept file in turn: a write in place that no event reported moves its stamp.
+      const keptFiles = [...folders].flatMap(([directory, folder]) => [...folder.files.keys()].filter(name => name !== LISTING).map(name => resolve(directory, name))).sort()
+      if (keptFiles.length > 0) {
+        const file = keptFiles[turn % keptFiles.length]
+        turn += 1
+        const found = stampOf(file).stamp
+        const before = turnStamps.get(file)
+        if (before !== undefined && before !== found) isMoved = true
+        turnStamps.set(file, found)
+      }
+      if (isMoved) {
         clear()
         if (events === eventsAtCheck && suspect === null) suspect = { at, events }
       }
