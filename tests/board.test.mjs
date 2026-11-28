@@ -8629,6 +8629,28 @@ test('two --serve run at the same moment open one page between them, and a serve
   }
 })
 
+// Three starts at once on a new board, fresh each round (#693): each one either opens the page or
+// reports the page another start opened. None exits 1 telling the person to fix the question list,
+// which is neither read-only nor damaged, and all of them name the same page.
+test('three --serve run at once on a new board all report one page, round after round, and none says the question list is read-only or locked (#693)', { timeout: 240_000 }, async () => {
+  for (let round = 1; round <= 15; round += 1) {
+    const board = serveIn()
+    const urls = []
+    try {
+      const runs = await Promise.all([board.serveFailing(), board.serveFailing(), board.serveFailing()])
+      urls.push(...runs.map(run => board.urlOf(run.out)))
+      for (const run of runs) {
+        assert.doesNotMatch(run.out, /question list/, `round ${round}: ${run.out}`)
+        assert.equal(run.status, 0, `round ${round}: ${run.out}`)
+      }
+      assert.ok(urls[0], `round ${round}: ${runs[0].out}`)
+      assert.deepEqual(urls, [urls[0], urls[0], urls[0]], `round ${round}: ${runs.map(run => run.out).join('\n---\n')}`)
+    } finally {
+      await board.end(urls.filter(Boolean))
+    }
+  }
+})
+
 test('Windows concurrent page startup waits for the winning address to finish publishing', { skip: process.platform !== 'win32' && 'Windows ACLs only', timeout: 60_000 }, async () => {
   const board = serveIn()
   const held = join(board.dir, 'publisher-held')
