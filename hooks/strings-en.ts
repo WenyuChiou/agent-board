@@ -162,6 +162,7 @@ export const EN: Strings = {
     "sidecarQuestion": "Also write the Antigravity sidecar, so the board can start a turn in an idle conversation? Google's terms may not cover it, and you switch it on yourself in Automations. [y/N] ",
     "filesPart": "{host} files",
     "sidecarPart": "Antigravity sidecar files",
+    "sidecarOptional": "Antigravity sidecar (optional, asked next): {status}",
     "trustPart": "Approve the board's hooks in {host}",
     "installPlugin": "Install the Claude Code plugin",
     "enablePlugin": "Claude Code: the plugin is installed but turned off in your user settings. Run {command} to turn it back on.",

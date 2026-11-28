@@ -206,7 +206,9 @@ or calls a vendor API directly:
 Antigravity's desktop app runs a sidecar kept in `~/.gemini/config/sidecars/agent-board/` (`sidecar.json`
 and `sidecar.mjs`) only after the person switches it on in the app's Automations page. Setup writes
 those two files only on the person's yes (the `--antigravity-sidecar` flag, or the one question that
-defaults to no) and says that Google's terms may not cover it; it never switches the sidecar on, and an
+defaults to no) and says that Google's terms may not cover it. In a terminal, the preview names both files
+as an optional part, and the question comes right after the main yes, before setup writes anything or
+calls any part done (#1642); it never switches the sidecar on, and an
 agent must not. `remove` takes both files away. The agy TUI runs no sidecars, and a closed app stops them.
 The sidecar touches no Antigravity sign-in, port or token: it uses only Antigravity's own `agentapi`,
 whose path the app gives it, and it never sees a message's text. What the board does with it is under

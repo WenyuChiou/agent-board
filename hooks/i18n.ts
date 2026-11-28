@@ -200,6 +200,7 @@ export const ZH_TW = {
     "sidecarQuestion": "要一併寫入 Antigravity sidecar，讓看板能在閒置的對話裡開始一輪嗎？Google 的條款可能不涵蓋它，而且要由你自己在 Automations 開啟。[y/N] ",
     "filesPart": "{host} 設定檔案",
     "sidecarPart": "Antigravity sidecar 檔案",
+    "sidecarOptional": "Antigravity sidecar（選用，接著會詢問）：{status}",
     "trustPart": "在 {host} 核准看板的 hooks",
     "installPlugin": "安裝 Claude Code 外掛",
     "enablePlugin": "Claude Code：外掛已安裝，但在使用者設定裡被停用了。請執行 {command} 重新啟用。",
