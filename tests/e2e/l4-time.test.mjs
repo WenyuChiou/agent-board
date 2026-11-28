@@ -451,14 +451,9 @@ describe('L4 time and scale', () => {
       const idle = fileOpsPerPoll(samples, samples[1].t, samples.at(-1).t)
       assert.ok(idle !== undefined, JSON.stringify(samples))
       assert.ok(samples.at(-1).requests - samples[1].requests >= 20, `Too few polls reached the idle stretch: ${JSON.stringify(samples)}`)
-      // The ceiling is outside the marker, so the cost cannot rise further while the budget is
-      // known to fail. It was 29.7 here, and a figure above 35 is a regression.
-      assert.ok(idle.perPoll <= 35, `idle poll cost rose past today's 29.7: ${idle.perPoll}`)
-      // The count does not depend on how busy the machine is, so a pass is a fix and the marker has
-      // no mayPass. Every poll reads the board's files again even when nothing changed, and each
-      // question adds to that. The budget of 6 is #254's, which was reopened after the umbrella #346
-      // closed. It was 29.7 here against that budget.
-      await knownFailure(254, () => assert.ok(idle.perPoll <= IDLE_POLL_FILE_OPS, `${idle.perPoll} file operations per idle poll on a board of 5 tasks and 1 ask, the budget is ${IDLE_POLL_FILE_OPS}`))
+      // The budget is #254's. Before it, every poll read the board's files again even when nothing
+      // had changed (34 here); now a folder watch and three stamps say when to read them.
+      assert.ok(idle.perPoll <= IDLE_POLL_FILE_OPS, `${idle.perPoll} file operations per idle poll on a board of 5 tasks and 1 ask, the budget is ${IDLE_POLL_FILE_OPS}`)
     } finally { await world.close() }
   })
 

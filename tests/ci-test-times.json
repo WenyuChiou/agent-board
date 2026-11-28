@@ -404,7 +404,7 @@
       "counting a CRLF board keeps every remaining line CRLF on Windows": 157,
       "default web and API refuse closed Codex and Grok sessions without starting a process": 717,
       "each choice button and each listed native option shows its choice as it is sent, so two choices never read the same (#1629)": 29,
-      "each unchanged page poll reads the question ledger once": 1750,
+      "an unchanged page poll does not read the question ledger again": 1750,
       "empty inbox polls list membership once and discover reports that appear later": 5,
       "every card kind on the page carries its agent's mark": 9,
       "every press on a page whose server restarted with a new key shows the offline line at once": 909,

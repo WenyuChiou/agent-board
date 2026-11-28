@@ -10755,7 +10755,7 @@ test('a changed page poll sends the full board once and then returns 304 again',
   } finally { await board.end() }
 })
 
-test('each unchanged page poll reads the question ledger once', { timeout: 30_000 }, async () => {
+test('an unchanged page poll does not read the question ledger again', { timeout: 30_000 }, async () => {
   const board = await conditionalPollBoard()
   try {
     const first = await board.poll()
@@ -10766,7 +10766,8 @@ test('each unchanged page poll reads the question ledger once', { timeout: 30_00
       const response = await board.poll(validator)
       assert.equal(response.status, validator ? 304 : 200)
       await response.arrayBuffer()
-      assert.equal(board.reads() - before, 1, 'an unchanged ledger must be read just once, including on a 304')
+      // The folder watch says nothing changed, so the ledger the first poll read is used again (#254).
+      assert.equal(board.reads() - before, 0, 'an unchanged ledger must not be read again, including on a 304')
     }
   } finally { await board.end() }
 })
