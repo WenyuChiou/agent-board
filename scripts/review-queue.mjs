@@ -39,8 +39,8 @@ const nameOf = text => (text ?? '').match(/[A-Za-z0-9][A-Za-z0-9_-]*/)?.[0].toLo
 // countOpenReviews keys its counts by a claim's first word, since the reviewers file lists first-word names;
 // the author comparisons in classify use the full identity below, and only the same full name answers a claim.
 const fullName = text => (text ?? '').replace(/`/g, '').split(',')[0].replace(/\s+/g, ' ').trim().toLowerCase() || null
-// The reviewer's name comes from the PR check's own reader, so the queue and the check never name different reviewers
-// for one verdict (#1974).
+// The reviewer's name comes from the PR check's own reader (#1974); the author comparison below also drops a note the
+// name's first comma cut open, as the check reads `codex (read-only, ...)` as `codex`.
 const verdictFullName = body => fullName(verdictNameOf(body))
 // A claim is "Reviewing: <head sha> by <reviewer>" and holds that head only (team-process, From claim to merge).
 // Only that form is a claim: the head's full sha, or 7 or more of its first characters as a Ready line may give,
@@ -253,7 +253,10 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
       // An approval with the words "started new for this review" that do not read as that one note is no approval,
       // as the PR check reads it (#1974).
       result.waitingForAuthor.push({ ...item, detail: 'the approval line cannot be read; write it in the R2 form', ...extras })
-    } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by, item.author) && !isLaneReviewer(latestHeadVerdict.verdict, tierOf(pr.body), { isRelease: /^chore\(release\):/.test(item.title) })) {
+    } else if (riskGap === 'release') {
+      // No reviewer a lane started, and no verdict on the maintainer route, approves a release, whatever its name (RULES R2, #1974).
+      result.waitingForAuthor.push({ ...item, detail: 'approved, but a release needs a reviewer outside the maintainer\'s lane, or the owner', ...extras })
+    } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by.replace(/[ \t]*\([^)]*$/, ''), item.author) && !isLaneReviewer(latestHeadVerdict.verdict, tierOf(pr.body), { isRelease: /^chore\(release\):/.test(item.title) })) {
       // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
       // even when it arrives from the shared login. The lane is part of the identity, so "codex (e2e)" approving
       // "codex (phase1)" counts, while a verdict with no name keeps its old reading. Outside a release pull request a

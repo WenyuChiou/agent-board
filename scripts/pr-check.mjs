@@ -858,8 +858,8 @@ export const verdictNameOf = body => {
 
 // On every named tier a reviewer the author's lane started new for this review may approve, whatever its name; on the
 // risk tier the Codex review bot's review of the same head is the other model family's check (owner, 2026-11-28;
-// #1974). A release pull request never takes one, and with no tier named a reviewer named like the author is the
-// author approving (RULES R2).
+// #1974). With no tier named a reviewer named like the author is the author approving (RULES R2). Whether such an
+// approval counts at all is `riskApprovalGap`'s to say: on a release it never does, whatever the reviewer's name.
 export const isLaneReviewer = (review, tier, { isRelease = false } = {}) => review?.isFresh === true && !isRelease && (tier === 'light' || tier === 'normal' || tier === 'risk')
 
 // The bot's own comments come from its Bot account (`chatgpt-codex-connector[bot]` over the REST API); an account that only
@@ -892,14 +892,17 @@ export const isSurfaceNone = body => {
   return filled.length === 1 && filled[0].replace(/`/g, '').trim().toLowerCase() === 'none'
 }
 
-// What keeps a risk-tier approval by a reviewer started new for this review from counting, of the R2 conditions this
-// check can read (owner, 2026-11-28; #1974): `surface-none` for a lane under risk-tier review, which takes the maintainer
+// What keeps an approval by a reviewer started new for this review from counting, of the R2 conditions this check can
+// read (owner, 2026-11-28; #1974): `release` on a release pull request, which neither a lane's own reviewer nor the
+// maintainer route approves, whatever the reviewer's name; `surface-none` for a lane under risk-tier review, which takes the maintainer
 // route, and `no-codex-review` until the Codex review bot reviewed the head (clean or with findings: whether they are
 // settled is the reviewer's to read). Null when it counts or the tier does not ask. A line with the lane's own note keeps
 // these conditions even when it ends `, maintainer route`: the maintainer route's verdict carries the maintainer's note,
 // which is not read as started new by the lane, or none (RULES R2).
 export const riskApprovalGap = (review, { tier = null, isRelease = false, isSurfaceNone: isNone = false, codexState = 'none' } = {}) => {
-  if (tier !== 'risk' || isRelease || review?.kind !== 'APPROVE' || review.isFresh !== true) return null
+  if (review?.kind !== 'APPROVE') return null
+  if (isRelease && (review.isFresh === true || review.isMaintainerRoute === true)) return 'release'
+  if (review.isFresh !== true || tier !== 'risk') return null
   if (isNone) return 'surface-none'
   return codexState === 'clean' || codexState === 'open' ? null : 'no-codex-review'
 }
@@ -1642,6 +1645,16 @@ export const verdict = (comments, head, options = {}) => {
     return output
   }
 
+  // The lane's note decides first, in one place, so the reviewer's name matters only where R2 lets the note count (#1974).
+  const gap = riskApprovalGap(last, { tier, isRelease, isSurfaceNone: isNone, codexState: codexStateOf(comments, head) })
+  if (gap === 'release') {
+    output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
+    if (!isDraft && number !== null) {
+      output.problems.push(problem('review', 'a release pull request is approved by a reviewer outside the maintainer\'s lane, or by the owner; a reviewer started new for this review, or one on the maintainer route, cannot approve it (RULES.md, R2).', 'ask a reviewer outside the maintainer\'s lane, or the owner, for the approval (docs/RELEASING.md).'))
+    }
+    return output
+  }
+
   if (authorAgent && last.reviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase()) && !isLaneReviewer(last, tier, { isRelease })) {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
@@ -1651,7 +1664,6 @@ export const verdict = (comments, head, options = {}) => {
   }
 
   output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, the current head.`)
-  const gap = riskApprovalGap(last, { tier, isRelease, isSurfaceNone: isNone, codexState: codexStateOf(comments, head) })
   if (gap && !isDraft && number !== null) {
     output.problems.push(gap === 'surface-none'
       ? problem('review', 'a pull request of a lane under risk-tier review (`Surface: none`) takes the maintainer route; a reviewer the lane starts cannot approve it (RULES.md, R2).', 'hand it to the maintainer, whose verdict line ends `, maintainer route`.')
