@@ -78,62 +78,37 @@ export const startersOf = (projects: readonly ProgressProject[]): ((auto: Progre
   }
 }
 
-export type FoldOptions = {
-  now?: number
-  staleMs?: number
-  gone?: ReadonlySet<string>
-  seen?: Readonly<Record<string, number>>
-}
+export type FoldOptions = { now?: number; staleMs?: number; gone?: ReadonlySet<string>; seen?: Readonly<Record<string, number>> }
 
 const isAfter = (a: { auto: Pick<ProgressAuto, 'updated'>; order: number }, b: { auto: Pick<ProgressAuto, 'updated'>; order: number }): boolean =>
   a.auto.updated !== b.auto.updated ? a.auto.updated > b.auto.updated : a.order > b.order
-
-const latestByOrder = <T extends { auto: Pick<ProgressAuto, 'updated'>; order: number }>(entries: readonly T[]): T =>
-  entries.reduce((best, entry) => (isAfter(entry, best) ? entry : best))
-
-const isDoneCandidate = (candidate: TwinCandidate): boolean =>
-  candidate.auto.state === 'done' || candidate.isComplete
-
-const updatedOfCandidate = (candidate: TwinCandidate, options?: FoldOptions): number =>
-  options?.now !== undefined && options.seen !== undefined
-    ? observedTime(candidate.auto as ProgressAuto, options.now, options.seen).updated
-    : candidate.auto.updated
-
-const isDeadCandidate = (candidate: TwinCandidate, options?: FoldOptions): boolean =>
-  options?.gone !== undefined && options.gone.has(blockKey(candidate.auto as ProgressAuto))
-
-const isStaleCandidate = (candidate: TwinCandidate, options?: FoldOptions): boolean =>
-  options?.now !== undefined && isStale(candidate.auto as ProgressAuto, options.now, updatedOfCandidate(candidate, options), options.staleMs ?? STALE_MS)
-
-const isLivelyCandidate = (candidate: TwinCandidate, options?: FoldOptions): boolean =>
-  isDoneCandidate(candidate) || (!isDeadCandidate(candidate, options) && !isStaleCandidate(candidate, options))
-
-const isRepliedAtOrAfter = (auto: Pick<ProgressAuto, 'replied'>, updated: number): boolean =>
-  auto.replied !== undefined && Number.isFinite(auto.replied) && auto.replied >= updated
+const latest = <T extends { auto: Pick<ProgressAuto, 'updated'>; order: number }>(list: readonly T[]): T =>
+  list.reduce((best, one) => (isAfter(one, best) ? one : best))
+const isDone = (c: TwinCandidate): boolean => c.auto.state === 'done' || c.isComplete
+const isReplied = (auto: Pick<ProgressAuto, 'replied'>, at: number): boolean =>
+  auto.replied !== undefined && Number.isFinite(auto.replied) && auto.replied >= at
 
 export const pickTwinWinner = <T extends TwinCandidate>(group: readonly T[], options?: FoldOptions): T => {
-  const lively = group.filter(candidate => isLivelyCandidate(candidate, options))
-  const candidates = lively.length > 0 ? lively : group
-  const doneCandidates = candidates.filter(isDoneCandidate)
-  if (doneCandidates.length === 0 || doneCandidates.length === candidates.length) {
-    return latestByOrder(candidates)
-  }
-  const bestDone = latestByOrder(doneCandidates)
-  const activeOverride = candidates.filter(candidate =>
-    !isDoneCandidate(candidate) && (
-      (candidate.auto.state === 'working' && (candidate.auto.source === 'turns' || isAfter(candidate, bestDone))) ||
-      (candidate.auto.state === 'waiting' && isAfter(candidate, bestDone) && candidate.hasWaitingStep && !isRepliedAtOrAfter(candidate.auto, candidate.auto.updated))
-    ),
-  )
-  return activeOverride.length > 0 ? latestByOrder(activeOverride) : bestDone
+  const { now, staleMs = STALE_MS, gone, seen } = options ?? {}
+  const lively = group.filter(c => {
+    if (isDone(c)) return true
+    if (gone?.has(blockKey(c.auto as ProgressAuto)) === true) return false
+    const at = now !== undefined && seen !== undefined ? observedTime(c.auto as ProgressAuto, now, seen).updated : c.auto.updated
+    return now === undefined || !isStale(c.auto as ProgressAuto, now, at, staleMs)
+  })
+  const pool = lively.length > 0 ? lively : group
+  const done = pool.filter(isDone)
+  if (done.length === 0 || done.length === pool.length) return latest(pool)
+  const bestDone = latest(done)
+  const active = pool.filter(c => !isDone(c) && (
+    (c.auto.state === 'working' && (c.auto.source === 'turns' || isAfter(c, bestDone))) ||
+    (c.auto.state === 'waiting' && isAfter(c, bestDone) && c.hasWaitingStep && !isReplied(c.auto, c.auto.updated))
+  ))
+  return active.length > 0 ? latest(active) : bestDone
 }
 
 const toCandidate = (entry: Entry): TwinCandidate & { entry: Entry } => ({
-  entry,
-  auto: entry.auto,
-  isComplete: isTaskComplete(entry.task),
-  hasWaitingStep: entry.task.steps.some(step => step.status === 'waiting'),
-  order: entry.order,
+  entry, auto: entry.auto, isComplete: isTaskComplete(entry.task), hasWaitingStep: entry.task.steps.some(s => s.status === 'waiting'), order: entry.order,
 })
 
 const tally = (): { add: (agent: string, at: number) => void; done: () => RunGroup } => {
@@ -194,20 +169,6 @@ export const foldRuns = (projects: readonly ProgressProject[], options?: FoldOpt
 
     return entry.auto.isRun === true || key !== null && runKeys.has(key)
   }
-  // If the winning block omits `dir=` (e.g. `source=codex-local`) while a twin carries `dir=`,
-  // preserve the newest non-null `dir` on the folded winner so reply routing keeps working (#1832).
-  const replacements = new Map<ProgressTask, ProgressTask>()
-  for (const [key, group] of groupsByKey) {
-    if (group.length < 2 || runKeys.has(key)) continue
-    const winner = winners.get(key)
-    if (winner === undefined || winner.auto.dir !== null) continue
-    const inheritedDir = group
-      .filter(entry => entry !== winner && entry.auto.dir !== null)
-      .sort((a, b) => (isAfter(a, b) ? -1 : isAfter(b, a) ? 1 : 0))[0]?.auto.dir ?? null
-    if (inheritedDir !== null) {
-      replacements.set(winner.task, { ...winner.task, auto: { ...winner.auto, dir: inheritedDir } })
-    }
-  }
   const parentOf = (entry: Entry): string | undefined => {
     const key = sessionKey(entry.auto)
 
@@ -243,7 +204,6 @@ export const foldRuns = (projects: readonly ProgressProject[], options?: FoldOpt
     return null
   }
 
-  const resolveTask = (task: ProgressTask): ProgressTask => replacements.get(task) ?? task
   const groups = new Map<ProgressTask, ReturnType<typeof tally>>()
   const background = tally()
   let hasBackground = false
@@ -255,11 +215,7 @@ export const foldRuns = (projects: readonly ProgressProject[], options?: FoldOpt
       if (!isRun(entry)) {
         const key = sessionKey(entry.auto)
         const winner = key === null ? undefined : winners.get(key)
-        duplicates.push({
-          project: entry.project,
-          task: entry.task,
-          ...(winner === undefined ? {} : { winner: { project: winner.project, task: resolveTask(winner.task) } }),
-        })
+        duplicates.push({ project: entry.project, task: entry.task, ...(winner === undefined ? {} : { winner: { project: winner.project, task: winner.task } }) })
       }
       continue
     }
@@ -277,10 +233,8 @@ export const foldRuns = (projects: readonly ProgressProject[], options?: FoldOpt
   }
 
   return {
-    projects: gone.size === 0 && replacements.size === 0
-      ? [...projects]
-      : projects.map(project => ({ ...project, tasks: project.tasks.filter(task => !gone.has(task)).map(resolveTask) })),
-    runs: new Map([...groups].map(([task, group]) => [resolveTask(task), group.done()])),
+    projects: gone.size === 0 ? [...projects] : projects.map(project => ({ ...project, tasks: project.tasks.filter(task => !gone.has(task)) })),
+    runs: new Map([...groups].map(([task, group]) => [task, group.done()])),
     background: hasBackground ? background.done() : null,
     duplicates,
   }

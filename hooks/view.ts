@@ -935,34 +935,22 @@ export const buildView = (
   // pair is no second row. What is left is what the rows, the questions and the counts read.
   const folded = foldRuns(projects, { now, staleMs, gone, seen })
   const twinsByWinner = new Map<ProgressTask, Array<{ project: ProgressProject; task: ProgressTask }>>()
-  const nonDoneAskingDuplicates: Array<{ project: ProgressProject; task: ProgressTask }> = []
+  const extraByProject = new Map<string, ProgressTask[]>()
   for (const dup of folded.duplicates) {
     if (dup.winner === undefined) continue
     const list = twinsByWinner.get(dup.winner.task)
     if (list === undefined) twinsByWinner.set(dup.winner.task, [{ project: dup.project, task: dup.task }])
     else list.push({ project: dup.project, task: dup.task })
-    const winnerDone = dup.winner.task.auto?.state === 'done' || isTaskComplete(dup.winner.task)
-    if (!winnerDone && dup.task.steps.some(step => step.status === 'waiting')) {
-      nonDoneAskingDuplicates.push({ project: dup.project, task: dup.task })
+    if (dup.winner.task.auto?.state !== 'done' && !isTaskComplete(dup.winner.task) && dup.task.steps.some(step => step.status === 'waiting')) {
+      const extra = extraByProject.get(dup.project.name)
+      if (extra === undefined) extraByProject.set(dup.project.name, [dup.task])
+      else extra.push(dup.task)
     }
   }
-  let observeProjects = folded.projects
-  if (nonDoneAskingDuplicates.length > 0) {
-    const extraByProject = new Map<string, ProgressTask[]>()
-    for (const dup of nonDoneAskingDuplicates) {
-      const list = extraByProject.get(dup.project.name)
-      if (list === undefined) extraByProject.set(dup.project.name, [dup.task])
-      else list.push(dup.task)
-    }
-    const existingNames = new Set(folded.projects.map(project => project.name))
-    observeProjects = [
-      ...folded.projects.map(project => {
-        const extra = extraByProject.get(project.name)
-        return extra === undefined ? project : { ...project, tasks: [...project.tasks, ...extra] }
-      }),
-      ...[...extraByProject.entries()].filter(([projectName]) => !existingNames.has(projectName)).map(([projectName, tasks]) => ({ name: projectName, tasks })),
-    ]
-  }
+  const observeProjects = extraByProject.size === 0 ? folded.projects : [
+    ...folded.projects.map(p => ({ ...p, tasks: [...p.tasks, ...(extraByProject.get(p.name) ?? [])] })),
+    ...[...extraByProject.entries()].filter(([n]) => folded.projects.every(p => p.name !== n)).map(([name, tasks]) => ({ name, tasks })),
+  ]
   const observed = questions === undefined ? null : observe(questions, observeProjects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
@@ -1192,6 +1180,9 @@ export const buildView = (
         return value
       }
 
+      const losers = [...(twinsByWinner.get(task) ?? [])].sort((a, b) => (b.task.auto?.updated ?? 0) - (a.task.auto?.updated ?? 0))
+      const effectiveDir = task.auto === null ? null : task.auto.dir ?? losers.find(one => one.task.auto?.dir !== null)?.task.auto?.dir ?? null
+      const effectiveTarget = targetOf(task.auto === null ? null : { ...task.auto, dir: effectiveDir })
       const taskSteps = task.steps.some(step => step.status === 'waiting') ? rowSteps(task, s, isRepliedTask) : undefined
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting') return
@@ -1205,7 +1196,7 @@ export const buildView = (
           ...parts,
           when,
           ...(lastActive === undefined ? {} : { at: lastActive }),
-          dir: task.auto?.dir ?? null,
+          dir: effectiveDir,
           ...(taskSteps !== undefined && taskSteps.length > 0 ? { steps: taskSteps } : {}),
           ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: optionsGiven(validOptions(step.options)) }),
           ...(step.native === undefined ? {} : { native: step.native }),
@@ -1219,40 +1210,20 @@ export const buildView = (
               ? null
               : (task.auto.resume ?? (task.auto.agent === 'claude' && RESUME.test(task.auto.session) ? task.auto.session : null)),
           resumeVia: task.auto?.resume ? resumeVia(task.auto.agent) : null,
-          reopen: task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
+          reopen: task.auto?.resume ? resumeCommand(task.auto.resume, effectiveDir, task.auto.agent) : null,
           hideKey: isFrozen ? '' : keys[index] ?? '',
           questionId: isFrozen ? undefined : observed?.keys[slotAt(index)],
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
-          target: targetOf(task.auto),
+          target: effectiveTarget,
           ...(task.auto === null ? {} : { auto: task.auto.state === 'done' || isComplete || isGone || isSilence ? 'ended' as const : task.auto.state, nativeSession: task.auto.resume ?? task.auto.session }),
           ...(mayBeClosed && task.auto !== null ? { mayBeClosed: true as const, archive: { project: name, title: task.title, line: task.line, session: task.auto.session } } : {}),
         })
       })
-      const unresolved = taskQuestions.filter(item => {
-        if (marked.has(item.hideKey)) return false
-        if (counts !== undefined) counts.indexLookups += 1
-        return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
-      })
-      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => {
-        if (!marked.has(item.hideKey)) return false
-        if (counts !== undefined) counts.indexLookups += 1
-        return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
-      }))
-      for (const item of taskQuestions) {
-        if (isRepliedTask && item.native === undefined) {
-          if (item.questionId) repliedQuestions.add(item.questionId)
-          if (item.hideKey) repliedQuestions.add(item.hideKey)
-          if (!isInactive) provisional.push(item)
-        } else if (!isInactive) waiting.push(item)
-      }
-      // Carry open unanswered `[?]` steps from live folded twins using their own persisted
-      // ledger scopes/IDs so Hide, aging, and archival stay consistent (#1832, Row 11).
       const carriedAsks: WaitingItem[] = []
       const carriedUnresolvedItems: WaitingItem[] = []
       let firstCarriedText: string | null = null
-      if (!isComplete && !isManual && task.auto !== null) {
+      if (!isComplete && !isManual && task.auto !== null && losers.length > 0) {
         const winnerWords = new Set(task.steps.filter(step => step.status === 'waiting').map(step => questionWords(step.text)))
-        const losers = [...(twinsByWinner.get(task) ?? [])].sort((a, b) => (b.task.auto?.updated ?? 0) - (a.task.auto?.updated ?? 0))
         const winnerAuto = task.auto
         const winnerReplied = winnerAuto.replied !== undefined && Number.isFinite(winnerAuto.replied) ? winnerAuto.replied : null
         for (const { project: loserProject, task: loser } of losers) {
@@ -1264,50 +1235,28 @@ export const buildView = (
           if (winnerReplied !== null && winnerReplied >= loserAuto.updated) continue
           const loserScope = scopeOf(loserProject.name, loserAuto.agent, loserAuto.session, loserAuto.resume)
           const isLoserFrozen = frozen.size > 0 && (frozen.has(loserScope) || frozen.has(questionScope(loserProject.name, loserAuto.agent, loserAuto.session)))
-          const loserKeys = observed === null
-            ? blockKeys(loser)
-            : loser.steps.map((step, index) => step.status === 'waiting' ? observed.keys[questionSlot(loserScope, index)] ?? '' : '')
           const loserLastActive = hasTime(loserClock.updated) ? loserClock.updated : seen[taskFingerprint(loserProject.name, loser)]
-          const loserWhen = loserClock.isFuture
-            ? loserClock.updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(loserClock.updated, now, s))
-            : relativeTime(loserClock.updated, now, s)
-          const loserSession = loserAuto.agent !== 'claude' && loserAuto.resume !== null ? sessionName(loserAuto.resume) : loserAuto.session
-          const effectiveDir = winnerAuto.dir ?? loserAuto.dir ?? null
+          const loserWhen = loserClock.isFuture ? loserClock.updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(loserClock.updated, now, s)) : relativeTime(loserClock.updated, now, s)
+          const fallbackKeys = observed === null ? blockKeys(loser) : null
           loser.steps.forEach((step, index) => {
             if (step.status !== 'waiting') return
             const words = questionWords(step.text)
             if (winnerWords.has(words)) return
             winnerWords.add(words)
-            if (isLoserFrozen && observed !== null) {
-              const frozenRecords = recordsByScope?.get(loserScope) ?? []
-              if (frozenRecords.some(record => record.words === words)) return
-            }
+            if (isLoserFrozen && observed !== null && (recordsByScope?.get(loserScope) ?? []).some(r => r.words === words)) return
             const questionId = isLoserFrozen ? undefined : observed?.keys[questionSlot(loserScope, index)]
-            const hideKey = isLoserFrozen ? '' : loserKeys[index] ?? ''
+            const hideKey = isLoserFrozen ? '' : (fallbackKeys !== null ? fallbackKeys[index] : questionId) ?? ''
             const parts = splitNote(step.text)
             const item: WaitingItem = {
-              key: `${key}::twin-${loserAuto.session}-${index}`,
-              project: name,
-              task: title,
-              context,
-              ...parts,
-              when: loserWhen,
-              ...(loserLastActive === undefined ? {} : { at: loserLastActive }),
-              dir: effectiveDir,
+              key: `${key}::twin-${loserAuto.session}-${index}`, project: name, task: title, context, ...parts, when: loserWhen,
+              ...(loserLastActive === undefined ? {} : { at: loserLastActive }), dir: effectiveDir,
               ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: optionsGiven(validOptions(step.options)) }),
-              ...(step.native === undefined ? {} : { native: step.native }),
-              where: 'other',
-              agent: agentOf(task),
-              session: loserSession,
+              ...(step.native === undefined ? {} : { native: step.native }), where: 'other', agent: agentOf(task),
+              session: loserAuto.agent !== 'claude' && loserAuto.resume !== null ? sessionName(loserAuto.resume) : loserAuto.session,
               sessionId: winnerAuto.resume ?? (winnerAuto.agent === 'claude' && RESUME.test(winnerAuto.session) ? winnerAuto.session : null),
-              resumeVia: winnerAuto.resume ? resumeVia(winnerAuto.agent) : null,
-              reopen: winnerAuto.resume ? resumeCommand(winnerAuto.resume, effectiveDir, winnerAuto.agent) : null,
-              hideKey,
-              questionId,
-              step: null,
-              target: targetOf({ ...winnerAuto, dir: effectiveDir }),
+              resumeVia: winnerAuto.resume ? resumeVia(winnerAuto.agent) : null, reopen: winnerAuto.resume ? resumeCommand(winnerAuto.resume, effectiveDir, winnerAuto.agent) : null,
+              hideKey, questionId, step: null, target: effectiveTarget, nativeSession: winnerAuto.resume ?? winnerAuto.session,
               auto: winnerAuto.state === 'done' || isComplete || isGone || isSilence ? 'ended' as const : winnerAuto.state,
-              nativeSession: winnerAuto.resume ?? winnerAuto.session,
               ...(mayBeClosed ? { mayBeClosed: true as const, archive: { project: name, title: task.title, line: task.line, session: winnerAuto.session } } : {}),
             }
             carriedAsks.push(item)
@@ -1322,8 +1271,25 @@ export const buildView = (
           })
         }
       }
+      const unresolved = taskQuestions.filter(item => {
+        if (marked.has(item.hideKey)) return false
+        if (counts !== undefined) counts.indexLookups += 1
+        return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
+      })
       const carriedUnresolved = carriedUnresolvedItems.length > 0
       const allUnresolved = carriedUnresolvedItems.length === 0 ? unresolved : [...unresolved, ...carriedUnresolvedItems]
+      if (isInactive) inactiveHidden.push(...[...taskQuestions, ...carriedAsks].filter(item => {
+        if (!marked.has(item.hideKey)) return false
+        if (counts !== undefined) counts.indexLookups += 1
+        return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
+      }))
+      for (const item of taskQuestions) {
+        if (isRepliedTask && item.native === undefined) {
+          if (item.questionId) repliedQuestions.add(item.questionId)
+          if (item.hideKey) repliedQuestions.add(item.hideKey)
+          if (!isInactive) provisional.push(item)
+        } else if (!isInactive) waiting.push(item)
+      }
 
       let completion: DoneItem & { at: number } | null = null
       if (isComplete) {
@@ -1339,7 +1305,7 @@ export const buildView = (
             agent: agentOf(task),
             ...(isManual ? { isOwn: true as const } : {}),
             ...(task.auto === null ? {} : { sessionId: task.auto.resume ?? task.auto.session }),
-            dir: task.auto?.dir ?? null,
+            dir: effectiveDir,
             questions: isInactive ? unresolved : [],
           })
         }
@@ -1408,7 +1374,7 @@ export const buildView = (
         when: isIdle && !clock.isFuture ? relativeTime(lastActive ?? 0, now, s) : when,
         ...(isRepliedTask ? { isChatReplied: true as const } : {}),
         ...(lastActive === undefined ? {} : { at: lastActive }),
-        dir: task.auto?.dir ?? null,
+        dir: effectiveDir,
         ...(clock.isFuture ? { hasFutureTime: true } : {}),
         isHere,
         auto,
@@ -1432,7 +1398,7 @@ export const buildView = (
         // The process check proved the session's process gone (#1092, #1595): it is closed, as one whose block says ended.
         ...(livenessOf(task.auto, gone) === 'dead' ? { isProcessGone: true as const } : {}),
         // Only an agent whose resume by id is known gets a command.
-        resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
+        resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, effectiveDir, task.auto.agent) : null,
         handoff: handoffOf(task),
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142). Nor does a row whose block state is
@@ -1455,7 +1421,7 @@ export const buildView = (
               : auto === 'working' && !isSilence && task.auto !== null && hasTime(updated) && !isWorkingTask(task.steps, updated, now)
                 ? { project: name, title: task.title, line: task.line, session: task.auto.session }
                 : null,
-        target: targetOf(task.auto),
+        target: effectiveTarget,
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         ...(group === undefined ? {} : { runs: runsText(group, now, s) }),
       }

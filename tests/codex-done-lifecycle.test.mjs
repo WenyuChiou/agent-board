@@ -612,6 +612,9 @@ test('an open question on a folded twin appears once under Needs you and clears 
   // Answering via persisted recL.id clears Needs you and stays gone even after loser leaves progress.md (no resurfacing).
   const answeredView = buildView(parseProgress(loserAskingProgress), [], null, now, 0, {}, s, [recL.id], {}, observed)
   assert.equal(answeredView.waiting.length, 0)
+  // Marked-answered carried ask on an ended winner remains visible in view.hidden so it can still be unhidden (#1832).
+  const endedWinnerAnswered = buildView(parseProgress(loserAskingProgress.replace('state=working', 'state=ended')), [], null, now, 0, {}, s, [recL.id], {}, observed)
+  assert.equal(endedWinnerAnswered.hidden.some(item => item.hideKey === recL.id), true)
   const winnerOnlyProgress = [
     '# Progress',
     '',
@@ -939,7 +942,7 @@ test('non-Claude ended row without a target gets send=none and no Copy answer bo
 test('after folding to one row both writers keep writing and othersNote deduplicates (#1832)', async () => {
   const { blockId } = await import('../hooks/inbox.ts')
   const { putCodexBlock } = await import('../hooks/codex.ts')
-  const { upsertAutoBlock } = await import('../hooks/blocks.ts')
+  const { confirmTask, upsertAutoBlock } = await import('../hooks/blocks.ts')
   const { emptyMirror } = await import('../hooks/mirror.ts')
   const { othersNote } = await import('../hooks/others.ts')
   const { parseProgress } = await import('../hooks/parse.ts')
@@ -992,13 +995,26 @@ test('after folding to one row both writers keep writing and othersNote deduplic
   assert.ok(plan)
   assert.equal(plan.args.includes(resume), true)
 
-  // Also verify dir= and sendPlan survive when codex-local (dir: null) writes AFTER source=turns (has dir=).
+  // Also verify dir=, sendPlan, and confirmTask (confirmKey) survive when codex-local (dir: null) wins over source=turns (has dir=).
   text = putCodexBlock(text, { ...skillReport1, updated: new Date(now - 10_000).toISOString(), steps: ['- [x] Writing code', '- [~] Testing'] }, owner)
   const skillWinnerView = buildView(parseProgress(text), [], null, now, 0, {}, s)
   assert.equal(skillWinnerView.active.length, 1)
   const skillWinnerTarget = skillWinnerView.active[0]?.target
   assert.ok(skillWinnerTarget?.dir)
   assert.equal(sendPlan(skillWinnerTarget, 'Follow up', false)?.args.includes(resume), true)
+
+  const endedTextWithInheritedDir = putCodexBlock(
+    upsertAutoBlock('# Progress\n\n## Demo\n', { ...hookMirror1WithTask, state: 'ended', updated: now - 20_000 }, s),
+    { ...skillReport1, state: 'ended', updated: new Date(now - 10_000).toISOString(), steps: ['- [~] Finish stopped step'] },
+    owner,
+  )
+  const stoppedView = buildView(parseProgress(endedTextWithInheritedDir), [], null, now, 0, {}, s)
+  assert.equal(stoppedView.stopped.length, 1)
+  assert.equal(stoppedView.stopped[0]?.target?.dir, '/tmp/demo')
+  assert.ok(stoppedView.stopped[0]?.confirm)
+  const confirmed = confirmTask(endedTextWithInheritedDir, stoppedView.stopped[0].confirm, now, s)
+  assert.ok(confirmed)
+  assert.equal(confirmed.text.includes('- [x] Finish stopped step'), true)
 
   // othersNote lists the open conversation once (never twice).
   const openNote = othersNote(parseProgress(text), ['Demo'], peer, now, s)

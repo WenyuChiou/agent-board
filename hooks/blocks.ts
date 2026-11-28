@@ -621,50 +621,25 @@ const hasExtraTask = (visible: readonly (string | null)[], span: BlockSpan): boo
   return false
 }
 
-const isSpanComplete = (visible: readonly (string | null)[], span: BlockSpan): boolean => {
-  let count = 0
-  for (let at = span.start + 1; at < span.end; at += 1) {
-    const match = STEP.exec(visible[at] ?? '')
-    if (match === null) continue
-    count += 1
-    if (match[2] !== 'x' && match[2] !== 'X' && match[2] !== '-') return false
-  }
-  return count > 0
-}
-
-const spanCandidate = (span: BlockSpan, visible: readonly (string | null)[]) => ({
-  span,
-  auto: {
-    session: span.session,
-    agent: (span.agent || 'claude').toLowerCase(),
-    state: span.state,
-    updated: span.updated,
-    resume: span.resume ?? null,
-    ...(span.source === undefined ? {} : { source: span.source }),
-    ...(span.replied === undefined ? {} : { replied: span.replied }),
-    ...(span.agentPid === undefined ? {} : { agentPid: span.agentPid }),
-    ...(span.agentStarted === undefined ? {} : { agentStarted: span.agentStarted }),
-    ...(span.host === undefined ? {} : { host: span.host }),
-  },
-  isComplete: isSpanComplete(visible, span),
-  hasWaitingStep: isAsking(visible, span),
-  order: span.start,
-})
-
-// Closed twins sharing `(agent, resume)` that are outranked by `target` according to `pickTwinWinner` (#1832).
-// Returns empty when `target` is itself outranked (e.g. a mid-turn Row-4 `done` skill block beside a fresh `working` hooks block).
-const outrankedBy = (spans: readonly BlockSpan[], target: BlockSpan, visible: readonly (string | null)[], options?: FoldOptions): BlockSpan[] => {
+const twinPeers = (spans: readonly BlockSpan[], target: BlockSpan, visible: readonly (string | null)[]) => {
   if (target.resume == null) return []
   const agent = (target.agent || 'claude').toLowerCase()
-  const peers = spans
-    .filter(other => other.resume === target.resume && (other.agent || 'claude').toLowerCase() === agent)
-    .map(other => spanCandidate(other, visible))
-  if (peers.length <= 1) return []
-  if (pickTwinWinner(peers, options).span.start !== target.start) return []
+  return spans.filter(other => other.resume === target.resume && (other.agent || 'claude').toLowerCase() === agent).map(span => {
+    let count = 0, complete = true
+    for (let at = span.start + 1; at < span.end; at += 1) {
+      const m = STEP.exec(visible[at] ?? '')?.[2]
+      if (m === undefined) continue
+      count += 1
+      if (m !== 'x' && m !== 'X' && m !== '-') complete = false
+    }
+    return { span, auto: { ...span, agent: (span.agent || 'claude').toLowerCase(), resume: span.resume ?? null }, isComplete: count > 0 && complete, hasWaitingStep: isAsking(visible, span), order: span.start }
+  })
+}
 
-  return peers
-    .filter(other => other.span.start !== target.start && other.span.isClosed && !hasExtraTask(visible, other.span))
-    .map(other => other.span)
+const outrankedBy = (spans: readonly BlockSpan[], target: BlockSpan, visible: readonly (string | null)[], options?: FoldOptions): BlockSpan[] => {
+  const peers = twinPeers(spans, target, visible)
+  if (peers.length <= 1 || pickTwinWinner(peers, options).span.start !== target.start) return []
+  return peers.filter(other => other.span.start !== target.start && other.span.isClosed && !hasExtraTask(visible, other.span)).map(other => other.span)
 }
 
 // Moves old blocks out; each entry is the block without its markers, under a dated heading,
@@ -677,14 +652,10 @@ export const takeArchivable = (text: string, now: number, keep?: string, s: Stri
   const visible = readable(lines)
   const allSpans = scanBlocks(lines)
   const isMidTurnDone = (span: BlockSpan): boolean => {
-    if (span.state !== 'done' || span.resume == null) return false
-    const agent = (span.agent || 'claude').toLowerCase()
-    const peers = allSpans
-      .filter(other => other.resume === span.resume && (other.agent || 'claude').toLowerCase() === agent)
-      .map(other => spanCandidate(other, visible))
-    if (peers.length <= 1) return false
-    const best = pickTwinWinner(peers, { now })
-    return best.span.start !== span.start && best.span.state === 'working'
+    if (span.state !== 'done') return false
+    const peers = twinPeers(allSpans, span, visible)
+    const best = peers.length > 1 ? pickTwinWinner(peers, { now }).span : undefined
+    return best !== undefined && best.start !== span.start && best.state === 'working'
   }
   const primary = allSpans.filter(span => span.isClosed && span.session !== keep && !isMidTurnDone(span) && (isAgentRun?.(span) === true || isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isAskingArchiveDue(span, now) && mayTake?.(span) === true))))
   const selected = new Set(primary)
