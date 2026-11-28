@@ -268,7 +268,7 @@ test('source-scan pins every buildView, views.view, takeTask and confirmTask cal
   assert.match(boardCli, /\): View => buildView\([^;]+, gone\)/)
   assert.match(boardCli, /confirmTask\(text, action\.ref, now, s, lastSeen, staleTimeoutMs\(\), gone\)/)
   assert.match(boardCli, /takeTask\(text, action\.ref, now, s, lastSeen, staleTimeoutMs\(\), gone\)/)
-  assert.match(boardCli, /takeTask\(text, fresh\.ref, now, s, \{\}, staleMs, gone\)/)
+  assert.match(boardCli, /takeTask\(text, fresh\.ref, now, s, \{\}, staleMs, gone, false\)/)
 })
 
 // #1589 Test 1: Stop extracts closing question after tool-call PLANNER_RESPONSE entries without content.

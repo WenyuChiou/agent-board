@@ -11,7 +11,8 @@ import { AUTO_END, AUTO_START, autoOf, doneKey, escapeOptionsJson, isCutMarker, 
 import type { QuickEntry } from './quick'
 import type { StepRef, TaskRef } from './view'
 import { sha256 } from './sha256'
-import { isOutranked, pickParent } from './runs'
+import { isOutranked, pickParent, pickTwinWinner } from './runs'
+import type { FoldOptions } from './runs'
 import { cutLine, oneLine, plain } from './step-words'
 import { isSilenceTask, isWorkingTask } from './grouping'
 import { isMaybeClosed, isStopped, observedTime } from './parse'
@@ -189,6 +190,11 @@ export type BlockSpan = {
   resume?: string | null
   state: ProgressSessionState
   updated: number
+  source?: string
+  replied?: number
+  agentPid?: number
+  agentStarted?: number
+  host?: string
   project: string
   start: number
   end: number
@@ -599,15 +605,70 @@ export const archivableAsking = (text: string, now: number, keep?: string): Aski
   })
 }
 
+// A block owns only its first heading (or first step when untitled); any later `###`
+// inside the markers is parsed by `parseProgress` as a separate hand-kept task (#1832).
+const hasExtraTask = (visible: readonly (string | null)[], span: BlockSpan): boolean => {
+  let seenOwn = false
+  for (let at = span.start + 1; at < span.end; at += 1) {
+    const line = visible[at] ?? ''
+    if (TASK.test(line)) {
+      if (seenOwn) return true
+      seenOwn = true
+    } else if (STEP.test(line)) {
+      seenOwn = true
+    }
+  }
+  return false
+}
+
+const twinPeers = (spans: readonly BlockSpan[], target: BlockSpan, visible: readonly (string | null)[]) => {
+  if (target.resume == null) return []
+  const agent = (target.agent || 'claude').toLowerCase()
+  return spans.filter(other => other.resume === target.resume && (other.agent || 'claude').toLowerCase() === agent).map(span => {
+    let count = 0, complete = true
+    for (let at = span.start + 1; at < span.end; at += 1) {
+      const m = STEP.exec(visible[at] ?? '')?.[2]
+      if (m === undefined) continue
+      count += 1
+      if (m !== 'x' && m !== 'X' && m !== '-') complete = false
+    }
+    return { span, auto: { ...span, agent: (span.agent || 'claude').toLowerCase(), resume: span.resume ?? null }, isComplete: count > 0 && complete, hasWaitingStep: isAsking(visible, span), order: span.start }
+  })
+}
+
+const outrankedBy = (spans: readonly BlockSpan[], target: BlockSpan, visible: readonly (string | null)[], options?: FoldOptions): BlockSpan[] => {
+  const peers = twinPeers(spans, target, visible)
+  if (peers.length <= 1 || pickTwinWinner(peers, options).span.start !== target.start) return []
+  return peers.filter(other => other.span.start !== target.start && other.span.isClosed && !hasExtraTask(visible, other.span)).map(other => other.span)
+}
+
 // Moves old blocks out; each entry is the block without its markers, under a dated heading,
 // ready to append to progress-archive.md. A block with a visible `[?]` step stays unless it has
 // been quiet long enough (`isAskingArchiveDue`) and `mayTake` says its questions are kept outside
 // it, so the question goes on under Older unanswered (`archivableAsking` lists the ones to ask about).
 // A verified agent run needs neither an age wait nor a retained question.
-export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean, isAgentRun?: (span: BlockSpan) => boolean): Archived => {
+export const takeArchivable = (text: string, now: number, keep?: string, s: Strings = ZH_TW, isNow = false, mayTake?: (span: BlockSpan) => boolean, isAgentRun?: (span: BlockSpan) => boolean, foldOptions?: FoldOptions): Archived => {
   const lines = linesOf(text)
   const visible = readable(lines)
-  const spans = scanBlocks(lines).filter(span => span.isClosed && span.session !== keep && (isAgentRun?.(span) === true || isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isAskingArchiveDue(span, now) && mayTake?.(span) === true))))
+  const allSpans = scanBlocks(lines)
+  const fold: FoldOptions = { ...foldOptions, now }
+  const isMidTurnDone = (span: BlockSpan): boolean => {
+    if (span.state !== 'done') return false
+    const peers = twinPeers(allSpans, span, visible)
+    const best = peers.length > 1 ? pickTwinWinner(peers, fold).span : undefined
+    return best !== undefined && best.start !== span.start && best.state === 'working'
+  }
+  const primary = allSpans.filter(span => span.isClosed && span.session !== keep && !isMidTurnDone(span) && (isAgentRun?.(span) === true || isArchivable(span, now, isNow) && (!isAsking(visible, span) || (isAskingArchiveDue(span, now) && mayTake?.(span) === true))))
+  const selected = new Set(primary)
+  for (const winner of primary) {
+    for (const older of outrankedBy(allSpans, winner, visible, fold)) {
+      if (older.session === keep || selected.has(older)) continue
+      if (!isAsking(visible, older) || (isAskingArchiveDue(older, now) && mayTake?.(older) === true)) {
+        selected.add(older)
+      }
+    }
+  }
+  const spans = allSpans.filter(span => selected.has(span))
   if (spans.length === 0) return { text, entries: [] }
   const entries = spans.map(span => {
     const body = lines.slice(span.start + 1, span.end)
@@ -687,7 +748,7 @@ export const takeManualDone = (
 // null when it cannot be found for sure: a block without its end marker, a heading that is
 // gone or has a twin, a heading inside some session's block, or a session id two blocks
 // share when the row's project and each block's first heading cannot tell them apart.
-export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set()): Archived | null => {
+export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = ZH_TW, observations: Readonly<Record<string, number>> = {}, staleMs: number = STALE_MS, gone: ReadonlySet<string> = new Set(), sweepTwins = true): Archived | null => {
   const lines = linesOf(text)
   const seen = seenOf(lines)
   const spans = scanBlocks(lines)
@@ -723,7 +784,7 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       const auto = task?.auto ?? null
       // The older block of a twin pair is offered for archive while it still looks live (#399):
       // a newer block with the same agent and full id is the one that runs.
-      const isTwin = ref.isDuplicate === true && task !== undefined && isOutranked(tasks, task)
+      const isTwin = ref.isDuplicate === true && task !== undefined && isOutranked(tasks, task, { now, staleMs, gone })
       const updated = auto === null ? 0 : observedTime(auto, now, observations).updated
       // A silence-classified row is kept for review: the write guard refuses its archive
       // as the row does (#1051, #1000).
@@ -738,7 +799,15 @@ export const takeTask = (text: string, ref: TaskRef, now: number, s: Strings = Z
       if (auto === null || !stopped) return null
     }
 
-    return { text: removeSpans(text, [span]), entries: [[heading, ...lines.slice(span.start + 1, span.end)].join('\n')] }
+    const day = localDay(now)
+    const visible = sweepTwins && span.resume != null ? readable(lines) : null
+    const removed = visible === null
+      ? [span]
+      : [span, ...outrankedBy(spans, span, visible, { now, staleMs, gone }).filter(other => !isAsking(visible, other))]
+    return {
+      text: removeSpans(text, removed),
+      entries: removed.map(one => [`## ${one.project || s.uncategorized} · ${day}`, ...lines.slice(one.start + 1, one.end)].join('\n')),
+    }
   }
   const isHeading = (line: string | undefined): boolean => TASK.exec(line ?? '')?.[1] === ref.title
   let at = isHeading(seen[ref.line]) ? ref.line : -1

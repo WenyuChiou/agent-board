@@ -723,7 +723,7 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
       const needs = rowNeedsYou(row, idleKeys.has(row.key) || stoppedKeys.has(row.key))
       const found = isLan ? undefined : reachable(row.agent, row.nativeSession, row.target, targets)
       const isContested = !isLan && found === undefined && (messaging?.connections.some(one => one.agent === (row.agent || 'claude') && one.session === row.nativeSession) ?? false)
-      const baseMode = row.target === null ? (row.auto === null ? 'none' : 'claude') : sendMode(row.agent, row.target)
+      const baseMode = row.target === null ? (row.auto === null ? 'none' : row.agent === '' ? 'claude' : 'none') : sendMode(row.agent, row.target)
       const state = sessionState(view, row.agent, row.nativeSession ?? '')
       const route = found === undefined ? undefined : decisionFor(found)
       const connection = route?.canSend === true ? found : undefined

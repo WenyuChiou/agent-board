@@ -346,7 +346,6 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
   if (view.details) lines.push(c('quiet', view.details), '')
 
   const asks = asksOf(view, pending, s, project => project, agent => agentLabel(agent, s))
-  const recentQuestions = view.recent.filter(item => (item.questions?.length ?? 0) > 0)
   for (const [title, items] of [[s.sectionQuestionReminders, view.reminder ?? []], [s.sectionOlderQuestions, view.older ?? []]] as const) {
     if (items.length === 0) continue
     const isOpen = o.isIdleOpen || o.isQuestionsOpen
@@ -400,10 +399,10 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
-  if (recentQuestions.length > 0) {
+  if (view.recent.length > 0) {
     lines.push(c('done', s.sectionRecent))
-    for (const item of recentQuestions) {
-      lines.push(`  ${cut(`${item.project} › ${item.title} · ${item.when}`, o.width - 4)}`)
+    for (const item of view.recent) {
+      lines.push(`  ${cut(`${item.project} › ${item.title}${item.when ? ` · ${item.when}` : ''}`, o.width - 4)}`)
       for (const question of item.questions ?? []) lines.push(`    ${cut(`${question.text}${question.note ? ` — ${question.note}` : ''}`, o.width - 6)}`)
     }
     lines.push('')

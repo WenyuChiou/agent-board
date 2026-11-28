@@ -176,19 +176,18 @@ test('the runs line says "just now" and "yesterday" the way a person would', () 
   }
 })
 
-test('two blocks for one agent and one session id show as one row and the older is offered for archive', () => {
+test('two blocks for one agent and one session id fold to the winning row without listing the older copy under stopped', () => {
   const older: Spec = { session: 'eeee0001', agent: 'codex', resume: 'eeee0001-0000-4000-8000-000000000005', title: 'Old copy', ageMinutes: 30 }
   const newer: Spec = { session: 'eeee0002', agent: 'codex', resume: 'eeee0001-0000-4000-8000-000000000005', title: 'New copy', ageMinutes: 2 }
   const text = file(older, newer)
+  const projects = parseProgress(text)
   const view = viewOf(text)
-  const titles = rowsOf(view).map(row => row.title)
-  expect(titles).toEqual(['New copy', 'Old copy'])
+  expect(rowsOf(view).map(row => row.title)).toEqual(['New copy'])
   expect(view.groups.flatMap(group => group.rows).map(row => row.title)).toEqual(['New copy'])
-  expect(view.stopped.map(row => row.title)).toEqual(['Old copy'])
-  const copy = view.stopped[0]
-  expect(copy?.archive?.isDuplicate).toBe(true)
-  expect(copy?.status).toBe(en.duplicateSession)
-  const taken = copy?.archive == null ? null : takeTask(text, copy.archive, NOW, en)
+  expect(view.stopped).toEqual([])
+  const duplicate = foldRuns(projects).duplicates[0]?.task
+  expect(duplicate?.title).toBe('Old copy')
+  const taken = duplicate == null ? null : takeTask(text, { project: 'Demo', title: duplicate.title, line: duplicate.line, session: duplicate.auto?.session ?? null, isDuplicate: true }, NOW, en)
   expect(taken?.text).not.toContain('Old copy')
   expect(taken?.text).toContain('New copy')
 })

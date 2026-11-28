@@ -182,6 +182,7 @@ export const autoOf = (raw: string): ProgressAuto | null => {
     ...(isRun ? { isRun: true as const } : {}),
     ...(isRun && attrs.parent !== undefined && RESUME.test(attrs.parent) ? { parent: attrs.parent } : {}),
     ...(replied !== null && Number.isFinite(replied) ? { replied } : {}),
+    ...(attrs.source !== undefined && attrs.source !== '' ? { source: attrs.source } : {}),
   }
 }
 

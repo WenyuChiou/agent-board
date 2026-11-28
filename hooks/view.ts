@@ -940,8 +940,25 @@ export const buildView = (
 ): View => {
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
   // pair is no second row. What is left is what the rows, the questions and the counts read.
-  const folded = foldRuns(projects)
-  const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
+  const folded = foldRuns(projects, { now, staleMs, gone, seen })
+  const twinsByWinner = new Map<ProgressTask, Array<{ project: ProgressProject; task: ProgressTask }>>()
+  const extraByProject = new Map<string, ProgressTask[]>()
+  for (const dup of folded.duplicates) {
+    if (dup.winner === undefined) continue
+    const list = twinsByWinner.get(dup.winner.task)
+    if (list === undefined) twinsByWinner.set(dup.winner.task, [{ project: dup.project, task: dup.task }])
+    else list.push({ project: dup.project, task: dup.task })
+    if (dup.winner.task.auto?.state !== 'done' && !isTaskComplete(dup.winner.task) && dup.task.steps.some(step => step.status === 'waiting')) {
+      const extra = extraByProject.get(dup.project.name)
+      if (extra === undefined) extraByProject.set(dup.project.name, [dup.task])
+      else extra.push(dup.task)
+    }
+  }
+  const observeProjects = extraByProject.size === 0 ? folded.projects : [
+    ...folded.projects.map(p => ({ ...p, tasks: [...p.tasks, ...(extraByProject.get(p.name) ?? [])] })),
+    ...[...extraByProject.entries()].filter(([n]) => folded.projects.every(p => p.name !== n)).map(([name, tasks]) => ({ name, tasks })),
+  ]
+  const observed = questions === undefined ? null : observe(questions, observeProjects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const records = observed?.ledger.records ?? []
@@ -1179,6 +1196,9 @@ export const buildView = (
         return value
       }
 
+      const losers = [...(twinsByWinner.get(task) ?? [])].sort((a, b) => (b.task.auto?.updated ?? 0) - (a.task.auto?.updated ?? 0))
+      const effectiveDir = task.auto === null ? null : task.auto.dir ?? losers.find(one => one.task.auto?.dir !== null)?.task.auto?.dir ?? null
+      const effectiveTarget = targetOf(task.auto === null ? null : { ...task.auto, dir: effectiveDir })
       const taskSteps = task.steps.some(step => step.status === 'waiting') ? rowSteps(task, s, isRepliedTask) : undefined
       task.steps.forEach((step, index) => {
         if (step.status !== 'waiting') return
@@ -1192,7 +1212,7 @@ export const buildView = (
           ...parts,
           when,
           ...(lastActive === undefined ? {} : { at: lastActive }),
-          dir: task.auto?.dir ?? null,
+          dir: effectiveDir,
           ...(taskSteps !== undefined && taskSteps.length > 0 ? { steps: taskSteps } : {}),
           ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: optionsGiven(validOptions(step.options)) }),
           ...(step.native === undefined ? {} : { native: step.native }),
@@ -1206,11 +1226,11 @@ export const buildView = (
               ? null
               : (task.auto.resume ?? (task.auto.agent === 'claude' && RESUME.test(task.auto.session) ? task.auto.session : null)),
           resumeVia: task.auto?.resume ? resumeVia(task.auto.agent) : null,
-          reopen: task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
+          reopen: task.auto?.resume ? resumeCommand(task.auto.resume, effectiveDir, task.auto.agent) : null,
           hideKey: isFrozen ? '' : keys[index] ?? '',
           questionId: isFrozen ? undefined : observed?.keys[slotAt(index)],
           step: isManual ? { project: name, title, step: step.text, line: step.line, raw: step.raw } : null,
-          target: targetOf(task.auto),
+          target: effectiveTarget,
           ...(task.auto === null ? {} : { auto: task.auto.state === 'done' || isComplete || isGone || isSilence ? 'ended' as const : task.auto.state, nativeSession: task.auto.resume ?? task.auto.session }),
           ...(mayBeClosed && task.auto !== null ? { mayBeClosed: true as const, archive: { project: name, title: task.title, line: task.line, session: task.auto.session } } : {}),
           // An ended session's question archives its task where it is shown, as the row's Archive
@@ -1218,12 +1238,66 @@ export const buildView = (
           ...(isInactive && task.auto !== null && (!isSilence || isGone) ? { archive: { project: name, title: task.title, line: task.line, session: task.auto.session } } : {}),
         })
       })
+      const carriedAsks: WaitingItem[] = []
+      const carriedUnresolvedItems: WaitingItem[] = []
+      let firstCarriedText: string | null = null
+      if (!isComplete && !isManual && task.auto !== null && losers.length > 0) {
+        const winnerWords = new Set(task.steps.filter(step => step.status === 'waiting').map(step => questionWords(step.text)))
+        const winnerAuto = task.auto
+        const winnerReplied = winnerAuto.replied !== undefined && Number.isFinite(winnerAuto.replied) ? winnerAuto.replied : null
+        for (const { project: loserProject, task: loser } of losers) {
+          const loserAuto = loser.auto
+          if (loserAuto === null || loserAuto.state === 'done' || isTaskComplete(loser) || loserAuto.state === 'ended') continue
+          const loserClock = observedTime(loserAuto, now, seen)
+          if (isStopped(loserAuto, now, loserClock.updated, staleMs, gone)) continue
+          if (loserAuto.replied !== undefined && Number.isFinite(loserAuto.replied) && loserAuto.replied >= loserAuto.updated) continue
+          if (winnerReplied !== null && winnerReplied >= loserAuto.updated) continue
+          const loserScope = scopeOf(loserProject.name, loserAuto.agent, loserAuto.session, loserAuto.resume)
+          const isLoserFrozen = frozen.size > 0 && (frozen.has(loserScope) || frozen.has(questionScope(loserProject.name, loserAuto.agent, loserAuto.session)))
+          const loserLastActive = hasTime(loserClock.updated) ? loserClock.updated : seen[taskFingerprint(loserProject.name, loser)]
+          const loserWhen = loserClock.isFuture ? loserClock.updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(loserClock.updated, now, s)) : relativeTime(loserClock.updated, now, s)
+          const fallbackKeys = observed === null ? blockKeys(loser) : null
+          loser.steps.forEach((step, index) => {
+            if (step.status !== 'waiting') return
+            const words = questionWords(step.text)
+            if (winnerWords.has(words)) return
+            winnerWords.add(words)
+            if (isLoserFrozen && observed !== null && (recordsByScope?.get(loserScope) ?? []).some(r => r.words === words)) return
+            const questionId = isLoserFrozen ? undefined : observed?.keys[questionSlot(loserScope, index)]
+            const hideKey = isLoserFrozen ? '' : (fallbackKeys !== null ? fallbackKeys[index] : questionId) ?? ''
+            const parts = splitNote(step.text)
+            const item: WaitingItem = {
+              key: `${key}::twin-${loserAuto.session}-${index}`, project: name, task: title, context, ...parts, when: loserWhen,
+              ...(loserLastActive === undefined ? {} : { at: loserLastActive }), dir: effectiveDir,
+              ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: optionsGiven(validOptions(step.options)) }),
+              ...(step.native === undefined ? {} : { native: step.native }), where: 'other', agent: agentOf(task),
+              session: loserAuto.agent !== 'claude' && loserAuto.resume !== null ? sessionName(loserAuto.resume) : loserAuto.session,
+              sessionId: winnerAuto.resume ?? (winnerAuto.agent === 'claude' && RESUME.test(winnerAuto.session) ? winnerAuto.session : null),
+              resumeVia: winnerAuto.resume ? resumeVia(winnerAuto.agent) : null, reopen: winnerAuto.resume ? resumeCommand(winnerAuto.resume, effectiveDir, winnerAuto.agent) : null,
+              hideKey, questionId, step: null, target: effectiveTarget, nativeSession: winnerAuto.resume ?? winnerAuto.session,
+              auto: winnerAuto.state === 'done' || isComplete || isGone || isSilence ? 'ended' as const : winnerAuto.state,
+              ...(mayBeClosed ? { mayBeClosed: true as const, archive: { project: name, title: task.title, line: task.line, session: winnerAuto.session } } : {}),
+            }
+            carriedAsks.push(item)
+            if (!isInactive) waiting.push(item)
+            if (!marked.has(hideKey)) {
+              if (counts !== undefined) counts.indexLookups += 1
+              if (recordsById.get(questionId ?? '')?.isUnresolved !== false) {
+                carriedUnresolvedItems.push(item)
+                if (firstCarriedText === null) firstCarriedText = parts.text
+              }
+            }
+          })
+        }
+      }
       const unresolved = taskQuestions.filter(item => {
         if (marked.has(item.hideKey)) return false
         if (counts !== undefined) counts.indexLookups += 1
         return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
       })
-      if (isInactive) inactiveHidden.push(...taskQuestions.filter(item => {
+      const carriedUnresolved = carriedUnresolvedItems.length > 0
+      const allUnresolved = carriedUnresolvedItems.length === 0 ? unresolved : [...unresolved, ...carriedUnresolvedItems]
+      if (isInactive) inactiveHidden.push(...[...taskQuestions, ...carriedAsks].filter(item => {
         if (!marked.has(item.hideKey)) return false
         if (counts !== undefined) counts.indexLookups += 1
         return recordsById.get(item.questionId ?? '')?.isUnresolved !== false
@@ -1250,7 +1324,7 @@ export const buildView = (
             agent: agentOf(task),
             ...(isManual ? { isOwn: true as const } : {}),
             ...(task.auto === null ? {} : { sessionId: task.auto.resume ?? task.auto.session }),
-            dir: task.auto?.dir ?? null,
+            dir: effectiveDir,
             questions: isInactive ? unresolved : [],
           })
         }
@@ -1274,7 +1348,7 @@ export const buildView = (
         liveness: livenessOf(task.auto, gone),
         now,
         staleMs,
-        hasOpenAsk: task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)),
+        hasOpenAsk: task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) || carriedUnresolved,
       })
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
@@ -1282,12 +1356,12 @@ export const buildView = (
       // One whose questions were all marked answered is back with the work in progress.
       // A blocked step keeps its row beside an open question: the card shows the ask, the row shows the blocker (#224).
       const isBlocked = task.steps.some(step => step.status === 'blocked')
-      if (!isIdle && !isBlocked && auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index))) continue
+      if (!isIdle && !isBlocked && auto === 'waiting' && (task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) || carriedUnresolved)) continue
 
       // A hook's placeholder step says the session waits; while it works the row shows no step (#612).
       const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
       const { done, total } = countSteps(shown)
-      const isAnsweredWaiting = !isBlocked && (auto === 'waiting' || isRepliedTask) && (task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index)) || isRepliedTask)
+      const isAnsweredWaiting = !isBlocked && (auto === 'waiting' || isRepliedTask) && (task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index)) || (carriedAsks.length > 0 && !carriedUnresolved) || isRepliedTask)
       const phrase =
         // An unsure row keeps its shelf (Q3) and its lifecycle step text (Q4);
         // only its status line changes, to the unsure wording with its age.
@@ -1319,7 +1393,7 @@ export const buildView = (
         when: isIdle && !clock.isFuture ? relativeTime(lastActive ?? 0, now, s) : when,
         ...(isRepliedTask ? { isChatReplied: true as const } : {}),
         ...(lastActive === undefined ? {} : { at: lastActive }),
-        dir: task.auto?.dir ?? null,
+        dir: effectiveDir,
         ...(clock.isFuture ? { hasFutureTime: true } : {}),
         isHere,
         auto,
@@ -1328,8 +1402,8 @@ export const buildView = (
         ...(isManual ? { stepLines: task.steps.map(step => step.line), stepTask: { project: name, title: task.title, line: task.line, session: null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) } } : {}),
         cells: rowCells(shown, isRepliedTask),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
-        questions: isInactive ? unresolved : [],
-        question: isInactive ? unresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
+        questions: isInactive ? allUnresolved : [],
+        question: isInactive ? allUnresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? firstCarriedText : splitNote(asked.text).text))(
           task.steps.find((step, index) => step.status === 'waiting' && isPrompt(index)),
         ),
         next:
@@ -1343,7 +1417,7 @@ export const buildView = (
         // The process check proved the session's process gone (#1092, #1595): it is closed, as one whose block says ended.
         ...(livenessOf(task.auto, gone) === 'dead' ? { isProcessGone: true as const } : {}),
         // Only an agent whose resume by id is known gets a command.
-        resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, task.auto.dir, task.auto.agent) : null,
+        resume: auto === 'ended' && task.auto?.resume ? resumeCommand(task.auto.resume, effectiveDir, task.auto.agent) : null,
         handoff: handoffOf(task),
         // A hand-kept task with no open step has nothing to confirm: confirmTask refuses it,
         // so the press could only say the line changed (#142). Nor does a row whose block state is
@@ -1366,7 +1440,7 @@ export const buildView = (
               : auto === 'working' && !isSilence && task.auto !== null && hasTime(updated) && !isWorkingTask(task.steps, updated, now)
                 ? { project: name, title: task.title, line: task.line, session: task.auto.session }
                 : null,
-        target: targetOf(task.auto),
+        target: effectiveTarget,
         ...(task.auto === null ? {} : { nativeSession: task.auto.resume ?? task.auto.session }),
         ...(group === undefined ? {} : { runs: runsText(group, now, s) }),
       }
@@ -1377,7 +1451,7 @@ export const buildView = (
       }
       // A finished session draws no row, so its runs are counted with the background runs instead.
       if (group !== undefined) placed.add(task)
-      if (auto === 'ended' && unresolved.length > 0) {
+      if (auto === 'ended' && allUnresolved.length > 0) {
         stopped.push({ row, updated })
         continue
       }
@@ -1398,27 +1472,9 @@ export const buildView = (
     }
   }
 
-  // The older block of two for one session: no row of its own, but the person may take it out.
-  for (const { project, task } of folded.duplicates) {
-    const auto = task.auto
-    if (auto === null) continue
-    const name = project.name || s.uncategorized
-    const title = task.title || s.unnamed
-    const base = `${name}::${title}`
-    const key = nextKey(base)
-    const updated = observedTime(auto, now, seen).updated
-    const { done, total } = countSteps(task)
-    stopped.push({
-      updated,
-      row: {
-        key,
-        project: name, title, context: '', done, total, status: s.duplicateSession, tone: 'quiet',
-        when: relativeTime(updated, now, s), isHere: false, auto: 'ended', rowState: 'ended', steps: [], cells: [], left: [], next: null, due: null, pr: '',
-        agent: auto.agent === 'claude' ? '' : auto.agent, resume: null, question: null, handoff: '',
-        archive: { project: name, title: task.title, line: task.line, session: auto.session, isDuplicate: true }, target: null,
-      },
-    })
-  }
+  // Duplicate blocks sharing one `(agent, resume)` fold into their winning row (#1832),
+  // rather than showing as a second Stopped (`ended`) row; `takeTask`/`takeArchivable` archive
+  // hidden older copies along with their winner.
   let background: RunGroup | null = folded.background
   for (const [task, group] of folded.runs) {
     if (!placed.has(task)) background = mergeGroups(background, group)

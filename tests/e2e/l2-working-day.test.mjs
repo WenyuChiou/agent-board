@@ -7,7 +7,6 @@ import { makeWorld } from './lib/world.mjs'
 import { block } from './lib/writers.mjs'
 import { inspectSurfaces, terminal, seenPageWithin, print, serve, pageDom } from './lib/surfaces.mjs'
 import { seenWithin, noSilentPress, noMachineIds } from './lib/expect.mjs'
-import { knownFailure } from './lib/known.mjs'
 import { PANE_MS, PAGE_MS } from './lib/budget.mjs'
 
 // The page's words with their line breaks and runs of spaces folded to one space.
@@ -281,10 +280,10 @@ syncBuiltinESMExports()
       noMachineIds(printed, world)
       assert.match(terminalText, /Waiting for synthetic credentials/)
       assert.match(printed, /Waiting for synthetic credentials/)
-      for (const [surface, text] of Object.entries({ terminal: terminalText, print: printed })) await knownFailure('hold:done-recently-summary', () => {
+      for (const [surface, text] of Object.entries({ terminal: terminalText, print: printed })) {
         assert.match(text, /Done recently/, surface)
         assert.match(text, /Finished route review/, surface)
-      })
+      }
     } finally { await world.close() }
   })
 

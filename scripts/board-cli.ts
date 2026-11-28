@@ -58,6 +58,7 @@ import { appendJournal, archivePath, countDay, journalLine, journalPath, localDa
 import type { PendingArchiveRecord } from '../hooks/journal'
 import { currentPart, inboxDropped, monthParts, prunedNote, prunedSince, prunedTotal, RETENTION, sizeWarnings, storageDetails } from '../hooks/retention'
 import { parseProgress, parseStaleMs, progressTail } from '../hooks/parse'
+import { foldRuns } from '../hooks/runs'
 import { qrModules, qrText } from '../hooks/qr'
 import { agentLabel, langOf, plainReadReason, plainReason, STRINGS } from '../hooks/strings'
 import { answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, manualDoneSeen, parseAnswered, parseSeen, seenJson, seenPath, withAnswered, withSeen } from '../hooks/view'
@@ -223,12 +224,14 @@ const journalRaw = (now: number): string => {
 // A task any agent finished today is one journal line, written once (#245). Claude's ticks already
 // wrote their own lines, so a task with a line today under the same project and title is not added.
 let doneProjects: readonly ProgressProject[] = []
-const doneBlockLines = (projects: readonly ProgressProject[], journal: string, now: number): string[] => {
+const doneBlockLines = (projects: readonly ProgressProject[], journal: string, now: number, staleMs = staleTimeoutMs(), gone: ReadonlySet<string> = new Set()): string[] => {
   const day = localDay(now)
   const written = new Set(parseJournal(journal).filter(entry => entry.at === day).map(entry => `${entry.project}\n${entry.task}`))
   const lines: string[] = []
+  const duplicates = new Set(foldRuns(projects, { now, staleMs, gone }).duplicates.map(one => one.task))
   for (const project of projects) {
     for (const task of project.tasks) {
+      if (duplicates.has(task)) continue
       const updated = task.auto?.state === 'done' ? task.auto.updated : undefined
       if (updated === undefined || !Number.isFinite(updated) || updated <= 0 || updated > now || localDay(updated) !== day) continue
       const title = task.title || s.unnamed
@@ -244,19 +247,20 @@ const doneBlockLines = (projects: readonly ProgressProject[], journal: string, n
 
 // The journal for today with what other agents finished today counted too, so every surface that
 // reads it (the count, the done list, --json) agrees with the blocks.
-const journalToday = (now: number): string => {
+const journalToday = (now: number, gone: ReadonlySet<string> = goneBlocksOf(doneProjects)): string => {
   const text = journalRaw(now)
-  return appendJournal(text, doneBlockLines(doneProjects, text, now), s)
+  return appendJournal(text, doneBlockLines(doneProjects, text, now, staleTimeoutMs(), gone), s)
 }
 
 // An interactive board also saves those lines to the month's journal, which the weekly report reads.
 let isDoneSaveFailed = false
-const saveDoneBlocks = (projects: readonly ProgressProject[], now: number): void => {
+const saveDoneBlocks = (projects: readonly ProgressProject[], now: number, gone: ReadonlySet<string> = goneBlocksOf(projects)): void => {
+  const staleMs = staleTimeoutMs()
   try {
     isDoneSaveFailed = false
-    if (doneBlockLines(projects, journalRaw(now), now).length === 0) return
+    if (doneBlockLines(projects, journalRaw(now), now, staleMs, gone).length === 0) return
     rewrite(partOf(journalPath(path, now)), past => {
-      const missing = doneBlockLines(projects, `${journalRaw(now)}\n${past}`, now)
+      const missing = doneBlockLines(projects, `${journalRaw(now)}\n${past}`, now, staleMs, gone)
       return missing.length === 0 ? null : appendJournal(past, missing, s)
     })
   } catch {
@@ -1674,7 +1678,7 @@ const tidyCount = (isNow: boolean, isStrict = false, isCleanUp = false, counted?
       // archive is written, and the next try starts again from it.
       if (asking.length > 0 && read(path) !== text) return AGAIN
     }
-    const blocks = takeArchivable(text, now, undefined, s, isNow, span => kept.has(span.start), span => runs.has(span.start))
+    const blocks = takeArchivable(text, now, undefined, s, isNow, span => kept.has(span.start), span => runs.has(span.start), { staleMs: staleTimeoutMs(), gone: goneBlocksOf(parseProgress(text)) })
     const manual = !isNow && !isCleanUp && !isHandKeptMoveOn
       ? { text: blocks.text, entries: [], keys: [] }
       : takeManualDone(blocks.text, now, (_key, project, task) => handKeptSeenAt(seen, project, task, now), s, isNow)
@@ -1773,7 +1777,7 @@ const bulkTidy = (request: { kind: 'preview'; selector: TidySelector } | { kind:
       if (fresh.asks && !keepAskedQuestions(freshProjects, fresh.ref, now, cutOffScopes(freshProjects, cutOffSpans(text, isCutSettledAt(now))))) return null
       // The gone set comes from the text this retry reads, as in the archive press.
       const gone = goneBlocksOf(freshProjects)
-      const again = takeTask(text, fresh.ref, now, s, {}, staleMs, gone)
+      const again = takeTask(text, fresh.ref, now, s, {}, staleMs, gone, false)
       if (again === null) return null
       if (isLast) return { text: again.text, entries: again.entries }
       if (read(path) !== text) return AGAIN
@@ -3236,7 +3240,7 @@ const boardJson = (days?: number, projectFilter?: string) => {
         if (t) archiveTexts.push(t)
       }
     }
-    finished = collectFinished(source, journalTexts, archiveTexts, days, now, projectFilter, home, isWin)
+    finished = collectFinished(source, journalTexts, archiveTexts, days, now, projectFilter, home, isWin, { staleMs: staleTimeoutMs(), gone: goneBlocksOf(parseProgress(source)), seen: lastSeen })
   }
   return boardDocument(current, updates, doneToday(journalToday(now), now, s), s, home, isWin, now, group, finished, queuedMessaging())
 }

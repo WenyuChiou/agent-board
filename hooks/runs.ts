@@ -1,5 +1,6 @@
 import type { ProgressAuto, ProgressMirror, ProgressProject, ProgressTask } from '../types'
-import { parseAttrs, RESUME, STALE_MS } from './parse'
+import { isStale, isTaskComplete, observedTime, parseAttrs, RESUME, STALE_MS } from './parse'
+import { blockKey } from './session-liveness'
 
 // Only a conversation a person started is a row (#501). Strong host signals suppress new run
 // blocks; legacy blocks and weak hints still fold into the row of the session that started
@@ -16,9 +17,16 @@ export type Folded = {
   runs: Map<ProgressTask, RunGroup>
   // Runs whose session is not known (none named, or gone from the file).
   background: RunGroup | null
-  // The older block of two that carry one agent and one full session id: one row shows, this one
-  // is offered for archive.
-  duplicates: Array<{ project: ProgressProject; task: ProgressTask }>
+  // The older or superseded blocks of two+ that carry one agent and one full session id:
+  // one row shows, these are offered for archive; `winner` points to the winning task in `projects`.
+  duplicates: Array<{ project: ProgressProject; task: ProgressTask; winner?: { project: ProgressProject; task: ProgressTask } }>
+}
+
+export type TwinCandidate = {
+  auto: Pick<ProgressAuto, 'session' | 'agent' | 'state' | 'updated' | 'resume' | 'source' | 'replied' | 'agentPid' | 'agentStarted' | 'host'>
+  isComplete: boolean
+  hasWaitingStep: boolean
+  order: number
 }
 
 type Entry = { project: ProgressProject; task: ProgressTask; auto: ProgressAuto; order: number }
@@ -70,8 +78,38 @@ export const startersOf = (projects: readonly ProgressProject[]): ((auto: Progre
   }
 }
 
-const isAfter = (a: Entry, b: Entry): boolean =>
+export type FoldOptions = { now?: number; staleMs?: number; gone?: ReadonlySet<string>; seen?: Readonly<Record<string, number>> }
+
+const isAfter = (a: { auto: Pick<ProgressAuto, 'updated'>; order: number }, b: { auto: Pick<ProgressAuto, 'updated'>; order: number }): boolean =>
   a.auto.updated !== b.auto.updated ? a.auto.updated > b.auto.updated : a.order > b.order
+const latest = <T extends { auto: Pick<ProgressAuto, 'updated'>; order: number }>(list: readonly T[]): T =>
+  list.reduce((best, one) => (isAfter(one, best) ? one : best))
+const isDone = (c: TwinCandidate): boolean => c.auto.state === 'done' || c.isComplete
+const isReplied = (auto: Pick<ProgressAuto, 'replied'>, at: number): boolean =>
+  auto.replied !== undefined && Number.isFinite(auto.replied) && auto.replied >= at
+
+export const pickTwinWinner = <T extends TwinCandidate>(group: readonly T[], options?: FoldOptions): T => {
+  const { now, staleMs = STALE_MS, gone, seen } = options ?? {}
+  const lively = group.filter(c => {
+    if (isDone(c)) return true
+    if (gone?.has(blockKey(c.auto as ProgressAuto)) === true) return false
+    const at = now !== undefined && seen !== undefined ? observedTime(c.auto as ProgressAuto, now, seen).updated : c.auto.updated
+    return now === undefined || !isStale(c.auto as ProgressAuto, now, at, staleMs)
+  })
+  const pool = lively.length > 0 ? lively : group
+  const done = pool.filter(isDone)
+  if (done.length === 0 || done.length === pool.length) return latest(pool)
+  const bestDone = latest(done)
+  const active = pool.filter(c => !isDone(c) && (
+    (c.auto.state === 'working' && (c.auto.source === 'turns' || isAfter(c, bestDone))) ||
+    (c.auto.state === 'waiting' && isAfter(c, bestDone) && c.hasWaitingStep && !isReplied(c.auto, c.auto.updated))
+  ))
+  return active.length > 0 ? latest(active) : bestDone
+}
+
+const toCandidate = (entry: Entry): TwinCandidate & { entry: Entry } => ({
+  entry, auto: entry.auto, isComplete: isTaskComplete(entry.task), hasWaitingStep: entry.task.steps.some(s => s.status === 'waiting'), order: entry.order,
+})
 
 const tally = (): { add: (agent: string, at: number) => void; done: () => RunGroup } => {
   const counts = new Map<string, number>()
@@ -93,7 +131,7 @@ const tally = (): { add: (agent: string, at: number) => void; done: () => RunGro
 export const mergeGroups = (a: RunGroup | null, b: RunGroup): RunGroup =>
   a === null ? b : { count: a.count + b.count, agents: [...new Set([...a.agents, ...b.agents])], last: Math.max(a.last, b.last) }
 
-export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
+export const foldRuns = (projects: readonly ProgressProject[], options?: FoldOptions): Folded => {
   const entries: Entry[] = []
   let order = 0
   for (const project of projects) {
@@ -102,9 +140,10 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
       if (task.auto !== null) entries.push({ project, task, auto: task.auto, order })
     }
   }
-  // Two blocks of one agent and one full session id are one session: the newest write wins. A
-  // run mark on either makes the session a run, so a reporter with no signal cannot hide it.
-  const winners = new Map<string, Entry>()
+  // Two blocks of one agent and one full session id are one session: choose one deterministic
+  // winner (fresh working hooks turns / resumed asks first, then done, then newest write). A run
+  // mark on either makes the session a run, so a reporter with no signal cannot hide it.
+  const groupsByKey = new Map<string, Entry[]>()
   const runKeys = new Set<string>()
   const parents = new Map<string, string>()
   for (const entry of entries) {
@@ -112,8 +151,13 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
     if (key === null) continue
     if (entry.auto.isRun === true) runKeys.add(key)
     if (entry.auto.parent !== undefined && !parents.has(key)) parents.set(key, entry.auto.parent)
-    const held = winners.get(key)
-    if (held === undefined || isAfter(entry, held)) winners.set(key, entry)
+    const group = groupsByKey.get(key)
+    if (group === undefined) groupsByKey.set(key, [entry])
+    else group.push(entry)
+  }
+  const winners = new Map<string, Entry>()
+  for (const [key, group] of groupsByKey) {
+    winners.set(key, group.length === 1 ? group[0]! : pickTwinWinner(group.map(toCandidate), options).entry)
   }
   const isLoser = (entry: Entry): boolean => {
     const key = sessionKey(entry.auto)
@@ -168,7 +212,11 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
   for (const entry of entries) {
     if (isLoser(entry)) {
       gone.add(entry.task)
-      if (!isRun(entry)) duplicates.push({ project: entry.project, task: entry.task })
+      if (!isRun(entry)) {
+        const key = sessionKey(entry.auto)
+        const winner = key === null ? undefined : winners.get(key)
+        duplicates.push({ project: entry.project, task: entry.task, ...(winner === undefined ? {} : { winner: { project: winner.project, task: winner.task } }) })
+      }
       continue
     }
     if (!isRun(entry)) continue
@@ -192,16 +240,20 @@ export const foldRuns = (projects: readonly ProgressProject[]): Folded => {
   }
 }
 
-// Whether a newer block carries the same agent and full session id. The archive of a twin is
-// checked again at the write, against the file as it is then.
-export const isOutranked = (tasks: readonly ProgressTask[], task: ProgressTask): boolean => {
+// Whether a winning block outranks this task for the same agent and full session id. The archive
+// of a twin is checked again at the write, against the file as it is then.
+export const isOutranked = (tasks: readonly ProgressTask[], task: ProgressTask, options?: FoldOptions): boolean => {
   const auto = task.auto
   if (auto === null || auto.resume === null) return false
+  const peers: (TwinCandidate & { entry: Entry })[] = []
+  tasks.forEach((other, index) => {
+    if (other.auto !== null && other.auto.agent === auto.agent && other.auto.resume === auto.resume) {
+      peers.push(toCandidate({ project: { name: '', tasks: [] }, task: other, auto: other.auto, order: index + 1 }))
+    }
+  })
+  if (peers.length <= 1) return false
 
-  return tasks.some(other =>
-    other !== task && other.auto !== null && other.auto.agent === auto.agent && other.auto.resume === auto.resume &&
-    (other.auto.updated > auto.updated || other.auto.updated === auto.updated && other.line > task.line),
-  )
+  return pickTwinWinner(peers, options).entry.task !== task
 }
 
 // A writer that knows a run but not who started it names the person's session that is working in

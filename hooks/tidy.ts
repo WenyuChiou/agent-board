@@ -40,7 +40,7 @@ export const previewTidy = (text: string, selector: TidySelector, now: number, s
     if (selector.kind === 'agent' && auto.agent !== selector.value) continue
     if (selector.kind === 'older' && !(auto.updated > 0 && auto.updated < now - selector.days * 86400000)) continue
     const ref = { project, title: task.title, line: task.line, session: span.session }
-    if (takeTask(text, ref, now, s, {}, staleMs) === null) continue
+    if (takeTask(text, ref, now, s, {}, staleMs, new Set(), false) === null) continue
     candidates.push({ ref, fingerprint: sha256(JSON.stringify([project, lines.slice(span.start, span.end + 1)])), asks: tasks.some(one => one.task.line > span.start && one.task.line < span.end && one.task.steps.some(step => step.status === 'waiting')) })
   }
   return { selector, now, candidates }
