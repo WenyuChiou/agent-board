@@ -70,6 +70,18 @@ step 1 of #902 (each file's share of the Windows board logs, x 1.5); the part bu
 from recent main runs, since a 420 s job wall already fails on main. A parallel run records no
 per-file times, so the file check only applies to serial parts.
 
+How many parts a job starts (#1917). The counts above (board 3 on Ubuntu and 10 on Windows, local exchange 2
+and 3, journeys 1 and 3) are the most a run starts, on every Node line. The planner writes the board, local
+exchange and journeys matrices itself (`partMatrices` in `scripts/ci-impact.mjs`), for the (system, Node)
+pairs the workflow gives it, so a part with no test file is never started. A full plan keeps every count. For
+each pair, a selection that includes a self-parted file keeps the count, since that file deals its tests into
+those parts; so does a selection with a file that has no time of its own in `tests/ci-test-times.json`, since
+its weight is only a guess. Otherwise the count is the smallest whose heaviest part, dealing the selected files
+by the table as above, is predicted no longer than the heaviest part of today's full run of that group on that
+pair: a part CI already runs, so no new budget is needed. A pull request that changes one small board test starts
+two board jobs, one per pair, not thirteen. When the trusted base planner writes no matrices (an older base, or the
+bootstrap), test.yml uses the fixed counts above, so no run starts fewer tests than before.
+
 Every job that runs tests on Windows first tries to turn off Windows
 Defender's real-time scanning (a failure there does not stop the job); the product's own antivirus
 handling stays covered by its simulated tests. No

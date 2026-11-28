@@ -38,7 +38,8 @@ import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
 import { antigravitySurface, deliverAntigravityStopWait, deliverTurnEvent } from './hook-delivery'
-import { checkStoreFile, hookMailbox } from './board-messaging'
+import { appendTurnStart, appendTurnStop, checkStoreFile, hookMailbox, startSeq, workerTurnMark } from './board-messaging'
+import { isTurnStart } from '../hooks/hook-messages'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
@@ -1491,6 +1492,31 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
       queuedFile = file
     }
+    // Antigravity's turn log (#1396, D2): appended to before the lock below and before any board call, so a lock that stays
+    // busy, a row write that fails or a take that fails each loses one mark at most. A turn start's number also goes with its
+    // take, so a log write that fails still reaches the board. A replayed event writes nothing: no turn counts twice.
+    const turnMark = current?.agent === 'antigravity' && current.mode === '--agent-status' && current.event !== undefined
+      ? isTurnStart('antigravity', current.event) ? 'start' : current.event === 'Stop' ? 'stop' : undefined : undefined
+    let turnSeq: number | undefined
+    // The hook worker usually marked the turn already and handed on what it wrote (hooks/hook-safety.ts), for this
+    // process only.
+    const handed = process.env.AGENT_BOARD_TURN_MARK
+    delete process.env.AGENT_BOARD_TURN_MARK
+    if (current !== undefined && turnMark !== undefined) {
+      const messages = defaultMessagesDirectory(progress, home, process.env, process.platform)
+      const marked = workerTurnMark(handed, messages, 'antigravity', current.session, turnMark)
+      try {
+        if (turnMark === 'start') {
+          // A start the worker could not append is appended here, with the same three tries; its number is the place of its
+          // own line, or, with none, the number of starts plus one.
+          const token = marked?.token ?? appendTurnStart(messages, 'antigravity', current.session)
+          turnSeq = startSeq(messages, 'antigravity', current.session, token)
+        } else if (marked?.token === undefined && marked?.none !== true) {
+          // A Stop the worker did not mark, or could not append, ends the turns before the size it read first.
+          appendTurnStop(messages, 'antigravity', current.session, marked?.size)
+        }
+      } catch {}
+    }
     // A board that refuses writes, for its lock or any file under it, as agy's terminal sandbox does (#1384).
     const isDenied = (error: unknown): boolean => !isBusy(error)
       && (error instanceof Error && error.message === 'LOCK_DENIED' || ['EACCES', 'EPERM', 'EROFS'].includes(String((error as { code?: unknown } | null)?.code)))
@@ -1679,7 +1705,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       '--progress-file', progress, '--home', home, '--data-dir', root,
     ])) : null
     if (await deliverTurnEvent({
-      mode, agent, event, session, report, raw, folder: current.folder, base, progress, home, root, hookDeadline, s,
+      mode, agent, event, session, report, raw, folder: current.folder, base, progress, home, root, hookDeadline, s, seq: turnSeq,
       hash, readLocal, atomic, checkDeadline, hereNames,
     })) return true
     if (mode === '--codex-report' && planInput !== undefined) return true
