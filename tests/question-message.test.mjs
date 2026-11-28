@@ -77,3 +77,43 @@ test('#1579 while the message from the card is being taken, the page says why th
   await page.redraw(modelOf(acknowledged.messages))
   assert.ok(!page.text().includes(EN.boardQueuedCount(1)), page.text())
 })
+
+test('#1579 a message whose POST replies never arrive still offers its answers again once its receipt is acknowledged', async () => {
+  const model = modelOf([])
+  assert.equal(model.asks.length, 1)
+  // The board stores the message, but no answer of any try reaches the page.
+  let store = { messages: [] }
+  const post = request => {
+    const { id, text, connection: target, turn } = request.body
+    store = queueMessage(store, { id, target, turn, text }, 'board', connection, now).state
+    const held = new Promise(() => {})
+    held.isHeld = true
+    return held
+  }
+  const page = await pageDom(servePage(EN, 'synthetic'), model, post)
+  page.cards().flatMap(card => page.buttons(card)).find(one => one.textContent === EN.pgWriteOwn).click()
+  page.inputs(page.cards()[0])[0].value = 'Message C'
+  page.buttons(page.cards()[0]).find(one => one.textContent === EN.serveSend('Claude')).click()
+  await page.flush()
+  assert.equal(page.requests.length, 1)
+  const id = page.requests[0].body.id
+  const claimed = claimMessages(store, connection, now + 1, 'abcdef').state
+  const accepted = messageReceipt(claimed, connection, { id, nonce: 'abcdef', status: 'accepted' }, now + 2)
+  const acknowledged = messageReceipt(accepted, connection, { id, nonce: 'abcdef', status: 'acknowledged', reply: 'ACK abcdef' }, now + 3)
+  // The board's read brings the stored message: its receipt replaces Sending.
+  await page.redraw(modelOf(accepted.messages))
+  // 30 s with no POST answer: 15 tries, all under the first press's id. The board has the message and its read
+  // answered, so the page neither says it cannot reach the board nor goes offline.
+  for (let i = 0; i < 15; i++) await page.runTimers('retrySend')
+  assert.equal(page.requests.length, 15)
+  assert.equal(new Set(page.requests.map(one => one.body.id)).size, 1)
+  assert.ok(!page.text().includes(EN.statusUnreachable), page.text())
+  // The receipt is acknowledged and the question is still open: the card offers its answers again.
+  const after = modelOf(acknowledged.messages)
+  assert.deepEqual(after.view.needs.handled, [])
+  await page.redraw(after)
+  const labels = visibleLabels(page)
+  assert.ok(labels.includes('Port 3000') && labels.includes('8080'), labels.join(' | '))
+  const receiptHide = page.cards().flatMap(card => page.buttons(card)).filter(one => one.textContent === EN.answeredHide && shown(page, one) && one.parentNode?.parentNode?.className === 'receipt-box')
+  assert.deepEqual(receiptHide, [])
+})
