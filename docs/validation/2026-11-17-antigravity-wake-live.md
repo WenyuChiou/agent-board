@@ -103,8 +103,9 @@ An earlier try in this run (a shorter count) ended before the row's button was p
 ## Result
 
 For the 2.0 Desktop App on Windows: a board message to an idle conversation started a turn with the one fixed line and
-the message handed over by the turn-start hook, once, and the row read it as read: at once when the last turn had ended
-long before (run 1), and 10.6 s after the last turn's end for a message sent 4.8 s after it (run 3). A message sent while
+the message handed over by the turn-start hook, once, and the row read it as read. The board saved the wake's start at
+once when the last turn had ended long before (run 1), and 10.6 s after the last turn's end for a message sent 4.8 s
+after it, the hook taking the message at 11.0 s (run 3); the app's own start time was not read. A message sent while
 a turn ran waited for the next turn and woke nothing (run 2).
 
 Not covered: the editor (IDE) surface, a woken turn that fails or is never confirmed, Linux and macOS, other app
