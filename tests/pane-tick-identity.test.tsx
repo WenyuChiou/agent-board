@@ -148,6 +148,16 @@ test('a pane tick is reported gone when a stale snapshot that kept it gave its l
   await ui.unmount()
 })
 
+test('a pane tick still counts when a stale snapshot that kept it reworded a step and another task shares its title', async ($, on) => {
+  const before = '## Demo\n### Checklist\n- [ ] First step\n- [ ] Second step\n\n### Checklist\n- [ ] Other task step\n'
+  const reworded = (text: string): string => text.replace('- [ ] Second step\n', '- [ ] Second step, reworded\n')
+  const { world, ui } = await pressAfter($, on, { before, open: CHECKLIST, press: CHECKLIST_TICK, changeAfterWrite: reworded, keepTick: true })
+  expect(world.files.get(FILE)).toMatch(/^## Demo\n### Checklist\n- \[x\] First step[^\n]*\n- \[ \] Second step, reworded\n\n### Checklist\n- \[ \] Other task step\n$/)
+  expect(journalOf(world).split(' · First step\n')).toHaveLength(2)
+  expect(await ui.find({ type: 'Text', text: ZH_TW.boardTicked('First step') })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a pane tick is refused when an identical sibling step appeared after the draw', async ($, on) => {
   const before = '## Demo\n### Checklist\n- [ ] Same step\n- [ ] Other step\n'
   const grown = (text: string): string => text.replace('### Checklist\n', '### Checklist\n- [ ] Same step\n')

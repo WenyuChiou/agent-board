@@ -4160,8 +4160,9 @@ const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
   const anchor = (task: ProgressTask): number => task.line >= 0 ? task.line : task.steps[0]?.line ?? -1
   const same = parseProgress(refused).filter(project => (project.name || s.uncategorized) === guard.task.project).flatMap(project => project.tasks)
     .filter(task => task.title === guard.task.title && (task.auto?.session ?? null) === guard.task.session)
-  const anchors = same.map(anchor).sort((a, b) => a - b)
-  if (anchors.length !== guard.lines.length || anchors.some((line, index) => line !== guard.lines[index])) return false
+  // Tasks with other steps can share the title; only those drawn as candidates must still be there.
+  const anchors = new Set(same.map(anchor))
+  if (guard.lines.some(line => !anchors.has(line))) return false
   return same.some(task => task.line === guard.task.line && anchor(task) === (guard.task.line >= 0 ? guard.task.line : guard.steps[0]) && task.steps.some(step => step.line === ticked.at))
 }
 
