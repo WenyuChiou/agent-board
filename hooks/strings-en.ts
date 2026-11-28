@@ -36,6 +36,12 @@ export const EN: Strings = {
   localAgentSkillDescription: 'Open the local interactive board and track real task progress for the currently connected session.',
   antigravitySidecarDescription: 'Agent Board: starts a new turn in an idle Antigravity conversation when the board has a message for it. Switched on only by you, in Automations.',
   antigravityWakeLine: 'Agent Board: a message from the board is attached to this turn. Follow it.',
+  // What a card says of a message the Antigravity sidecar wakes a conversation for (#1396).
+  agyWoken: 'Antigravity was woken. It gets this as its new turn starts.',
+  agyWakeFailed: 'Antigravity could not be woken. It gets this at its next turn.',
+  agyWaking: 'Waking Antigravity, not confirmed yet. If no turn starts, it gets this at its next turn.',
+  agySidecarOff: "Antigravity's sidecar is not on, so this waits for its next turn.",
+  agyMayJoin: 'If you start a turn in Antigravity just as it goes in, it may join your turn.',
   openclawProgressTool: 'Report the real progress of this task to the local board. Send every step as one Markdown task line, after each real step or state change. When your reply ends on a question for the person, first send it as a "- [?] <the question>" step with state waiting, before you end the turn: the board reads no reply text, so this step is the only way the question reaches the person. When you need the user, mark the step [?] and write one line they can answer: end a yes/no question with "OK?", write a choice as "A or B?", put a command in backticks, start a wait with "waiting for".',
   deepseekBoardTool: 'Open the local board, or report the real progress of this task to it. action open starts the board page and returns the one line it prints: the page link, or why there is no page. action report takes title, state and steps: send every step as one Markdown task line, after each real step or state change. When your reply ends on a question for the person, first send it as a "- [?] <the question>" step with state waiting, before you end the turn: the board reads no reply text, so this step is the only way the question reaches the person. When you need the user, mark the step [?] and write one line they can answer: end a yes/no question with "OK?", write a choice as "A or B?", put a command in backticks, start a wait with "waiting for".',
   opencodeAckTool: 'Acknowledge a board message: pass the id and the 6-character code from its envelope, and optionally a one-line summary of your reply.',

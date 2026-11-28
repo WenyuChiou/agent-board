@@ -21,7 +21,7 @@ import type { RowState as DerivedRowState } from './row-state'
 import type { AgentTarget, StepRef, TaskRef, View, WaitingItem } from './view'
 import type { Connection, Message, ReceiverRoutes, RouteLine, RowState, SendDecision } from './messaging'
 import { deliveryTargets } from './hook-messages'
-import { address, ENDED_UNCERTAIN_ERRORS, isEndedUncertain, isMailboxSurfaceLost, isMailboxTarget, isOpen, isRecordedRoute, sendDecision, SURFACE_IDS } from './messaging'
+import { address, ENDED_UNCERTAIN_ERRORS, isEndedUncertain, isMailboxSurfaceLost, isMailboxTarget, isOpen, isRecordedRoute, sendDecision, sidecarRoutes, SURFACE_IDS } from './messaging'
 import { RECEIVER_ROUTES } from './receiver-routes'
 
 // The board's page: what `agent-board` shows in a browser for agents other than
@@ -36,11 +36,13 @@ import { RECEIVER_ROUTES } from './receiver-routes'
 export type SendMode = 'send' | 'connected' | 'mailbox' | 'open' | 'claude' | 'none'
 // isAfterAppQuit: the connection is a Codex desktop app conversation, whose message waits for the app to be quit (#557).
 type Delivery = { id: string; turn: string; agent: string; isAfterAppQuit?: true }
-type ShownMessage = Omit<Message, 'nonce' | 'hash'> & { isSurfaceLost?: boolean; isAfterAppQuit?: boolean }
 // isAfterAppQuit: a message to a Codex desktop app conversation, which runs only once the app has let go of it (#557).
+// wake: what the card says of an Antigravity sidecar wake (shownWake in hooks/hook-messages.ts).
+type ShownMessage = Omit<Message, 'nonce' | 'hash' | 'wake'> & { isSurfaceLost?: boolean; isAfterAppQuit?: boolean; wake?: 'sent' | 'failed' | 'started' | 'off' }
 // shown: the card's one status line, from hooks/message-status.ts (#1843); none for a message taken back after it was handed out.
-type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean; isSurfaceLost?: true; isAfterAppQuit?: true; shown?: { state: StatusState; line: string; tone: StatusTone } }
-type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; surfaces?: { connections: readonly Connection[]; mailboxes: readonly Connection[] }; messages: readonly ShownMessage[] }
+type Receipt = Pick<Message, 'id' | 'status' | 'reply' | 'error' | 'text' | 'hasAccepted' | 'line'> & { when: string; isMailbox: boolean; isSurfaceLost?: true; isAfterAppQuit?: true; wake?: ShownMessage['wake']; shown?: { state: StatusState; line: string; tone: StatusTone } }
+// sidecar: whether the Antigravity sidecar polls the board now (#1396).
+type Messaging = { connections: readonly Connection[]; mailboxes?: readonly Connection[]; surfaces?: { connections: readonly Connection[]; mailboxes: readonly Connection[] }; messages: readonly ShownMessage[]; sidecar?: boolean }
 
 const liveTarget = (agent: string, session: string | undefined, connections: readonly Connection[]): Connection | undefined => {
   const matches = session === undefined ? [] : connections.filter(one => address(one.agent, one.session) === address(agent || 'claude', session))
@@ -72,7 +74,7 @@ export const rowReceipt = (agent: string, session: string | undefined, messages:
   // receiver still holds is the one reading only the page makes.
   const status = isAppTurnRunning(one, connections, now) ? 'accepted' : one.status
   const shown = messageStatus({ ...one, status, isSurfaceLost: isSurfaceLost(one) }, now, s, reportedAt)
-  return { receipt: { id: one.id, status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), ...(one.isAfterAppQuit === true ? { isAfterAppQuit: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s), ...(shown === null ? {} : { shown: { state: shown.state, line: shown.line, tone: shown.tone } }) } }
+  return { receipt: { id: one.id, status, reply: one.reply, error: one.error, text: one.text, ...(one.line === undefined ? {} : { line: one.line }), ...(one.wake === undefined ? {} : { wake: one.wake }), ...(one.hasAccepted === true ? { hasAccepted: true } : {}), ...(isSurfaceLost(one) ? { isSurfaceLost: true as const } : {}), ...(one.isAfterAppQuit === true ? { isAfterAppQuit: true as const } : {}), isMailbox: isMailboxTarget(one.target), when: relativeTime(one.updated, now, s), ...(shown === null ? {} : { shown: { state: shown.state, line: shown.line, tone: shown.tone } }) } }
 }
 // The person's answer to this question reached its session: the session took it, or replied.
 const isAnswerHanded = (messages: readonly Pick<ShownMessage, 'answers' | 'status' | 'hasAccepted'>[], questionId: string): boolean =>
@@ -117,7 +119,10 @@ export const routeText = (line: RouteLine, canSend: boolean, agent: string, s: S
   if (line === 'none' && !canSend && agent === 'codex' && state === 'ended') return codexResumeHint(agent, state, s)
   // Codex's daemon receiver takes `afterWait` on idle because it starts a message within seconds with a Codex window open,
   // after a watch of up to about 10 minutes without one, before starting a message (#1578, #1814, #1652). Each route line maps cleanly to its own text.
-  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : s.serveLineNow(name))
+  // The Antigravity app has no "send only if idle": a wake the board hands out just as the person starts a turn may
+  // land in that turn, a window the owner accepted on 2026-11-18 on the condition that the card says so (#1396).
+  const idleNow = agent === 'antigravity' ? `${s.serveLineNow(name)} ${s.agyMayJoin}` : s.serveLineNow(name)
+  const text = line === 'now' ? (isClaudeAgent(agent) ? s.claudeSendNow : state === 'working' ? s.serveLineNowWorking(name) : idleNow)
     : line === 'afterWait' ? s.serveLineSoon(name)
     : line === 'stepEnd' ? (isClaudeAgent(agent) ? s.claudeSendWorking : s.serveLineStepEnd(name))
     : line === 'nextTurn' ? s.serveNextTurnHint(name)
@@ -550,15 +555,16 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   const isSending = (target: AgentTarget | null): boolean => target !== null && sending.has(sendKey(target))
   const stateOfSession = (agent: string, session: string): RowState | undefined => sessionState(view, agent, session)
   // A live connection hides its session's mailbox only on a route its record shows for the session's state now (#318).
-  const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes, live => isRecordedRoute(live, stateOfSession, routes))
+  const known = sidecarRoutes(routes, messaging?.sidecar === true)
+  const targets = deliveryTargets(messaging?.connections ?? [], messaging?.mailboxes, live => isRecordedRoute(live, stateOfSession, known))
   const surfaceConnections = messaging?.surfaces ? messaging.surfaces.connections : (messaging?.connections ?? [])
   const surfaceMailboxes = messaging?.surfaces ? messaging.surfaces.mailboxes : messaging?.mailboxes
-  const surfaceTargets = messaging?.surfaces ? deliveryTargets(surfaceConnections, surfaceMailboxes, live => isRecordedRoute(live, stateOfSession, routes)) : targets
+  const surfaceTargets = messaging?.surfaces ? deliveryTargets(surfaceConnections, surfaceMailboxes, live => isRecordedRoute(live, stateOfSession, known)) : targets
   const surfaceOf = (agent: string, session: string | undefined, target: AgentTarget | null): string | undefined =>
     reachable(agent, session, target, surfaceTargets)?.surface
     ?? liveTarget(agent, session, surfaceConnections)?.surface
     ?? (target?.isClosed === true ? undefined : liveTarget(agent, session, surfaceMailboxes ?? [])?.surface)
-  const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], stateOfSession, routes, group?.now ?? 0)
+  const decisionFor = (target: Connection): SendDecision => sendDecision(target.id, messaging?.connections ?? [], messaging?.mailboxes ?? [], stateOfSession, known, group?.now ?? 0)
   const isMessageSurfaceLost = (one: ShownMessage): boolean => isMailboxSurfaceLost(one, messaging?.mailboxes)
   const onLan = (mode: SendMode): SendMode => (isLan && mode === 'send' ? 'open' : mode)
   const lanInfo = (mode: SendMode, agent: string): string | null => (isLan && mode === 'send' ? s.serveLanSend(agentLabel(agent || 'claude', s)) : null)

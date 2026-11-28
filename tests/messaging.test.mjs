@@ -9569,7 +9569,8 @@ test('every receiver record against idle, working and ended shows its line, with
     const view = buildView(parseProgress(stateFile(record.agent, state, session)), [], null, now, 0, {}, s)
     const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
     const surface = route.surfaces?.[0] ?? 'Synthetic'
-    const live = record.kind === 'mailbox' ? { connections: [], mailboxes: enrollMailbox({ messages: [] }, record.agent, session, surface, now, 43_200_000).mailboxes, messages: [] }
+    // The Antigravity sidecar's entry holds only while its sidecar polls (#1396), so its card is drawn with the sidecar on.
+    const live = record.kind === 'mailbox' ? { connections: [], mailboxes: enrollMailbox({ messages: [] }, record.agent, session, surface, now, 43_200_000).mailboxes, messages: [], sidecar: record.sidecar === true }
       : { connections: [{ id: 'table-receiver', agent: record.agent, session, surface, turn: record.kind === 'turn' ? 'turn1' : 'session', scope: record.kind === 'turn' ? 'turn' : 'session', expires: now + 60_000 }], messages: [] }
     const model = realServeModel(view, [], s, new Set(), false, live, false, group, RECEIVER_ROUTES)
     const card = state === 'idle' ? model.asks[0] : [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)].find(one => one.title === 'Route table')
@@ -9750,18 +9751,20 @@ test('each receiver record names a validation note that exists, and the table th
       if (route.record !== null) assert.ok(existsSync(join(root, route.record)), `${record.source} ${state}: ${route.record}`)
       assert.ok(!(route.line === 'none' && route.record !== null), `${record.source} ${state} names a note for a route that does not exist`)
     }
-    const shipped = RECEIVER_ROUTES.find(one => one.agent === record.agent && one.kind === record.kind)
     // Three adapters can share an agent and kind (the Codex owner connector, the daemon receiver and the desktop app
     // receiver): a note and a line cover only the surfaces they name, so each record must match the shipped entry on its
-    // own surfaces, read the way the send gate reads them (routeLine, routeRecord, #557).
+    // own surfaces, read the way the send gate reads them (routeLine, routeRecord, #557). Two entries can share them too:
+    // the Antigravity sidecar's beside the hook mailbox's (#1396), so a record matches the one of its own kind.
     const ids = record.surfaces.map(surface => surface.id)
     const own = route => {
       const surfaces = route.surfaces.filter(id => ids.includes(id))
       return { surfaces, each: surfaces.map(id => [id, routeLine(route, id), routeRecord(route, id)]) }
     }
-    assert.deepEqual(shipped && Object.fromEntries(states.map(state => [state, own(shipped.routes[state])])), Object.fromEntries(states.map(state => [state, own(record.routes[state])])), `${record.source} differs from hooks/receiver-routes.ts`)
+    const shipped = RECEIVER_ROUTES.filter(one => one.agent === record.agent && one.kind === record.kind && (one.sidecar === true) === (record.sidecar === true))
+    assert.equal(shipped.length, 1, `${record.source}: one shipped entry`)
+    assert.deepEqual(Object.fromEntries(states.map(state => [state, own(shipped[0].routes[state])])), Object.fromEntries(states.map(state => [state, own(record.routes[state])])), `${record.source} differs from hooks/receiver-routes.ts`)
     // A state no surface of the record covers still names the same line, the one its card shows without a note.
-    for (const state of states) if (record.routes[state].surfaces.length === 0) assert.equal(shipped.routes[state].line, record.routes[state].line, `${record.source} ${state}`)
+    for (const state of states) if (record.routes[state].surfaces.length === 0) assert.equal(shipped[0].routes[state].line, record.routes[state].line, `${record.source} ${state}`)
   }
   // And every surface a shipped note covers is one a record names for that same note and line.
   for (const shipped of RECEIVER_ROUTES) for (const state of states) for (const id of shipped.routes[state].surfaces) {
@@ -9850,6 +9853,61 @@ test('with the receivers\' own records, a Claude card sends and a Codex card tha
   // A recorded route is not refused by the table (a second message to the same session is held back by the usual busy rule).
   assert.notEqual((await board.call('/api/messages/send', { id: 'AB-DIRECT-claude', target: claudeConnection.id, turn: 'session', text: 'Again' })).body.error, 'NO_RECORDED_ROUTE')
 }, '', undefined, RECEIVER_ROUTES))
+
+// agentapi here is a stand-in that only logs its arguments: whether Antigravity's app starts a turn for the line is the
+// live run's to show (docs/validation/2026-11-17-antigravity-wake-live.md).
+test('the real Antigravity sidecar runs a stand-in agentapi\'s send-message once for a board message 10 s after the turn\'s Stop in its turn log, and the board\'s mailbox hand-over that the turn-start hook calls then gives the message (#1396)', () => fixture(async (board, dir) => {
+  const { ANTIGRAVITY_WAKE_LINE, antigravitySidecarSource } = await import('../hooks/antigravity-sidecar.ts')
+  const { WAKE_IDLE_MS } = await import('../hooks/hook-messages.ts')
+  const conversation = '0b6d6e0e-6f43-4c0b-9a58-3f1a7e3a1c11'
+  // The conversation's progress row reads waiting, so the card offers the idle route.
+  writeFileSync(join(dir, 'progress.md'), `# Progress\n\n## Synthetic\n<!-- auto session=abcdef01 agent=antigravity resume=${conversation} state=waiting updated=${new Date(Date.now() - 20_000).toISOString()} -->\n### App card\n- [?] Pick one?\n<!-- /auto session=abcdef01 -->\n`)
+  // The sidecar finds the board by the owner record a board keeps only in its default folder, so this board runs there;
+  // Antigravity's hooks keep the conversation's turn log in it too.
+  const folder = (await board.call('/api/ping')).body.messagesDirectory
+  const turnLog = join(folder, `${mailboxId('antigravity', conversation)}.turns.log`)
+  // What Antigravity's turn-start hook does: it appends the turn's start line to that log, then takes with that line's number
+  // from the board's mailbox API, called here directly. Its Stop hook appends the size it read and calls no board.
+  let stopped = 0, starts = 0
+  const hook = async seq => {
+    fs.appendFileSync(turnLog, `\nS ${(starts += 1).toString(16).padStart(32, '0')}\n`)
+    return (await board.call('/api/messages/mailbox-turn', { agent: 'antigravity', session: conversation, surface: 'IDE', seq })).body.message
+  }
+  assert.equal(await hook(1), null)
+  stopped = Date.now()
+  fs.appendFileSync(turnLog, `\nE ${statSync(turnLog).size} ${stopped} ${'e'.repeat(32)}\n`)
+  const card = async () => (await board.call('/api/board')).body.model.asks.find(one => one.agent === 'antigravity')
+  assert.equal((await card()).line, 'nextTurn')
+  // The sidecar setup writes, with a stand-in for Antigravity's agentapi that only logs its arguments.
+  const log = join(dir, 'agentapi.log')
+  writeFileSync(join(dir, 'sidecar.mjs'), antigravitySidecarSource())
+  writeFileSync(join(dir, 'agentapi.cjs'), `if (require('node:path').basename(process.argv[1] ?? '') === 'agentapi') { require('node:fs').appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + '\\n'); process.exit(0) }\n`)
+  const sidecar = () => new Promise(done => {
+    const child = spawn(process.execPath, [join(dir, 'sidecar.mjs'), '--messages-dir', folder, '--once'], { cwd: dir, windowsHide: true, env: { ...process.env, NODE_OPTIONS: `--require=${join(dir, 'agentapi.cjs')}`, ANTIGRAVITY_AGENTAPI_EXE: process.execPath } })
+    let output = ''
+    // A sidecar that does not end its one poll is stopped, so the test never leaves it running.
+    const timer = setTimeout(() => child.kill(), 15_000)
+    child.stdout.on('data', chunk => { output += chunk })
+    child.on('exit', () => { clearTimeout(timer); done(output) })
+  })
+  const calls = () => existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map(line => JSON.parse(line)) : []
+  // Its first poll marks it alive, so the card sends at once.
+  await sidecar()
+  assert.equal((await card()).line, 'now')
+  const sent = await board.call('/api/messages/send', { id: 'AB-WAKE-1', target: mailboxId('antigravity', conversation), turn: 'session', text: 'Synthetic wake text' })
+  assert.equal(sent.body.line, 'now')
+  // The board wakes a conversation only 10 s after its Stop, so the test waits that out; then the next poll wakes the
+  // conversation with the fixed line alone, and the board keeps the sidecar's report.
+  await pause(Math.max(0, stopped + WAKE_IDLE_MS + 500 - Date.now()))
+  assert.match(await sidecar(), /wake sent/)
+  assert.deepEqual(calls(), [['send-message', '--title=Agent Board', conversation, ANTIGRAVITY_WAKE_LINE]])
+  const message = (await board.call('/api/board')).body.messaging.messages.find(one => one.id === 'AB-WAKE-1')
+  assert.deepEqual([message.status, message.wake], ['queued', 'sent'])
+  // One wake per message: another poll runs nothing.
+  await sidecar()
+  assert.equal(calls().length, 1)
+  assert.equal((await hook(2)).text, 'Synthetic wake text')
+}, '', [], RECEIVER_ROUTES))
 
 // Live run 2026-11-22 (#557): a Codex app conversation's message waits for the app to be quit, so the press says so, not "running".
 test('a board reply to a Codex desktop app conversation is answered with the wait for the app to quit, not a running turn (#557)', () => fixture(async (board, dir) => {
@@ -10151,7 +10209,7 @@ test('shape 23: every recorded surface and state agrees with the card in three l
     assert.equal(typeof surface.id, 'string', `${record.source}: ${surface.name} needs a registered id`)
     const route = record.routes[state], now = Date.now(), session = '11111111-2222-4333-8444-999999999999'
     const view = buildView(parseProgress(stateFile(record.agent, state, session)), [], null, now, 0, {}, s)
-    const target = record.kind === 'mailbox' ? { connections: [], mailboxes: enrollMailbox({ messages: [] }, record.agent, session, surface.id, now, 43_200_000).mailboxes, messages: [] }
+    const target = record.kind === 'mailbox' ? { connections: [], mailboxes: enrollMailbox({ messages: [] }, record.agent, session, surface.id, now, 43_200_000).mailboxes, messages: [], sidecar: record.sidecar === true }
       : { connections: [{ id: 'surface-matrix', agent: record.agent, session, surface: surface.id, turn: record.kind === 'turn' ? 'turn1' : 'session', scope: record.kind === 'turn' ? 'turn' : 'session', expires: now + 60_000 }], messages: [] }
     const group = { now, repoOf: () => null, versions: { board: 'synthetic', package: null }, unreadable: [] }
     const model = realServeModel(view, [], s, new Set(), false, target, false, group, RECEIVER_ROUTES)

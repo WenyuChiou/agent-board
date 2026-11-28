@@ -124,6 +124,8 @@ export type TurnDelivery = {
   root: string
   hookDeadline: number
   s: Strings
+  // Antigravity's turn number for a turn start, from its turn log, sent with the take (#1396).
+  seq?: number
   // These stay in codex-local.ts, which owns the file lock, the deadline and the hash scheme;
   // importing them back would make the two files import each other.
   hash: (text: string) => string
@@ -137,7 +139,7 @@ export type TurnDelivery = {
 // hook has already answered on stdout, so the caller must stop; false lets the caller carry on
 // with its own output.
 export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean> => {
-  const { mode, agent, event, session, report, raw, folder, base, progress, home, root, hookDeadline, s, hash, readLocal, atomic, checkDeadline, hereNames } = delivery
+  const { mode, agent, event, session, report, raw, folder, base, progress, home, root, hookDeadline, s, seq, hash, readLocal, atomic, checkDeadline, hereNames } = delivery
   // Only the live event has a host reading stdout. A queued event and recovery never claim.
   if (mode !== '--codex-report' && report !== undefined && hookDeadline - Date.now() >= 300) {
     let mailbox: ReturnType<typeof hookMailbox> | undefined
@@ -244,7 +246,8 @@ export const deliverTurnEvent = async (delivery: TurnDelivery): Promise<boolean>
         : SURFACE_IDS.cli
       // A Codex turn start names its turn, so an answer the board queues while it runs is bound to it (#319).
       const turnId = raw.turn_id
-      try { message = await mailbox?.turn(agent, session, surface, Date.now(), undefined, agent === 'codex' && isHostTurn(turnId) ? { hostTurn: turnId } : undefined) ?? null } catch {}
+      const hostTurn = agent === 'codex' && isHostTurn(turnId) ? { hostTurn: turnId } : {}
+      try { message = await mailbox?.turn(agent, session, surface, Date.now(), undefined, { ...hostTurn, ...(seq === undefined ? {} : { seq }) }) ?? null } catch {}
       const failed = mailbox?.error ?? setupError
       if (mailbox?.hasDeferred) process.stderr.write(`${s.localAgentMailboxDeferred}\n`)
       else if (failed !== null) process.stderr.write(`${s.localAgentMailboxFailed(failed)}\n`)
