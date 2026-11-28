@@ -185,7 +185,9 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   'tests/merge-check.test.mjs': 90_000, // slowest 46.4 s
   // Grew with #1680's eleven removal re-read tests: up to 49.0 s on Windows Node 24 (run 44650276536), over the 42 s
   // line of the 60 s default. By the rule of #1715: 49 x 1.3 / 0.7, rounded up to five seconds.
-  'tests/setup-sidecar.test.mjs': 95_000, // slowest 49.0 s
+  // Grew with #1642's fifteen terminal sidecar tests: 73.1 s on Windows Node 24 (run 46122518996), over the 66.5 s line of
+  // 95 s. By the rule of #1715: 73.1 x 1.3 / 0.7, rounded up to five seconds.
+  'tests/setup-sidecar.test.mjs': 140_000, // slowest 73.1 s
   // Grew with #1881's test of the 20 s clock (#1843), which waits the real 20 s: 56.6 s on Windows Node 24 (run
   // 45763999753), over the 42 s line of the 60 s default. By the rule of #1715: 56.6 x 1.3 / 0.7, rounded up to five seconds.
   'tests/serve-watch.test.mjs': 110_000, // slowest 56.6 s
