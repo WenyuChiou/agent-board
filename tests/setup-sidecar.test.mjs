@@ -279,6 +279,23 @@ test('a sidecar plan that fails asks no sidecar question, and the preview says i
   assert.ok(!existsSync(join(dir, 'sidecar.json')), asked.stdout)
 }))
 
+test('a sidecar plan that stops on a conflict asks no sidecar question, and the preview says it was skipped with the command to run (#1642)', () => withHome(({ home, run, dir }) => {
+  // A sidecar.mjs of someone else's and no sidecar.json: the main plan does not touch it, the sidecar's own plan stops on it.
+  const theirs = '// a synthetic sidecar.mjs of someone else\n'
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'sidecar.mjs'), theirs)
+  const asked = run(['--agent', 'antigravity'], { input: 'y\ny\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.ok(!asked.stdout.includes('[y/N]'), asked.stdout)
+  const preview = asked.stdout.slice(0, asked.stdout.indexOf('This will:'))
+  assert.match(preview, /Antigravity sidecar files: skipped: [^\n]*sidecar\.mjs[^\n]*\n[^\n]*--agent antigravity --antigravity-sidecar --apply/, asked.stdout)
+  assert.doesNotMatch(asked.stdout, /optional, asked next/, asked.stdout)
+  assert.match(asked.stdout, /Antigravity files: done\./, asked.stdout)
+  assert.equal(readFileSync(join(dir, 'sidecar.mjs'), 'utf8'), theirs)
+  assert.ok(!existsSync(join(dir, 'sidecar.json')), asked.stdout)
+  assert.ok(existsSync(join(home, '.gemini', 'config', 'hooks.json')), asked.stdout)
+}))
+
 test('piped setup and terminal --apply ask no sidecar question and write no sidecar (#1642)', () => withHome(({ home, run, dir }) => {
   const piped = run(['--agent', 'antigravity'], { input: 'y\ny\n' })
   assert.equal(piped.status, 0, piped.stderr)
