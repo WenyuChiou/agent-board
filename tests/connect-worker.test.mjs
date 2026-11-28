@@ -273,8 +273,10 @@ test('the full generated worker bundle runs through verified staging without rec
   // the structural checks above catch an embedded generated predecessor. The decoded text is
   // not one module: Claude Code's per-file limit is checked by the module limit test above.
   // /progress connect writes and reads the decoded text through $.fs, which refuses files over
-  // 4,194,304 bytes (hooks/register.tsx), so this alarm fires well before that limit.
-  assert.ok(Buffer.byteLength(code) < 2 * 1024 * 1024)
+  // 4,194,304 bytes (hooks/register.tsx), so this alarm fires a full MiB before that limit.
+  // Ordinary growth passed 2 MiB on 2026-11-28 (2,115,272 bytes at 98c2dca8); a bundle built
+  // into itself about doubles, so it still trips this cap as well as the structural checks.
+  assert.ok(Buffer.byteLength(code) < 3 * 1024 * 1024, `the worker bundle is ${Buffer.byteLength(code)} bytes`)
   // A bundle built twice into itself repeats every module banner, so each hooks/ module appears once.
   // An earlier build embedded as a string keeps its banners inside the string: the BOARD_SCRIPT
   // checks and the byte cap catch that. A character cap was only a guess, and ordinary growth reached it.
