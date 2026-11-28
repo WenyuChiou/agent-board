@@ -877,6 +877,8 @@ export const codexStateOf = (comments, head) => {
     let review
     try { review = JSON.parse(json)?.code_review } catch { continue }
     const sha = typeof review?.commit_sha === 'string' ? review.commit_sha.toLowerCase() : ''
+    // A code review that did not complete (`failed`, `in_progress`) is not a review of that head (#1974).
+    if (review?.status !== undefined && review.status !== 'completed') continue
     if (!/^[0-9a-f]{7,40}$/.test(sha) || typeof review.has_unresolved_findings !== 'boolean') continue
     if (!String(head ?? '').toLowerCase().startsWith(sha)) return 'stale'
     return review.has_unresolved_findings ? 'open' : 'clean'
@@ -966,7 +968,9 @@ const readReview = item => {
 export const reviewOf = item => readReview(item).review
 
 // The tier the body names on its `Tier:` line (RULES R2), or null when it names none.
-export const tierOf = body => visibleBody(body).match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
+// The tier as the tier check reads it (`visibleTier`), so a `Tier:` after a lone \r or a Unicode line separator is not a
+// line of its own here either (#1974).
+export const tierOf = body => visibleTier(body ?? '')
 
 // A risk-tier pull request changes one failure surface and names it on a `Surface:` line (CONTRIBUTING rule 2, #1490).
 // It applies to pull requests numbered above SURFACE_FROM, the issue (#1490) the rule and this check came in with; a local
