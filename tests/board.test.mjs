@@ -5873,6 +5873,38 @@ test('a send still pending when the receiver reconnects clears only the text it 
   } finally { await board.close() }
 })
 
+test('a send that ends while the board box holds newer words gives those words to the rail box of the same card, and a redraw keeps them', async () => {
+  const board = await page(LIVE_QUESTION)
+  try {
+    const model = (await board.call('GET', '/api/board')).json().model
+    const html = (await board.call('GET', `/?t=${board.token}`)).body
+    const connected = { ...model, asks: [{ ...model.asks[0], send: 'connected', delivery: { id: 'synthetic-connection-1', turn: 'synthetic-turn-1', agent: 'grok' } }] }
+    let answer
+    const gate = new Promise(resolve => { answer = resolve })
+    const dom = await pageDom(html, connected, {
+      post: async () => { await gate; return { ok: true, json: async () => ({ ok: true, note: 'Synthetic queued' }) } },
+    })
+    const boardBox = dom.boxes()[0]
+    const key = boardBox.getAttribute('data-key')
+    assert.ok(key, 'the card draws a reply box with a key')
+    // The same card drawn in the detail rail: a second box with the same key.
+    const railBox = dom.element('textarea')
+    railBox.setAttribute('data-key', key)
+    dom.node('detail-rail').appendChild(railBox)
+    boardBox.value = 'blue'
+    railBox.value = 'blue'
+    dom.send().click()
+    await dom.flush()
+    boardBox.value = 'green'
+    answer()
+    await dom.settle()
+    assert.equal(boardBox.value, 'green', 'words typed after the press stay in the box they were typed in')
+    assert.equal(railBox.value, 'green', 'the other box of the card takes the newer words instead of being emptied')
+    await dom.redraw(connected)
+    assert.equal(dom.boxes()[0].value, 'green', 'the next draw keeps the newer words')
+  } finally { await board.close() }
+})
+
 test('a reachable file error replaces the offline line and restores the previous button states', async () => {
   const board = await page(LIVE_QUESTION)
   try {
