@@ -4129,10 +4129,29 @@ const handOverPrompt = (row: TaskRow, s: Strings): string =>
 // A guarded ref names its task by the pane's own words, so the write reads it in them too.
 const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
   const s = await wordsOf($)
-  const wrote = await rewrite($, await progressPath($), async before => setManualStep(before, ref, 'x', await $.clock.now(), s))
+  // rewrite keeps an earlier attempt's write when a later attempt changes nothing. When that later
+  // attempt refused the press, the earlier tick still counts only if the file still holds it with
+  // every line above it where it was: another writer's stale snapshot that moved lines put a twin
+  // there, and the tick is gone (#1228).
+  const last: { ticked: { lines: string[]; at: number } | null; refused: string | null } = { ticked: null, refused: null }
+  const wrote = await rewrite($, await progressPath($), async before => {
+    const after = setManualStep(before, ref, 'x', await $.clock.now(), s)
+    if (after === before) {
+      last.refused = before
+    } else {
+      const was = before.split(/\r?\n/)
+      const lines = after.split(/\r?\n/)
+      last.ticked = { lines, at: lines.findIndex((line, index) => line !== was[index]) }
+      last.refused = null
+    }
+    return after
+  })
   await poll($)
-
-  return wrote !== null
+  const { ticked, refused } = last
+  if (wrote === null || ticked === null) return false
+  if (refused === null) return true
+  const now = refused.split(/\r?\n/)
+  return ticked.at >= 0 && ticked.lines.slice(0, ticked.at + 1).every((line, index) => now[index] === line)
 }
 
 // A side question: answered over this session's transcript, without a turn of its own.

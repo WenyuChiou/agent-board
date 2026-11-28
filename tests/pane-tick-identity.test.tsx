@@ -14,6 +14,8 @@ type Case = {
   change?: (text: string) => string
   // What another writer does after the queued write's first read, so its retry reads it.
   changeOnRetry?: (text: string) => string
+  // What another writer, working from the file it read before the press, writes right after the tick lands.
+  changeAfterWrite?: (drawn: string) => string
   lang?: 'en'
 }
 
@@ -53,8 +55,13 @@ const pressAfter = async ($: Engine, on: On, one: Case): Promise<{ world: World;
       world.mtime += 1
     }
   }
+  if (one.changeAfterWrite !== undefined) {
+    const stale = one.changeAfterWrite(world.files.get(FILE) ?? '')
+    world.afterWrite = () => stale
+  }
   await ui.press({ key: key! })
   world.afterRead = undefined
+  world.afterWrite = undefined
 
   return { world, ui, key: key!, drawn }
 }
@@ -99,6 +106,12 @@ test('a pane tick does not move to the identical sibling once the drawn step was
 
 test('a retried pane tick that reads a newer file refuses instead of ticking the identical sibling', async ($, on) => {
   const { world, ui, key } = await pressAfter($, on, { before: TWIN_STEPS, open: CHECKLIST, press: CHECKLIST_TICK, changeOnRetry: removeEarlier })
+  await expectRefused(world, ui, key, removeEarlier(TWIN_STEPS), 'Same step')
+  await ui.unmount()
+})
+
+test('a pane tick written over by a stale snapshot that moved its identical sibling reports the tick gone and journals nothing', async ($, on) => {
+  const { world, ui, key } = await pressAfter($, on, { before: TWIN_STEPS, open: CHECKLIST, press: CHECKLIST_TICK, changeAfterWrite: removeEarlier })
   await expectRefused(world, ui, key, removeEarlier(TWIN_STEPS), 'Same step')
   await ui.unmount()
 })
