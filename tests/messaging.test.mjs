@@ -3398,6 +3398,16 @@ test('a second stall after the idle re-check is set up, in the timers phase and 
   // re-check is set up; the third is a setImmediate it schedules, which runs after the next poll phase.
 }, stallFault('setTimeout(() => { hold(1000); setImmediate(() => hold(1000)) }, 1000)'), ['--idle-minutes', '0.03']))
 
+test('a board closed by a request that waited out a stall, while its idle re-check is pending, stops once and cleanly (#1958)', async () => fixture(async board => {
+  // Sent 2 s after the start, inside the stall (1.5 s to 3.5 s after the server listens): it is read after the idle check
+  // that set up the re-check, so the close and the re-check meet.
+  await pause(2000)
+  assert.equal((await board.call('/api/close', {})).status, 200)
+  const ended = await Promise.race([board.exited.then(code => 'exited ' + code), pause(10000).then(() => 'still running')])
+  assert.equal(ended, 'exited 0')
+  await assert.rejects(board.call('/api/ping'), /exit code 0, signal null; stderr ""/)
+}, stallFault(), ['--idle-minutes', '0.03']))
+
 test('a board held 2 s that nobody polls still stops as idle (#1958)', async () => fixture(async board => {
   const ended = await Promise.race([board.exited.then(code => 'exited ' + code), pause(15000).then(() => 'still running')])
   assert.equal(ended, 'exited 0')
