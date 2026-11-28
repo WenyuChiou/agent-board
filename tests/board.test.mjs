@@ -6931,9 +6931,13 @@ test('the board command picks text, the terminal board or the page from where it
     assert.equal(pickSurface({ isTty: true, platform: 'linux', env: { CLAUDECODE: blank, OPENCODE_CONFIG_DIR: blank, SSH_CONNECTION: '192.168.1.1 1234 192.168.1.2 22' } }), 'terminal')
   }
   // Row 10: all three README copies match the new SSH config-folder rule (#1283).
-  for (const [file, stale] of [['README.md', "unless an agent's setting"], ['README.zh-TW.md', '就開網頁'], ['README.zh-CN.md', '就开网页']]) {
+  for (const [file, ...stale] of [
+    ['README.md', "unless an agent's setting", 'active agent sessions open the page'],
+    ['README.zh-TW.md', '就開網頁', '在作用中的 agent 對話內則開網頁'],
+    ['README.zh-CN.md', '就开网页', '在活动 agent 会话内则开网页'],
+  ]) {
     const line = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8').split(/\r?\n/).find(one => one.includes('`npx @wenyuchiou/agent-board`') && one.startsWith('|')) ?? ''
-    assert.ok(line.includes('HERMES_HOME') && line.includes('OPENCODE_CONFIG_DIR') && !line.includes(stale), `${file} SSH terminal row should reflect #1283`)
+    assert.ok(line.includes('HERMES_HOME') && line.includes('OPENCODE_CONFIG_DIR') && line.includes('AGENT_BOARD_AGENT') && stale.every(bad => !line.includes(bad)), `${file} SSH terminal row should reflect #1283`)
   }
 
   for (const platform of ['win32', 'darwin', 'linux']) {
@@ -7036,13 +7040,38 @@ test('over SSH with a config folder variable set, plain agent-board runs the liv
       assert.ok(out.startsWith('\u001b[?1049h'), `${name}: draws the live terminal board instead of printing an address: ${JSON.stringify(out.slice(0, 80))}`)
       assert.ok(out.includes('Rate-limit the public endpoints'), `${name}: live board shows tasks`)
       assert.ok(out.includes('Forward port to open the page'), `${name}: offers port forward hint in terminal board`)
-      if (runningUrl !== null) assert.ok(out.includes(`ssh -L ${new URL(runningUrl).port}:127.0.0.1:${new URL(runningUrl).port}`), `${name}: reuses running page port`)
+      if (runningUrl !== null) {
+        assert.ok(out.includes(`ssh -L ${new URL(runningUrl).port}:127.0.0.1:${new URL(runningUrl).port}`), `${name}: reuses running page port`)
+        assert.equal(board.urlOf(await board.serve(['--quiet-board'])), runningUrl, `${name}: no second server started`)
+        assert.equal((await fetch(runningUrl)).ok, true, `${name}: existing server stays alive`)
+      }
       assert.doesNotMatch(out, /Opened Agent Board|window opened/i)
       assert.equal(child.exitCode, null, `${name}: live terminal board keeps running`)
-      // Row 7: explicit surface flags (--json) behave identically with config-folder vars set over SSH.
+      // Row 7: explicit surface flags (--json, --status, --print, --html --no-open, --watch) behave identically with config-folder vars under SSH+TTY.
       if (name === 'OPENCODE_CONFIG_DIR') {
-        const jsonOut = await new Promise((done, fail) => execFile(process.execPath, [board.script, '--json'], { env, encoding: 'utf8', timeout: 20_000 }, (err, stdout) => (err ? fail(err) : done(stdout))))
+        const runFlag = (flagArgs, extraEnv = {}) => new Promise((done, fail) => execFile(process.execPath, ['--require', shim, board.script, ...flagArgs], { env: { ...env, ...extraEnv }, encoding: 'utf8', timeout: 20_000 }, (err, stdout) => (err ? fail(err) : done(stdout))))
+        const jsonOut = await runFlag(['--json'])
+        assert.doesNotMatch(jsonOut, /\u001b\[\?1049h/)
         assert.doesNotThrow(() => JSON.parse(jsonOut))
+        const statusOut = await runFlag(['--status'])
+        assert.doesNotMatch(statusOut, /\u001b\[\?1049h/)
+        assert.ok(statusOut.trim().length > 0)
+        const printOut = await runFlag(['--print'])
+        assert.doesNotMatch(printOut, /\u001b\[\?1049h/)
+        assert.ok(printOut.includes('Rate-limit the public endpoints'))
+        const htmlOut = await runFlag(['--html', '--no-open'])
+        assert.doesNotMatch(htmlOut, /\u001b\[\?1049h/)
+        assert.equal(board.urlOf(htmlOut), runningUrl)
+        let watchChild
+        try {
+          watchChild = spawn(process.execPath, ['--require', shim, board.script, '--watch'], { env: { ...env, CLAUDECODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+          let watchOut = ''
+          watchChild.stdout.on('data', chunk => { watchOut += chunk })
+          for (let tries = 0; tries < 150 && !watchOut.includes('\u001b[?1049h'); tries++) await new Promise(done => setTimeout(done, 100))
+          assert.ok(watchOut.startsWith('\u001b[?1049h'), `--watch overrides SSH+session page mode: ${JSON.stringify(watchOut.slice(0, 80))}`)
+        } finally {
+          if (watchChild && watchChild.exitCode === null) watchChild.kill()
+        }
       }
     } finally {
       if (child && child.exitCode === null) child.kill()
