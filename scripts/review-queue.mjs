@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { authorKey, codexStateOf, isLaneReviewer, isSurfaceNone, reviewOf, riskApprovalGap, tierOf, verdictNameOf } from './pr-check.mjs'
+import { approvalGap, authorKey, codexStateOf, isSurfaceNone, reviewOf, tierOf, verdictNameOf } from './pr-check.mjs'
 import { bundleSources, safeLine } from './preflight.mjs'
 
 const usage = 'Usage: node scripts/review-queue.mjs [--repo owner/name] [--roadmap N] [--json] [--help]'
@@ -242,7 +242,14 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     const extras = {
       bots: { codex: codexStateOf(comments.map(entry => entry.comment), head), codexSecurity: codexSecurityOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
     }
-    const riskGap = latestHeadVerdict?.verdict.kind === 'APPROVE' ? riskApprovalGap(latestHeadVerdict.verdict, { tier: tierOf(pr.body), isRelease: /^chore\(release\):/.test(item.title), isSurfaceNone: isSurfaceNone(pr.body), codexState: extras.bots.codex }) : null
+    // Whether the head's approval counts is the PR check's to say (`approvalGap`); the queue only reads the names its own
+    // way. The notes are no lane: the group the name's first comma cut open is dropped, or, on a line that says how its
+    // reviewer was started, the whole last group.
+    const approval = latestHeadVerdict?.verdict.kind === 'APPROVE' ? latestHeadVerdict : null
+    const isNoted = approval?.verdict.isFresh === true || approval?.verdict.isMaintainerNote === true
+    const cut = approval?.by?.replace(/[ \t]*\([^)]*$/, '')
+    const isByAuthor = Boolean(cut && sameAgent(cut === approval.by && isNoted ? cut.replace(/[ \t]*\([^()]*\)$/, '') : cut, item.author))
+    const gap = approval ? approvalGap(approval.verdict, { tier: tierOf(pr.body), isRelease: /^chore\(release\):/.test(item.title), isSurfaceNone: isSurfaceNone(pr.body), codexState: extras.bots.codex, isByAuthor }) : null
     if (ready && !reviewAfterReady) {
       if (!Number.isFinite(ready.time)) throw new Error('invalid Ready time')
       const hours = Math.max(0, nowMs - ready.time) / hour
@@ -253,19 +260,19 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
       // An approval with the words "started new for this review" that do not read as that one note is no approval,
       // as the PR check reads it (#1974).
       result.waitingForAuthor.push({ ...item, detail: 'the approval line cannot be read; write it in the R2 form', ...extras })
-    } else if (riskGap === 'release') {
-      // No reviewer a lane started, and no verdict on the maintainer route, approves a release, whatever its name (RULES R2, #1974).
+    } else if (gap === 'release') {
+      // No reviewer a lane or the maintainer started, and no verdict on the maintainer route, approves a release, whatever its name (RULES R2, #1974).
       result.waitingForAuthor.push({ ...item, detail: 'approved, but a release needs a reviewer outside the maintainer\'s lane, or the owner', ...extras })
-    } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by.replace(/[ \t]*\([^)]*$/, ''), item.author) && !isLaneReviewer(latestHeadVerdict.verdict, tierOf(pr.body), { isRelease: /^chore\(release\):/.test(item.title) })) {
+    } else if (gap === 'author') {
       // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
       // even when it arrives from the shared login. The lane is part of the identity, so "codex (e2e)" approving
       // "codex (phase1)" counts, while a verdict with no name keeps its old reading. Outside a release pull request a
       // reviewer the lane started new for this review counts on every tier, as the PR check reads it (#1974).
       result.waitingForAuthor.push({ ...item, detail: 'approval is by the author', ...extras })
-    } else if (riskGap) {
+    } else if (gap) {
       // On the risk tier a reviewer started new for this review counts only once the Codex review bot reviewed the head,
-      // and never for a lane under risk-tier review, as the PR check reads it (RULES R2, #1974).
-      result.waitingForAuthor.push({ ...item, detail: riskGap === 'surface-none' ? 'approved by the lane; a lane under risk-tier review takes the maintainer route' : 'approved; the Codex review bot has not reviewed this head', ...extras })
+      // and never, on any tier, for a lane under risk-tier review, as the PR check reads it (RULES R2, #1974).
+      result.waitingForAuthor.push({ ...item, detail: gap === 'surface-none' ? 'approved by the lane; a lane under risk-tier review takes the maintainer route' : 'approved; the Codex review bot has not reviewed this head', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
       // A release must contain current main before it merges (docs/RELEASING.md, step 5), so an approved one that is behind waits.
