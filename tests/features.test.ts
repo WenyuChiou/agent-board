@@ -1313,6 +1313,9 @@ test('an inline "A or B?" choice whose first amount holds a comma offers no shor
   expect(askOf('History', 'Should the export keep 1 day, 12 hours or 2 days?')).toMatchObject({ kind: 'reply', options: [] })
   expect(askOf('Should the export keep 1 day, 12 hours or forever?', '')).toMatchObject({ kind: 'reply', options: [] })
   expect(askOf('Retry 3, 5 or 7 times?', '')).toMatchObject({ kind: 'reply', options: [] })
+  // A question frame before the amounts does not make them a list of three (#1978 review).
+  expect(askOf('Do you want 1 day, 12 hours or 2 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Do you want 3, 5 or 7?', '').options).toEqual(['3', '5', '7'])
   // A comma before `or`, a comma after a lead-in and a listed choice keep their buttons.
   expect(askOf('Should the export keep 1 day, or 2 days?', '').options).toEqual(['1 day', '2 days'])
   expect(askOf('Tests pass, 3 or 5?', '').options).toEqual(['3', '5'])

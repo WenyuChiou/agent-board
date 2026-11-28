@@ -166,12 +166,14 @@ const parallelAmounts = (first: string, last: string): [string, string] | typeof
 // A comma can sit inside one amount (`1 day, 12 hours or 2 days`, `3, 5 or 7 times`): when the
 // lead opens with a number and the words before its comma end with an amount, the first option's
 // start is unclear, so there are no buttons rather than one that sends a shorter amount (#1936).
-const amountBeforeComma = (before: string, lead: string): boolean => {
-  const head = before.slice(0, before.lastIndexOf(lead)).trimEnd()
-  if (!/[,，]$/.test(head)) return false
-  const words = head.slice(0, -1).trim().split(/\s+/)
+const endsWithAmount = (text: string): boolean => {
+  const words = text.trim().split(/\s+/)
   const last = words.at(-1) ?? ''
   return NUMBER.test(last) || (UNIT.test(last) && NUMBER.test(words.at(-2) ?? ''))
+}
+const amountBeforeComma = (before: string, lead: string): boolean => {
+  const head = before.slice(0, before.lastIndexOf(lead)).trimEnd()
+  return /[,，]$/.test(head) && endsWithAmount(head.slice(0, -1))
 }
 
 const lastOption = (text: string): string => {
@@ -195,7 +197,7 @@ const CJK = /[㐀-鿿]/
 // run is a list only with three items before `or`, a comma before `or`, or a question that
 // opens it. Anything else, such as a clause (`A first, or B?`, `先開旗標，還是全部開？`), is
 // not a list: null.
-const listBefore = (before: string): string[] | null => {
+const listBefore = (before: string): string[] | typeof UNCLEAR_AMOUNTS | null => {
   const run = (before.split(/[：:；;。]/).at(-1) ?? '').trim()
   const isListed = run.includes('、')
   if (!isListed && (CJK.test(run) || !run.includes(','))) return null
@@ -204,6 +206,10 @@ const listBefore = (before: string): string[] | null => {
   if (isSerial) items.pop()
   const first = firstOption(items[0] ?? '')
   const isAsked = first !== items[0] || CLAUSE_OPENING.test(first)
+  // `Do you want 1 day, 12 hours or 2 days?`: after a question frame, a comma between an amount
+  // with a unit and a number may sit inside one amount, as in `amountBeforeComma`. Bare numbers
+  // (`Do you want 3, 5 or 7?`) and a lead-in of its own (`Which count, 3, 5 or 7?`) stay a list (#1936).
+  if (first !== items[0] && endsWithAmount(first) && !NUMBER.test(first.split(/\s+/).at(-1) ?? '') && NUMBER.test(items[1] ?? '')) return UNCLEAR_AMOUNTS
   if (first === items[0] && CLAUSE_OPENING.test(first)) {
     if (first.split(/\s+/).length > 4) return null
     items.shift()
@@ -237,6 +243,7 @@ const optionsOf = (text: string): string[] => {
   }
   if (match === null) return []
   const listed = listBefore(match[1] ?? '')
+  if (listed === UNCLEAR_AMOUNTS) return UNCLEAR_AMOUNTS
   if (listed !== null) return [...listed, lastOption(match[2] ?? '')].filter(one => one !== '')
   const clauses = (match[1] ?? '')
     .split(/[，,：:；;。]/)
