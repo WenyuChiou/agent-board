@@ -8,6 +8,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
+import { EN } from '../hooks/strings-en.ts'
+import { ZH_TW } from '../hooks/i18n.ts'
+import { ZH_CN } from '../hooks/strings-zh-cn.ts'
+import { noAddress, readPrintedLink } from './helpers/printed-link.mjs'
 
 // Acceptance tests for #1831: two copies of the same release with different mtimes/preludes/CRLF
 // reuse the running board page, while different script bytes (even with equal mtime) or different
@@ -314,5 +318,59 @@ test('a same-release copy with a different baked codexRoot replaces the running 
     assert.equal(await board.urlOf(await board.serve(copyC, ['--quiet-board'])), url2, 'matching baked codexRoot must reuse running page')
   } finally {
     await board.end(urls)
+  }
+})
+
+// The printed-link reader (#1650): these test the reading itself with synthetic output.
+const READ_PORT = 45678
+const READ_CODE = 'A'.repeat(32)
+const READ_LINK = `http://127.0.0.1:${READ_PORT}/open/${READ_CODE}`
+const READ_TOKEN = 'synthetictoken0001'
+const READ_OPTIONS = { wordings: [EN.serveAt, ZH_TW.serveAt, ZH_CN.serveAt], secrets: [READ_TOKEN] }
+const READ_SHAPE = { link: READ_LINK, port: READ_PORT, code: READ_CODE }
+const readOf = (stdout, stderr = '', options = READ_OPTIONS) => () => readPrintedLink({ stdout, stderr }, options)
+
+test('the printed-link reader refuses a longer address that starts like a one-use link', () => {
+  assert.deepEqual(readPrintedLink({ stdout: `\n${EN.serveAt(READ_LINK)}\n`, stderr: '' }, READ_OPTIONS), READ_SHAPE)
+  for (const longer of [`${READ_LINK}/extra`, `${READ_LINK}?x=1`, `${READ_LINK}#frag`, `${READ_LINK}.`]) {
+    assert.throws(readOf(`\n${EN.serveAt(longer)}\n`), undefined, `refused: ${longer}`)
+  }
+  assert.throws(readOf(`\nsee ${EN.serveAt(READ_LINK)}\n`), undefined, 'refused: words before the address line')
+})
+
+test('the printed-link reader refuses a link made by joining stdout and stderr', () => {
+  const head = `http://127.0.0.1:${READ_PORT}/open/${'A'.repeat(10)}`
+  assert.throws(readOf(`\n${EN.serveAt(head)}`, `${'B'.repeat(22)}\n`), undefined, 'refused: a code cut between the streams')
+  assert.throws(readOf(`\n${EN.serveAt('http://127.0.0.1:456')}`, `78/open/${READ_CODE}\n`), undefined, 'refused: a port cut between the streams')
+  assert.throws(readOf('\n', `${EN.serveAt(READ_LINK)}\n`), undefined, 'refused: the address line on stderr only')
+})
+
+test('the printed-link reader refuses a second link, a link on a line that is not the last, and a code shorter than 16 characters', () => {
+  const other = `http://127.0.0.1:${READ_PORT + 1}/open/${'C'.repeat(32)}`
+  assert.throws(readOf(`\n${EN.serveAt(other)}\n${EN.serveAt(READ_LINK)}\n`), undefined, 'refused: two links on stdout')
+  assert.throws(readOf(`\n${EN.serveAt(READ_LINK)}\n`, `${READ_LINK}\n`), undefined, 'refused: the link repeated on stderr when none is expected')
+  assert.throws(readOf(`\n${EN.serveAt(READ_LINK)}\nDone.\n`), undefined, 'refused: the link is not on the last line')
+  assert.throws(readOf(`\n${EN.serveAt(`http://127.0.0.1:${READ_PORT}/open/${'D'.repeat(15)}`)}\n`), undefined, 'refused: a 15-character code')
+  assert.throws(readOf(`\n${EN.serveAt(`http://127.0.0.1:${READ_PORT}/open/abc`)}\n`), undefined, 'refused: a 3-character code')
+  assert.throws(readOf(`\n${EN.serveAt(`http://127.0.0.1:${READ_PORT}/open/${'E'.repeat(129)}`)}\n`), undefined, 'refused: a 129-character code')
+})
+
+test('the printed-link reader refuses a page token or a ?t= address on either stream', () => {
+  const good = `\n${EN.serveAt(READ_LINK)}\n`
+  assert.throws(readOf(`${good}${READ_TOKEN}\n`), undefined, 'refused: the token on stdout')
+  assert.throws(readOf(good, `${READ_TOKEN}\n`), undefined, 'refused: the token on stderr')
+  assert.throws(readOf(good, `http://127.0.0.1:${READ_PORT}/?t=other\n`), undefined, 'refused: a ?t= address on stderr')
+  assert.throws(readOf(`http://127.0.0.1:${READ_PORT}/?t=other\n${good}`), undefined, 'refused: a ?t= address on stdout')
+  assert.throws(readOf(good, 'x&t=1\n'), undefined, 'refused: a &t= query on stderr')
+  assert.doesNotThrow(() => noAddress({ stdout: '', stderr: 'invalid --port\n' }, [READ_TOKEN]))
+  assert.throws(() => noAddress({ stdout: good, stderr: '' }, [READ_TOKEN]), undefined, 'a failed command prints no address on stdout')
+  assert.throws(() => noAddress({ stdout: '', stderr: `http://127.0.0.1:${READ_PORT}/?t=other\n` }, [READ_TOKEN]), undefined, 'a failed command prints no address on stderr')
+  assert.throws(() => noAddress({ stdout: '', stderr: `${READ_TOKEN}\n` }, [READ_TOKEN]), undefined, 'a failed command prints no token')
+})
+
+test('the printed-link reader reads the address line in English, Traditional Chinese and Simplified Chinese', () => {
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    assert.deepEqual(readPrintedLink({ stdout: `\n${words.serveAt(READ_LINK)}\n`, stderr: '' }, READ_OPTIONS), READ_SHAPE)
+    assert.deepEqual(readPrintedLink({ stdout: `\n${words.serveAt(READ_LINK)}\n`, stderr: '' }, { ...READ_OPTIONS, wordings: [words.serveAt] }), READ_SHAPE)
   }
 })
