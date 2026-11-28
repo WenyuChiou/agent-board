@@ -61,7 +61,7 @@ npx @wenyuchiou/agent-board@next
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board`（看板網頁） | 尚未支援 |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁 | Codex app 完全結束後（只關視窗不算），在背景執行；回覆最多等 30 分鐘。實際跑過 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 卡片有「排入」時可排給它。桌面 app：實際跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 在 Antigravity 的 Automations 頁面開著它的 sidecar 時，看板會替它開始新的一輪；沒開時，卡片有「排入」時可排給它。桌面 app：排入實際跑過，開始新的一輪還沒跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板網頁 | 尚未測試 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁 | 它空下來就送出。沒有單獨跑過；它的外掛把它回報成終端機，所以跟終端機一樣處理 |
 

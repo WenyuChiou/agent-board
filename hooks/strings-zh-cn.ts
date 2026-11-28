@@ -36,6 +36,12 @@ export const ZH_CN: Strings = {
   localAgentSkillDescription: '打开本地交互看板，跟踪当前已接线 session 的实际任务进度。',
   antigravitySidecarDescription: 'Agent Board：看板有消息要发给空闲的 Antigravity 对话时，替它开始新的一轮。只有你能在 Automations 页面开启。',
   antigravityWakeLine: 'Agent Board：看板的消息已附在这一轮，请照着处理。',
+  // What a card says of a message the Antigravity sidecar wakes a conversation for (#1396).
+  agyWoken: '已叫醒 Antigravity，它会在新的一轮开始时收到这条消息。',
+  agyWakeFailed: '没能叫醒 Antigravity，它会在下一回合收到这条消息。',
+  agyWaking: '正在叫醒 Antigravity，还没确认。没有开始新的一轮的话，它会在下一回合收到。',
+  agySidecarOff: 'Antigravity 的 sidecar 没有开着，这条消息会等到它的下一回合。',
+  agyMayJoin: '如果它发出的同时你在 Antigravity 里开始新的回合，它可能会并进你这个回合。',
   openclawProgressTool: '把这项任务的实际进度报告给本地看板。每个实际步骤或状态改变后，把每个步骤以一行 Markdown 任务送出。回复以向用户提问收尾时，结束回合前先把问题以“- [?] <问题>”步骤（state 为 waiting）送出：看板不读回复文字，这个步骤是问题到达用户的唯一途径。需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。',
   deepseekBoardTool: '打开本地看板，或把这项任务的实际进度报告给看板。action 选 open 会启动看板网页，并返回它打印的那一行：网页链接，或没有网页的原因。action 选 report 要给 title、state 和 steps：每个实际步骤或状态改变后，把每个步骤以一行 Markdown 任务发送。回复以向用户提问收尾时，结束回合前先把问题以“- [?] <问题>”步骤（state 为 waiting）发送：看板不读回复文字，这个步骤是问题到达用户的唯一途径。需要用户时，把步骤标成 [?]，写一行对方能直接回答的话：是非题用“…可以吗？”结尾，选择题写成“A 还是 B？”，命令放在反引号里，等别人时用“等”开头。',
   opencodeAckTool: '确认收到看板消息：传入消息信封里的 id 与 6 位代码，可另附一行回复摘要。',
