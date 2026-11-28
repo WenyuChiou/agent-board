@@ -2451,7 +2451,7 @@ export const LINES = [
 "      try {",
 "        if (readdirSync6(folder).every((name) => deletedFiles.has(join17(folder, name)) || removedDirs.has(join17(folder, name)))) {",
 "          removedDirs.add(folder);",
-"          changes.push({ file: folder, action: \"remove\" });",
+"          changes.push({ file: folder, action: \"remove\", folder: true });",
 "        }",
 "      } catch {}",
 "    }",
