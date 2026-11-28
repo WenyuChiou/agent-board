@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url'
 import { bundleFiles, bundleFromDir } from '../scripts/bundle-text.mjs'
 import { privateRuntimeFolder, writePrivateRuntimeFile } from '../scripts/runtime-folder.ts'
 import { setupPrograms } from './helpers/setup-programs.mjs'
+import { readPrintedLink, withoutSsh } from './helpers/printed-link.mjs'
+import { EN } from '../hooks/strings-en.ts'
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
 const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
@@ -28,8 +30,9 @@ const makeBox = () => {
   const tmp = join(box, 'tmp')
   const cache = join(box, 'npm-cache')
   for (const dir of [home, tmp, cache]) mkdirSync(dir)
+  // Over SSH the launcher prints the forward note before the link (#1283): left out here (#1970).
   const env = {
-    ...process.env,
+    ...withoutSsh(process.env),
     HOME: home, USERPROFILE: home, TEMP: tmp, TMP: tmp,
     CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
     CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
@@ -1226,8 +1229,8 @@ test('a later launcher that reuses a server without its address record still ref
       // surface: run the launcher as a non-CI call so it opens the page and prints its address.
       const second = f.run(pkg, [], { CI: '0' })
       success(second)
-      assert.doesNotMatch(second.stdout, /\?t=/)
-      assert.match(second.stdout.trim(), /^Agent Board is already open in your browser\. If you do not see it, open this one-use link: http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
+      const { link } = readPrintedLink(second, { wordings: [EN.boardPageAlreadyOpenLink] })
+      assert.equal(second.stdout.trim(), EN.boardPageAlreadyOpenLink(link))
       const after = await board()
       assert.equal(after.view.versions.package, manifest.version)
       // The package is the board's own version, so there is no update to name.
@@ -1293,7 +1296,7 @@ test('a later launcher that reuses a server through the retry wait or the claim 
           return
         }
         res.writeHead(200, { 'content-type': 'application/json' })
-        res.end(JSON.stringify({ url: `http://127.0.0.1:${fake.address().port}/open/synthetic-open-${++openCount}` }))
+        res.end(JSON.stringify({ url: `http://127.0.0.1:${fake.address().port}/open/synthetic-open-${String(++openCount).padStart(4, '0')}` }))
         return
       }
       if (req.method === 'POST' && url.pathname === '/api/package') {
@@ -1389,8 +1392,7 @@ test('a later launcher that reuses a server through the retry wait or the claim 
       writeRecord()
       const waited = await run
       assert.equal(waited.code, 0, waited.stderr)
-      assert.match(waited.stdout, /http:\/\/127\.0\.0\.1:\d+\/open\/synthetic-open-\d+/, waited.stdout)
-      assert.doesNotMatch(waited.stdout, /\?t=/)
+      readPrintedLink(waited, { wordings: [EN.boardPageLink], secrets: ['retrytesttoken'] })
       assert.equal(posts.length, 1, JSON.stringify(posts))
       assert.equal(posts[0]?.version, manifest.version)
       assert.ok(claimCreates - before <= 1, `the launcher started ${claimCreates - before} children in the wait scenario`)
@@ -1415,8 +1417,7 @@ test('a later launcher that reuses a server through the retry wait or the claim 
       writeRecord()
       const backedOff = await run
       assert.equal(backedOff.code, 0, backedOff.stderr)
-      assert.match(backedOff.stdout, /http:\/\/127\.0\.0\.1:\d+\/open\/synthetic-open-\d+/, backedOff.stdout)
-      assert.doesNotMatch(backedOff.stdout, /\?t=/)
+      readPrintedLink(backedOff, { wordings: [EN.boardPageLink], secrets: ['retrytesttoken'] })
       assert.equal(posts.length, 1, JSON.stringify(posts))
       assert.equal(posts[0]?.version, manifest.version)
       assert.ok(claimCreates - before <= 1, `the launcher started ${claimCreates - before} children in the backoff scenario`)

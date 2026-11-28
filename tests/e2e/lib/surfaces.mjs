@@ -8,6 +8,7 @@ import { runInNewContext } from 'node:vm'
 import { randomUUID } from 'node:crypto'
 import { seenWithin, noMachineIds, noSilentPress } from './expect.mjs'
 import { PANE_MS } from './budget.mjs'
+import { readPrintedLink, wordingsOf } from '../../helpers/printed-link.mjs'
 
 const pause = ms => new Promise(done => setTimeout(done, ms))
 // On Linux a process that has exited but that its parent has not collected yet still answers
@@ -444,11 +445,9 @@ export const serve = {
     }
     world.cleanups.push(stop)
     try {
-      const output = await command(world, ['--serve', '--no-open', '--idle-minutes', String(idleMinutes), ...args])
-      assert.doesNotMatch(output, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
-      const match = output.match(/http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)
-      assert.ok(match, output)
-      url = new URL(match[0])
+      const started = await run(world, ['--serve', '--no-open', '--idle-minutes', String(idleMinutes), ...args])
+      successful(started)
+      url = new URL(readPrintedLink(started, { wordings: wordingsOf(['serveAt']) }).link)
       discover()
       assert.ok(pid && recordPath, 'The isolated runtime owns its server address file')
       timer = setTimeout(() => { void owner.killRecorded().catch(() => {}) }, lifetimeMs)

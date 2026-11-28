@@ -9,6 +9,7 @@ import { liveBoardArgv, liveBoardPage } from '../../hooks/live-page.ts'
 import { ZH_TW } from '../../hooks/i18n.ts'
 import { EN } from '../../hooks/strings-en.ts'
 import { ZH_CN } from '../../hooks/strings-zh-cn.ts'
+import { readPrintedLink } from '../helpers/printed-link.mjs'
 
 // In the desktop app's Code tab no pane can be placed, so /progress runs the installed board
 // script with the arguments openLiveBoard in hooks/register.tsx uses, and reads its link by the
@@ -32,9 +33,9 @@ describe('L2 desktop app', () => {
 
       const first = await progress(world, 'en')
       assert.equal(first.status, 0, first.stderr || first.stdout)
-      assert.doesNotMatch(first.stdout, /\?t=/)
       const link = progressLink(first.stdout, EN)
-      assert.match(link ?? '', /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/, first.stdout)
+      // The pane's reader finds the link the test's reader reads whole: a 16 to 128 character code, alone.
+      assert.equal(link, readPrintedLink(first, { wordings: [EN.serveAt] }).link, first.stdout)
       // A quiet start: the reply carries the link, never the board itself.
       for (const words of ['Release the gateway', 'Ship the gateway', 'Publish the docs']) assert.ok(!first.stdout.includes(words), first.stdout)
       noMachineIds(first.stdout, world, { allow: [link] })
@@ -46,9 +47,8 @@ describe('L2 desktop app', () => {
       for (const [lang, words] of [['en', EN], ['zh-TW', ZH_TW], ['zh-CN', ZH_CN]]) {
         const again = await progress(world, lang)
         assert.equal(again.status, 0, again.stderr || again.stdout)
-        assert.doesNotMatch(again.stdout, /\?t=/)
         const againLink = progressLink(again.stdout, words)
-        assert.match(againLink ?? '', /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/, `${lang}: ${again.stdout}`)
+        assert.equal(againLink, readPrintedLink(again, { wordings: [words.serveAt] }).link, `${lang}: ${again.stdout}`)
         assert.equal(new URL(againLink).origin, new URL(server.url).origin, `${lang}: ${again.stdout}`)
       }
 

@@ -6,6 +6,7 @@ import { basename, delimiter, dirname, extname, isAbsolute, join, relative, reso
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { recordSocketState } from './socket-state.mjs'
+import { readPrintedLink, withoutSsh, wordingsOf } from '../helpers/printed-link.mjs'
 
 const execFileAsync = promisify(execFile)
 const repository = fileURLToPath(new URL('../..', import.meta.url))
@@ -50,7 +51,8 @@ const isolatedEnvironment = root => {
   }
   for (const directory of Object.values(directories)) mkdirSync(directory, { recursive: true })
   const env = {
-    ...process.env,
+    // Over SSH the command prints its forward note with the link (#1283, #1970).
+    ...withoutSsh(process.env),
     // A board this fixture starts opens no window and stops once this test process is gone (#959).
     AGENT_BOARD_TEST_PID: String(process.pid),
     // Every route the receivers name counts as shown live here: these journeys press Send on them.
@@ -275,9 +277,7 @@ export const browserFixture = async (name, run, { hasTouch = false } = {}) => {
     const startServer = async ({ messages = false, language = 'en', allowResume = false } = {}) => {
       const args = ['--serve', '--no-open', '--quiet-board', ...(language === null ? [] : ['--lang', language]), ...(messages ? ['--messages-dir', join(root, 'messages')] : []), ...(allowResume ? ['--allow-resume'] : [])]
       const result = await commandEvidence(evidence, 'serve', installedScript, args, env, boardRoot)
-      const openUrl = result.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)?.[0]
-      assert.ok(openUrl, result.stdout)
-      assert.doesNotMatch(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
+      const { link: openUrl } = readPrintedLink(result, { wordings: wordingsOf(['serveAt']) })
       const record = findServerRecord(root, openUrl)
       assert.ok(record, 'the owned localhost server record was not found below the fixture root')
       server = { url: record.url, record }
