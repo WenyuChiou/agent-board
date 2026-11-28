@@ -1,8 +1,8 @@
 # Live run: the Antigravity sidecar wakes an idle desktop app conversation for a board message
 
 This note is the record the sidecar's idle route names (`hooks/receivers/sidecar-antigravity.ts`, #1396). One run,
-2026-11-27, synthetic data only, results below. The first item of the list further down is still open, so no surface of
-that route reads Verified yet.
+2026-11-27, synthetic data only, results below. The sidecar's surfaces keep `evidence: null` in the pull request that
+adds this run (#1952), so its rows read Implemented; naming this note there, for the 2.0 Desktop App, is a follow-up.
 
 Question to answer: with the sidecar switched on in the app's Automations page and polling the board, does a message sent
 from the board's page to an idle Antigravity desktop app conversation (route `now`, surface `IDE`) start a new turn there
@@ -83,14 +83,15 @@ An earlier try in this run (a shorter count) ended before the row's button was p
 
 ## What the board cannot see
 
-1. `send-message` into a running turn: still open. During a running turn, `Antigravity.exe agentapi send-message
-   --title=Agent Board <conversation> <line>` run by hand from a shell in the test home exited with -1 and printed
-   nothing; the app showed no line, and no turn followed after the running one ended (20 s). So a call from outside the
-   app does not run, and what the app does with the sidecar's own call into a running turn was not shown. The D1 run on
-   #1612 showed a call made while the `Stop` hook ran: the app held it and started the turn after the hook returned.
+1. `send-message` into a running turn: answered before this run. The live run on #1612 (comment 6932556611) found that
+   it injects the line into the running turn; the owner accepted the two windows that lead there, with a test and the
+   card's wording (#1396, 2026-11-18; `docs/validation/2026-11-18-c3-antigravity-wake-windows.md`). The D1 run on #1612
+   showed a call made while the `Stop` hook ran: the app held it and started the turn after the hook returned. In this
+   run, the same call made by hand from a shell in the test home during a running turn exited with -1 and printed
+   nothing; the app showed no line, and no turn followed (20 s): a call from outside the app does not run.
 2. Hook order in a turn with several steps: the typed turn with a tool step (the one that took message 2) wrote two start lines and
    one end line: the turn-start hook ran twice inside that turn and `Stop` once, at its end. No `Stop` ran inside the turn.
-3. A turn-start hook killed or timed out: not run.
+3. A turn-start hook killed or timed out: not run. It is the first window the owner accepted (item 1).
 4. The keys of a real `Stop` input: from the D1 run on #1612 (same app version): no `invocationNum` and no time; the
    turn-start input has `invocationNum` and `initialNumSteps`.
 5. A slow `Stop` hook: from the D1 run on #1612: the app waited for an 8 s `Stop` hook, and the next turn-start hook came
@@ -100,8 +101,7 @@ An earlier try in this run (a shorter count) ended before the row's button was p
 
 For the 2.0 Desktop App on Windows: a board message to an idle conversation started a turn with the one fixed line and
 the message handed over by the turn-start hook, once, about 10 s after the conversation's last turn ended (runs 1 and 3),
-and the row read it as read. A message sent while a turn ran waited for the next turn and woke nothing (run 2). Item 1
-is open, so the route's rows stay Implemented until the owner rules on it.
+and the row read it as read. A message sent while a turn ran waited for the next turn and woke nothing (run 2).
 
 Not covered: the editor (IDE) surface, a woken turn that fails or is never confirmed, Linux and macOS, other app
 versions, a second run.

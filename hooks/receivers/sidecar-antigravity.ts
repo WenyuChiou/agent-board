@@ -12,7 +12,7 @@ export const messagingReceiver = {
   agent: 'antigravity',
   kind: 'mailbox',
   sidecar: true,
-  // Its note records one live run (2026-11-27); its first item, a wake into a running turn, is open, so no surface is Verified.
+  // Its note records one live run (2026-11-27); naming it as a surface's evidence (2.0 Desktop App) is a follow-up.
   surfaces: [{ name: '2.0 Desktop App', id: SURFACE_IDS.antigravityIde, evidence: null }, { name: 'IDE', id: SURFACE_IDS.antigravityIde, evidence: null }],
   tier: 1,
   primitive: 'unknown',
