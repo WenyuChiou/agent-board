@@ -278,12 +278,19 @@ test('the full generated worker bundle runs through verified staging without rec
   // into itself about doubles, so it still trips this cap as well as the structural checks.
   assert.ok(Buffer.byteLength(code) < 3 * 1024 * 1024, `the worker bundle is ${Buffer.byteLength(code)} bytes`)
   // A bundle built twice into itself repeats every module banner, so each hooks/ module appears once.
-  // An earlier build embedded as a string keeps its banners inside the string: the BOARD_SCRIPT
-  // checks and the byte cap catch that. A character cap was only a guess, and ordinary growth reached it.
+  // An earlier build embedded as a string keeps its banners inside the string, after an escaped line
+  // break, so every banner's text must start a line of its own: an older, smaller build appended as a
+  // string stays under the byte cap and holds neither BOARD_SCRIPT nor today's trusted-source line
+  // (review of #1962). A character cap was only a guess, and ordinary growth reached it.
   const modules = code.match(/^\/\/ hooks\/[\w./-]+\.tsx?$/gm) ?? []
   assert.ok(modules.length > 20, 'the worker bundle carries its hooks/ module banners')
   assert.equal(new Set(modules).size, modules.length, 'each hooks/ module appears once in the worker bundle')
   assert.ok(!code.includes('BOARD_SCRIPT'), 'the worker bundle embeds no earlier board bundle')
+  const bannersOutsideLines = text => (text.match(/\/\/ (?:hooks|scripts)\/[\w./-]+\.(?:tsx?|mjs)(?![\w./-])/g) ?? []).length
+    - (text.match(/^\/\/ (?:hooks|scripts)\/[\w./-]+\.(?:tsx?|mjs)$/gm) ?? []).length
+  assert.equal(bannersOutsideLines(code), 0, 'every module banner in the worker bundle starts a line of its own')
+  // The case the byte cap alone let through: part of a build, its banners included, appended as a string.
+  assert.ok(bannersOutsideLines(`${code}\nconst EARLIER = ${JSON.stringify(code.slice(0, 300_000))}\n`) > 0)
   const { digest, value } = stage(code)
   try {
     writeFileSync(value.file, code)
