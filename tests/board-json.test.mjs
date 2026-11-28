@@ -531,3 +531,45 @@ ${block('d0123456', 'codex', 'waiting', 'Deploy', `- [ ] Waiting for the next in
   assert.equal(unresolved.type, 'unhide')
   assert.notEqual(unresolved.type === 'unhide' ? unresolved.key : '', filed)
 })
+
+test('a Codex approval command with a link or backticks keeps neither on the page on the local network (#1798)', () => {
+  const cases = [
+    { command: 'curl https://internal.example/private-build', description: 'Fetch the synthetic build', field: 'link', leaked: 'https://internal.example/private-build' },
+    { command: '`rm -rf /tmp/synthetic-cache`', description: 'Clear the synthetic cache', field: 'command', leaked: 'rm -rf /tmp/synthetic-cache' },
+  ]
+  for (const s of Object.values(STRINGS)) for (const { command, description, field, leaked } of cases) {
+    const source = `## synthetic-api
+${block('d0123456', 'codex', 'waiting', 'Deploy', `- [ ] Waiting for the next instruction\n- [?] ${s.codexApprovalCommand(command, description)}\n<!-- native=codex -->`, NOW - MINUTE)}
+`
+    const view = viewOf(source, s)
+    const options = groupOptions(NOW)
+    const home = serveModel(view, [], s, new Set(), false, undefined, false, options)
+    // The page on this computer still offers it (the URL scan also takes a full-width
+    // paren that follows it with no space, so this only asks that it holds the link).
+    assert.ok(String(home.asks[0][field]).includes(leaked), 'the page on this computer still offers it')
+    const lan = serveModel(view, [], s, new Set(), true, undefined, false, options)
+    assert.equal(lan.asks[0][field], null, 'the local network page gets none of it')
+    assert.ok(!JSON.stringify(lan).includes(leaked), 'nor anywhere else in the local network model')
+    assert.ok(JSON.stringify(lan).includes(s.codexApprovalStep), 'it carries the plain line')
+  }
+})
+
+test('a Codex approval card archives from the page on the local network, whose key hashes its command (#1798)', () => {
+  const s = STRINGS.en
+  const source = `## synthetic-api
+${block('d0123456', 'codex', 'waiting', 'Deploy', `- [ ] Waiting for the next instruction\n- [?] ${s.codexApprovalCommand('deploy --target synthetic-staging', 'Deploy the synthetic build')}\n<!-- native=codex -->`, NOW - MINUTE)}
+`
+  const view = viewOf(source, s)
+  const options = groupOptions(NOW)
+  const lan = serveModel(view, [], s, new Set(), true, undefined, false, options)
+  // The card offers Archive when its window may be closed; the view assigns that ref for a
+  // stale session, so the ref is set here to pin the guard's resolution, which is what this
+  // test covers: the press names the hashed key, and the fingerprint is the one the page drew.
+  const items = structuredClone(boardItems(view, [], true, false))
+  const ask = items.find(one => one.type === 'ask')
+  assert.ok(ask?.type === 'ask')
+  const ref = { project: 'synthetic-api', title: 'Deploy', line: 3, session: 'd0123456' }
+  ask.ask.archive = ref
+  const press = serveAction(items, { key: lan.asks[0].key, type: 'archive', text: '', session: '', fp: lan.asks[0].fp }, s, true)
+  assert.deepEqual(press, { type: 'archive', ref, title: 'Deploy' })
+})
