@@ -582,7 +582,7 @@ const claimBoundary = '[\\s`\'",:;()!?*<>\\[\\].]'
 // When a claim runs out: its "until" time, "2026-10-28 21:04 UTC" or "2026-10-28T21:04Z" (always read as UTC).
 // "waiting for a slot" runs out 7 days after its comment and a claim with no readable time after 2, the longest rule 3
 // allows; a comment with no date counts as still live.
-const claimEnd = comment => {
+export const claimEnd = comment => {
   const until = String(comment.body).match(/\buntil\s+(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/i)
   if (until) return Date.UTC(Number(until[1]), Number(until[2]) - 1, Number(until[3]), Number(until[4]), Number(until[5]))
   const written = writtenAt(comment)
@@ -675,6 +675,12 @@ const emailPattern = /\b([A-Za-z0-9._%+-]+)@((?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,})\b
 const isPlaceholderEmail = ([, local, domain]) => /^(?:git|no-?reply)$/i.test(local) || /^no-?reply\b/i.test(local) ||
   /(?:^|\.)(?:example\.(?:com|org|net)|example|invalid|test|localhost)$/i.test(domain) || /(?:^|\.)users\.noreply\.github\.com$/i.test(domain)
 const uuidPattern = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi
+// A Claude Code web session link and a Claude app session id (local_<uuid>, or local_ and 32 hex) are session ids too:
+// the first is not a UUID, and \b finds no word boundary between _ and the UUID of the second (#1959).
+const sessionLinkPattern = /claude\.ai\/code\/session_([A-Za-z0-9]+)/gi
+const localIdPattern = /local_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})(?![0-9a-z])/gi
+// A made-up id of one or two repeated characters, such as 00000000-0000-0000-0000-000000000001, is a placeholder.
+const isRealId = id => new Set(id.replace(/-/g, '').toLowerCase()).size > 2
 const homePattern = /(?:[A-Za-z]:[\\/]{1,2}Users[\\/]{1,2}|\/(?:Users|home)\/)([^\\/\s"'`]+)/gi
 // A web address, such as https://github.com/users/<name>, is not a home folder; file:///home/…,
 // ssh://host/home/… and vscode-remote://wsl+Ubuntu/home/… still are.
@@ -688,28 +694,41 @@ const publicAttachmentId = address => {
 // ana and li are the made-up people of docs/preview/samples.ts.
 const placeholders = new Set(['you', 'me', 'user', 'username', 'name', 'example', 'jane', 'john', 'alice', 'bob', 'ana', 'li', 'someone', 'runner', '...', '…'])
 const safeText = text => {
-  let safe = String(text).replace(uuidPattern, '<session-id>').replace(homePattern, '<home>')
+  let safe = String(text).replace(sessionLinkPattern, 'claude.ai/code/session_<id>').replace(localIdPattern, 'local_<id>')
+    .replace(uuidPattern, '<session-id>').replace(homePattern, '<home>')
   for (const pattern of tokenPatterns) safe = safe.replace(pattern, '<redacted token>')
   return safe.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '')
 }
 
-export const privateData = ({ added, body }) => {
+// A squash merge copies the branch's commit messages to main, and a pushed branch is never force-pushed or rebased
+// (CONTRIBUTING.md rules 1 and 4), so a commit message is fixed only by a new branch.
+const commitFix = 'open a replacement pull request from a new branch whose commits leave it out, and close this one; a pushed branch is never force-pushed or rebased (CONTRIBUTING.md rules 1 and 4).'
+
+// commits: [{ sha, message }] for every commit in base..head; a squash merge copies their messages to main (#1959).
+export const privateData = ({ added, body, commits = [] }) => {
   const output = result()
   const entries = [
     ...added.filter(item => /\.(md|svg|html)$/i.test(item.path) || item.path.startsWith('docs/')),
     ...linesOf(body).map((text, index) => ({ path: null, line: index + 1, text })),
+    ...commits.flatMap(({ sha, message }) => linesOf(message ?? '').map((text, index) => ({ path: null, commit: String(sha), line: index + 1, text }))),
   ]
-  for (const { path, line, text } of entries) {
-    const location = path ? `${safeText(path)} line ${line}` : `body line ${line}`
-    const add = (kind, fix) => output.problems.push(problem('private-data', `${kind} in ${location}.`, fix))
+  for (const { path, commit, line, text } of entries) {
+    const location = commit ? `commit ${safeText(commit).slice(0, 7)} message line ${line}` : path ? `${safeText(path)} line ${line}` : `body line ${line}`
+    const add = (kind, fix) => output.problems.push(problem('private-data', `${kind} in ${location}.`, commit ? `${fix.replace(/\.$/, '')}; ${commitFix}` : fix))
     // A public screenshot's asset UUID is not a session. Other UUIDs on the same
     // line and every other privacy check still see their original text.
     const sessionText = text.replace(webAddress, address => {
       const id = publicAttachmentId(address)
       return id === null ? address : address.replace(id, '<attachment-id>')
     })
-    if ([...sessionText.matchAll(uuidPattern)].some(match => new Set(match[0].replace(/-/g, '').toLowerCase()).size > 2)) {
+    if ([...sessionText.matchAll(uuidPattern)].some(match => isRealId(match[0]))) {
       add('session id', 'use a placeholder such as <session-id>; a made-up id of repeated digits, such as 00000000-0000-0000-0000-000000000001, also passes.')
+    }
+    if ([...text.matchAll(sessionLinkPattern)].some(match => isRealId(match[1]))) {
+      add('Claude Code session link', 'leave the link out, or write claude.ai/code/session_<id> as a placeholder.')
+    }
+    if ([...text.matchAll(localIdPattern)].some(match => isRealId(match[1]))) {
+      add('Claude app session id', 'use a placeholder such as local_<session-id>.')
     }
     if ([...text.replace(webAddress, ' ').matchAll(homePattern)].some(match => !placeholders.has(match[1].toLowerCase()) && !/^[<$%]/.test(match[1]))) {
       add('home-folder path', 'use ~ or <home> instead of a personal home folder.')
@@ -1703,7 +1722,7 @@ export const checkPr = data => {
   add(naming(data.title, data.branch))
   add(sections(data.body, data.template))
   add(changelog({ text: data.changelogText, added: data.added, paths: data.paths, addedPaths: data.addedPaths, headPaths: data.headPaths, issue: issue.issue, titles: testTitles(data.testFiles), isRelease, isFold: !isOutside && isFoldTitle(data.title), isDocsOnly: data.paths.every(path => path.endsWith('.md') || /^(docs|\.github)\//.test(path)), isRequired: /^(feat|fix)[(!:]/.test(data.title) && data.paths.includes('CHANGELOG.md'), title: data.title, releaseNumbers: data.releaseNumbers ?? [] }))
-  add(privateData({ added: data.added, body: data.body }))
+  add(privateData({ added: data.added, body: data.body, commits: data.commits ?? [] }))
   add(rulesPage({ paths: data.paths, body: data.body, headPaths: data.headPaths }))
   add(binaryImages(data.changedPaths))
   add(tier({ body: data.body, title: data.title, number: data.number, paths: data.paths, riskPaths: data.riskPaths }))
@@ -2095,6 +2114,13 @@ export const main = async (argv = process.argv.slice(2)) => {
     // --no-renames: a moved file counts as removed and added, so its old path and its new content are both judged.
     data.added = addedLines(git(cwd, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=0', range))
     data.paths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', range)).filter(Boolean).map(diffPath)
+    // Every commit message in base..head: a squash merge copies them to main (#1959).
+    // -z ends each record with NUL, which a commit message cannot hold; the sha is the record's first line, and the rest,
+    // whatever bytes it holds, is the message.
+    data.commits = git(cwd, 'log', '-z', '--format=%H%n%B', `${base}..${data.head}`).split('\0').filter(item => item.trim()).map(item => {
+      const end = item.indexOf('\n')
+      return end === -1 ? { sha: item.trim(), message: '' } : { sha: item.slice(0, end).trim(), message: item.slice(end + 1) }
+    })
     data.changedPaths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', '--diff-filter=ACMRT', range)).filter(Boolean).map(diffPath)
     data.addedPaths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', '--diff-filter=A', range)).filter(Boolean).map(diffPath)
     // Lines added and removed in each file, for the size note on an outside pull request; a binary file shows "-".

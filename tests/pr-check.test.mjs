@@ -431,6 +431,55 @@ test('pr-check finds a session id, a home-folder path and a token link in added 
   }
 })
 
+// Synthetic ids only (#1959): the link's id and the local_ ids are made up.
+const syntheticSessionLink = 'https://claude.ai/code/session_01SyntheticExample7Qx2Vb9'
+const syntheticLocalUuid = 'local_12345678-abcd-4ef0-8123-456789abcdef'
+const syntheticLocalHex = 'local_0123456789abcdef0123456789abcdef'
+
+test('pr-check finds a Claude Code session link and a Claude app session id in the body and added docs', () => {
+  for (const value of [syntheticSessionLink, syntheticLocalUuid, syntheticLocalHex, `(see ${syntheticSessionLink}).`, `id=${syntheticLocalUuid},`]) {
+    const fromBody = privateData({ added: [], body: `Synthetic note\n${value}` })
+    assert.equal(fromBody.problems.length, 1, value)
+    assert.match(fromBody.problems[0].message, /session (link|id) in body line 2/, value)
+    const fromDocs = privateData({ added: [{ path: 'docs/validation/synthetic-record.md', line: 4, text: value }], body: '' })
+    assert.equal(fromDocs.problems.length, 1, value)
+    assert.match(fromDocs.problems[0].message, /session (link|id) in docs\/validation\/synthetic-record\.md line 4/, value)
+    const output = report(fromDocs, 'synthetic') + reportMarkdown(fromDocs, 'synthetic')
+    for (const id of ['01SyntheticExample7Qx2Vb9', '12345678-abcd', '0123456789abcdef0123']) assert.equal(output.includes(id), false, value)
+  }
+  // Placeholders, a public screenshot link and a made-up id of repeated digits still pass.
+  for (const value of ['claude.ai/code/session_<id>', 'local_<session-id>', 'https://claude.ai/code/session_000000000000', 'local_00000000-0000-0000-0000-000000000001', 'local_00000000000000000000000000000001', 'https://github.com/user-attachments/assets/12345678-abcd-4ef0-9876-abcdef123456', '00000000-0000-0000-0000-000000000001', 'a local_variable name']) {
+    assert.deepEqual(privateData({ added: [{ path: 'docs/synthetic.md', line: 1, text: value }], body: value }).problems, [], value)
+  }
+})
+
+test('pr-check finds a session id, a session link and a local_ id in the commit messages of the branch', async t => {
+  const sessionUuid = '12345678-abcd-4ef0-9876-abcdef123456'
+  // The control bytes a record or field separator might use do not hide what follows them (#1972 review).
+  for (const value of [syntheticSessionLink, syntheticLocalUuid, syntheticLocalHex, `Claude-Session: ${syntheticSessionLink}`, `Session: ${sessionUuid}`, `x\x1f y\x1e ${syntheticSessionLink}`]) {
+    const setup = fixture(t)
+    // Precondition: the branch as the fixture makes it passes.
+    const before = await setup.run()
+    assert.equal(before.status, 0, before.stdout + before.stderr)
+    setup.put('tests/x.test.mjs', `test('${coveringTitle}', () => {})\n// synthetic\n`)
+    setup.git('add', '--', 'tests/x.test.mjs')
+    setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'test: a synthetic second commit', '-m', `Why: synthetic.\n\n${value}`)
+    const sha = setup.git('rev-parse', 'HEAD')
+    const failed = await setup.run()
+    assert.equal(failed.status, 1, value)
+    assert.match(failed.stdout, new RegExp(`session (link|id) in commit ${sha.slice(0, 7)} message line 5`), value)
+    assert.match(failed.stdout, /new branch whose commits leave it out/, value)
+    for (const id of ['01SyntheticExample7Qx2Vb9', '12345678-abcd', '0123456789abcdef0123']) assert.equal(failed.stdout.includes(id), false, value)
+  }
+  // A commit message with only placeholders, a screenshot link and a repeated-digit id passes.
+  const setup = fixture(t)
+  setup.put('tests/x.test.mjs', `test('${coveringTitle}', () => {})\n// synthetic\n`)
+  setup.git('add', '--', 'tests/x.test.mjs')
+  setup.git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'test: a synthetic second commit', '-m', 'See https://github.com/user-attachments/assets/12345678-abcd-4ef0-9876-abcdef123456 and 00000000-0000-0000-0000-000000000001.\n\nCo-Authored-By: Synthetic <noreply@anthropic.com>')
+  const passed = await setup.run()
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr)
+})
+
 test('pr-check finds an email address in added docs and the body, but not git, noreply or example addresses', () => {
   // An address inside a link counts as much as one on its own, in the body or in added docs.
   for (const value of ['Contact private.synthetic@gmail.com', 'mailto:synthetic.person@university.edu', 'https://forms.example.org/x?to=private.synthetic@gmail.com', 'https://host.example.org/people/synthetic.person@university.edu/']) {

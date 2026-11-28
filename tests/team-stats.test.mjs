@@ -112,6 +112,20 @@ test('team stats scorecard groups merged pull requests by the Author line, with 
   assert.deepEqual({ issues, pullRequests }, before)
 })
 
+test('team stats daily line appends the milestone counts when the milestone read ran', () => {
+  const work = (fields = {}) => ({
+    milestone: { number: 15, title: '0.26.0 The mainstream AIs end to end' },
+    open: 96, ready: 41, reallyFree: 9, unchecked: [], expiredClaims: [], staleClaimed: [],
+    idleAssignees: [], staleFirst: [], isUncertain: false, ...fields,
+  })
+  const data = { issues: [issue(1)], pullRequests: [] }
+  assert.match(dailyLine({ ...data, milestoneWork: work() }, date), /milestone 0\.26\.0: open 96, ready 41, really free 9$/)
+  assert.match(dailyLine({ ...data, milestoneWork: work({ isUncertain: true }) }, date), /really free 9 \(uncertain\)$/)
+  assert.match(dailyLine({ ...data, milestoneWork: null }, date), /milestone work uncertain$/)
+  assert.ok(!dailyLine({ ...data, milestoneWork: work({ milestone: null }) }, date).includes('milestone'))
+  assert.ok(!dailyLine(data, date).includes('milestone'))
+})
+
 test('team stats lists merged pull requests with no review verdict as zero rounds', () => {
   const merged = (number, comments = [], merged_at = '2026-10-20T12:00:00Z') => pull(number, comments, { body: 'Author: codex, fix/x', merged_at, state: 'closed' })
   const pullRequests = [merged(12, [comment('Ready for review abcdef0', '2026-10-19T01:00:00Z')]), merged(9), merged(99, [], '2026-10-01T00:00:00Z')]
@@ -258,6 +272,26 @@ test('team stats reads every GitHub review through the REST fallback when a pull
   assert.deepEqual(fetched.pullRequests.find(item => item.number === 39).reviews, [restReview])
   assert.match(scorecard(fetched, date), /^\| codex \| 1 \| 0 \| 1\/1 \| 1\.0 \| 0 \|$/m)
   assert.doesNotMatch(scorecard(fetched, date), /merged with no review verdict:/)
+})
+
+test('team stats daily reads use the supplied runner for the milestone fragment too', () => {
+  const milestone = { number: 15, title: '0.26.0 The mainstream AIs end to end', state: 'open' }
+  const calls = []
+  const run = (command, args) => {
+    assert.equal(command, 'gh')
+    calls.push(args.at(-1))
+    const endpoint = args.at(-1)
+    if (endpoint.includes('/milestones?')) return JSON.stringify(milestone)
+    if (endpoint.includes('/issues?milestone=')) return ''
+    if (endpoint.includes('/issues?') || endpoint.includes('/pulls?')) return ''
+    if (endpoint.includes('/comments?')) return ''
+    throw new Error(`unexpected endpoint: ${endpoint}`)
+  }
+  const fetched = teamStats.fetchStats({ repo: 'synthetic/example', date, isWeek: false }, run)
+  assert.equal(fetched.milestoneWork?.milestone?.title, milestone.title)
+  assert.equal(fetched.milestoneWork?.open, 0)
+  assert.ok(calls.some(endpoint => endpoint.includes('/milestones?')))
+  assert.match(dailyLine(fetched, date), /milestone 0\.26\.0: open 0, ready 0, really free 0/)
 })
 
 test('team stats rejects an unknown flag and a malformed date', () => {
