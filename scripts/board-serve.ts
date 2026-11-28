@@ -1380,8 +1380,10 @@ export const startServer = (o: ServeOptions): void => {
         const view = o.view()
         // The press picks its target as the card did: a live connection hides the mailbox only on a recorded route (#318).
         const targets = deliveryTargets(state?.connections ?? [], state?.mailboxes, live => isRecordedRoute(live, (agent, session) => sessionState(view, agent, session), o.routes ?? RECEIVER_ROUTES))
-        // Hiding a question on the reminder or Older shelf names a line of that shelf; no other press needs it, and its fingerprints stay as drawn.
-        const action = serveAction(boardItems(view, o.pending(), true, text(body.type) === 'hide'), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, targets, true, o.allowResume, o.routes)
+        // Hiding a question on the reminder or Older shelf, or archiving an ended session's task from there (#155), names a line
+        // of that shelf; no other press needs it, and its fingerprints stay as drawn.
+        const isShelf = text(body.type) === 'hide' || text(body.type) === 'archive' && text(body.key).startsWith('older:')
+        const action = serveAction(boardItems(view, o.pending(), true, isShelf), { key: text(body.key), type: text(body.type), text: text(body.text), session: text(body.session), asked: text(body.asked), fp: text(body.fp), line: lineOf(body.line), connection: text(body.connection), turn: text(body.turn) }, o.s, isLan, targets, true, o.allowResume, o.routes)
         if (action.type === 'refuse') return json(res, 409, { note: action.note || o.s.pressNothing })
         if (action.type === 'message') {
           if (isLan) return json(res, 403, {})
