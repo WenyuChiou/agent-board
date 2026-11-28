@@ -2264,6 +2264,122 @@ test('a refusal status with its body left open ends the wait when the headers ar
   }
 })
 
+// #1691: every wait of the hook counts from one end time, so its own timers end inside the 45 s that
+// hooks/hooks.json gives it. A board stands in that sends its headers when `headersAfter` is set
+// (at once for 0) and answers allow after `answerAfter`, or never.
+const timedBoard = async ({ headersAfter = null, answerAfter = null } = {}) => {
+  const seen = []
+  const server = createServer((req, res) => {
+    seen.push(req.url)
+    req.resume()
+    req.on('end', () => {
+      if (headersAfter !== null) setTimeout(() => { if (!res.destroyed) { res.writeHead(200, { 'content-type': 'application/json' }); res.flushHeaders() } }, headersAfter)
+      if (answerAfter !== null) setTimeout(() => { if (!res.destroyed) res.end('{"decision":{"behavior":"allow"}}') }, answerAfter)
+    })
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  return {
+    seen,
+    address: { origin: `http://127.0.0.1:${server.address().port}`, token: 'synthetic-token' },
+    url: `http://127.0.0.1:${server.address().port}/?t=synthetic-token`,
+    close: async () => { server.closeAllConnections(); await new Promise(done => server.close(done)) },
+  }
+}
+const askUntil = async (stand, endIn) => {
+  const started = performance.now()
+  const answer = await hook.askBoard(stand.address, Buffer.from('{"tool":"Bash"}'), { end: started + endIn })
+  return { answer, took: performance.now() - started }
+}
+
+test('a board that sends no headers is given up on at the hook\'s end', async () => {
+  const stand = await timedBoard()
+  try {
+    const { answer, took } = await askUntil(stand, 500)
+    assert.equal(stand.seen.length, 1)
+    assert.equal(answer, null)
+    assert.ok(took < 1_500, `waited ${Math.round(took)} ms past an end 500 ms away`)
+  } finally { await stand.close() }
+})
+
+test('a board that sends its headers and no answer is given up on at the hook\'s end', async () => {
+  const stand = await timedBoard({ headersAfter: 0 })
+  try {
+    const { answer, took } = await askUntil(stand, 800)
+    assert.equal(stand.seen.length, 1)
+    assert.equal(answer, null)
+    assert.ok(took < 2_000, `waited ${Math.round(took)} ms past an end 800 ms away`)
+  } finally { await stand.close() }
+})
+
+test('an answer that comes after the hook\'s end allows nothing', async () => {
+  const stand = await timedBoard({ headersAfter: 0, answerAfter: 1_200 })
+  try {
+    const { answer } = await askUntil(stand, 500)
+    assert.equal(stand.seen.length, 1)
+    assert.equal(answer, null)
+  } finally { await stand.close() }
+})
+
+test('an answer read after the hook\'s end, before its timer runs, allows nothing', async () => {
+  // The clock passes the end the moment the board answers, while the timer, set for 5 s, has not run yet.
+  let late = false
+  const server = createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.flushHeaders()
+      setTimeout(() => { late = true; res.end('{"decision":{"behavior":"allow"}}') }, 100)
+    })
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  try {
+    const started = performance.now()
+    const end = started + 5_000
+    const answer = await hook.askBoard({ origin: `http://127.0.0.1:${server.address().port}`, token: 'synthetic-token' }, Buffer.from('{"tool":"Bash"}'), { end, now: () => (late ? end + 1 : performance.now()) })
+    assert.equal(late, true)
+    assert.equal(answer, null)
+    assert.ok(performance.now() - started < 4_000, 'the answer was read only when the timer ran')
+  } finally {
+    server.closeAllConnections()
+    await new Promise(done => server.close(done))
+  }
+})
+
+test('late headers leave only the time until the hook\'s end for the answer', async () => {
+  const stand = await timedBoard({ headersAfter: 400 })
+  try {
+    const { answer, took } = await askUntil(stand, 900)
+    assert.equal(answer, null)
+    assert.ok(took >= 400, `gave up at ${Math.round(took)} ms, before the headers came`)
+    assert.ok(took < 2_000, `waited ${Math.round(took)} ms past an end 900 ms away`)
+  } finally { await stand.close() }
+})
+
+test('time that discovery spends is taken off the wait for the board', async () => {
+  const stand = await timedBoard()
+  try {
+    const place = homeFor(stand.url)
+    let at = 0
+    const started = performance.now()
+    const answer = await hook.run(place.env, process.platform, { input: request('npm run synthetic-1691-spent'), now: () => at, discoveryMs: 1_000, hookMs: 1_500, checkListener: () => null, clearRefusal: () => { at += 900 } })
+    const took = performance.now() - started
+    assert.equal(answer, null)
+    assert.equal(stand.seen.length, 1)
+    assert.ok(took < 1_500, `waited ${Math.round(took)} ms with 600 ms of the hook left`)
+  } finally { await stand.close() }
+})
+
+test('a hook that reaches its end before the request sends no request', async () => {
+  const stand = await allowingBoard()
+  try {
+    const place = homeFor(stand.url)
+    let at = 0
+    const answer = await hook.run(place.env, process.platform, { input: request('npm run synthetic-1691-late'), now: () => at, discoveryMs: 1_000, hookMs: 500, checkListener: () => null, clearRefusal: () => { at += 600 } })
+    assert.equal(answer, null)
+    assert.deepEqual(stand.seen, [])
+  } finally { await stand.close() }
+})
+
 test('a slow removal of the old refusal record that spends the budget sends no request', async () => {
   const stand = await allowingBoard()
   try {

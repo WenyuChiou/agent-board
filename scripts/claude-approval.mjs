@@ -38,6 +38,11 @@ export const DISCOVERY_MS = HOOK_MS - ASK_MS
 export const SEND_ROOM_MS = ASK_MS - 30_000
 // The most the check of who is listening may add to a request. Windows needs about 0.6 s of it.
 export const LOOKUP_MS = 2_000
+// Every wait for the board counts from one end time, taken when the hook starts, so the headers' 2 s and the 35 s
+// after them never run past the hook's limit together (#1691). This much of the limit is left for node to start
+// before that clock read and to write the answer after it.
+const EXIT_ROOM_MS = 1_000
+export const HOOK_END_MS = HOOK_MS - EXIT_ROOM_MS
 const INPUT_MS = 5_000
 const INPUT_MAX = 1024 * 1024
 // The board takes a request of up to 64 KB; a tool input past this many bytes is sent with its long
@@ -655,9 +660,11 @@ const readInput = () => new Promise(done => {
 })
 
 // The request goes to the address that was checked and nowhere else: an agent of its own takes no proxy from the
-// environment, and node:http follows no redirect. Any failure, status or unreadable answer is no answer.
-export const askBoard = (address, payload) => new Promise(done => {
+// environment, and node:http follows no redirect. Any failure, status or unreadable answer is no answer. Neither
+// wait runs past `end`: an answer that comes later is no answer.
+export const askBoard = (address, payload, { end = Infinity, now = () => performance.now() } = {}) => new Promise(done => {
   const { hostname, port } = new URL(address.origin)
+  const until = limit => Math.max(0, Math.min(limit, end - now()))
   let timer
   const finish = value => { clearTimeout(timer); done(value) }
   const asked = httpRequest({
@@ -676,15 +683,17 @@ export const askBoard = (address, payload) => new Promise(done => {
     }
     // The headers came: the board is alive, and the press may take up to 30 s.
     clearTimeout(timer)
-    timer = setTimeout(() => asked.destroy(), ASK_MS)
+    timer = setTimeout(() => asked.destroy(), until(ASK_MS))
     const chunks = []
     answer.on('data', chunk => chunks.push(chunk))
     answer.on('error', () => finish(null))
     answer.on('end', () => {
+      // The answer's end event can run after `end` but before the timer's callback: it is still too late.
+      if (now() >= end) { finish(null); return }
       try { finish(JSON.parse(Buffer.concat(chunks).toString('utf8'))) } catch { finish(null) }
     })
   })
-  timer = setTimeout(() => asked.destroy(), HEADERS_MS)
+  timer = setTimeout(() => asked.destroy(), until(HEADERS_MS))
   asked.on('error', () => finish(null))
   asked.on('close', () => finish(null))
   asked.end(payload)
@@ -692,7 +701,9 @@ export const askBoard = (address, payload) => new Promise(done => {
 
 export const run = async (env = process.env, platform = process.platform, options = {}) => {
   const now = options.now ?? (() => performance.now())
-  const discoveryDeadline = now() + (options.discoveryMs ?? DISCOVERY_MS)
+  const started = now()
+  const discoveryDeadline = started + (options.discoveryMs ?? DISCOVERY_MS)
+  const end = started + (options.hookMs ?? HOOK_END_MS)
   const input = options.input !== undefined ? options.input : await readInput()
   if (input === null || typeof input !== 'object' || QUIET_MODES.has(input.permission_mode)) return null
   // Not sent to the board at all: it could only allow or deny, and the board allowing is the thing refused.
@@ -707,8 +718,9 @@ export const run = async (env = process.env, platform = process.platform, option
   }
   ;(options.clearRefusal ?? clearRefusal)(address.file)
   const payload = Buffer.from(JSON.stringify(askBody(input)))
-  if (now() >= discoveryDeadline) return null
-  const body = await askBoard(address, payload)
+  const sendAt = now()
+  if (sendAt >= discoveryDeadline || sendAt >= end) return null
+  const body = await askBoard(address, payload, { end, now })
   return decisionOutput(body?.decision ?? null)
 }
 
