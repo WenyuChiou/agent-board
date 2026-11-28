@@ -850,16 +850,14 @@ test('B6 an ack on a marked message that was not accepted yet acknowledges it', 
   assert.deepEqual([acked.messages[0].status, acked.messages[0].reply], ['acknowledged', `ACK ${nonce} done`])
 })
 
-test("B8 a DeepSeek hook's claims behave as before: handed out again with a repeat count and line, expired at 30 minutes, and another hook's unknown release is still ok", async () => {
+test("B8 a DeepSeek hook's claim nobody accepted reads HOLDER_LOST after its lease, as every hook's does, and is not handed out again; another hook's unknown release is still ok (#1870)", async () => {
   const b = await mailbox()
-  // DeepSeek's claims keep the lease rule for now (#1843 answer 3, #1870); every other hook's claim reads HOLDER_LOST after it.
+  // DeepSeek's plugin gives a claim back while its session works (#1870), so its claims follow the rule every other hook's do.
   let state = b.seed('deepseek', 's1')
   state = b.take(state, 'deepseek', 's1', refOf(1), T0).state
-  const again = b.take(b.prune(state, T0 + 31 * SEC), 'deepseek', 's1', refOf(2), T0 + 31 * SEC)
-  assert.equal(again.message.redelivered, 1)
-  assert.ok(b.messaging.deliveryText(again.message, b.STRINGS.en).includes(b.STRINGS.en.messagesDeliveryRepeat))
-  const expired = b.prune(again.state, T0 + 31 * SEC + 31 * MIN)
-  assert.deepEqual([expired.messages[0].status, expired.messages[0].error, expired.messages[0].text], ['uncertain', 'EXPIRED', ''])
+  const lost = b.prune(state, T0 + 31 * SEC)
+  assert.deepEqual([lost.messages[0].status, lost.messages[0].error, lost.messages[0].redelivered], ['uncertain', 'HOLDER_LOST', undefined])
+  assert.equal(b.take(lost, 'deepseek', 's1', refOf(2), T0 + 31 * SEC).message, null)
   // Release of a ref nobody holds answers as before, and attempt is not a call for these agents.
   assert.equal(b.act(state, 'mailbox-release', { agent: 'codex', session: 's1', ref: refOf(9) }, T0 + SEC).result.ok, true)
   assert.throws(() => b.act(state, 'mailbox-attempt', { agent: 'codex', session: 's1', ref: refOf(1) }, T0 + SEC), /INVALID_MAILBOX_CALL/)

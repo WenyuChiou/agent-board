@@ -16,10 +16,11 @@ export const DELIVERY_STATES = [
   'queued', 'queuedForHook', 'queuedForWake',
   // Handed to a live receiver with no receipt yet; handed to an unnamed pull of its mailbox (board_inbox).
   'claimed', 'pulled',
-  // Handed to a hook under a name. Only DeepSeek's is handed out again once the lease passes, MAILBOX_REDELIVERIES times at
-  // most (#990, #1843 answer 3); any other reads HOLDER_LOST once a write after the lease prunes the store.
+  // Handed to a hook under a name. It is never handed out again once the lease passes: it reads HOLDER_LOST once a write after
+  // the lease prunes the store (#1843), DeepSeek's too since its plugin gives a claim back while its session works (#1870).
   'leased',
-  // DeepSeek's after its last repeat: never handed out again.
+  // A claim an earlier release handed out again for the last time (DeepSeek's, MAILBOX_REDELIVERIES times, #990), as a store
+  // saved then still holds it: it is never handed out again either.
   'leaseSpent',
   // An OpenCode claim its plugin has not marked as a wake, and one it marked as started (never handed out again, #724).
   'wakeClaimed', 'wakeStarted',
@@ -181,7 +182,8 @@ const OWN_SHAPES: Partial<Record<DeliveryState, Record<string, Shape>>> = {
   handed: { onPull: { ref: undefined }, onWake: wake },
   handedLost: { onPull: { ref: undefined }, onWake: wake },
   acceptedAwaitsAck: { onPull: { ref: undefined } },
-  leased: { onDeepSeek: { agent: 'deepseek' }, lastRepeat: { agent: 'deepseek', redelivered: MAILBOX_REDELIVERIES - 1 } },
+  // DeepSeek's claim, and one an earlier release handed out again before its last repeat (#990): no longer handed out again (#1870).
+  leased: { onDeepSeek: { agent: 'deepseek' }, repeated: { agent: 'deepseek', redelivered: MAILBOX_REDELIVERIES - 1 } },
   inDoubt: { otherError: { error: 'CONNECTION_LOST' } },
   acceptedLost: { awaitsAck: { ...ON_HOOK, awaitsAck: true }, onWake: { ...wake, awaitsAck: true }, otherError: { error: 'RECEIVER_ERROR' } },
   rejected: { stopped: { error: 'STOPPED' } },
@@ -352,13 +354,6 @@ export const DELIVERY_TABLE: Record<DeliveryState, DeliveryRow> = {
     attempt: 'INVALID_MAILBOX_CALL', release: 'queuedForHook', releaseUnsent: 'queuedForHook', dismiss: 'dismissed', disconnect: 'disconnected', leave: 'disconnected', rebind: 'leased', openLimit: 'expired', dayLimit: 'expired', restart: 'restarted' },
     shapes: {
       acceptedBefore: { status: 'unsure', on: { release: 'leased', releaseUnsent: 'leased' } },
-      // DeepSeek's claim is handed out again after the lease, up to its last repeat (#1843 answer 3, #1870).
-      onDeepSeek: { on: { claimLate: 'sent:leased' } },
-      lastRepeat: { on: { claimLate: 'sent:leaseSpent' } },
-      'acceptedBefore+onDeepSeek': { status: 'unsure', on: { claimLate: 'leased' } },
-      'acceptedBefore+lastRepeat': { status: 'unsure', on: { claimLate: 'leased' } },
-      'otherSurface+onDeepSeek': { on: { claimLate: 'leased' } },
-      'otherSurface+lastRepeat': { on: { claimLate: 'leased' } },
     } },
   leaseSpent: { holdsSend: true, holdsStart: true, status: 'queued', on: {
     claim: 'leaseSpent', claimLate: 'leaseSpent', pull: 'leaseSpent', accept: 'handed', ack: 'acknowledged', reject: 'rejected', fail: 'turnEnded', timeout: 'inDoubt', unsure: 'leaseSpent',
