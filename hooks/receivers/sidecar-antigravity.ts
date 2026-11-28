@@ -12,7 +12,7 @@ export const messagingReceiver = {
   agent: 'antigravity',
   kind: 'mailbox',
   sidecar: true,
-  // The live run of the wake is pending: its note names the run to come, and no surface is Verified until it is done.
+  // Its note records one live run (2026-11-27); its first item, a wake into a running turn, is open, so no surface is Verified.
   surfaces: [{ name: '2.0 Desktop App', id: SURFACE_IDS.antigravityIde, evidence: null }, { name: 'IDE', id: SURFACE_IDS.antigravityIde, evidence: null }],
   tier: 1,
   primitive: 'unknown',
