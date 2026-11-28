@@ -15,7 +15,8 @@ const pull = (number, fields = {}) => ({
 })
 const comment = (body, created_at = '2026-10-20T09:00:00Z', id = 1) => ({ body, created_at, id })
 const ready = (sha = head, at, id) => comment(`Ready for review ${sha}`, at, id)
-const verdict = (kind, sha = head, at, id) => comment(`Review: ${kind} ${sha}`, at, id)
+// A verdict names its reviewer, as RULES R2 asks; an approval with no name is none (#1974).
+const verdict = (kind, sha = head, at, id) => comment(`Review: ${kind} ${sha} by fixture-reviewer`, at, id)
 const by = (login, item) => ({ ...item, user: { login } })
 // The extra GitHub lookups and the bundle sources, empty: a test of the queue alone must not reach for them.
 const noContext = () => ({ roadmapComments: [], collaborators: [], claimed: [], notes: [] })
@@ -254,17 +255,68 @@ test('an approval named for the pull request author does not count as approved',
   assert.deepEqual(other.waitingForAuthor, [])
 })
 
-test('a reviewer the author\'s lane started new for this review counts as an approval on the light and normal tiers only, as the PR check reads it (#1375)', () => {
+test('a reviewer the author\'s lane started new for this review counts as an approval on every tier but a release pull request, as the PR check reads it (#1375, #1974)', () => {
   // The queue reads a one-note lane as the author's own lane, so this shape is the one it would hold as self-approval.
   const fresh = by('WenyuChiou', answered('codex (started new for this review), lane codex'))
-  const queue = tier => classify([pull(1, { body: `Author: codex, branch\nTier: ${tier}`, files: [] })], { 1: [ready(head, '2026-10-20T08:00:00Z'), fresh] }, now)
-  for (const tier of ['light', 'normal']) {
+  // On the risk tier the Codex review bot's review of the head comes first (#1974).
+  const bot = codexState(head, false, '2026-10-20T10:00:00Z', 5)
+  const queue = (tier, title, extra = '', items = [bot, fresh]) => classify([pull(1, { body: `Author: codex, branch\nTier: ${tier}${extra}`, files: [], ...(title ? { title } : {}) })], { 1: [ready(head, '2026-10-20T08:00:00Z'), ...items] }, now)
+  for (const tier of ['light', 'normal', 'risk']) {
     assert.deepEqual(queue(tier).approvedNow.map(item => item.number), [1], tier)
     assert.deepEqual(queue(tier).waitingForAuthor, [], tier)
   }
-  assert.deepEqual(queue('risk').waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approval is by the author']])
+  const releaseDetail = 'approved, but a release needs a reviewer outside the maintainer\'s lane, or the owner'
+  assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9').waitingForAuthor.map(item => [item.number, item.detail]), [[1, releaseDetail]])
+  // On a release a reviewer a lane started does not count whatever its name, nor a verdict on the maintainer route (#1974).
+  for (const suffix of ['', ', maintainer route']) {
+    const other = by('WenyuChiou', answered(`sonnet_900 (read-only, started new for this review), lane codex${suffix}`))
+    assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9', '', [bot, other]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, releaseDetail]], suffix)
+  }
+  // Nor a line with the maintainer's note and no route (#1974).
+  const noted = by('WenyuChiou', answered('sonnet_900 (read-only, started new for this review by the maintainer), lane claude'))
+  assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9', '', [bot, noted]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, releaseDetail]])
+  assert.deepEqual(queue('normal', undefined, '', [noted]).approvedNow.map(item => item.number), [1])
+  // A lane under risk-tier review takes the maintainer route on every tier its body names.
+  for (const tier of ['light', 'normal']) {
+    assert.deepEqual(queue(tier, undefined, '\nSurface: none').waitingForAuthor.map(item => item.detail), ['approved by the lane; a lane under risk-tier review takes the maintainer route'], tier)
+    assert.deepEqual(queue(tier, undefined, '\nSurface: none', [noted]).approvedNow.map(item => item.number), [1], tier)
+  }
+  // A note is no lane: with the maintainer's note, a reviewer named like an author that names its lane is still the author.
+  const laned = (name, tier = 'normal') => classify([pull(1, { body: `Author: codex (local), branch\nTier: ${tier}`, files: [] })], { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered(name))] }, now)
+  assert.deepEqual(laned('codex (started new for this review by the maintainer), lane codex, maintainer route').waitingForAuthor.map(item => item.detail), ['approval is by the author'])
+  assert.deepEqual(laned('codex (started new for this review), lane codex', '').waitingForAuthor.map(item => item.detail), ['approval is by the author'])
+  assert.deepEqual(laned('codex (started new for this review), lane codex').approvedNow.map(item => item.number), [1])
+  assert.deepEqual(laned('codex (e2e), lane codex').approvedNow.map(item => item.number), [1])
+  const outside = by('WenyuChiou', answered('sonnet_900, lane claude'))
+  assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9', '', [bot, outside]).approvedNow.map(item => item.number), [1])
+  // A name with two notes is still the author's name: the queue compares it as the PR check does.
+  const twoNotes = by('WenyuChiou', answered('codex (read-only, started new for this review by the maintainer), lane codex'))
+  assert.deepEqual(queue('normal', undefined, '', [twoNotes]).waitingForAuthor.map(item => item.detail), ['approval is by the author'])
+  const twoNotesFresh = by('WenyuChiou', answered('codex (read-only, started new for this review), lane codex'))
+  assert.deepEqual(queue('', undefined, '', [twoNotesFresh]).waitingForAuthor.map(item => item.detail), ['approval is by the author'])
+  for (const tier of ['light', 'normal']) assert.deepEqual(queue(tier, undefined, '', [fresh]).approvedNow.map(item => item.number), [1], tier)
+  assert.deepEqual(queue('risk', undefined, '', [fresh]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approved; the Codex review bot has not reviewed this head']])
+  assert.deepEqual(queue('risk', undefined, '', [codexState(oldHead, false, '2026-10-20T10:00:00Z', 5), fresh]).waitingForAuthor.map(item => item.detail), ['approved; the Codex review bot has not reviewed this head'])
+  assert.deepEqual(queue('risk', undefined, '\nSurface: none').waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approved by the lane; a lane under risk-tier review takes the maintainer route']])
+  // The lane's own note keeps the lane's conditions even when the line ends `, maintainer route`, as the PR check reads it.
+  const mixed = by('WenyuChiou', answered('codex (started new for this review), lane codex, maintainer route'))
+  assert.deepEqual(queue('risk', undefined, '\nSurface: none', [bot, mixed]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approved by the lane; a lane under risk-tier review takes the maintainer route']])
+  assert.deepEqual(queue('risk', undefined, '', [mixed]).waitingForAuthor.map(item => item.detail), ['approved; the Codex review bot has not reviewed this head'])
+  const maintainer = by('WenyuChiou', answered('sonnet_900 (started new for this review by the maintainer), lane claude, maintainer route'))
+  assert.deepEqual(queue('risk', undefined, '\nSurface: none', [maintainer]).approvedNow.map(item => item.number), [1])
   const plain = classify([pull(1, { body: 'Author: codex, branch\nTier: normal', files: [] })], { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('codex'))] }, now)
   assert.deepEqual(plain.waitingForAuthor.map(item => item.detail), ['approval is by the author'])
+  // A line with the words that does not read as that one note is no approval, as the PR check reads it (#1974).
+  const unreadable = by('WenyuChiou', answered('codex (unfinished, lane example, checked by assistant (started new for this review)'))
+  for (const tier of ['normal', 'risk']) {
+    assert.deepEqual(queue(tier, undefined, '', [bot, unreadable]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'the approval line cannot be read; write it in the R2 form']], tier)
+    assert.deepEqual(queue(tier, undefined, '', [bot, unreadable]).approvedNow, [], tier)
+  }
+  // A note after a line break belongs to the next line, so the author's own name approves nothing (#1974).
+  for (const broken of ['\r', '\u2028']) {
+    const own = by('WenyuChiou', answered(`codex${broken}Assistant (started new for this review)`))
+    assert.deepEqual(queue('normal', undefined, '', [bot, own]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approval is by the author']], JSON.stringify(broken))
+  }
 })
 
 test('a different lane of the same base name is a different agent, not the author', () => {
@@ -402,12 +454,16 @@ for (const [description, author, reviewer, isSame] of [
   })
 }
 
-test('an absent or empty approval name keeps its legacy reading and an empty Reviewing claims nobody', () => {
+test('an approval with an absent or empty reviewer name is no approval, as the PR check reads it, and an empty Reviewing claims nobody (#1974)', () => {
   const prs = [pull(1, { body: 'Author: Claude Code (desktop), branch', files: [] })]
-  for (const suffix of ['', ' by ', ' by ``', ' by , context']) {
+  for (const suffix of ['', ' by ', ' by ``', ' by , context', ' by \rcodex']) {
     const queue = classify(prs, { 1: [ready(), comment(`Review: APPROVE ${head}${suffix}`, '2026-10-20T10:00:00Z')] }, now)
-    assert.deepEqual(queue.approvedNow.map(item => item.number), [1])
+    assert.deepEqual(queue.approvedNow.map(item => item.number), [], JSON.stringify(suffix))
+    assert.deepEqual(queue.waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'the approval line cannot be read; write it in the R2 form']], JSON.stringify(suffix))
   }
+  // A request for changes main reads, with a space this check had stopped reading, is still one.
+  const split = classify([pull(2, { body: 'Author: codex, branch', files: [] })], { 2: [ready(), comment(`Review: REQUEST CHANGES\u00a0${head} by independent\nReview: APPROVE ${head} by codex`, '2026-10-20T10:00:00Z')] }, now)
+  assert.deepEqual(split.approvedNow, [])
   const queue = classify(prs, { 1: [ready(), taking('  ', '2026-10-20T10:00:00Z')] }, now)
   assert.equal(queue.needsReviewer[0].takenBy, null)
   assert.equal(queue.needsReviewer[0].lapsedBy, null)
@@ -772,7 +828,10 @@ test('the newest Codex review state decides whether the head is clean, open, sta
   const stateOf = (...items) => botsOf(items).codex
   assert.equal(stateOf(), 'none')
   assert.equal(stateOf(codexState(head, false, '2026-10-20T10:00:00Z', 2)), 'clean')
-  assert.equal(stateOf(codexState(head.slice(0, 7), true, '2026-10-20T10:00:00Z', 2, 'chatgpt-codex-connector')), 'open')
+  assert.equal(stateOf(codexState(head.slice(0, 7), true, '2026-10-20T10:00:00Z', 2)), 'open')
+  // The bot's name without `[bot]` counts only from a Bot account, as the PR check reads it (#1974).
+  assert.equal(stateOf({ ...codexState(head, false, '2026-10-20T10:00:00Z', 2), user: { login: 'chatgpt-codex-connector', type: 'Bot' } }), 'clean')
+  assert.equal(stateOf(codexState(head, false, '2026-10-20T10:00:00Z', 2, 'chatgpt-codex-connector')), 'none')
   assert.equal(stateOf(codexState(oldHead, false, '2026-10-20T10:00:00Z', 2)), 'stale')
   // The newest comment wins, whatever order they are listed in; a state for an older head is stale even when an earlier one fits.
   const older = codexState(head, true, '2026-10-20T09:30:00Z', 2)

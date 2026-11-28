@@ -793,16 +793,145 @@ export const binaryImages = paths => {
 }
 
 // A lane's own reviewer says so in the parentheses right after its name, as one of their comma-separated notes:
-// `by codex (read-only, started new for this review), lane x` (RULES R2). Only that whole note counts, so a line
-// that says "not started new for this review", or says it anywhere else, is not one.
-const isFreshLine = line => {
-  const notes = line.match(/[ \t]by[ \t]+[^\r\n(,]*\(([^)\r\n]*)\)/i)?.[1] ?? ''
-  return notes.split(',').some(note => note.trim().toLowerCase() === 'started new for this review')
+// `by codex (read-only, started new for this review), lane x` (RULES R2); one the maintainer started says
+// `started new for this review by the maintainer` instead. The reviewer field, from the ` by ` after the sha, is read
+// once (#1974, the Fable diagnosis on #1975): split at commas outside parentheses, its first part is the name and the
+// parentheses after it, one level deep. Read as fresh, a line lifts the author check; read as not fresh, it skips the
+// risk-tier conditions; so a misreading either way is a hole, and an approval that has the words but not as one of
+// those notes, cleanly placed, cannot be read and is no approval. A line without the words reads as it always did.
+const FRESH_NOTE = 'started new for this review'
+const MAINTAINER_NOTE = 'started new for this review by the maintainer'
+const noteOf = text => text.trim().replace(/\s+/g, ' ').toLowerCase()
+const reviewerNotes = field => {
+  const parts = []
+  let depth = 0
+  let part = ''
+  let isBroken = false
+  for (const char of field) {
+    if (char === '(') {
+      depth += 1
+      if (depth > 1) isBroken = true
+    } else if (char === ')') {
+      if (depth === 0) isBroken = true
+      else depth -= 1
+    } else if (char === ',' && depth === 0) {
+      parts.push(part)
+      part = ''
+      continue
+    }
+    part += char
+  }
+  parts.push(part)
+  if (depth !== 0) isBroken = true
+  const name = parts[0]
+  const open = name.indexOf('(')
+  // The notes belong to a name: one with no letter or digit before them (a dash, a backtick, a zero-width space) is none.
+  if (open >= 0 && !/[\p{L}\p{N}]/u.test(name.slice(0, open))) isBroken = true
+  const notes = []
+  let rest = open < 0 ? '' : name.slice(open)
+  while (!isBroken && rest.trim() !== '') {
+    const group = rest.match(/^[ \t]*\(([^()]*)\)/)
+    if (!group) isBroken = true
+    else {
+      notes.push(...group[1].split(',').map(noteOf))
+      rest = rest.slice(group[0].length)
+    }
+  }
+  return { notes, isBroken }
+}
+const readVerdictLine = (line, fieldStart, kind) => {
+  const { notes, isBroken } = fieldStart === null ? { notes: [], isBroken: true } : reviewerNotes(line.slice(fieldStart))
+  const isFresh = !isBroken && notes.includes(FRESH_NOTE)
+  const isMaintainerNote = !isBroken && notes.includes(MAINTAINER_NOTE)
+  const isUnreadable = kind === 'APPROVE' && noteOf(line).includes(FRESH_NOTE) && !isFresh && !isMaintainerNote
+  return { isFresh, isMaintainerNote, isUnreadable }
+}
+// Main's pattern alone says whether a comment holds a verdict, its kind and its sha, so every change request it reads
+// still counts (#1974; the second Fable diagnosis on #1975, after rounds 3 to 5 each found a reading that kept an
+// approval or lost a change request).
+const VERDICT = /^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi
+// An approval counts only in the R2 form on its own line: spaces or tabs between the words, the sha alone (in backticks
+// on both sides or none), then ` by ` and a name with a letter or digit before any parenthesis. Anything else is an
+// approval that cannot be read, never one by the account that posted it.
+const APPROVAL_LINE = /^Review:[ \t]*APPROVE[ \t]+(`?)[0-9a-fA-F]{7,40}\1[ \t]+by[ \t]+([^,]+)/i
+const LINE_END = /\r\n|[\r\n\p{Zl}\p{Zp}]/u
+const verdictName = (body, match) => {
+  // The verdict's line runs from `Review:` to its first line break of any kind, so its name, notes and route end there.
+  const line = body.slice(match.index).split(LINE_END, 1)[0]
+  if (match[1].toUpperCase() === 'APPROVE') {
+    const approval = line.match(APPROVAL_LINE)
+    const name = approval?.[2].trim() ?? ''
+    return /[\p{L}\p{N}]/u.test(name.split('(')[0])
+      ? { name, line, fieldStart: approval[0].length - approval[2].length }
+      : { name: null, line, fieldStart: null }
+  }
+  const name = match[3]?.split(LINE_END, 1)[0].trim() || null
+  const fieldStart = match[3] === undefined ? null : match[0].length - match[3].length
+  return { name, line, fieldStart: fieldStart !== null && fieldStart <= line.length ? fieldStart : null }
+}
+// The reviewer's name as the verdict writes it, read the way the PR check reads it, for the review queue.
+export const verdictNameOf = body => {
+  const text = body ?? ''
+  const match = text.match(VERDICT)
+  return match ? verdictName(text, match).name : null
 }
 
-// On the light and normal tiers a reviewer the author's lane started new for this review may approve, whatever its
-// name; on the risk tier, or with no tier named, a reviewer named like the author is the author approving (RULES R2).
-export const isLaneReviewer = (review, tier) => review?.isFresh === true && (tier === 'light' || tier === 'normal')
+// On every named tier a reviewer the author's lane started new for this review may approve, whatever its name; on the
+// risk tier the Codex review bot's review of the same head is the other model family's check (owner, 2026-11-28;
+// #1974). With no tier named a reviewer named like the author is the author approving (RULES R2). Whether such an
+// approval counts at all is `approvalGap`'s to say: on a release it never does, whatever the reviewer's name.
+export const isLaneReviewer = (review, tier, { isRelease = false } = {}) => review?.isFresh === true && !isRelease && (tier === 'light' || tier === 'normal' || tier === 'risk')
+
+// The bot's own comments come from its Bot account (`chatgpt-codex-connector[bot]` over the REST API); an account that only
+// has its name is not the bot (#1974).
+const isCodexBot = user => /^chatgpt-codex-connector\[bot\]$/i.test(user?.login ?? '') || (/^chatgpt-codex-connector$/i.test(user?.login ?? '') && user?.type === 'Bot')
+const codexMarker = /<!--\s*codex-review-state:v1\s+(\{[\s\S]*?\})\s*-->/
+
+// The Codex review bot's code review of a head, from the newest of its state comments that can be read (the caller lists
+// them oldest first): clean, open (findings left), stale (it names another head) or none. One whose JSON cannot be read
+// is passed over, so noise cannot hide a real state.
+export const codexStateOf = (comments, head) => {
+  for (const comment of [...(comments ?? [])].reverse()) {
+    const json = isCodexBot(comment?.user) ? (comment.body ?? '').match(codexMarker)?.[1] : null
+    if (!json) continue
+    let review
+    try { review = JSON.parse(json)?.code_review } catch { continue }
+    const sha = typeof review?.commit_sha === 'string' ? review.commit_sha.toLowerCase() : ''
+    // A code review that did not complete (`failed`, `in_progress`) is not a review of that head (#1974).
+    if (review?.status !== undefined && review.status !== 'completed') continue
+    if (!/^[0-9a-f]{7,40}$/.test(sha) || typeof review.has_unresolved_findings !== 'boolean') continue
+    if (!String(head ?? '').toLowerCase().startsWith(sha)) return 'stale'
+    return review.has_unresolved_findings ? 'open' : 'clean'
+  }
+  return 'none'
+}
+
+// `Surface: none`: the pull request is risk tier only because its lane is under risk-tier review after a P0 or P1.
+export const isSurfaceNone = body => {
+  const { filled } = surfaceLine(body ?? '')
+  return filled.length === 1 && filled[0].replace(/`/g, '').trim().toLowerCase() === 'none'
+}
+
+// The one place that says why an approval cannot count, or null, for the PR check and the review queue (RULES R2; owner,
+// 2026-11-28; #1974). A line says how its reviewer was started in three ways: the lane's note (`isFresh`), the
+// maintainer's note (`isMaintainerNote`) and the `, maintainer route` ending (`isMaintainerRoute`). Each only adds a
+// reason. The one thing a note gives is that the lane's note lifts the author check, and only where every condition of
+// a lane's own reviewer holds, so no way of writing the line opens what R2 closes.
+// `release`: a release is approved from outside the maintainer's lane or by the owner, never by a reviewer a lane or
+// the maintainer started. `surface-none`: a lane under risk-tier review takes the maintainer route on every tier, so
+// its own reviewer never counts, whatever else the line says. `author`: named like the author (`isByAuthor`, the
+// caller's reading), with no lane's note that lifts it. `no-codex-review`: on the risk tier the lane's note counts only
+// once the Codex review bot reviewed the head (clean or with findings: whether they are settled is the reviewer's to
+// read). Off a release the maintainer's note and route add nothing: the line reads as an ordinary approval.
+export const approvalGap = (review, { tier = null, isRelease = false, isSurfaceNone: isNone = false, codexState = 'none', isByAuthor = false } = {}) => {
+  if (review?.kind !== 'APPROVE') return null
+  const isLane = review.isFresh === true
+  if (isRelease && (isLane || review.isMaintainerNote === true || review.isMaintainerRoute === true)) return 'release'
+  if (isLane && isNone) return 'surface-none'
+  if (isByAuthor && !isLaneReviewer(review, tier, { isRelease })) return 'author'
+  if (!isLane || tier !== 'risk') return null
+  return codexState === 'clean' || codexState === 'open' ? null : 'no-codex-review'
+}
 
 const isBotUser = user => user?.type === 'Bot' || /\[bot\]$/i.test(user?.login ?? '')
 
@@ -819,23 +948,38 @@ const readReview = item => {
   if (!item) return { review: null, ignored: null }
   const blocked = ignoredApprovalReason(item)
   const body = typeof item === 'string' ? item : item.body ?? ''
-  const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
+  const match = body.match(VERDICT)
   if (match) {
     const kind = match[1].toUpperCase()
-    const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
+    const { name, line: verdictLine, fieldStart } = verdictName(body, match)
+    const isNameless = kind === 'APPROVE' && name === null
+    const login = typeof item === 'object' ? item.user?.login ?? null : null
+    // A change request falls back to the account that posted it, as it always did; an approval names its reviewer or
+    // is none, since one account posts for many agents (RULES R2).
+    const reviewer = kind === 'APPROVE' ? name : name ?? login
     if (kind === 'APPROVE' && blocked) {
       if (typeof item === 'object' && item.state === 'CHANGES_REQUESTED' && item.commit_id) {
         return { review: { kind: 'REQUEST CHANGES', sha: item.commit_id.toLowerCase(), ...(item.user?.login ? { reviewer: item.user.login } : {}) }, ignored: null }
       }
-      return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
+      return { review: null, ignored: { who: name || login || 'unknown account', reason: blocked } }
     }
-    const isFresh = isFreshLine(body.slice(match.index).split(/\r?\n/, 1)[0])
+    const notes = readVerdictLine(verdictLine, fieldStart, kind)
+    const isFresh = !isNameless && notes.isFresh
+    const isMaintainerNote = !isNameless && notes.isMaintainerNote
+    const isUnreadable = isNameless || notes.isUnreadable
+    // The maintainer route's verdict ends `, maintainer route` (RULES R2); tied to the end of the line, it cannot bind
+    // to a later part of it.
+    const isMaintainerRoute = /,[ \t]*maintainer route[ \t.]*$/i.test(verdictLine)
     return {
       review: {
         kind,
         sha: match[2].toLowerCase(),
         ...(reviewer ? { reviewer } : {}),
         ...(isFresh ? { isFresh } : {}),
+        ...(isMaintainerNote ? { isMaintainerNote } : {}),
+        ...(isMaintainerRoute ? { isMaintainerRoute } : {}),
+        ...(isUnreadable ? { isUnreadable } : {}),
+        ...(isNameless ? { isNameless } : {}),
       },
       ignored: null,
     }
@@ -855,7 +999,9 @@ const readReview = item => {
 export const reviewOf = item => readReview(item).review
 
 // The tier the body names on its `Tier:` line (RULES R2), or null when it names none.
-export const tierOf = body => visibleBody(body).match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
+// The tier as the tier check reads it (`visibleTier`), so a `Tier:` after a lone \r or a Unicode line separator is not a
+// line of its own here either (#1974).
+export const tierOf = body => visibleTier(body ?? '')
 
 // A risk-tier pull request changes one failure surface and names it on a `Surface:` line (CONTRIBUTING rule 2, #1490).
 // It applies to pull requests numbered above SURFACE_FROM, the issue (#1490) the rule and this check came in with; a local
@@ -1479,7 +1625,7 @@ export const rounds = (comments, { body = '', title = '', number = null, isDraft
 
 export const verdict = (comments, head, options = {}) => {
   const output = result()
-  const { isDraft = false, authorAgent = null, number = null, tier = null } = options
+  const { isDraft = false, authorAgent = null, number = null, tier = null, isRelease = false, isSurfaceNone: isNone = false } = options
   const reviews = []
   for (const comment of comments ?? []) {
     const { review, ignored } = readReview(comment)
@@ -1517,15 +1663,41 @@ export const verdict = (comments, head, options = {}) => {
     return output
   }
 
-  if (authorAgent && last.reviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase()) && !isLaneReviewer(last, tier)) {
+  if (last.isUnreadable) {
+    output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head, in a line that cannot be read.`)
+    if (!isDraft && number !== null && last.isNameless) {
+      output.problems.push(problem('review', 'the approval line cannot be read: it does not name its reviewer after the sha, as `by <reviewer>` on the same line (RULES.md, R2).', 'post the verdict again in the R2 form, `Review: APPROVE <full head sha> by <reviewer>, lane <lane>`, on one line.'))
+    } else if (!isDraft && number !== null) {
+      output.problems.push(problem('review', 'the approval line cannot be read: it says "started new for this review", but not as one note in the parentheses right after the reviewer\'s name (RULES.md, R2).', 'post the verdict again in the R2 form, `Review: APPROVE <full head sha> by <reviewer> (read-only, started new for this review), lane <lane>`, with no parenthesis inside another.'))
+    }
+    return output
+  }
+
+  // The lane's note decides first, in one place, so the reviewer's name matters only where R2 lets the note count (#1974).
+  const isByAuthor = Boolean(authorAgent && last.reviewer && last.reviewer.toLowerCase().includes(authorAgent.toLowerCase()))
+  const gap = approvalGap(last, { tier, isRelease, isSurfaceNone: isNone, codexState: codexStateOf(comments, head), isByAuthor })
+  if (gap === 'release') {
     output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
-      output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer; on the light and normal tiers, a reviewer your lane starts new for this review says so on its verdict line ("started new for this review").'))
+      output.problems.push(problem('review', 'a release pull request is approved by a reviewer outside the maintainer\'s lane, or by the owner; a reviewer a lane or the maintainer started new for this review, or one on the maintainer route, cannot approve it (RULES.md, R2).', 'ask a reviewer outside the maintainer\'s lane, or the owner, for the approval (docs/RELEASING.md).'))
+    }
+    return output
+  }
+
+  if (gap === 'author') {
+    output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head.`)
+    if (!isDraft && number !== null) {
+      output.problems.push(problem('review', 'an author cannot approve their own pull request (RULES.md, R2).', 'request an independent review from another lane or reviewer; outside a release pull request, a reviewer your lane starts new for this review says so on its verdict line ("started new for this review").'))
     }
     return output
   }
 
   output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, the current head.`)
+  if (gap && !isDraft && number !== null) {
+    output.problems.push(gap === 'surface-none'
+      ? problem('review', 'a pull request of a lane under risk-tier review (`Surface: none`) takes the maintainer route; a reviewer the lane starts cannot approve it (RULES.md, R2).', 'hand it to the maintainer, whose verdict line ends `, maintainer route`; only a pull request of a lane under risk-tier review says `Surface: none`.')
+      : problem('review', `the Codex review bot has not reviewed ${head.slice(0, 7)}; a reviewer started new for this review approves a risk-tier pull request only once it has (RULES.md, R2).`, 'comment `@codex review` and approve again once it has reviewed this head; after an hour without its review, hand the pull request to the maintainer route.'))
+  }
   return output
 }
 
@@ -1602,7 +1774,7 @@ export const checkPr = data => {
   }
   if (data.prComments === null) output.info.push('review: skipped (offline).')
   else {
-    add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body) }))
+    add(verdict(data.prComments, data.head, { isDraft: data.isDraft, authorAgent: author.agent, number: data.number, tier: tierOf(data.body), isRelease: isReleaseTitle(data.title ?? ''), isSurfaceNone: isSurfaceNone(data.body) }))
     add(rounds([...data.prComments, ...(data.prReviews ?? [])], { body: data.body, title: data.title, number: data.number, isDraft: data.isDraft }))
     const linkedComments = [...new Set(issue.issues)].flatMap((number, index) => (index === 0 ? data.issueComments : data.moreIssues?.[number]?.issueComments) ?? [])
     output.warnings.push(...roundWarnings({ body: data.body, prComments: data.prComments, prReviews: data.prReviews ?? [], issueComments: linkedComments }))

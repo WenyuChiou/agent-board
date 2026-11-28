@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process'
 import { readFileSync, statSync } from 'node:fs'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { authorKey, claimEnd, isLaneReviewer, reviewOf, tierOf } from './pr-check.mjs'
+import { approvalGap, authorKey, claimEnd, codexStateOf, isSurfaceNone, reviewOf, tierOf, verdictNameOf } from './pr-check.mjs'
 import { bundleSources, safeLine } from './preflight.mjs'
 
 const usage = 'Usage: node scripts/review-queue.mjs [--repo owner/name] [--roadmap N] [--json] [--help]'
@@ -38,7 +38,9 @@ const nameOf = text => (text ?? '').match(/[A-Za-z0-9][A-Za-z0-9_-]*/)?.[0].toLo
 // countOpenReviews keys its counts by a claim's first word, since the reviewers file lists first-word names;
 // the author comparisons in classify use the full identity below, and only the same full name answers a claim.
 const fullName = text => (text ?? '').replace(/`/g, '').split(',')[0].replace(/\s+/g, ' ').trim().toLowerCase() || null
-const verdictFullName = body => fullName((body ?? '').match(/^Review:[ \t]*(?:APPROVE|REQUEST CHANGES)\b[^\r\n]*?\bby[ \t]+(\S[^\r\n]*)/m)?.[1])
+// The reviewer's name comes from the PR check's own reader (#1974); the author comparison below also drops a note the
+// name's first comma cut open, as the check reads `codex (read-only, ...)` as `codex`.
+const verdictFullName = body => fullName(verdictNameOf(body))
 // A claim is "Reviewing: <head sha> by <reviewer>" and holds that head only (team-process, From claim to merge).
 // Only that form is a claim: the head's full sha, or 7 or more of its first characters as a Ready line may give,
 // in backticks only as a pair; then `by` between spaces; then a name with a letter or digit before any comma.
@@ -99,21 +101,6 @@ const utcMs = (date, time = '00:00:00') => {
 
 const codexLogin = /^chatgpt-codex-connector(?:\[bot\])?$/i
 const codexMarker = /<!--\s*codex-review-state:v1\s+(\{[\s\S]*?\})\s*-->/
-
-// The newest Codex state comment decides. One whose JSON cannot be read is passed over, so noise cannot hide a real state.
-const codexStateOf = (comments, head) => {
-  for (const { comment } of [...comments].reverse()) {
-    const json = codexLogin.test(comment.user?.login ?? '') ? (comment.body ?? '').match(codexMarker)?.[1] : null
-    if (!json) continue
-    let review
-    try { review = JSON.parse(json)?.code_review } catch { continue }
-    const sha = typeof review?.commit_sha === 'string' ? review.commit_sha.toLowerCase() : ''
-    if (!/^[0-9a-f]{7,40}$/.test(sha) || typeof review.has_unresolved_findings !== 'boolean') continue
-    if (!head.startsWith(sha)) return 'stale'
-    return review.has_unresolved_findings ? 'open' : 'clean'
-  }
-  return 'none'
-}
 
 // Codex also runs a security review, reported in the same state comment. When the paying account is out of usage the code
 // review still completes but the security review fails, so a reviewer needs to see that it never ran on this head.
@@ -249,23 +236,42 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
     // A Reviewing comment past its 2 hours no longer holds the review; the queue names who let it lapse.
     const takenBy = taking && !isLapsed(taking.time, nowMs) ? taking.label : null
     const lapsedBy = taking && !takenBy ? taking.label : null
-    // What the review bots say about the head. A missing bot review never moves a pull request between groups.
+    // What the review bots say about the head. A missing bot review moves a pull request between groups only for a risk-tier
+    // approval by a reviewer started new for this review (#1974).
     const extras = {
-      bots: { codex: codexStateOf(comments, head), codexSecurity: codexSecurityOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
+      bots: { codex: codexStateOf(comments.map(entry => entry.comment), head), codexSecurity: codexSecurityOf(comments, head), greptile: hasGreptileReview(comments, pr.reviews, head) },
     }
+    // Whether the head's approval counts is the PR check's to say (`approvalGap`); the queue only reads the names its own
+    // way. The notes are no lane: the group the name's first comma cut open is dropped, or, on a line that says how its
+    // reviewer was started, the whole last group.
+    const approval = latestHeadVerdict?.verdict.kind === 'APPROVE' ? latestHeadVerdict : null
+    const isNoted = approval?.verdict.isFresh === true || approval?.verdict.isMaintainerNote === true
+    const cut = approval?.by?.replace(/[ \t]*\([^)]*$/, '')
+    const isByAuthor = Boolean(cut && sameAgent(cut === approval.by && isNoted ? cut.replace(/[ \t]*\([^()]*\)$/, '') : cut, item.author))
+    const gap = approval ? approvalGap(approval.verdict, { tier: tierOf(pr.body), isRelease: /^chore\(release\):/.test(item.title), isSurfaceNone: isSurfaceNone(pr.body), codexState: extras.bots.codex, isByAuthor }) : null
     if (ready && !reviewAfterReady) {
       if (!Number.isFinite(ready.time)) throw new Error('invalid Ready time')
       const hours = Math.max(0, nowMs - ready.time) / hour
       const isOverFourHours = hours > 4
       const suggestion = reviewers ? suggestReviewer(reviewers, { author: nameOf(item.author), isOverFourHours }, openCounts) : {}
       result.needsReviewer.push({ ...item, readyAt: ready.comment.created_at, hours, isOverFourHours, takenBy, lapsedBy, ...suggestion, ...extras })
-    } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by, item.author) && !isLaneReviewer(latestHeadVerdict.verdict, tierOf(pr.body))) {
+    } else if (latestHeadVerdict?.verdict.isUnreadable === true) {
+      // An approval with the words "started new for this review" that do not read as that one note is no approval,
+      // as the PR check reads it (#1974).
+      result.waitingForAuthor.push({ ...item, detail: 'the approval line cannot be read; write it in the R2 form', ...extras })
+    } else if (gap === 'release') {
+      // No reviewer a lane or the maintainer started, and no verdict on the maintainer route, approves a release, whatever its name (RULES R2, #1974).
+      result.waitingForAuthor.push({ ...item, detail: 'approved, but a release needs a reviewer outside the maintainer\'s lane, or the owner', ...extras })
+    } else if (gap === 'author') {
       // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
       // even when it arrives from the shared login. The lane is part of the identity, so "codex (e2e)" approving
-      // "codex (phase1)" counts, while a verdict with no name keeps its old reading. On the light and normal tiers a
-      // reviewer the lane started new for this review counts, as the PR check reads it. This checks only who the author
-      // is: whether the reviewer is one the pull request's tier allows (another model family on risk) is not checked here.
+      // "codex (phase1)" counts, while a verdict with no name keeps its old reading. Outside a release pull request a
+      // reviewer the lane started new for this review counts on every tier, as the PR check reads it (#1974).
       result.waitingForAuthor.push({ ...item, detail: 'approval is by the author', ...extras })
+    } else if (gap) {
+      // On the risk tier a reviewer started new for this review counts only once the Codex review bot reviewed the head,
+      // and never, on any tier, for a lane under risk-tier review, as the PR check reads it (RULES R2, #1974).
+      result.waitingForAuthor.push({ ...item, detail: gap === 'surface-none' ? 'approved by the lane; a lane under risk-tier review takes the maintainer route' : 'approved; the Codex review bot has not reviewed this head', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE') {
       // Without a file list a pull request cannot be shown to be clear of the shared files, so it waits its turn.
       // A release must contain current main before it merges (docs/RELEASING.md, step 5), so an approved one that is behind waits.
