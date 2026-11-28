@@ -79,18 +79,22 @@ const sessionOf = agent => {
 const DEFERRED_ASKS = 20
 // The board's lease on a claim (MAILBOX_LEASE_MS): after it, a claim nobody accepted reads Unsure and is not the plugin's to give.
 const LEASE_MS = 30000
+// How long a receiver waits before it gives a kept claim back again while its session works.
+const GIVE_BACK_MS = 2000
 const mailboxReceiver = () => {
-  const roots = new Map(), busy = new Set(), failing = new Set(), again = new Set(), stashed = new Map(), asks = new Map(), retries = new Map()
+  const roots = new Map(), busy = new Set(), failing = new Set(), again = new Set(), stashed = new Map(), asks = new Map(), retries = new Map(), regives = new Map()
   let watcher = null, folder = null, pending = null, timer = null, ticks = 0
-  // A claim the plugin kept because its give-back failed goes to the session only while the board still holds it for this
-  // claim, with no error, inside its lease.
+  // A named claim the plugin kept because its give-back failed goes to the session only while the board still holds it for
+  // this claim, with no error, inside its lease. An older board's claim names nothing, cannot be given back, and that board
+  // keeps it for this plugin past its lease, so it keeps the old rule: it goes at the next idle while the board holds it.
   const isDeliverable = message => {
-    if (folder === null) return false
+    const named = typeof message.ref === 'string'
+    if (folder === null) return !named
     let store
     try { store = JSON.parse(readFileSync(join(folder, 'messages.json'), 'utf8')) } catch { return false }
     const live = Array.isArray(store?.messages) && store.messages.find(one => one?.id === message.id)
     return Boolean(live && live.status === 'uncertain' && live.nonce === message.nonce && (!live.error || live.error === '')
-      && (message.ref === undefined || live.ref === message.ref) && typeof live.claimed === 'number' && Date.now() - live.claimed < LEASE_MS)
+      && (!named || (live.ref === message.ref && typeof live.claimed === 'number' && Date.now() - live.claimed < LEASE_MS)))
   }
   // Gives a claim back to the board, which queues it again for the next take. True when the board no longer holds it for
   // this claim. A take from an older board names no claim, so there is nothing to give back.
@@ -99,6 +103,34 @@ const mailboxReceiver = () => {
     const answer = await mailboxCall('release', session, ['--ref', message.ref])
     return answer?.ok === true || answer?.code === 'NOT_HELD'
   }
+  // A named claim whose give-back failed is given back again every few seconds while the session works, inside the lease the
+  // take started, so a board that recovers queues it again before it reads Unsure. The next idle takes the kept claim itself.
+  const keep = (session, agent, message) => {
+    stashed.set(session, message)
+    if (typeof message.ref !== 'string') return
+    const until = Date.now() + LEASE_MS
+    const later = () => {
+      if (Date.now() + GIVE_BACK_MS >= until) return
+      const one = setTimeout(attempt, GIVE_BACK_MS)
+      one.unref?.()
+      regives.set(session, one)
+    }
+    const attempt = async () => {
+      regives.delete(session)
+      if (stashed.get(session) !== message || roots.get(session) !== agent || agent.status === 'idle') return
+      if (busy.has(session)) { later(); return }
+      busy.add(session)
+      try {
+        if (await giveBack(session, message)) { if (stashed.get(session) === message) stashed.delete(session) }
+        else later()
+      } finally {
+        busy.delete(session)
+        if (again.delete(session)) { const current = roots.get(session); if (current !== undefined) deliver(current) }
+      }
+    }
+    later()
+  }
+  const unkeep = session => { stashed.delete(session); clearTimeout(regives.get(session)); regives.delete(session) }
   const deliver = async agent => {
     const session = sessionOf(agent)
     if (session === undefined || roots.get(session) !== agent || agent.status !== 'idle') return
@@ -108,7 +140,7 @@ const mailboxReceiver = () => {
     try {
       let message = stashed.get(session)
       if (message !== undefined) {
-        stashed.delete(session)
+        unkeep(session)
         // A kept claim the board no longer holds (a give-back it saved but whose answer was lost, a dismissal, a lease
         // that ran out) is dropped, and this idle takes afresh, so a message queued again is not left for a later idle.
         if (!isDeliverable(message)) message = undefined
@@ -150,9 +182,9 @@ const mailboxReceiver = () => {
       // A session that closed meanwhile does not get it: the claim runs out and the board hands it out again.
       if (roots.get(session) !== agent) return
       // The session started a turn while the take ran: the claim goes back, and the next idle takes it again (#1870).
-      // Only a give-back that failed keeps it here, for the next idle inside its lease.
+      // Only a give-back that failed keeps it here: given back again while the session works, else for the next idle inside its lease.
       if (agent.status !== 'idle') {
-        if (!(await giveBack(session, message))) stashed.set(session, message)
+        if (!(await giveBack(session, message))) keep(session, agent, message)
         return
       }
       // Given first, then marked delivered: if the mark fails, the claim runs out and the session may get the
@@ -222,7 +254,7 @@ const mailboxReceiver = () => {
       asks.delete(session)
       clearTimeout(retries.get(session))
       retries.delete(session)
-      stashed.delete(session)
+      unkeep(session)
       mailboxCall('end', session)
       if (roots.size > 0) return
       clearInterval(timer)
