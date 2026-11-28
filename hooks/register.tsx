@@ -91,9 +91,9 @@ import { baseName, doneKey, isTaskComplete, parseProgress, progressTail, STALE_M
 import { othersNote, sessionPushNote } from './others'
 import type { AgentClaim } from './session-liveness'
 import { goneBlocks, hostHashOf, withoutProcessIdentity } from './session-liveness'
-import type { ProgressProject } from '../types'
+import type { ProgressProject, ProgressTask } from '../types'
 import { boardRun } from './board-commands'
-import { peekInbox, redact, turnsFor } from './board'
+import { guardViewStep, peekInbox, redact, turnsFor } from './board'
 import type { PendingTurn, TurnCache } from './board'
 import { paletteFor } from './palette'
 import { drawPane, pressTarget, reviseKey } from './pane'
@@ -4126,11 +4126,44 @@ const handOverPrompt = (row: TaskRow, s: Strings): string =>
 
 // A press on 完成: the step is ticked in the file, by the person's own hand, and journaled
 // like a step Claude finished.
+// A guarded ref names its task by the pane's own words, so the write reads it in them too.
 const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
-  const wrote = await rewrite($, await progressPath($), async before => setManualStep(before, ref, 'x', await $.clock.now()))
+  const s = await wordsOf($)
+  // rewrite keeps an earlier attempt's write when a later attempt changes nothing. When that later
+  // attempt refused the press, the earlier tick still counts only if the file still holds it where
+  // it was written and the drawn task still owns that line. Another writer's stale snapshot that
+  // moved lines put a twin there instead, or gave the line to another task, and the tick is gone
+  // (#1228); words it changed elsewhere, another step of the same task included, are not.
+  const last: { ticked: { lines: string[]; at: number } | null; refused: string | null } = { ticked: null, refused: null }
+  const wrote = await rewrite($, await progressPath($), async before => {
+    const after = setManualStep(before, ref, 'x', await $.clock.now(), s)
+    if (after === before) {
+      last.refused = before
+    } else {
+      const was = before.split(/\r?\n/)
+      const lines = after.split(/\r?\n/)
+      last.ticked = { lines, at: lines.findIndex((line, index) => line !== was[index]) }
+      last.refused = null
+    }
+    return after
+  })
   await poll($)
-
-  return wrote !== null
+  const { ticked, refused } = last
+  if (wrote === null || ticked === null) return false
+  if (refused === null) return true
+  const now = refused.split(/\r?\n/)
+  if (ticked.at < 0 || now[ticked.at] !== ticked.lines[ticked.at]) return false
+  const guard = ref.guard
+  if (guard === undefined) return ticked.lines.slice(0, ticked.at).every((line, index) => now[index] === line)
+  // The same task must still own the ticked line, at its drawn place, and the tasks it could be
+  // taken for must still start where they were drawn.
+  const anchor = (task: ProgressTask): number => task.line >= 0 ? task.line : task.steps[0]?.line ?? -1
+  const same = parseProgress(refused).filter(project => (project.name || s.uncategorized) === guard.task.project).flatMap(project => project.tasks)
+    .filter(task => task.title === guard.task.title && (task.auto?.session ?? null) === guard.task.session)
+  // Tasks with other steps can share the title; only those drawn as candidates must still be there.
+  const anchors = new Set(same.map(anchor))
+  if (guard.lines.some(line => !anchors.has(line))) return false
+  return same.some(task => task.line === guard.task.line && anchor(task) === (guard.task.line >= 0 ? guard.task.line : guard.steps[0]) && task.steps.some(step => step.line === ticked.at))
 }
 
 // A side question: answered over this session's transcript, without a turn of its own.
@@ -5082,7 +5115,8 @@ export const register: Register = (on, options) => {
       },
       takeOver: row => submitted(takeOverPrompt(row, s)),
       handOver: row => submitted(handOverPrompt(row, s)),
-      tick: async ref => {
+      tick: async drawn => {
+        const ref = guardViewStep(drawn, view)
         const ticked = await enqueue(() => tickStep($, ref))
         if (!ticked) return failure(s.boardTickGone)
         const outcome = { isSaved: true, isDeferred: false }

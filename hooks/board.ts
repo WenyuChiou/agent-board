@@ -774,6 +774,12 @@ export const guardStep = (ref: StepRef, items: readonly BoardItem[]): StepRef =>
   return { ...ref, guard: { task: item.row.stepTask, steps: item.row.stepLines ?? [], lines } }
 }
 
+// The native pane draws from the view itself, not from board items: its press takes the same
+// draw-time proof from the rows it drew, so a queued write refuses a moved step instead of
+// ticking an identical twin now on the drawn line (#1228).
+export const guardViewStep = (ref: StepRef, view: View): StepRef =>
+  guardStep(ref, [...view.due, ...view.active, ...view.groups.flatMap(group => group.rows), ...view.idle, ...view.stopped, ...(view.recentAsking ?? [])].map(row => ({ type: 'row' as const, key: `row:${row.key}`, row })))
+
 // What each key does on the selected line, so the footer lists only keys that do something.
 export const answersOf = (ask: WaitingItem, s: Strings): string[] =>
   ask.native !== undefined ? [] : ask.kind === 'confirm' ? [s.yesAnswer, s.noAnswer] : ask.kind === 'choose' ? ask.options.slice(0, 9) : []
