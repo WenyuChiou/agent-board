@@ -4,7 +4,9 @@ import { SURFACE_IDS } from '../messaging.ts'
 // each root session's board mailbox open, so that session's card has a Send box. When a message waits and
 // the session is idle, the plugin takes it through the board script and gives it to the session with
 // Agent.followup, which wakes the session and starts a turn (dsh 0.2.2-rc.1: dsh-agent-loop followup, the
-// call dsh's own browser prompt uses). It then marks the message delivered. A subagent's session
+// call dsh's own browser prompt uses). It then marks the message delivered. A take that lands while the session
+// works is given back at once, and the next idle takes it again, so no lease runs out on a message only the plugin
+// holds (#1870). A subagent's session
 // (header.origin 'subagent') never receives one. Nothing here reads the conversation.
 export const messagingReceiver = {
   host: 'DeepSeek Harness',
@@ -14,8 +16,8 @@ export const messagingReceiver = {
   tier: 1,
   primitive: '[P1]',
   isImplemented: true,
-  // Idle: the live run woke the session within seconds. Working: the plugin holds the message until the
-  // session is idle (tests only; the live note says a long busy session was not run). Ended: no mailbox.
+  // Idle: the live run woke the session within seconds. Working: the plugin gives a claim back and takes it
+  // again when the session is idle (tests only; the live note says a long busy session was not run). Ended: no mailbox.
   // The live run was `dsh web` only, so the idle record names the Web surface; the terminal interface keeps Copy.
   routes: {
     idle: { line: 'now', record: 'docs/validation/2026-11-08-deepseek-harness-live.md', surfaces: [SURFACE_IDS.web] },
@@ -75,15 +77,27 @@ const sessionOf = agent => {
 // session only, 250 ms later, this many times in a row: about 5 s, the 5000 ms a take itself is given, which outlasts
 // the stalls of a few seconds seen on a busy computer. After that the watcher and the ten-minute tick are all there is.
 const DEFERRED_ASKS = 20
+// The board's lease on a claim (MAILBOX_LEASE_MS): after it, a claim nobody accepted reads Unsure and is not the plugin's to give.
+const LEASE_MS = 30000
 const mailboxReceiver = () => {
   const roots = new Map(), busy = new Set(), failing = new Set(), again = new Set(), stashed = new Map(), asks = new Map(), retries = new Map()
   let watcher = null, folder = null, pending = null, timer = null, ticks = 0
+  // A claim the plugin kept because its give-back failed goes to the session only while the board still holds it for this
+  // claim, with no error, inside its lease.
   const isDeliverable = message => {
-    if (folder === null) return true
+    if (folder === null) return false
     let store
     try { store = JSON.parse(readFileSync(join(folder, 'messages.json'), 'utf8')) } catch { return false }
     const live = Array.isArray(store?.messages) && store.messages.find(one => one?.id === message.id)
-    return Boolean(live && live.status === 'uncertain' && live.nonce === message.nonce && (!live.error || live.error === ''))
+    return Boolean(live && live.status === 'uncertain' && live.nonce === message.nonce && (!live.error || live.error === '')
+      && (message.ref === undefined || live.ref === message.ref) && typeof live.claimed === 'number' && Date.now() - live.claimed < LEASE_MS)
+  }
+  // Gives a claim back to the board, which queues it again for the next take. True when the board no longer holds it for
+  // this claim. A take from an older board names no claim, so there is nothing to give back.
+  const giveBack = async (session, message) => {
+    if (typeof message.ref !== 'string') return false
+    const answer = await mailboxCall('release', session, ['--ref', message.ref])
+    return answer?.ok === true || answer?.code === 'NOT_HELD'
   }
   const deliver = async agent => {
     const session = sessionOf(agent)
@@ -132,8 +146,10 @@ const mailboxReceiver = () => {
       if (typeof message.text !== 'string' || typeof message.id !== 'string' || typeof message.nonce !== 'string') throw new Error('MAILBOX_FAILED')
       // A session that closed meanwhile does not get it: the claim runs out and the board hands it out again.
       if (roots.get(session) !== agent) return
+      // The session started a turn while the take ran: the claim goes back, and the next idle takes it again (#1870).
+      // Only a give-back that failed keeps it here, for the next idle inside its lease.
       if (agent.status !== 'idle') {
-        stashed.set(session, message)
+        if (!(await giveBack(session, message))) stashed.set(session, message)
         return
       }
       // Given first, then marked delivered: if the mark fails, the claim runs out and the session may get the

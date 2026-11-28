@@ -180,10 +180,11 @@ export const routeKind = (scope: Connection['scope']): RouteKind => scope === 'm
 export const isMailboxTarget = (id: string): boolean => /^mailbox_[0-9a-f]{24}$/.test(id)
 const isHookDelivered = (one: Message): boolean => one.status === 'accepted' && isMailboxTarget(one.target) && !one.awaitsAck
 // A hook can stop waiting after the board has claimed a message for it, and then nobody accepts it. A claim a hook
-// named and nobody accepted in its lease reads Unsure with HOLDER_LOST (below) and is never handed out again (#1843).
-// DeepSeek's plugin holds a claim while its session works and delivers it at the next idle, so until it can give a held
-// claim back (#1870) its claims are still handed out again once the lease has passed, a few times at most, with the same
-// ACK code and a line saying it may be a repeat (#990). A claim with no name (board_inbox, a live receiver) is handed over once.
+// named and nobody accepted in its lease reads Unsure with HOLDER_LOST (below) and is never handed out again (#1843),
+// DeepSeek's too: its plugin gives a claim back when its take lands on a working session, so no lease runs out on a message
+// only the plugin holds (#1870). A claim with no name (board_inbox, a live receiver) is handed over once.
+// MAILBOX_REDELIVERIES is how many times an earlier release handed a DeepSeek claim out again (#990), kept so a store
+// saved then still loads; nothing counts a repeat now.
 export const MAILBOX_LEASE_MS = 30_000
 export const MAILBOX_REDELIVERIES = 3
 // The error a started wake carries once 30 minutes passed with no receipt: the card says "sent, not confirmed".
@@ -206,13 +207,13 @@ export const HOLDER_LOST = 'HOLDER_LOST'
 // The error the board writes on an answer that a step end of a later turn than its own refused (#319): the conversation
 // moved on from the question it answers. Only the board writes it.
 export const MOVED_ON = 'MOVED_ON'
-const isLeaseKept = (one: Pick<Message, 'to'>): boolean => one.to.startsWith('deepseek:')
-// A named claim whose lease is over and that no rule hands out again: not OpenCode's (#724), not DeepSeek's, not one its host
+// A named claim whose lease is over and that no rule hands out again: not OpenCode's (#724), not one its host
 // accepted (#1407). An error a receipt wrote does not change it: a later receipt with no error would clear that error.
 export const isLeaseOver = (one: Message, now: number): boolean => one.status === 'uncertain' && one.ref !== undefined && isMailboxTarget(one.target)
-  && !isAtMostOnce(one) && !isLeaseKept(one) && !isAcceptedOnce(one) && now - one.claimed >= MAILBOX_LEASE_MS
+  && !isAtMostOnce(one) && !isAcceptedOnce(one) && now - one.claimed >= MAILBOX_LEASE_MS
 const isLeasePassed = (one: Message, now: number): boolean => one.status === 'uncertain' && one.error === '' && one.ref !== undefined && isMailboxTarget(one.target) && now - one.claimed >= MAILBOX_LEASE_MS
-const isLapsed = (one: Message, now: number): boolean => isLeasePassed(one, now) && !isAcceptedOnce(one) && (isAtMostOnce(one) ? one.attempted === undefined : isLeaseKept(one) && (one.redelivered ?? 0) < MAILBOX_REDELIVERIES)
+// Only an OpenCode claim nobody marked as a wake goes back once its lease has passed (#724).
+const isLapsed = (one: Message, now: number): boolean => isLeasePassed(one, now) && !isAcceptedOnce(one) && isAtMostOnce(one) && one.attempted === undefined
 // An OpenCode claim nobody marked: its plugin lost the answer to the take, or gave up before the attempt. The plugin's next take
 // from the same mailbox gets it at once instead of waiting out the lease; the old ref then answers CLAIM_LOST to an attempt.
 const isUnmarked = (one: Message): boolean => isAtMostOnce(one) && one.status === 'uncertain' && one.error === '' && one.attempted === undefined && !isAcceptedOnce(one) && isMailboxTarget(one.target)
@@ -471,10 +472,11 @@ export const claimMessages = (state: MessageState, target: Connection, now: numb
   const pick = held.length === 0 ? current.messages.find(canTake) : held.every(isRetaken) ? held.find(canReach) : undefined
   const messages = pick === undefined ? [] : [pick]
   if (messages.length === 0) return { state: current, messages }
-  // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat.
-  const claimed = messages.map(({ ref: previous, ...one }) => ({
+  // A message handed out before keeps its ACK code, so a host that saw it can tell the repeat. Only OpenCode's claims are taken
+  // again (#724), with no repeat count; nothing else is (#1843, #1870).
+  const claimed = messages.map(({ ref: _previous, ...one }) => ({
     ...one, target: target.id, turn: target.turn, status: 'uncertain' as const, claimed: now, nonce: one.nonce || nonce, updated: now,
-    ...(one.status === 'uncertain' && !isAtMostOnce({ to: one.to, ref: previous }) ? { redelivered: (one.redelivered ?? 0) + 1 } : {}), ...(ref === undefined ? {} : { ref }),
+    ...(ref === undefined ? {} : { ref }),
     ...(marksStart ? { awaitsStart: true as const } : {}),
   }))
   return { state: { ...current, messages: current.messages.map(one => claimed.find(message => message.id === one.id) ?? one) }, messages: claimed }

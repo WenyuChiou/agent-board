@@ -794,7 +794,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
     // OpenCode's plugin (#724) also acknowledges for its own session: ack upgrades an accepted message.
     // open (OpenCode's too) opens or renews the mailbox of a session that is busy, where the plugin takes nothing (#1366).
     // verify (OpenCode's too) answers whether the board accepts its messages file as it is now, and writes nothing (#1366).
-    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', ...(agent === 'opencode' ? ['ack', 'release', 'attempt', 'open', 'verify'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
+    // release (DeepSeek's too) hands a claim back: DeepSeek's plugin gives back what it took for a session that is working (#1870).
+    if (agent !== 'deepseek' && agent !== 'opencode' || session === undefined || !['take', 'accept', 'end', 'release', ...(agent === 'opencode' ? ['ack', 'attempt', 'open', 'verify'] : [])].includes(action ?? '')) throw new Error('INVALID_MAILBOX_CALL')
     const directory = defaultMessagesDirectory(progress, home, process.env, process.platform)
     // This path runs in the plugin's own process with seconds to spare, so it waits for a busy board or store (a turn-start hook cannot).
     const mailbox = hookMailbox(directory, 5000, 2000, 2000)
@@ -837,7 +838,9 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const line = message === null ? '' : message.text.replace(/\s+/g, ' ').trim()
       const summary = line.length > 120 ? `${line.slice(0, 119)}…` : line
       // deferred: the board's store was busy, so null here is "not checked", not "nothing waiting"; the plugin asks again (#1429).
-      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary }, deferred: message === null && taker.hasDeferred })
+      // ref: the name the board gave DeepSeek's claim, which its plugin passes to release when the session is working (#1870).
+      const claim = agent === 'deepseek' && typeof message?.ref === 'string' ? { ref: message.ref } : {}
+      answer({ watch: directory, message: message === null ? null : { id: message.id, nonce: message.nonce, text: deliveryText(message, s), summary, ...claim }, deferred: message === null && taker.hasDeferred })
     } else if (action === 'open') {
       // OpenCode's plugin only. It claims nothing, and the plugin reads the board's file to see whether it worked. The answer
       // names the folder to watch. With no board folder at all no board can queue a message, so nothing is enrolled yet
@@ -857,10 +860,10 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         answer({ ok: false, code: codeOf(error) })
       }
     } else if (action === 'release' || action === 'attempt') {
-      // OpenCode's plugin only. release hands a claim back (--unsent: the host was never called, so even a started wake goes back);
-      // attempt marks the wake it is about to start, and answers CLAIM_LOST when the ref is no longer the claim (#724).
+      // release hands a claim back (--unsent, OpenCode's only: the host was never called, so even a started wake goes back);
+      // attempt, OpenCode's only, marks the wake it is about to start, and answers CLAIM_LOST when the ref is no longer the claim (#724).
       const ref = flag('--ref')
-      if (ref === undefined || !/^[0-9a-f]{12}$/.test(ref)) throw new Error('INVALID_MAILBOX_CALL')
+      if (ref === undefined || !/^[0-9a-f]{12}$/.test(ref) || agent !== 'opencode' && args.includes('--unsent')) throw new Error('INVALID_MAILBOX_CALL')
       try {
         if (action === 'attempt') await mailbox.attempt(agent, session, ref, Date.now())
         else await mailbox.release(agent, session, ref, Date.now(), args.includes('--unsent'))

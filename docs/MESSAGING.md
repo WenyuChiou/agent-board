@@ -75,12 +75,11 @@ still have shown it to its host, so the board does not risk showing it twice (#1
 text and takes a late accept or ACK; until then it holds the session as any open uncertain claim
 does (below), so a new send to that session gets `PAIR_BUSY` and nothing queued goes out until it
 is dismissed or its 30 minutes pass. The page shows it as no reply confirmed. A later receipt from
-the session, even one with no error, keeps `HOLDER_LOST`. DeepSeek's claims are the one exception,
-until its plugin can give a held claim back (#1870): a DeepSeek claim that is still uncertain with
-no error can be handed out again after 30 seconds, with the same ACK code and a line saying it may
-be a repeat: at most three times for one message (a claim after a hand-back does not count), and
-not while it has an error (`EXPIRED` and `DISMISSED` are final; a later receipt from the session
-can clear a disconnected mark). A message its host accepted
+the session, even one with no error, keeps `HOLDER_LOST`. DeepSeek's claims follow the same rule:
+its plugin gives a claim back at once when its take lands while the session is working, and takes it
+again at the next idle, so no lease runs out on a message only the plugin holds (#1870). A store an
+earlier release saved may still hold a DeepSeek claim with a repeat count; it is not handed out again
+either. A message its host accepted
 is never handed out or handed back again, even after a later receipt from its session makes it
 uncertain with no error, and dismissing it keeps the mark (#1407). At a board start, a claim a hook
 named that is still uncertain with no error, and a message a hook handed back with its ACK code,
@@ -88,9 +87,8 @@ become `uncertain` / `BOARD_RESTARTED` with their text, and every claim a hook n
 uncertain loses its name (one with an error keeps the error): nothing a hook was handed before a
 board start is handed out after it, whatever receipts its session sends later, and the page shows
 them as no reply confirmed. The rule holds from the next board start: with no board running, a hook
-takes from the store itself, and a DeepSeek claim an earlier board run made is handed out again once
-its lease passes, until a board starts (#1868); any other hook's claim is not taken or handed back
-past its lease there either, and the next save marks it `HOLDER_LOST`. OpenCode's claims keep
+takes from the store itself, and a hook's claim, DeepSeek's too, is not taken or handed back past
+its lease there either, and the next save marks it `HOLDER_LOST` (#1868, #1870). OpenCode's claims keep
 their own rules (below). While a claim stays open as uncertain (not yet `EXPIRED` or
 `DISMISSED`), none of the session's queued messages is handed out. A claim is taken again only when
 every message that holds the session (the condition is under "stdio MCP") is one of this mailbox's
@@ -104,7 +102,9 @@ OpenCode's claims follow the rules below instead of the 30-second hand-out and t
 A receiver that runs inside the host (OpenCode, DeepSeek) waits up to two seconds for a busy board or store, where a
 turn-start hook waits well under a second. A take that still fails is reported as a failure, not as an empty mailbox.
 OpenCode's receiver asks the host whether the session is idle before each take and hands a claim back when the session
-turns busy, so a long turn does not use it up.
+turns busy, so a long turn does not use it up. DeepSeek's receiver takes only while the session is idle and hands back
+a claim whose take lands after the session started a turn (`--mailbox release --ref`, the name its take answered); a
+give-back that fails keeps the claim for the next idle, and only while the board still holds it within its lease (#1870).
 
 OpenCode's wake costs a model turn, so the board promises at most one wake per message. Its plugin tells the board a
 wake is about to start (`--mailbox attempt --ref`, answered only for the current claim) before it calls the host, and
