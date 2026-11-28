@@ -632,7 +632,7 @@ test('the PR check takes a risk-tier approval from the lane of the author when i
   assert.equal(reviewProblems({ title: 'chore(release): Agent Board 9.9.9' }).length, 1)
 })
 
-test('a risk-tier approval by a reviewer started new for this review counts only once the Codex review bot reviewed that head, and never for a lane under risk-tier review; a maintainer-route verdict is read as before (#1974)', () => {
+test('a risk-tier approval by a reviewer started new for this review counts only once the Codex review bot reviewed that head, and never for a lane under risk-tier review, even when its line ends with the maintainer route; a maintainer-route verdict with the maintainer\'s note is read as before (#1974)', () => {
   const pr = syntheticPr()
   const line = (who, suffix = '') => ({ body: `Review: APPROVE ${pr.head} by ${who} (read-only, started new for this review), lane codex${suffix}` })
   const problems = (comments, surface = 'delivery') => checkPr({ ...pr, body: `${body}Tier: risk\nSurface: ${surface}\n`, prComments: comments }).problems.filter(item => item.check === 'review')
@@ -645,14 +645,24 @@ test('a risk-tier approval by a reviewer started new for this review counts only
   assert.equal(problems([codexBotState(pr.head), codexBotState('1234567'), line('codex')]).length, 1)
   // A state comment from anyone but the bot is not the bot's review.
   assert.equal(problems([{ ...codexBotState(pr.head), user: { login: 'alice' } }, line('codex')]).length, 1)
+  // Nor is one from an account that only has the bot's name: the bot's own comments come as a Bot account.
+  assert.equal(problems([{ ...codexBotState(pr.head), user: { login: 'chatgpt-codex-connector', type: 'User' } }, line('codex')]).length, 1)
+  assert.equal(problems([{ ...codexBotState(pr.head), user: { login: 'chatgpt-codex-connector' } }, line('codex')]).length, 1)
+  assert.deepEqual(problems([{ ...codexBotState(pr.head), user: { login: 'chatgpt-codex-connector', type: 'Bot' } }, line('codex')]), [])
   // A reviewer whose name is not the author's is held to the same condition.
   assert.equal(problems([line('sonnet_900')]).length, 1)
   // A lane under risk-tier review takes the maintainer route, even with the bot's review of the head.
   assert.equal(problems([codexBotState(pr.head), line('codex')], 'none').length, 1)
   assert.match(problems([codexBotState(pr.head), line('codex')], 'none')[0].message, /maintainer route/)
-  // The maintainer route's verdict, and a draft, are read as before.
-  assert.deepEqual(problems([line('codex_900', ', maintainer route')], 'none'), [])
-  assert.deepEqual(problems([line('codex_900', ', maintainer route')]), [])
+  // A line with the lane's own note is a lane's own reviewer's even when it ends `, maintainer route`: its conditions hold.
+  assert.equal(problems([line('codex_900', ', maintainer route')], 'none').length, 1)
+  assert.match(problems([line('codex_900', ', maintainer route')], 'none')[0]?.message ?? '', /maintainer route/)
+  assert.equal(problems([line('codex_900', ', maintainer route.')]).length, 1)
+  assert.match(problems([line('codex_900', ', maintainer route')])[0]?.message ?? '', /Codex review bot has not reviewed/)
+  // The maintainer route's verdict with the maintainer's note, and a draft, are read as before.
+  const maintainer = { body: `Review: APPROVE ${pr.head} by sonnet_900 (read-only, started new for this review by the maintainer), lane claude, maintainer route` }
+  assert.deepEqual(problems([maintainer], 'none'), [])
+  assert.deepEqual(problems([maintainer]), [])
   assert.deepEqual(checkPr({ ...pr, isDraft: true, body: `${body}Tier: risk\nSurface: delivery\n`, prComments: [line('codex')] }).problems.filter(item => item.check === 'review'), [])
   // Off the risk tier nothing changes.
   assert.deepEqual(checkPr({ ...pr, body: `${body}Tier: normal\n`, prComments: [line('codex')] }).problems.filter(item => item.check === 'review'), [])

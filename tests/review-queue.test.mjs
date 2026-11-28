@@ -269,7 +269,11 @@ test('a reviewer the author\'s lane started new for this review counts as an app
   assert.deepEqual(queue('risk', undefined, '', [fresh]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approved; the Codex review bot has not reviewed this head']])
   assert.deepEqual(queue('risk', undefined, '', [codexState(oldHead, false, '2026-10-20T10:00:00Z', 5), fresh]).waitingForAuthor.map(item => item.detail), ['approved; the Codex review bot has not reviewed this head'])
   assert.deepEqual(queue('risk', undefined, '\nSurface: none').waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approved by the lane; a lane under risk-tier review takes the maintainer route']])
-  const maintainer = by('WenyuChiou', answered('codex (started new for this review), lane codex, maintainer route'))
+  // The lane's own note keeps the lane's conditions even when the line ends `, maintainer route`, as the PR check reads it.
+  const mixed = by('WenyuChiou', answered('codex (started new for this review), lane codex, maintainer route'))
+  assert.deepEqual(queue('risk', undefined, '\nSurface: none', [bot, mixed]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approved by the lane; a lane under risk-tier review takes the maintainer route']])
+  assert.deepEqual(queue('risk', undefined, '', [mixed]).waitingForAuthor.map(item => item.detail), ['approved; the Codex review bot has not reviewed this head'])
+  const maintainer = by('WenyuChiou', answered('sonnet_900 (started new for this review by the maintainer), lane claude, maintainer route'))
   assert.deepEqual(queue('risk', undefined, '\nSurface: none', [maintainer]).approvedNow.map(item => item.number), [1])
   const plain = classify([pull(1, { body: 'Author: codex, branch\nTier: normal', files: [] })], { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered('codex'))] }, now)
   assert.deepEqual(plain.waitingForAuthor.map(item => item.detail), ['approval is by the author'])
@@ -795,7 +799,10 @@ test('the newest Codex review state decides whether the head is clean, open, sta
   const stateOf = (...items) => botsOf(items).codex
   assert.equal(stateOf(), 'none')
   assert.equal(stateOf(codexState(head, false, '2026-10-20T10:00:00Z', 2)), 'clean')
-  assert.equal(stateOf(codexState(head.slice(0, 7), true, '2026-10-20T10:00:00Z', 2, 'chatgpt-codex-connector')), 'open')
+  assert.equal(stateOf(codexState(head.slice(0, 7), true, '2026-10-20T10:00:00Z', 2)), 'open')
+  // The bot's name without `[bot]` counts only from a Bot account, as the PR check reads it (#1974).
+  assert.equal(stateOf({ ...codexState(head, false, '2026-10-20T10:00:00Z', 2), user: { login: 'chatgpt-codex-connector', type: 'Bot' } }), 'clean')
+  assert.equal(stateOf(codexState(head, false, '2026-10-20T10:00:00Z', 2, 'chatgpt-codex-connector')), 'none')
   assert.equal(stateOf(codexState(oldHead, false, '2026-10-20T10:00:00Z', 2)), 'stale')
   // The newest comment wins, whatever order they are listed in; a state for an older head is stale even when an earlier one fits.
   const older = codexState(head, true, '2026-10-20T09:30:00Z', 2)
