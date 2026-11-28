@@ -6492,6 +6492,38 @@ test('the Codex desktop app\'s exec-server and an MCP server are not counted as 
   assert.deepEqual(terminalClients([{ pid: 40, started: at, name: 'codex', argv: '/usr/bin/codex exec-server' }], 'linux'), { clients: [], isUnsure: false })
 })
 
+test('a Codex window whose prompt names a server command is still a window (#1907)', async () => {
+  const { terminalClients } = await import('../scripts/codex-receiver.mjs')
+  const at = 1_700_000_000_000
+  // Windows windows whose prompt (or a flag's value) holds a server command's name as a word: each is a person's window.
+  const windows = [
+    { pid: 50, started: at, name: 'codex.exe', argv: 'codex "why does app-server hang"' },
+    { pid: 51, started: at, name: 'codex.exe', argv: '"C:\\Program Files\\Codex\\codex.exe" "explain exec-server"' },
+    { pid: 52, started: at, name: 'codex.exe', argv: 'codex.exe -m synthetic-model "is mcp-server running?"' },
+    { pid: 53, started: at, name: 'codex.exe', argv: 'codex -c "notes=app-server" "read the logs"' },
+    { pid: 54, started: at, name: 'codex.exe', argv: 'codex resume --last "compare app-server and mcp-server"' },
+  ]
+  for (const row of windows) assert.deepEqual(terminalClients([row], 'win32'), { clients: [`${row.pid}:${at}`], isUnsure: false }, row.argv)
+  // The same on Linux, whose command line quotes an argument holding a space.
+  assert.deepEqual(terminalClients([{ pid: 60, started: at, name: 'codex', argv: '/usr/bin/codex "why does app-server hang"' }], 'linux'), { clients: [`60:${at}`], isUnsure: false })
+  // The real servers stay no window: the command word right after the program, or after its flags and their values.
+  const servers = [
+    { pid: 70, started: at, name: 'codex.exe', argv: 'codex app-server' },
+    { pid: 71, started: at, name: 'codex.exe', argv: 'codex.exe exec-server --listen stdio' },
+    { pid: 72, started: at, name: 'codex.exe', argv: 'codex mcp-server' },
+    { pid: 73, started: at, name: 'codex.exe', argv: '"C:\\Program Files\\Codex\\codex.exe" app-server proxy' },
+    { pid: 74, started: at, name: 'codex.exe', argv: '"C:\\Program Files\\Codex\\codex.exe" -c features.prefer_mxc=true -c "forced_login_method=\\"chatgpt\\"" exec-server --listen stdio' },
+    { pid: 75, started: at, name: 'codex.exe', argv: 'codex.exe --config=features.x=true --model synthetic-model mcp-server' },
+  ]
+  for (const row of servers) assert.deepEqual(terminalClients([row], 'win32'), { clients: [], isUnsure: false }, row.argv)
+  assert.deepEqual(terminalClients([{ pid: 80, started: at, name: 'codex', argv: '"/opt/My Tools/codex" -c k=v app-server' }], 'linux'), { clients: [], isUnsure: false })
+  // macOS's ps loses the quotes: `codex -C "/tmp/My Project" app-server` reads as `codex -C /tmp/My Project app-server`, so there a
+  // server's name anywhere after the program keeps the row off the windows (Greptile on #1990).
+  const { parsePsClients } = await import('../scripts/codex-receiver.mjs')
+  const ps = ['  901 Thu Nov 26 10:11:12 2026 /usr/local/bin/codex -C /tmp/My Project app-server', '  902 Thu Nov 26 10:11:13 2026 /usr/local/bin/codex -c k=v exec-server --listen stdio', '  903 Thu Nov 26 10:11:14 2026 /usr/local/bin/codex resume abc', ''].join('\n')
+  assert.deepEqual(terminalClients(parsePsClients(ps), 'darwin').clients, [`903:${Date.parse('Thu Nov 26 10:11:14 2026 UTC')}`])
+})
+
 test('a one-shot Codex run (codex exec) and Codex\'s other commands are not counted as a terminal window, while a prompt or a resumed session still is (#1652)', async () => {
   const { terminalClients } = await import('../scripts/codex-receiver.mjs')
   const at = 1_700_000_000_000
