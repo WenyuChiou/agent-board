@@ -93,7 +93,7 @@ import type { AgentClaim } from './session-liveness'
 import { goneBlocks, hostHashOf, withoutProcessIdentity } from './session-liveness'
 import type { ProgressProject } from '../types'
 import { boardRun } from './board-commands'
-import { peekInbox, redact, turnsFor } from './board'
+import { guardViewStep, peekInbox, redact, turnsFor } from './board'
 import type { PendingTurn, TurnCache } from './board'
 import { paletteFor } from './palette'
 import { drawPane, pressTarget, reviseKey } from './pane'
@@ -4126,8 +4126,10 @@ const handOverPrompt = (row: TaskRow, s: Strings): string =>
 
 // A press on 完成: the step is ticked in the file, by the person's own hand, and journaled
 // like a step Claude finished.
+// A guarded ref names its task by the pane's own words, so the write reads it in them too.
 const tickStep = async ($: EngineInterface, ref: StepRef): Promise<boolean> => {
-  const wrote = await rewrite($, await progressPath($), async before => setManualStep(before, ref, 'x', await $.clock.now()))
+  const s = await wordsOf($)
+  const wrote = await rewrite($, await progressPath($), async before => setManualStep(before, ref, 'x', await $.clock.now(), s))
   await poll($)
 
   return wrote !== null
@@ -5082,7 +5084,8 @@ export const register: Register = (on, options) => {
       },
       takeOver: row => submitted(takeOverPrompt(row, s)),
       handOver: row => submitted(handOverPrompt(row, s)),
-      tick: async ref => {
+      tick: async drawn => {
+        const ref = guardViewStep(drawn, view)
         const ticked = await enqueue(() => tickStep($, ref))
         if (!ticked) return failure(s.boardTickGone)
         const outcome = { isSaved: true, isDeferred: false }
