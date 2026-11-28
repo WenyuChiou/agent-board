@@ -148,6 +148,7 @@ test('in a terminal the "This will" list names sidecar.json and sidecar.mjs as a
 test('a no to the main question asks no sidecar question and writes nothing (#1642)', () => withHome(({ home, run, dir }) => {
   const asked = run(['--agent', 'antigravity'], { input: 'n\ny\n', env: TTY })
   assert.ok(asked.stdout.includes('Set these up? [Y/n]'), asked.stdout)
+  assert.ok(namesSidecarFiles(asked.stdout.split('Set these up? [Y/n]')[0]), asked.stdout)
   assert.ok(!asked.stdout.includes('[y/N]'), asked.stdout)
   assert.ok(!existsSync(join(home, '.gemini', 'config', 'hooks.json')) && !existsSync(dir), 'a no writes nothing')
 }))
@@ -190,17 +191,22 @@ test('a sidecar yes writes no sidecar file when Antigravity\'s own apply fails, 
   assert.ok(!existsSync(dir), 'no sidecar file')
 }))
 
-for (const [row, name] of [['a sidecar.json another setup wrote while this setup waited is kept, and the sidecar part is not called done (#1642)', 'sidecar.json'], ['in a terminal an edit to sidecar.mjs made after the yes is kept and the sidecar part is reported as not done (#1642)', 'sidecar.mjs']]) {
-  test(row, () => withHome(({ home, run, dir }) => {
-    const file = join(dir, name), text = `// synthetic ${name} of another run\n`
-    const asked = runChanging(home, run, ['--agent', 'antigravity'], 'y\ny\n', `fs.mkdirSync(${JSON.stringify(dir)}, { recursive: true }); fs.writeFileSync(${JSON.stringify(file)}, ${JSON.stringify(text)})`)
-    assert.equal(asked.status, 1, asked.stdout)
-    assert.match(asked.stdout, /Antigravity files: done\./, asked.stdout)
-    assert.doesNotMatch(asked.stdout, /Antigravity sidecar files: done\./, asked.stdout)
-    assert.match(asked.stdout, /Antigravity sidecar files: .*--antigravity-sidecar --apply/, asked.stdout)
-    assert.equal(readFileSync(file, 'utf8'), text)
-  }))
+// Another run's sidecar file lands while setup waits on its answers; the yes must not write over it.
+const otherRunWrites = (home, run, dir, name) => {
+  const file = join(dir, name), text = `// synthetic ${name} of another run\n`
+  const asked = runChanging(home, run, ['--agent', 'antigravity'], 'y\ny\n', `fs.mkdirSync(${JSON.stringify(dir)}, { recursive: true }); fs.writeFileSync(${JSON.stringify(file)}, ${JSON.stringify(text)})`)
+  assert.equal(asked.status, 1, asked.stdout)
+  assert.ok(asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.doesNotMatch(beforeSidecarQuestion(asked.stdout), /done\./, asked.stdout)
+  assert.match(asked.stdout, /Antigravity files: done\./, asked.stdout)
+  assert.doesNotMatch(asked.stdout, /Antigravity sidecar files: done\./, asked.stdout)
+  assert.match(asked.stdout, /Antigravity sidecar files: .*--antigravity-sidecar --apply/, asked.stdout)
+  assert.equal(readFileSync(file, 'utf8'), text)
 }
+
+test('a sidecar.json another setup wrote while this setup waited is kept, and the sidecar part is not called done (#1642)', () => withHome(({ home, run, dir }) => otherRunWrites(home, run, dir, 'sidecar.json')))
+
+test('in a terminal an edit to sidecar.mjs made after the yes is kept and the sidecar part is reported as not done (#1642)', () => withHome(({ home, run, dir }) => otherRunWrites(home, run, dir, 'sidecar.mjs')))
 
 test('the lone sidecar question follows a line naming sidecar.json and sidecar.mjs (#1642)', () => withHome(({ run, dir }) => {
   assert.equal(run(['--agent', 'antigravity', '--apply']).status, 0)
