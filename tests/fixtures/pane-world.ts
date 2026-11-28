@@ -117,7 +117,49 @@ export const makeWorld = (files: Array<[string, string]> = []): World => ({
 const posix = (path: string): string => path.replace(/^[A-Za-z]:\\/, '/').replace(/\\/g, '/')
 let workerStageSequence = 0
 
-export const engineBeneath = (on: On, world: World): MockClock => {
+// #1786: a measurement only. Two Windows plugin tests overran the harness's 5 s limit at random,
+// and the cause is not shown: the first handler call came late, or a step never settled. This
+// records when the fixture was built, when the first handler was called and each call after it,
+// and at 4500 ms (before the limit) prints one line saying where the time went. It changes no
+// outcome: it only reads clocks and names. The previous test's timer is cleared when the next
+// fixture is built, and it never keeps the process alive.
+const LIMIT_PROBE_MS = 4500
+let limitProbe: ReturnType<typeof setTimeout> | undefined
+
+const startLimitProbe = (): ((name: string) => void) => {
+  if (limitProbe !== undefined) clearTimeout(limitProbe)
+  const built = performance.now()
+  let calls = 0
+  let first: number | undefined
+  let last: { name: string; at: number } | undefined
+  limitProbe = setTimeout(() => {
+    const now = performance.now()
+    const late = Math.round(now - built - LIMIT_PROBE_MS)
+    const toFirst = first === undefined ? 'no handler called yet' : `${Math.round(first - built)} ms to the first handler call`
+    const lastCall = last === undefined ? 'no last call' : `last call ${last.name} ${Math.round(now - last.at)} ms ago`
+    console.error(`[#1786 pane timing] ${toFirst}, ${calls} calls, ${lastCall}, the ${LIMIT_PROBE_MS} ms timer fired ${late} ms late`)
+  }, LIMIT_PROBE_MS)
+  limitProbe.unref()
+  return name => {
+    const at = performance.now()
+    first ??= at
+    calls += 1
+    last = { name, at }
+  }
+}
+
+export const engineBeneath = (rawOn: On, world: World): MockClock => {
+  const note = startLimitProbe()
+  // Every handler the fixture registers reports its name when it is called, then runs as before.
+  const on = ((...args: unknown[]) => {
+    const name = String(args[0])
+    const handler = args.at(-1)
+    if (typeof handler !== 'function') return Reflect.apply(rawOn, undefined, args)
+    return Reflect.apply(rawOn, undefined, [...args.slice(0, -1), (...inner: unknown[]) => {
+      note(name)
+      return Reflect.apply(handler, undefined, inner)
+    }])
+  }) as On
   let modelNow = world.at ?? Date.parse('2026-10-16T12:00:00.000Z')
   const delayed: Array<{ at: number; finish: () => void }> = []
   if (world.completeDelayMs !== undefined) world.completeDue = at => {
