@@ -79,12 +79,14 @@ export const redact = (text: string, home: string, isWindows = false): string =>
 // page on the local network never gets this line, and the board script keeps no more of it than the first 2,000 characters.
 export const CONTROLS = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff\ufff9-\ufffb\u034f\ufe00-\ufe0f\u{E0000}-\u{E007F}]+/gu
 const PASS_FLAG = new RegExp(`(--(?:[\\w-]*-)?(?:password|passwd|pwd|pass|token|secret|api-?key|access-?key|private-?key|auth|credentials?|key)(?:[= ]+))(?:${VALUE})`, 'gi')
-// curl -u user:pass, --user user:pass, and a proxy's.
-const USER_FLAG = /((?:^|\s)(?:-u|--user|--proxy-user)(?:[= ]+))(?:"[^"]*:[^"]*"|'[^']*:[^']*'|[^\s:]*:\S*)/gi
+// curl -u user:pass, --user user:pass, and a proxy's. The short -u also takes its
+// argument attached (-uuser:pass); a long flag never does, so only -u may skip the separator.
+const USER_FLAG = /((?:^|\s)(?:-u|--user|--proxy-user)(?:[= ]+|(?<=-u)))(?:"[^"]*:[^"]*"|'[^']*:[^']*'|[^\s:]*:\S*)/gi
 // sshpass -p X, and an attached -pX with a digit or a capital in it, or six letters or more
-// (mysql takes a bare -p as a prompt; -print, -perm and -pi do not match).
+// (mysql takes a bare -p as a prompt; -print, -perm and -pi do not match). A quoted span
+// after -p is one argument, so the whole span is the value, spaces inside it included.
 const SSHPASS = new RegExp(`(\\bsshpass\\s+(?:-\\S+\\s+)*-p\\s*)(?:${VALUE})`, 'gi')
-const SHORT_P = /(?<=\s)(-p)([^\s=-]\S*)/g
+const SHORT_P = /(?<=\s)(-p)("[^"\n]*(?:"|$)|'[^'\n]*(?:'|$)|[^\s=-]\S*)/g
 
 export const approvalWords = (text: string, home: string, isWindows: boolean, max: number): string => {
   const line = text.replace(CONTROLS, ' ').replace(/\s+/g, ' ').trim().slice(0, 20000)
