@@ -726,7 +726,7 @@ test('a verdict line ends at any line break and needs a name with a letter or di
   const problems = (comments, tier) => checkPr({ ...pr, body: `${body}Tier: ${tier}\nSurface: delivery\n`, prComments: comments }).problems.filter(item => item.check === 'review')
   // Round 4: a note after a lone carriage return, or another line break, belongs to the next line, so the author's own
   // name approves nothing.
-  for (const broken of ['\r', ' ', ' ']) {
+  for (const broken of ['\r', '\u2028', '\u2029']) {
     const own = { body: `Review: APPROVE ${pr.head} by codex${broken}Assistant (started new for this review)` }
     assert.equal(reviewOf(own.body).isFresh, undefined, JSON.stringify(broken))
     assert.equal(reviewOf(own.body).reviewer, 'codex', JSON.stringify(broken))
@@ -739,7 +739,7 @@ test('a verdict line ends at any line break and needs a name with a letter or di
   assert.equal(reviewOf(`Review:\nAPPROVE ${pr.head} by codex (started new for this review), lane x`), null)
   assert.equal(reviewOf(`Review:\tAPPROVE\t${pr.head} by codex (read-only, started new for this review), lane x`).isFresh, true)
   // The words after no name, or after a name with no letter or digit, cannot be read.
-  for (const name of ['', '-', '`', '​', '  ']) {
+  for (const name of ['', '-', '`', '\u200b', '  ']) {
     assert.equal(reviewOf(`Review: APPROVE ${pr.head} by ${name} (started new for this review), lane x`)?.isUnreadable, true, JSON.stringify(name))
   }
   assert.equal(reviewOf(`Review: APPROVE ${pr.head} by 小花 (started new for this review), lane x`).isFresh, true)

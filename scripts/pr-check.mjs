@@ -806,6 +806,8 @@ const reviewerNotes = field => {
   if (depth !== 0) isBroken = true
   const name = parts[0]
   const open = name.indexOf('(')
+  // The notes belong to a name: one with no letter or digit before them (a dash, a backtick, a zero-width space) is none.
+  if (open >= 0 && !/[\p{L}\p{N}]/u.test(name.slice(0, open))) isBroken = true
   const notes = []
   let rest = open < 0 ? '' : name.slice(open)
   while (!isBroken && rest.trim() !== '') {
@@ -883,7 +885,18 @@ const readReview = item => {
   if (!item) return { review: null, ignored: null }
   const blocked = ignoredApprovalReason(item)
   const body = typeof item === 'string' ? item : item.body ?? ''
-  const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/mi)
+  // The verdict is read from one line, cut at any line break, so the name, the notes and the route all end where the
+  // line does (#1974): a note after a lone carriage return belongs to the next line, and a verdict split over lines is
+  // none.
+  let match = null
+  let verdictLine = ''
+  for (const line of body.split(/\r\n|\r|\n|\u2028|\u2029/)) {
+    match = line.match(/^Review:[ \t]*(APPROVE|REQUEST CHANGES)[ \t]+`?([0-9a-fA-F]{7,40})`?(?:[ \t]+by[ \t]+([^\r\n,]+))?/i)
+    if (match) {
+      verdictLine = line
+      break
+    }
+  }
   if (match) {
     const kind = match[1].toUpperCase()
     const reviewer = match[3]?.trim() || (typeof item === 'object' ? item.user?.login ?? null : null)
@@ -893,7 +906,6 @@ const readReview = item => {
       }
       return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
     }
-    const verdictLine = body.slice(match.index).split(/\r?\n/, 1)[0]
     // The reviewer field starts where the name does, right after the ` by ` that follows the sha.
     const { isFresh, isUnreadable } = readVerdictLine(verdictLine, match[3] === undefined ? null : match[0].length - match[3].length, kind)
     // The maintainer route's verdict ends `, maintainer route` (RULES R2); tied to the end of the line, it cannot bind
