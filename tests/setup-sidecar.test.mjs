@@ -249,6 +249,18 @@ test('an existing sidecar.json leaves the optional line and the sidecar question
   assert.equal(readFileSync(join(dir, 'sidecar.json'), 'utf8'), before)
 }))
 
+test('a sidecar.json deleted after an earlier setup wrote it comes back with the main yes, with no sidecar question and no failed part (#1642)', () => withHome(({ run, dir }) => {
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  rmSync(join(dir, 'sidecar.json'))
+  const asked = run(['--agent', 'antigravity'], { input: 'y\ny\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stdout)
+  assert.ok(asked.stdout.includes('Set these up? [Y/n]'), asked.stdout)
+  assert.ok(!asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.doesNotMatch(asked.stdout, /failed/, asked.stdout)
+  assert.match(asked.stdout, /Antigravity files: done\./, asked.stdout)
+  assert.ok(existsSync(join(dir, 'sidecar.json')), asked.stdout)
+}))
+
 test('piped setup and terminal --apply ask no sidecar question and write no sidecar (#1642)', () => withHome(({ home, run, dir }) => {
   const piped = run(['--agent', 'antigravity'], { input: 'y\ny\n' })
   assert.equal(piped.status, 0, piped.stderr)

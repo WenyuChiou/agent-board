@@ -871,7 +871,9 @@ const main = () => {
     const sidecarFiles = ['sidecar.json', 'sidecar.mjs'].map(name => join(home, '.gemini', 'config', 'sidecars', 'agent-board', name))
     const isLoneSidecar = !will.length && available.includes('antigravity') && !plans[selected.indexOf('antigravity')].changes.length
     // On a run with other work, Antigravity has its part line, so the sidecar can follow it: not on a repair that leaves it out.
+    // A plan that already writes a sidecar file (an earlier setup's sidecar.json was deleted) restores it with the main yes.
     const isSidecarOffered = available.includes('antigravity') && !args.includes('--antigravity-sidecar') && !existsSync(sidecarFiles[0])
+      && !hasSidecar([plans[selected.indexOf('antigravity')]])
       && (will.length ? !(isRepair && !changedAgents.includes('antigravity')) : isLoneSidecar)
     if (isSidecarOffered) {
       const optional = words('sidecarOptional', { status: words('previewCreate', { count: sidecarFiles.length }) })
