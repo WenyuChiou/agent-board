@@ -1418,29 +1418,35 @@ const undoJournal = (added: Map<string, number>, journal: string, writesBefore: 
 }
 
 // Only the latest Confirm done or Archive press in this server process can be undone (#566).
-let lastUndo: UndoRecord | null = null
+let lastUndo: { token: string; record: UndoRecord; stage?: 'archive' | 'journal' } | null = null
 const undoProject = (text: string, project: string): string => project === s.uncategorized && sectionOfProject(seenOf(linesOf(text)), project) === null ? '' : project
 
-const undoLastPress = (): { ok: boolean; note: string } => {
-  const record = lastUndo
+const undoLastPress = (token?: string): { ok: boolean; note: string; retryUndo?: boolean } => {
+  const entry = lastUndo
+  if (entry === null || !token || entry.token !== token) return { ok: false, note: s.undoNothing }
   lastUndo = null
-  if (record === null) return { ok: false, note: s.undoNothing }
+  const { record } = entry
   drainQuestionCaptures()
-  let reason: 'changed' | 'gone' | null = null
-  const wrote = rewrite(path, current => {
-    const reverted = applyUndo(current, record)
-    if (!reverted.ok) { reason = reverted.reason; return null }
-    if (record.kind === 'archive' && record.archiveFile !== undefined && record.archiveEntries.length > 0 && !applyArchiveUndo(read(record.archiveFile), record, s.archiveTitle).ok) {
-      reason = 'changed'
-      return null
-    }
-    return reverted.text
-  })
-  if (wrote === null) return { ok: false, note: reason === 'gone' ? s.undoGone : reason === 'changed' ? s.undoChanged : s.boardWriteFailed }
+  if (entry.stage === undefined) {
+    let reason: 'changed' | 'gone' | null = null
+    const wrote = rewrite(path, current => {
+      const reverted = applyUndo(current, record)
+      if (!reverted.ok) { reason = reverted.reason; return null }
+      if (record.kind === 'archive' && record.archiveFile !== undefined && record.archiveEntries.length > 0 && !applyArchiveUndo(read(record.archiveFile), record, s.archiveTitle).ok) {
+        reason = 'changed'
+        return null
+      }
+      return reverted.text
+    })
+    if (wrote === null) return { ok: false, note: reason === 'gone' ? s.undoGone : reason === 'changed' ? s.undoChanged : s.boardWriteFailed }
+  }
+  const failStage = (stage: 'archive' | 'journal') => { lastUndo = { ...entry, stage }; return { ok: false, note: s.boardWriteFailed, retryUndo: true } }
   if (record.kind === 'archive' && record.archiveFile !== undefined && record.archiveEntries.length > 0) {
-    rewrite(record.archiveFile, past => { const cleaned = applyArchiveUndo(past, record, s.archiveTitle); return cleaned.ok ? cleaned.text : null })
+    try {
+      if (rewrite(record.archiveFile, past => { const c = applyArchiveUndo(past, record, s.archiveTitle); return c.ok ? c.text : null }) === null) return failStage('archive')
+    } catch { return failStage('archive') }
   } else if (record.kind === 'done' && record.journalFile !== undefined && record.journalLines.length > 0) {
-    try { undoJournal(new Map(record.journalLines), record.journalFile, writes) } catch {}
+    try { undoJournal(new Map(record.journalLines), record.journalFile, writes) } catch { return failStage('journal') }
   }
   try { view() } catch {}
   return { ok: true, note: s.undoneOne(record.title) }
@@ -1497,7 +1503,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     if (wrote === null && !isReplaced) undoJournal(added, journal, writesBefore)
     const found = confirmed as ConfirmedTask | null
     if (found === null || wrote === null || !confirmMatches(read(path), found.ref, s)) return s.boardLineChanged
-    if (isReplaced) lastUndo = recordUndo(doneBefore, found.text, { kind: 'done', title: action.title, project: undoProject(doneBefore, action.ref.project), session: action.ref.session, start: found.span.start, end: found.span.end, journalFile: journal, journalLines: [...added.entries()] })
+    if (isReplaced) lastUndo = { token: randomUUID(), record: recordUndo(doneBefore, found.text, { kind: 'done', title: action.title, project: undoProject(doneBefore, action.ref.project), session: action.ref.session, start: found.span.start, end: found.span.end, journalFile: journal, journalLines: [...added.entries()] }) }
     return done(s.confirmedDone(action.title))
   }
   if (action.type === 'tick') {
@@ -1567,7 +1573,7 @@ const act = (action: BoardAction, fallback?: { copyText?: string; tone?: 'done' 
     if (count === 0) return s.archiveGone
     if (captured !== null) {
       const { before, after, span, archiveFile, entries } = captured as ArchiveCapture
-      if (span !== undefined) lastUndo = recordUndo(before, after, { kind: 'archive', title: action.title, project: undoProject(before, action.ref.project), session: action.ref.session, start: span.start, end: span.end, ...(archiveFile === undefined ? {} : { archiveFile }), archiveEntries: entries })
+      if (span !== undefined) lastUndo = { token: randomUUID(), record: recordUndo(before, after, { kind: 'archive', title: action.title, project: undoProject(before, action.ref.project), session: action.ref.session, start: span.start, end: span.end, ...(archiveFile === undefined ? {} : { archiveFile }), archiveEntries: entries }) }
     }
     // Not through view(), which may rewrite the question list and throw: a list another process holds
     // for a moment must not change what is said about an archive that has already happened.
@@ -2427,7 +2433,7 @@ const serveChild = (): void => {
       pending: (isFresh = true) => pending(undefined, isFresh),
       act,
       undo: undoLastPress,
-      hasUndo: () => lastUndo !== null,
+      undoToken: () => lastUndo?.token ?? null,
       dropUndo: () => { lastUndo = null },
       tidy,
       paste,

@@ -64,9 +64,9 @@ export type ServeOptions = {
   pending: (isFresh?: boolean) => PendingTurn[]
   // A tick or an archive, written the way the terminal board writes one: the line to show.
   act: (action: BoardAction) => string
-  // Restores the last Archive or Confirm done action when its block and archive entry stayed untouched (#566).
-  undo?: () => { ok: boolean; note: string }
-  hasUndo?: () => boolean
+  // Restores the last Archive or Confirm done press matching its offer token (#566).
+  undo?: (token?: string) => { ok: boolean; note: string; retryUndo?: boolean }
+  undoToken?: () => string | null
   dropUndo?: () => void
   // Every finished task to the archive now: the line to show.
   tidy: () => string
@@ -1401,12 +1401,12 @@ export const startServer = (o: ServeOptions): void => {
         }
         const note = o.act(action) || o.s.pressNothing
         const isDone = ![o.s.boardWriteFailed, o.s.boardTickGone, o.s.archiveGone, o.s.hideFailed, o.s.boardLineChanged, o.s.questionRetentionFailed, o.s.pressFailed].includes(note)
-        const canUndo = isDone && (action.type === 'archive' || action.type === 'done') && o.hasUndo?.() === true
-        return json(res, isDone ? 200 : 409, { note, ...(canUndo ? { canUndo: true } : {}) })
+        const undoToken = isDone && (action.type === 'archive' || action.type === 'done') ? o.undoToken?.() ?? null : null
+        return json(res, isDone ? 200 : 409, { note, ...(undoToken ? { canUndo: true, undoToken } : {}) })
       }
       if (url.pathname === '/api/undo') {
         if (o.undo === undefined) return json(res, 409, { ok: false, note: o.s.undoNothing })
-        const result = o.undo()
+        const result = o.undo(text(body.token))
         return json(res, result.ok ? 200 : 409, result)
       }
       if (url.pathname === '/api/tidy') {

@@ -111,11 +111,12 @@ test('Undo after Confirm done puts the block back as it was', { timeout: 30_000 
     const pressed = await board.call('POST', '/api/act', { key: stopped.key, type: 'done', fp: stopped.fp })
     assert.equal(pressed.status, 200, pressed.body)
     assert.equal(pressed.json().canUndo, true)
+    assert.ok(pressed.json().undoToken)
     assert.notEqual(readFileSync(board.path, 'utf8'), before)
     const journalPath = journalFileIn(board.dir)
     assert.ok(journalPath !== null && readFileSync(journalPath, 'utf8').includes('Finish synthetic report'))
 
-    const undone = await board.call('POST', '/api/undo', {})
+    const undone = await board.call('POST', '/api/undo', { token: pressed.json().undoToken })
     assert.equal(undone.status, 200, undone.body)
     assert.equal(undone.json().ok, true)
     assert.match(undone.json().note, /Restored.*Ended Codex task/)
@@ -130,9 +131,31 @@ test('Undo after Confirm done puts the block back as it was', { timeout: 30_000 
     const manualPressed = await board.call('POST', '/api/act', { key: manual.key, type: 'done', fp: manual.fp })
     assert.equal(manualPressed.status, 200, manualPressed.body)
     assert.equal(manualPressed.json().canUndo, true)
-    const manualUndone = await board.call('POST', '/api/undo', {})
+    const manualUndone = await board.call('POST', '/api/undo', { token: manualPressed.json().undoToken })
     assert.equal(manualUndone.status, 200, manualUndone.body)
     assert.equal(readFileSync(board.path, 'utf8'), manualBefore)
+
+    // Regression: failed journal rollback surfaces 409 and retains token so retry cleans journal.
+    const jBefore = readFileSync(board.path, 'utf8')
+    const jDone = await board.call('POST', '/api/act', { key: stopped.key, type: 'done', fp: stopped.fp })
+    assert.equal(jDone.status, 200, jDone.body)
+    const jToken = jDone.json().undoToken
+    const jSaved = readFileSync(journalPath, 'utf8')
+    fs.unlinkSync(journalPath)
+    fs.mkdirSync(journalPath)
+    try {
+      const partialFail = await board.call('POST', '/api/undo', { token: jToken })
+      assert.equal(partialFail.status, 409, partialFail.body)
+      assert.equal(partialFail.json().ok, false)
+      assert.equal(partialFail.json().retryUndo, true)
+    } finally {
+      if (fs.existsSync(journalPath) && fs.statSync(journalPath).isDirectory()) fs.rmdirSync(journalPath)
+      writeFileSync(journalPath, jSaved)
+    }
+    const retryOk = await board.call('POST', '/api/undo', { token: jToken })
+    assert.equal(retryOk.status, 200, retryOk.body)
+    assert.equal(readFileSync(board.path, 'utf8'), jBefore)
+    assert.ok(!readFileSync(journalPath, 'utf8').includes('Finish synthetic report'))
   } finally { await board.close() }
 
   // Regression P1-3: uncategorized manual task above first ## section restores after Confirm done.
@@ -141,8 +164,9 @@ test('Undo after Confirm done puts the block back as it was', { timeout: 30_000 
     const beforeUncat = readFileSync(uncat.path, 'utf8')
     const row = await uncat.rowOf('Uncategorized manual')
     assert.ok(row && row.canConfirm)
-    assert.equal((await uncat.call('POST', '/api/act', { key: row.key, type: 'done', fp: row.fp })).status, 200)
-    const undone = await uncat.call('POST', '/api/undo', {})
+    const pUncat = await uncat.call('POST', '/api/act', { key: row.key, type: 'done', fp: row.fp })
+    assert.equal(pUncat.status, 200)
+    const undone = await uncat.call('POST', '/api/undo', { token: pUncat.json().undoToken })
     assert.equal(undone.status, 200, undone.body)
     assert.equal(readFileSync(uncat.path, 'utf8'), beforeUncat)
   } finally { await uncat.close() }
@@ -162,7 +186,7 @@ test('Undo after Archive puts the task back and removes its archive entry', { ti
     const archFile = join(board.dir, archiveName())
     assert.ok(readFileSync(archFile, 'utf8').includes('Archiveable task'))
 
-    const undone = await board.call('POST', '/api/undo', {})
+    const undone = await board.call('POST', '/api/undo', { token: archived.json().undoToken })
     assert.equal(undone.status, 200, undone.body)
     assert.equal(undone.json().ok, true)
     assert.equal(readFileSync(board.path, 'utf8'), before)
@@ -176,9 +200,10 @@ test('Undo after Archive puts the task back and removes its archive entry', { ti
   )
   try {
     const rowA = await multi.rowOf('Alpha gone')
-    assert.equal((await multi.call('POST', '/api/act', { key: rowA.key, type: 'archive', fp: rowA.fp })).status, 200)
+    const pA = await multi.call('POST', '/api/act', { key: rowA.key, type: 'archive', fp: rowA.fp })
+    assert.equal(pA.status, 200)
     writeFileSync(multi.path, readFileSync(multi.path, 'utf8').replace('- [ ] Open', '- [ ] Concurrent beta edit'))
-    const resA = await multi.call('POST', '/api/undo', {})
+    const resA = await multi.call('POST', '/api/undo', { token: pA.json().undoToken })
     assert.equal(resA.status, 200, resA.body)
     const afterA = readFileSync(multi.path, 'utf8')
     assert.ok(afterA.indexOf('Alpha gone') > afterA.indexOf('## alpha') && afterA.indexOf('Alpha gone') < afterA.indexOf('## beta'), afterA)
@@ -188,9 +213,10 @@ test('Undo after Archive puts the task back and removes its archive entry', { ti
   const soloOrder = await startBoard(`# Progress\n\n## alpha\n${autoStopped('a3334444', 'alpha', 'Alpha solo')}\n\n## beta\n### Beta task\n- [ ] Open\n`)
   try {
     const rowSolo = await soloOrder.rowOf('Alpha solo')
-    assert.equal((await soloOrder.call('POST', '/api/act', { key: rowSolo.key, type: 'archive', fp: rowSolo.fp })).status, 200)
+    const pSolo = await soloOrder.call('POST', '/api/act', { key: rowSolo.key, type: 'archive', fp: rowSolo.fp })
+    assert.equal(pSolo.status, 200)
     writeFileSync(soloOrder.path, readFileSync(soloOrder.path, 'utf8').replace('- [ ] Open', '- [ ] Beta changed'))
-    const resSolo = await soloOrder.call('POST', '/api/undo', {})
+    const resSolo = await soloOrder.call('POST', '/api/undo', { token: pSolo.json().undoToken })
     assert.equal(resSolo.status, 200, resSolo.body)
     const afterSolo = readFileSync(soloOrder.path, 'utf8')
     assert.ok(afterSolo.indexOf('## alpha') >= 0 && afterSolo.indexOf('## alpha') < afterSolo.indexOf('## beta'), afterSolo)
@@ -207,7 +233,7 @@ test('Undo refuses with the reason when the block changed after the press', { ti
     const edited = readFileSync(board.path, 'utf8').replace('Finish synthetic report', 'Edited by another writer')
     writeFileSync(board.path, edited)
 
-    const refused = await board.call('POST', '/api/undo', {})
+    const refused = await board.call('POST', '/api/undo', { token: pressed.json().undoToken })
     assert.equal(refused.status, 409, refused.body)
     assert.equal(refused.json().ok, false)
     assert.equal(refused.json().note, 'Could not undo: that task changed since your press.')
@@ -225,7 +251,7 @@ test('Undo refuses when the block is gone', { timeout: 30_000 }, async () => {
     const withoutTask = '# Progress\n\n## other\n### Keeper\n- [ ] Keep this\n'
     writeFileSync(board.path, withoutTask)
 
-    const refused = await board.call('POST', '/api/undo', {})
+    const refused = await board.call('POST', '/api/undo', { token: pressed.json().undoToken })
     assert.equal(refused.status, 409, refused.body)
     assert.equal(refused.json().ok, false)
     assert.equal(refused.json().note, 'Could not undo: that task is no longer on the board.')
@@ -234,7 +260,7 @@ test('Undo refuses when the block is gone', { timeout: 30_000 }, async () => {
 })
 
 test('a second Undo has nothing to undo', { timeout: 30_000 }, async () => {
-  const initial = `# Progress\n\n## api-gateway\n${autoStopped('e5f6a7b8', 'api-gateway', 'Single undo')}\n`
+  const initial = `# Progress\n\n## api-gateway\n${autoStopped('e5f6a7b8', 'api-gateway', 'Single undo')}\n\n## second\n${autoStopped('e6f7a8b9', 'second', 'Second tab task')}\n`
   const board = await startBoard(initial)
   try {
     const empty = await board.call('POST', '/api/undo', {})
@@ -244,14 +270,31 @@ test('a second Undo has nothing to undo', { timeout: 30_000 }, async () => {
 
     const before = readFileSync(board.path, 'utf8')
     const row = await board.rowOf('Single undo')
-    assert.equal((await board.call('POST', '/api/act', { key: row.key, type: 'done', fp: row.fp })).status, 200)
-    assert.equal((await board.call('POST', '/api/undo', {})).status, 200)
+    const done1 = await board.call('POST', '/api/act', { key: row.key, type: 'done', fp: row.fp })
+    assert.equal(done1.status, 200)
+    const undone1 = await board.call('POST', '/api/undo', { token: done1.json().undoToken })
+    assert.equal(undone1.status, 200)
     assert.equal(readFileSync(board.path, 'utf8'), before)
 
-    const second = await board.call('POST', '/api/undo', {})
+    const second = await board.call('POST', '/api/undo', { token: done1.json().undoToken })
     assert.equal(second.status, 409, second.body)
     assert.equal(second.json().ok, false)
     assert.equal(second.json().note, 'Nothing to undo.')
+
+    // Stale token from tab A must not undo or clear tab B's newer offer.
+    const rowA = await board.rowOf('Single undo')
+    const rowB = await board.rowOf('Second tab task')
+    const actA = await board.call('POST', '/api/act', { key: rowA.key, type: 'archive', fp: rowA.fp })
+    const actB = await board.call('POST', '/api/act', { key: rowB.key, type: 'archive', fp: rowB.fp })
+    assert.equal(actA.status, 200)
+    assert.equal(actB.status, 200)
+    const stale = await board.call('POST', '/api/undo', { token: actA.json().undoToken })
+    assert.equal(stale.status, 409, stale.body)
+    assert.equal(stale.json().note, 'Nothing to undo.')
+    const liveB = await board.call('POST', '/api/undo', { token: actB.json().undoToken })
+    assert.equal(liveB.status, 200, liveB.body)
+    assert.ok(readFileSync(board.path, 'utf8').includes('Second tab task'))
+    assert.ok(!readFileSync(board.path, 'utf8').includes('Single undo'))
   } finally { await board.close() }
 })
 
@@ -260,13 +303,14 @@ test('Undo after Archive refuses when the archive entry changed since', { timeou
   const board = await startBoard(initial)
   try {
     const row = await board.rowOf('Edited archive')
-    assert.equal((await board.call('POST', '/api/act', { key: row.key, type: 'archive', fp: row.fp })).status, 200)
+    const pArch = await board.call('POST', '/api/act', { key: row.key, type: 'archive', fp: row.fp })
+    assert.equal(pArch.status, 200)
     const afterArchiveProgress = readFileSync(board.path, 'utf8')
     const archFile = join(board.dir, archiveName())
     const editedArchive = readFileSync(archFile, 'utf8').replace('Edited archive', 'Edited in archive')
     writeFileSync(archFile, editedArchive)
 
-    const refused = await board.call('POST', '/api/undo', {})
+    const refused = await board.call('POST', '/api/undo', { token: pArch.json().undoToken })
     assert.equal(refused.status, 409, refused.body)
     assert.equal(refused.json().ok, false)
     assert.equal(refused.json().note, 'Could not undo: that task changed since your press.')
@@ -278,11 +322,12 @@ test('Undo after Archive refuses when the archive entry changed since', { timeou
   const ext = await startBoard(`# Progress\n\n## api-gateway\n${autoStopped('f7a8b9c0', 'api-gateway', 'Extended archive')}\n`)
   try {
     const row = await ext.rowOf('Extended archive')
-    assert.equal((await ext.call('POST', '/api/act', { key: row.key, type: 'archive', fp: row.fp })).status, 200)
+    const pExt = await ext.call('POST', '/api/act', { key: row.key, type: 'archive', fp: row.fp })
+    assert.equal(pExt.status, 200)
     const archFile = join(ext.dir, archiveName())
     const appendedArchive = `${readFileSync(archFile, 'utf8').trimEnd()}\n\n- [x] Appended note\n`
     writeFileSync(archFile, appendedArchive)
-    const refused = await ext.call('POST', '/api/undo', {})
+    const refused = await ext.call('POST', '/api/undo', { token: pExt.json().undoToken })
     assert.equal(refused.status, 409, refused.body)
     assert.equal(refused.json().note, 'Could not undo: that task changed since your press.')
     assert.equal(readFileSync(archFile, 'utf8'), appendedArchive)
@@ -296,9 +341,10 @@ test('Undo after Confirm done or Archive keeps an unrelated block written meanwh
   try {
     // Case A: Confirm done then concurrent block added to the same project
     const rowDone = await board.rowOf('Target task')
-    assert.equal((await board.call('POST', '/api/act', { key: rowDone.key, type: 'done', fp: rowDone.fp })).status, 200)
+    const pDone = await board.call('POST', '/api/act', { key: rowDone.key, type: 'done', fp: rowDone.fp })
+    assert.equal(pDone.status, 200)
     writeFileSync(board.path, `${readFileSync(board.path, 'utf8').trimEnd()}\n\n${otherBlock}`)
-    const undoDone = await board.call('POST', '/api/undo', {})
+    const undoDone = await board.call('POST', '/api/undo', { token: pDone.json().undoToken })
     assert.equal(undoDone.status, 200, undoDone.body)
     const afterDoneUndo = readFileSync(board.path, 'utf8')
     assert.ok(afterDoneUndo.includes('- [ ] Finish synthetic report'), afterDoneUndo)
@@ -306,9 +352,10 @@ test('Undo after Confirm done or Archive keeps an unrelated block written meanwh
 
     // Case B: Archive while unrelated section stays untouched and gets updated concurrently
     const rowArchive = await board.rowOf('Target task')
-    assert.equal((await board.call('POST', '/api/act', { key: rowArchive.key, type: 'archive', fp: rowArchive.fp })).status, 200)
+    const pArchive = await board.call('POST', '/api/act', { key: rowArchive.key, type: 'archive', fp: rowArchive.fp })
+    assert.equal(pArchive.status, 200)
     writeFileSync(board.path, readFileSync(board.path, 'utf8').replace('Running elsewhere', 'Updated concurrent step'))
-    const undoArchive = await board.call('POST', '/api/undo', {})
+    const undoArchive = await board.call('POST', '/api/undo', { token: pArchive.json().undoToken })
     assert.equal(undoArchive.status, 200, undoArchive.body)
     const afterArchiveUndo = readFileSync(board.path, 'utf8')
     assert.ok(afterArchiveUndo.includes('Target task'), afterArchiveUndo)
@@ -325,13 +372,14 @@ test('any later press on the board drops the Undo record', { timeout: 30_000 }, 
     const first = await board.rowOf('Confirmed first')
     const second = await board.rowOf('Next press')
     assert.ok(first && second)
-    assert.equal((await board.call('POST', '/api/act', { key: first.key, type: 'done', fp: first.fp })).status, 200)
+    const pFirst = await board.call('POST', '/api/act', { key: first.key, type: 'done', fp: first.fp })
+    assert.equal(pFirst.status, 200)
     const ticked = await board.call('POST', '/api/act', { key: second.key, type: 'tick', text: 'Tick this later', fp: second.tickFp ?? second.fp, line: second.nextFileLine })
     assert.equal(ticked.status, 200, ticked.body)
     assert.equal(ticked.json().canUndo ?? false, false)
 
     const afterTickProgress = readFileSync(board.path, 'utf8')
-    const undo = await board.call('POST', '/api/undo', {})
+    const undo = await board.call('POST', '/api/undo', { token: pFirst.json().undoToken })
     assert.equal(undo.status, 409, undo.body)
     assert.equal(undo.json().note, 'Nothing to undo.')
     assert.equal(readFileSync(board.path, 'utf8'), afterTickProgress)

@@ -1900,14 +1900,15 @@ const PAGE_SCRIPT = String.raw`
       keepCopyFocus(drawLostResults);
     }
   }
-  function undoAction(targetKey, label, go) {
+  function undoAction(targetKey, label, token, go) {
     if (isUnreachable) return;
     busyOn(go);
     if (targetKey && label && !results[targetKey]) results[targetKey] = { label: label };
     say(w('pressPending'), 'wait', targetKey);
-    call('/api/undo', {}).then(function (data) {
+    call('/api/undo', { token: token }).then(function (data) {
       var ok = !!(data && data.ok);
-      say(data && data.note || w(ok ? 'pressDone' : 'pressFailed'), ok ? 'done' : 'alert', targetKey);
+      var retry = !ok && data && data.retryUndo && token;
+      say(data && data.note || w(ok ? 'pressDone' : 'pressFailed'), ok ? 'done' : 'alert', targetKey, undefined, undefined, undefined, retry ? targetKey : undefined, retry ? token : undefined);
       busyOff(go, ok);
       refresh();
     }, function () {
@@ -1916,7 +1917,7 @@ const PAGE_SCRIPT = String.raw`
   }
   function restoreNotice(node, result) {
     var acts = el('div', 'acts');
-    if (result.canUndo) { var undoBtn = button(w('serveUndo'), function () { undoAction(result.undoTargetKey || '', result.label || '', undoBtn); }); acts.appendChild(undoBtn); }
+    if (result.canUndo) { var undoBtn = button(w('serveUndo'), function () { undoAction(result.undoTargetKey || '', result.label || '', result.undoToken || '', undoBtn); }); acts.appendChild(undoBtn); }
     if (typeof result.unhideKey === 'string' && result.unhideKey.indexOf('hidden:') === 0) acts.appendChild(button(w('showAgain'), function () { act(result.unhideKey, 'unhide'); }));
     if (acts.firstChild) add(node, acts);
   }
@@ -1939,11 +1940,11 @@ const PAGE_SCRIPT = String.raw`
   }
   // unhideKey: a written hide's Show again. It is part of the result before the first paint, because a card the
   // board already drew away paints the result once, as a lost card, and never again (#1786).
-  function say(text, tone, key, copyText, canRetry, unhideKey, undoTargetKey) {
+  function say(text, tone, key, copyText, canRetry, unhideKey, undoTargetKey, undoToken) {
     if (key) {
       var slot = resultSlots[key];
       var previous = results[key];
-      var canUndo = typeof undoTargetKey === 'string' && undoTargetKey !== '';
+      var canUndo = typeof undoTargetKey === 'string' && undoTargetKey !== '' && typeof undoToken === 'string' && undoToken !== '';
       if (canUndo) {
         undoKey = key;
         clearTimeout(undoTimer);
@@ -1951,7 +1952,7 @@ const PAGE_SCRIPT = String.raw`
       } else if (undoKey === key) {
         clearUndoOffer();
       }
-      results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, canRetry: canRetry === true, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '', unhideKey: unhideKey, canUndo: canUndo, undoTargetKey: undoTargetKey || '' };
+      results[key] = { text: text || w('pressFailed'), tone: tone || '', copyText: copyText, canRetry: canRetry === true, pending: tone !== 'done' && tone !== 'alert', awaitingRefresh: tone === 'done', revision: previous ? previous.revision : slot ? slot.revision : '', label: previous ? previous.label : slot ? slot.label : '', unhideKey: unhideKey, canUndo: canUndo, undoTargetKey: undoTargetKey || '', undoToken: undoToken || '' };
       paintResult(key);
       if (!slot || (canUndo && isSlotHidden(slot.node))) keepCopyFocus(drawLostResults);
       return;
@@ -2199,7 +2200,7 @@ const PAGE_SCRIPT = String.raw`
       answered = true;
       clearTimeout(waitTimer);
       delete hideWaiting[key];
-      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok, data.ok && type === 'hide' && unhideKey ? unhideKey : undefined, data.ok && data.canUndo && (type === 'archive' || type === 'done') ? key : undefined);
+      say(data.note || w(data.ok ? 'pressDone' : 'pressFailed'), data.ok ? 'done' : 'alert', key, undefined, type === 'send' && !data.ok, data.ok && type === 'hide' && unhideKey ? unhideKey : undefined, data.ok && data.canUndo && (type === 'archive' || type === 'done') ? key : undefined, data.ok && data.undoToken ? data.undoToken : undefined);
       busyOff(go, data.ok);
       return data.ok;
     }, function () {
