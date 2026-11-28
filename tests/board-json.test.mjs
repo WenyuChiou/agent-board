@@ -20,7 +20,7 @@ const loadSources = async () => {
   } finally { loader.deregister() }
 }
 
-const [{ BOARD_JSON_SCHEMA, boardDocument, collectFinished }, { serveModel }, { buildView }, { parseProgress }, { STRINGS }, { clipped, plain, redact }] = await loadSources()
+const [{ BOARD_JSON_SCHEMA, boardDocument, collectFinished }, { serveModel, serveAction }, { buildView }, { parseProgress }, { STRINGS }, { boardItems, clipped, plain, redact }] = await loadSources()
 const NOW = Date.parse('2026-11-04T12:00:00Z')
 const MINUTE = 60_000
 const block = (id, agent, state, title, steps, at = NOW) => `<!-- auto session=${id} agent=${agent} state=${state} updated=${new Date(at).toISOString()} -->
@@ -474,4 +474,102 @@ ${block('d0123456', 'codex', 'waiting', 'Await review', '- [?] Waiting for revie
   assert.equal(document.counts.working, 0)
   assert.equal(document.counts.waiting, 1)
   assert.equal(document.waiting[0]?.title, 'Await review')
+})
+
+test('a Codex approval step names its command on the computer, and the page on the local network gets the plain line (#1798)', () => {
+  const cases = [
+    { command: 'deploy --target synthetic-staging', description: 'Deploy the synthetic build', tails: [] },
+    // A ` — ` inside the command or the description splits the step, and the tail must not
+    // reach the network through the note either.
+    { command: `echo 'public — private-text'`, description: 'wipe — the synthetic cache', tails: ['private-text', 'synthetic cache'] },
+  ]
+  for (const s of Object.values(STRINGS)) for (const { command, description, tails } of cases) {
+    const source = `## synthetic-api
+${block('d0123456', 'codex', 'waiting', 'Deploy', `- [ ] Waiting for the next instruction\n- [?] ${s.codexApprovalCommand(command, description)}\n<!-- native=codex -->`, NOW - MINUTE)}
+`
+    const view = viewOf(source, s)
+    const options = groupOptions(NOW)
+    const home = serveModel(view, [], s, new Set(), false, undefined, false, options)
+    assert.ok(JSON.stringify(home).includes(command), 'the page on this computer names the command')
+    const lan = serveModel(view, [], s, new Set(), true, undefined, false, options)
+    const drawn = JSON.stringify(lan)
+    const where = []; const walk = (v, path) => { if (typeof v === 'string') { if (v.includes(command)) where.push(path) } else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) walk(x, `${path}.${k}`) }; walk(lan, 'lan')
+    assert.deepEqual(where, [], 'the command is on the local network page')
+    assert.ok(!drawn.includes(command), 'the page on the local network does not carry the command')
+    assert.ok(!drawn.includes(description), 'nor its description')
+    for (const tail of tails) assert.ok(!drawn.includes(tail), `nor the command's tail ${JSON.stringify(tail)}`)
+    assert.equal(lan.asks[0].note, '', 'the note carries none of it either')
+    assert.ok(drawn.includes(s.codexApprovalStep), 'it carries the plain line')
+    // A press on the phone's key still finds the card on this computer.
+    const press = serveAction(boardItems(view, [], true, false), { key: lan.asks[0].key, type: 'hide', text: '', session: '' }, s, true)
+    assert.notEqual(press.type, 'refuse')
+  }
+})
+
+test('a hidden Codex approval card is shown again from the page on the local network, whose key hashes its command (#1798)', () => {
+  const s = STRINGS.en
+  const source = `## synthetic-api
+${block('d0123456', 'codex', 'waiting', 'Deploy', `- [ ] Waiting for the next instruction\n- [?] ${s.codexApprovalCommand(`echo 'public — private-text'`, 'wipe — the synthetic cache')}\n<!-- native=codex -->`, NOW - MINUTE)}
+`
+  const view = viewOf(source, s)
+  const options = groupOptions(NOW)
+  const home = serveModel(view, [], s, new Set(), false, undefined, false, options)
+  // Hiding names the key the computer filed the question under.
+  const hide = serveAction(boardItems(view, [], true, false), { key: home.asks[0].key, type: 'hide', text: '', session: '' }, s, false)
+  assert.equal(hide.type, 'hide')
+  const filed = hide.type === 'hide' ? hide.key : ''
+  assert.notEqual(filed, '')
+  // The question is hidden, and the phone's shelf names it by the hashed key.
+  const hidden = buildView(parseProgress(source), [], null, NOW, 0, {}, s, [filed])
+  const lan = serveModel(hidden, [], s, new Set(), true, undefined, false, options)
+  assert.equal(lan.hidden.length, 1)
+  assert.ok(!lan.hidden[0].key.includes('private-text'), 'the shelf key carries no command words')
+  const unhide = serveAction(boardItems(hidden, [], true, false), { key: lan.hidden[0].key, type: 'unhide', text: '', session: '' }, s, true, [], false, false, undefined, [filed])
+  assert.deepEqual(unhide, { type: 'unhide', key: filed })
+  // Without the filed keys the hashed key does not resolve, as before.
+  const unresolved = serveAction(boardItems(hidden, [], true, false), { key: lan.hidden[0].key, type: 'unhide', text: '', session: '' }, s, true)
+  assert.equal(unresolved.type, 'unhide')
+  assert.notEqual(unresolved.type === 'unhide' ? unresolved.key : '', filed)
+})
+
+test('a Codex approval command with a link or backticks keeps neither on the page on the local network (#1798)', () => {
+  const cases = [
+    { command: 'curl https://internal.example/private-build', description: 'Fetch the synthetic build', field: 'link', leaked: 'https://internal.example/private-build' },
+    { command: '`rm -rf /tmp/synthetic-cache`', description: 'Clear the synthetic cache', field: 'command', leaked: 'rm -rf /tmp/synthetic-cache' },
+  ]
+  for (const s of Object.values(STRINGS)) for (const { command, description, field, leaked } of cases) {
+    const source = `## synthetic-api
+${block('d0123456', 'codex', 'waiting', 'Deploy', `- [ ] Waiting for the next instruction\n- [?] ${s.codexApprovalCommand(command, description)}\n<!-- native=codex -->`, NOW - MINUTE)}
+`
+    const view = viewOf(source, s)
+    const options = groupOptions(NOW)
+    const home = serveModel(view, [], s, new Set(), false, undefined, false, options)
+    // The page on this computer still offers it (the URL scan also takes a full-width
+    // paren that follows it with no space, so this only asks that it holds the link).
+    assert.ok(String(home.asks[0][field]).includes(leaked), 'the page on this computer still offers it')
+    const lan = serveModel(view, [], s, new Set(), true, undefined, false, options)
+    assert.equal(lan.asks[0][field], null, 'the local network page gets none of it')
+    assert.ok(!JSON.stringify(lan).includes(leaked), 'nor anywhere else in the local network model')
+    assert.ok(JSON.stringify(lan).includes(s.codexApprovalStep), 'it carries the plain line')
+  }
+})
+
+test('a Codex approval card archives from the page on the local network, whose key hashes its command (#1798)', () => {
+  const s = STRINGS.en
+  const source = `## synthetic-api
+${block('d0123456', 'codex', 'waiting', 'Deploy', `- [ ] Waiting for the next instruction\n- [?] ${s.codexApprovalCommand('deploy --target synthetic-staging', 'Deploy the synthetic build')}\n<!-- native=codex -->`, NOW - MINUTE)}
+`
+  const view = viewOf(source, s)
+  const options = groupOptions(NOW)
+  const lan = serveModel(view, [], s, new Set(), true, undefined, false, options)
+  // The card offers Archive when its window may be closed; the view assigns that ref for a
+  // stale session, so the ref is set here to pin the guard's resolution, which is what this
+  // test covers: the press names the hashed key, and the fingerprint is the one the page drew.
+  const items = structuredClone(boardItems(view, [], true, false))
+  const ask = items.find(one => one.type === 'ask')
+  assert.ok(ask?.type === 'ask')
+  const ref = { project: 'synthetic-api', title: 'Deploy', line: 3, session: 'd0123456' }
+  ask.ask.archive = ref
+  const press = serveAction(items, { key: lan.asks[0].key, type: 'archive', text: '', session: '', fp: lan.asks[0].fp }, s, true)
+  assert.deepEqual(press, { type: 'archive', ref, title: 'Deploy' })
 })

@@ -32,6 +32,7 @@ import { installControlRoot, withInstallLock } from './install-control'
 import { ConnectTransaction } from './connect-transaction'
 import { boardPromptHelper, boardRequestWords, boardRun, deliveryRequestWords, isBoardRequest } from '../hooks/board-commands'
 import { PROMPT_EVENTS } from '../hooks/inbox'
+import { approvalWords as maskedWords } from '../hooks/redact'
 import { hookProgram, windowsHookNode } from './windows-hook-node'
 import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
@@ -1136,6 +1137,15 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         : mode === '--codex-event' && agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' ? lastQuestion(String(raw.text ?? ''))
           : mode === '--agent-status' && status === 'waiting' && (agent === 'grok' || agent === 'opencode' || agent === 'hermes') ? lastQuestion(message)
             : mode === '--agent-status' && status === 'waiting' && agent === 'antigravity' && (event === undefined || event === 'Stop') ? antigravityQuestion(raw.transcriptPath, session, home) : null
+      // The one tool input a Codex approval keeps (#1798): the command and its description, with secrets and the home folder
+      // masked before they are queued or written. Any other field of the tool input is dropped, as before.
+      const toolInput = typeof raw.tool_input === 'object' && raw.tool_input !== null && !Array.isArray(raw.tool_input) ? raw.tool_input as Json : {}
+      const approvalWords: Json = agent === 'codex' && mode === '--codex-event' && raw.hook_event_name === 'PermissionRequest' && typeof toolInput.command === 'string'
+        ? {
+            approval_command: maskedWords(toolInput.command, home, process.platform === 'win32', 2000),
+            ...(typeof toolInput.description === 'string' ? { approval_description: maskedWords(toolInput.description, home, process.platform === 'win32', 500) } : {}),
+          }
+        : {}
       const antigravityTitle = mode === '--agent-status' && agent === 'antigravity'
         ? resolveAntigravityTitle(session, raw.transcriptPath, raw.artifactDirectoryPath, home)
         : null
@@ -1151,6 +1161,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
           // The end of a `codex exec` run the board started for a Codex app conversation (#557), told by the board's mark.
           ...(agent === 'codex' && payload.hook_event_name === 'SessionEnd' && env[BACKGROUND_TURN_ENV] === '1' ? { background_turn: true } : {}),
           ...(question === null ? {} : { question }),
+          ...approvalWords,
         } : {
           ...(antigravityTitle === null ? {} : antigravityTitle),
           ...(question === null ? {} : { question }),

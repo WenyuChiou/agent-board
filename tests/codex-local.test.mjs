@@ -8251,7 +8251,7 @@ test('setup writes Hermes config where --hermes-dir says, ahead of HERMES_HOME (
   assert.equal(existsSync(hermesConfig(f)), false)
 }))
 
-test('Codex lifecycle hooks never retain conversation and approval payloads, and open nothing that is not a Codex history file', () => fixture(f => {
+test('Codex lifecycle hooks never retain conversation text or an approval payload with no command, and open nothing that is not a Codex history file', () => fixture(f => {
   f.install('--apply')
   const secret = 'DO-NOT-STORE-THIS-PRIVATE-TEXT'
   const transcript = join(f.home, 'nonexistent-transcript')
@@ -8264,6 +8264,104 @@ test('Codex lifecycle hooks never retain conversation and approval payloads, and
   const digest = createHash('sha256').update(`codex:${session}`).digest('hex')
   assert.ok(!readFileSync(join(f.root, 'sessions', `${digest}.json`), 'utf8').includes(secret))
   assert.ok(!existsSync(transcript))
+}))
+
+test('a Codex PermissionRequest names its command and description on the approval step, hides secrets in it, and keeps no other tool input (#1798)', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  const other = 'DO-NOT-STORE-THIS-OTHER-FIELD'
+  const asked = f.event('PermissionRequest', 'turn-1', {
+    tool_name: 'Bash',
+    tool_input: { command: 'Remove-Item -Recurse -Force .\\synthetic-build --password hunter2', description: 'Remove the synthetic build folder', other },
+  })
+  assert.equal(asked.status, 0)
+  const text = readFileSync(f.progress, 'utf8')
+  const step = text.match(/- \[\?\] Codex [^\n]*/)?.[0]
+  assert.ok(step, text)
+  assert.ok(step.includes('Remove-Item -Recurse -Force .\\synthetic-build'), step)
+  assert.ok(step.includes('Remove the synthetic build folder'), step)
+  assert.ok(!step.includes('hunter2'), step)
+  assert.ok(!text.includes(other))
+  assert.match(text, /- \[\?\] Codex [^\n]*\n<!-- native=codex -->\n/)
+  // The board's own views read the same line.
+  const json = JSON.parse(f.command(['--json']).stdout)
+  assert.ok(JSON.stringify(json).includes('Remove the synthetic build folder'))
+  assert.equal(f.event('Stop', 'turn-1').status, 0)
+  assert.ok(readFileSync(f.progress, 'utf8').includes(step.replace('[?]', '[x]')))
+}))
+
+test('a Codex approval command is masked after its white space is made one line, for each way a command line writes a secret (#1798)', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  const secret = 'synthetic-private-value'
+  const hidden = [
+    `deploy --token  ${secret}`,
+    `deploy --password\t${secret}`,
+    `deploy --password\n${secret}`,
+    `deploy --password \r\n  ${secret}`,
+    `deploy --access-token ${secret}`,
+    `deploy --passwd ${secret}`,
+    `deploy --api-key=${secret}`,
+    `deploy --client-secret ${secret}`,
+    `sshpass -p ${secret} ssh host`,
+    `mysql -pSynthetic1${secret} db`,
+    `mysql -p${secret}word db`,
+    `curl -u user:${secret} https://example.invalid`,
+    `curl --user=user:${secret} https://example.invalid`,
+    `curl -u "user:${secret}" https://example.invalid`,
+    `curl https://user:${secret}@example.invalid/path`,
+  ]
+  for (const command of hidden) {
+    assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'Bash', tool_input: { command, description: `uses ${command.split(/\s/)[0]} --token  ${secret}` } }).status, 0)
+    const text = readFileSync(f.progress, 'utf8')
+    assert.ok(!text.includes(secret), JSON.stringify(command))
+    assert.ok(text.includes('•••'), JSON.stringify(command))
+  }
+  // An ordinary flag with the same letters is left as it was written.
+  for (const command of ['mkdir -p build/out', 'find . -name x -print', 'perl -pi -e s/a/b/ file', 'ssh -p 22 host', 'deploy --target staging']) {
+    assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'Bash', tool_input: { command } }).status, 0)
+    assert.ok(readFileSync(f.progress, 'utf8').includes(`Codex asks to run a command: ${command}\n`), command)
+  }
+}))
+
+test('a Codex approval command masks a quoted password whole, in both quote styles, and a password attached to -u (#1798)', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  const cases = [
+    ['mysql -p"Alpha1 PrivateSuffix" synthetic_db', 'mysql -p••• synthetic_db'],
+    ["mysql -p'Alpha1 PrivateSuffix' synthetic_db", 'mysql -p••• synthetic_db'],
+    ['curl -uuser:SyntheticPass1 https://example.invalid', 'curl -u••• https://example.invalid'],
+    ['curl -u user:SyntheticPass1 https://example.invalid', 'curl -u ••• https://example.invalid'],
+  ]
+  for (const [command, masked] of cases) {
+    assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'Bash', tool_input: { command } }).status, 0)
+    const text = readFileSync(f.progress, 'utf8')
+    assert.ok(!text.includes('PrivateSuffix'), command)
+    assert.ok(!text.includes('SyntheticPass1'), command)
+    assert.ok(text.includes(`Codex asks to run a command: ${masked}\n`), command)
+  }
+}))
+
+test('a Codex approval command and description lose control characters and bidi marks (#1798)', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  const bad = [...[0, 7, 8, 27, 127, 0x85, 0x202e, 0x2066, 0x200b, 0xfeff].map(code => String.fromCharCode(code)), String.fromCharCode(0x034f, 0xfe0f), String.fromCodePoint(0xE0001)].join('')
+  assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'Bash', tool_input: { command: `echo a${bad}b${String.fromCharCode(27)}[31mred`, description: `say${bad}hi` } }).status, 0)
+  const step = readFileSync(f.progress, 'utf8').match(/- \[\?\] Codex [^\n]*/)?.[0]
+  assert.equal(step, '- [?] Codex asks to run a command: echo a b [31mred (say hi)')
+}))
+
+test('a long Codex approval command is cut so its description still shows, and a request with no command keeps the plain line (#1798)', () => fixture(f => {
+  f.install('--apply')
+  assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
+  const long = `powershell -NoProfile -Command ${'Get-ChildItem -Recurse | '.repeat(30)}Remove-Item`
+  assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'Bash', tool_input: { command: long, description: 'Remove the synthetic build folder' } }).status, 0)
+  const step = readFileSync(f.progress, 'utf8').match(/- \[\?\] Codex [^\n]*/)?.[0]
+  assert.ok(step)
+  assert.ok([...step.slice(6)].length <= 120, step)
+  assert.ok(step.includes('powershell -NoProfile') && step.includes('…') && step.endsWith('(Remove the synthetic build folder)'), step)
+  assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'apply_patch', tool_input: { patch: 'x' } }).status, 0)
+  assert.match(readFileSync(f.progress, 'utf8'), /- \[\?\] Codex asks to run a command\n/)
 }))
 
 test('a Codex PermissionRequest adds a waiting approval step with a native line, and Stop closes it', () => fixture(f => {

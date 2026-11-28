@@ -12,7 +12,8 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { messageStatus } from './message-status'
 import type { StatusState, StatusTone } from './message-status'
-import { agentLabel } from './strings'
+import { agentLabel, STRINGS } from './strings'
+import { sha256 } from './sha256'
 import type { Tone } from './palette'
 import { cellCode } from './progress-bar'
 import { RESUME } from './parse'
@@ -910,8 +911,36 @@ export const serveModel = (view: View, pending: readonly PendingTurn[], s: Strin
   if (isLan) {
     for (const item of [...model.asks, ...model.reminder, ...model.older, ...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows), ...model.finished, ...model.recent]) delete item.dir
     for (const row of [...model.idle, ...model.stopped, ...model.groups.flatMap(one => one.rows)]) delete row.sessionId
+    lanApprovals(model)
   }
   return model
+}
+
+// A Codex approval step names its command (#1798), and the command is the computer's only, like a resume command: the page on
+// the local network gets the plain line. A key is built from the step's words and a press names it, so a key keeps a short
+// hash of what was cut, and `lanKey` gives the same key from the computer's side to find the item the press names.
+const APPROVAL_HEADS = Object.values(STRINGS).map(words => ({ head: words.codexApprovalCommand('', '').split('')[0]!, plain: words.codexApprovalStep }))
+const lanWords = (text: string, isKey: boolean): string => {
+  for (const { head, plain } of APPROVAL_HEADS) {
+    const at = text.indexOf(head)
+    if (at >= 0) return `${text.slice(0, at)}${plain}${isKey ? `#${sha256(text.slice(at + head.length)).slice(0, 8)}` : ''}`
+  }
+  return text
+}
+const LAN_KEYS = new Set(['key', 'unhideKey', 'hideKey', 'questionId'])
+const lanApprovals = (value: unknown): void => {
+  if (typeof value !== 'object' || value === null) return
+  const record = value as Record<string, unknown>
+  // A note beside approval words comes from the same step, and so do the command and
+  // link the question's words imply: the network must read none of them.
+  const isApproval = Object.values(record).some(one => typeof one === 'string' && APPROVAL_HEADS.some(({ head }) => one.includes(head)))
+  for (const name of Object.keys(record)) {
+    const one = record[name]
+    if (typeof one !== 'string') { lanApprovals(one); continue }
+    if (isApproval && (name === 'note' || name === 'noteLine')) record[name] = ''
+    else if (isApproval && (name === 'command' || name === 'link')) record[name] = null
+    else record[name] = lanWords(one, LAN_KEYS.has(name))
+  }
 }
 
 // `asked`: with a reply, the question the page showed it under ('' for none). `fp`: the line's
@@ -945,22 +974,36 @@ export const replyText = (raw: string): string =>
 // gone or changed since the page drew it is refused, never taken for the one now in its place.
 // From the local network (`isLan`) a reply to an agent is refused: it would run a program on
 // the computer, and the network's page is plain HTTP that others on the network could read.
-export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false, connections: readonly Connection[] = [], isMessaging = false, allowResume = false, _routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeAction => {
-  const action = actionOf(items, request, s, isLan, connections, isMessaging, allowResume)
+// A key the phone names is the hashed form `lanWords` gives a key holding approval
+// words: the computer finds the item by the key it filed, or by that hashed form.
+// Both the action and its final check resolve the same way, so a press on an approval
+// card from the phone is checked against the line the phone drew.
+const findItem = (items: readonly BoardItem[], key: string, isLan: boolean): BoardItem | undefined =>
+  items.find(one => one.key === key) ?? (isLan ? items.find(one => lanWords(one.key, true) === key) : undefined)
+
+export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false, connections: readonly Connection[] = [], isMessaging = false, allowResume = false, _routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES, hiddenKeys: readonly string[] = []): ServeAction => {
+  const action = actionOf(items, request, s, isLan, connections, isMessaging, allowResume, hiddenKeys)
   if (action.type === 'refuse' && action.note === '') return { type: 'refuse', note: s.pressNothing }
   if (action.type !== 'tick' && action.type !== 'archive' && action.type !== 'done' && action.type !== 'send' && action.type !== 'message') return action
   // The key is a project and a title, which another session's block can take over, and a step
   // can be reworded under it: the press goes through only on the block and words the page drew.
-  const item = items.find(one => one.key === request.key)
+  const item = findItem(items, request.key, isLan)
 
   if (item === undefined || request.fp !== fingerprint(item, items, request.type === 'tick' && (item.type === 'ask' || request.line !== undefined))) return { type: 'refuse', note: s.boardLineChanged }
   return action.type === 'tick' ? { ...action, ref: guardStep(action.ref, items) } : action
 }
 
-const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean): ServeAction => {
-  // A hidden question is off the board: it is named by the key it was hidden under.
-  if (request.type === 'unhide') return request.key.startsWith('hidden:') ? { type: 'unhide', key: request.key.slice('hidden:'.length) } : { type: 'refuse', note: '' }
-  const item = items.find(one => one.key === request.key)
+const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean, hiddenKeys: readonly string[] = []): ServeAction => {
+  // A hidden question is off the board: it is named by the key it was hidden under. That key
+  // holds the step's words, so the key the phone names is the hashed form `lanWords` gives
+  // it: file the press under the key the computer filed it under.
+  if (request.type === 'unhide') {
+    if (!request.key.startsWith('hidden:')) return { type: 'refuse', note: '' }
+    const shown = request.key.slice('hidden:'.length)
+    const filed = isLan ? hiddenKeys.find(key => key === shown || lanWords(`hidden:${key}`, true) === request.key) : undefined
+    return { type: 'unhide', key: filed ?? shown }
+  }
+  const item = findItem(items, request.key, isLan)
   if (item === undefined) return { type: 'refuse', note: s.boardLineChanged }
   if (request.type === 'tick') {
     if (item.type === 'ask') {
