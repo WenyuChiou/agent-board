@@ -1015,12 +1015,17 @@ export const buildView = (
   // The AI that wrote a hand-kept task: its `<!-- session=<id> -->` trailer, matched to the block with
   // that session (or its full resume id). A trailer that matches no block names no one, and so does a
   // task with none: both stay '' and show only in Needs you and the full list (#1866). A Claude block
-  // gives 'claude', not '', because '' on a hand-kept task means no writer.
+  // gives 'claude', not '', because '' on a hand-kept task means no writer. An id that blocks of two
+  // different AIs carry names no one either, so the task stays in Needs you under no AI (#1916).
   const writerAgents = new Map<string, string>()
   for (const project of projects) {
     for (const task of project.tasks) {
       if (task.auto === null) continue
-      for (const id of [task.auto.session, task.auto.resume]) if (id !== null && id !== '' && !writerAgents.has(id)) writerAgents.set(id, task.auto.agent)
+      for (const id of [task.auto.session, task.auto.resume]) {
+        if (id === null || id === '') continue
+        const known = writerAgents.get(id)
+        writerAgents.set(id, known === undefined || known === task.auto.agent ? task.auto.agent : '')
+      }
     }
   }
   const agentOf = (task: ProgressTask): string =>
