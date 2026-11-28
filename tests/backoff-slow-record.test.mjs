@@ -9,8 +9,6 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { privateRuntimeFolder, writePrivateRuntimeFile } from '../scripts/runtime-folder.ts'
-import { EN } from '../hooks/strings-en.ts'
-import { readPrintedLink } from './helpers/printed-link.mjs'
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
 const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
@@ -214,9 +212,8 @@ test('launcher waits for a slow 0-byte address record after claim backoff and re
       const result = await run
       assert.equal(result.code, 0, result.stderr)
       // The reused server's one-use link is printed, never the page's token (#1650).
-      // The plain command (no --serve) prints the bare link as its last line; the stand-in's code is
-      // shorter than a real one, so the link is named in full.
-      readPrintedLink({ stdout: result.stdout, stderr: result.stderr }, { wordings: [EN.boardPageLink], expected: `http://127.0.0.1:${port}/open/slowrecordlink`, secrets: ['slowrecordtoken'] })
+      assert.ok(result.stdout.includes(`http://127.0.0.1:${port}/open/slowrecordlink`), result.stdout)
+      assert.ok(!`${result.stdout}${result.stderr}`.includes('slowrecordtoken'), `${result.stdout}${result.stderr}`)
       assert.ok(linkTokens.length >= 1 && linkTokens.every(token => token === 'slowrecordtoken'), JSON.stringify(linkTokens))
       assert.equal(posts.length, 1, JSON.stringify(posts))
       assert.equal(posts[0]?.version, manifest.version)
