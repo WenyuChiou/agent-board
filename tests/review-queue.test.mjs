@@ -278,6 +278,11 @@ test('a reviewer the author\'s lane started new for this review counts as an app
     assert.deepEqual(queue(tier, undefined, '', [bot, unreadable]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'the approval line cannot be read; write it in the R2 form']], tier)
     assert.deepEqual(queue(tier, undefined, '', [bot, unreadable]).approvedNow, [], tier)
   }
+  // A note after a line break belongs to the next line, so the author's own name approves nothing (#1974).
+  for (const broken of ['\r', '\u2028']) {
+    const own = by('WenyuChiou', answered(`codex${broken}Assistant (started new for this review)`))
+    assert.deepEqual(queue('normal', undefined, '', [bot, own]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approval is by the author']], JSON.stringify(broken))
+  }
 })
 
 test('a different lane of the same base name is a different agent, not the author', () => {
