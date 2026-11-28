@@ -87,7 +87,7 @@ An answer to an agent's question and a message you send it travel the same way, 
 | Where | How |
 |---|---|
 | In an agent | `/agent-board` (`$agent-board` in Codex) |
-| A terminal | `npx @wenyuchiou/agent-board`: the terminal board in an interactive terminal over SSH or on Linux with no display, unless an agent's setting such as `HERMES_HOME` or `OPENCODE_CONFIG_DIR` is set in that shell; plain text in CI; the page everywhere else. `--watch` gives the terminal board in any interactive terminal |
+| A terminal | `npx @wenyuchiou/agent-board`: the terminal board in an interactive terminal over SSH or on Linux with no display (profile folder settings such as `HERMES_HOME` or `OPENCODE_CONFIG_DIR` stay on the terminal board; recognized agent sessions such as Claude Code, Codex, Cursor, OpenCode, Hermes, Grok, or AGENT_BOARD_AGENT open the page); plain text in CI; the page everywhere else. `--watch` gives the terminal board in any interactive terminal |
 | A phone on the same Wi-Fi | `npx @wenyuchiou/agent-board --lan` and scan the QR code. The phone can look, tick, archive and close the board, but cannot send an answer (it shows the answer to copy). Use it on a network you trust: the link is not encrypted and anyone who has it can open the page |
 | An agent reading the board | `npx @wenyuchiou/agent-board --json` ([fields](docs/BOARD-JSON.md)) |
 
