@@ -32,8 +32,8 @@ npx @wenyuchiou/agent-board@next
 
 ## 你會得到什麼
 
-- **問題排最前面。** 不管是哪個 agent 問的，在等你回答的問題都會排到最上面；它給的選項讀得出來，就每個選項一顆按鈕，否則自己輸入回答。
-- **每個 agent 留在原本的地方。** agent 繼續在自己的終端機和 Codex、Antigravity 桌面 app 裡跑，登入和計費都不變；看板讀的是它們 hooks 的回報，關掉看板也不會停掉任何 session。
+- **問題排最前面。** 不管是哪個 agent 問的，在等你回答的問題都會排到最上面；每個選項一顆按鈕：選項來自 agent 交給看板的選項，或一個簡短的「A 還是 B？」問題的兩邊（`24 小時還是 7 天？`）。回覆裡的編號或列點清單不會變成按鈕。你隨時都可以自己輸入回答。
+- **每個 agent 留在原本的地方。** agent 繼續在自己的終端機和 Codex、Antigravity 桌面 app 裡跑；看板讀的是它們 hooks 的回報，關掉看板也不會停掉任何 session。
 - **在本機、純文字。** 一個你可以自己看、自己改的 Markdown 檔，只在 127.0.0.1 的網頁，看板本身不呼叫模型。
 - **一個指令裝、一個指令移除。** `setup` 寫入前先列出要改什麼；`remove` 拿掉 setup 寫的東西，不動你自己的設定。
 
@@ -61,7 +61,7 @@ npx @wenyuchiou/agent-board@next
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board`（看板網頁） | 尚未支援 |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板網頁 | Codex app 完全結束後（只關視窗不算），在背景執行；回覆最多等 30 分鐘。實際跑過 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 卡片有「排入」時可排給它。桌面 app：實際跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板網頁 | 在 Antigravity 的 Automations 頁面開著它的 sidecar 時，看板會替它開始新的一輪；沒開時，卡片有「排入」時可排給它。桌面 app：排入實際跑過，開始新的一輪還沒跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板網頁 | 尚未測試 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板網頁 | 它空下來就送出。沒有單獨跑過；它的外掛把它回報成終端機，所以跟終端機一樣處理 |
 

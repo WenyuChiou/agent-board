@@ -110,6 +110,59 @@ const firstOption = (text: string): string =>
 const SHARED_TAIL = /^(\S+)\s+(?:for|in|on|with|to|at|as|from|into|via)\s+\S.*$/i
 const pairedLast = (first: string, last: string): string => /^[^\s㐀-鿿]+$/.test(first) ? last.replace(SHARED_TAIL, '$1') : last
 
+// A question frame left on the first option (`Should the export keep 24 hours` for `Should the
+// export keep 24 hours or 7 days of history?`) would send the question's own words as an answer
+// (#1640). When the last option opens with a number, the options are parallel amounts: the first
+// starts at the lead's last number (`24 hours`). The last option stays whole (`7 days of history`):
+// words after it may be shared context or its own qualifier (`4 hours with a sandbox`), and the
+// button must not drop a qualifier. A lead with no such number keeps its words, as before.
+const NUMBER = /^\d/
+// Words that join the last number to an earlier one (`3 to 5`, `1 day and 12 hours`, `3 - 5`).
+const RANGE_JOIN = /^(?:and|or|to|through|thru|plus|\+|-|–|~)$/i
+// Words that only ever bound a number (`at least 2`, `more than 3`, `between 3`): anywhere in the lead
+// they keep the words whole (`at least a full 24 hours`).
+const BOUND = /^(?:than|least|approximately|roughly|nearly|almost|between|within)$/i
+// Words that bound a number only when they lead into it (`about the last 3`, `max of 3`, `from 2`);
+// elsewhere they name the subject (`the export from staging`, `the maximum retry limit`).
+const LEADING_BOUND = /^(?:most|under|over|below|above|about|around|from|max|min|maximum|minimum)$/i
+// Words that can sit between a bound and its number (`about the last 24 hours`, `max of 3`).
+const AMOUNT_LEAD = /^(?:the|a|an|last|first|next|past|of|just|only|another|full|whole|entire|extra|additional)$/i
+const SPELLED = /^(?:a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty|thirty|forty|fifty|sixty|hundred|thousand|half|few|a few|several|couple|dozen)$/i
+const UNIT = /^(?:ms|s|secs?|seconds?|mins?|minutes?|h|hrs?|hours?|d|days?|w|wks?|weeks?|months?|y|yrs?|years?|[kmgt]i?b|bytes?|%)$/i
+// The options are amounts but the first one's start is unclear: no buttons, only the reply box, rather
+// than a button that starts with the question's words or sends a different amount (#1640).
+const UNCLEAR_AMOUNTS: string[] = []
+const parallelAmounts = (first: string, last: string): [string, string] | typeof UNCLEAR_AMOUNTS | null => {
+  if (!CLAUSE_OPENING.test(first) || CJK.test(first) || CJK.test(last)) return null
+  const lastWords = last.split(/\s+/)
+  if (!NUMBER.test(lastWords[0] ?? '')) return null
+  const firstWords = first.split(/\s+/)
+  const from = firstWords.findLastIndex(word => NUMBER.test(word))
+  if (from <= 0) return null
+  // When the last number is part of a longer amount, its start is unclear, so there are no buttons
+  // rather than a shorter or unbounded amount: a compound amount (`1h 30m`, `1 day 12 hours`,
+  // `1 day and 12 hours`), a range (`3 to 5 days`) or a bound (`at least 2 GB`, `up to 2 GB`).
+  // A number in the subject (`worker 2 keep 24 hours`) is followed by no unit and joins nothing.
+  const word = (index: number): string => (firstWords[index] ?? '').replace(/,$/, '')
+  const amountEndsAt = (index: number): boolean => NUMBER.test(word(index)) || (UNIT.test(word(index)) && NUMBER.test(word(index - 1)))
+  const before = word(from - 1)
+  // A bound leading into the number, directly or across words like `the last` (`about the last 24
+  // hours`, `max of 3`), means no buttons, so a button never drops it. A word that only bounds numbers
+  // counts within the three words before that (`more than the usual 24 hours`); further back it is
+  // in the subject (`the service within the cluster wait 24 hours`).
+  let lead = from - 1
+  while (lead > 0 && AMOUNT_LEAD.test(word(lead))) lead -= 1
+  const bounded = LEADING_BOUND.test(word(lead)) || [lead, lead - 1, lead - 2].some(index => index >= 0 && BOUND.test(word(index)))
+  // A join word other than `to` (`between three and 5`) means no buttons too. `to` joins a range
+  // only after an amount, spelled or not (`3 to 5`, `three to 5`, `up to 5`); after a noun it only
+  // names the value (`limit to 3`).
+  if (amountEndsAt(from - 1) || bounded) return UNCLEAR_AMOUNTS
+  if (RANGE_JOIN.test(before) && (before.toLowerCase() !== 'to' || amountEndsAt(from - 2) || SPELLED.test(word(from - 2)) || /^(?:up|down|from)$/i.test(word(from - 2)))) return UNCLEAR_AMOUNTS
+  const amount = firstWords.slice(from)
+  if (amount.length > lastWords.length) return UNCLEAR_AMOUNTS
+  return [amount.join(' '), last]
+}
+
 const lastOption = (text: string): string => {
   const option = text.trim()
   // These common nouns end in the same characters as question particles.
@@ -182,6 +235,8 @@ const optionsOf = (text: string): string[] => {
   const rest = lastOption(match[2] ?? '')
   // Reply length must not turn a real choice into a yes/no question; interfaces clip labels.
   const first = firstOption(lead)
+  const amounts = parallelAmounts(first, rest)
+  if (amounts !== null) return amounts
   return [first, pairedLast(first, rest)].filter(one => one !== '')
 }
 
@@ -246,6 +301,7 @@ export const askOf = (
   let kind: AskKind = 'reply'
   if (WAIT.test(noteWords) || (noteWords === '' && WAIT.test(subjectWords))) kind = 'wait'
   else if (options.length >= 2) kind = 'choose'
+  else if (options === UNCLEAR_AMOUNTS) kind = 'reply'
   else if (isYesNo(words)) kind = 'confirm'
   else if (link !== null || REVIEW.test(words)) kind = 'review'
   else if (command !== null || DO.test(words)) kind = 'do'

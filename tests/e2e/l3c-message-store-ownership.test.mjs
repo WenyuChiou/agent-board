@@ -256,16 +256,17 @@ test('three real --serve starts on the default store collide and every start pri
         assert.equal(outcomes[i].code, 0, `Round ${r} start ${i} failed (code ${outcomes[i].code}): stdout=${JSON.stringify(outcomes[i].stdout)} stderr=${JSON.stringify(outcomes[i].stderr)}`)
       }
       const urls = outcomes.map(o => {
-        const match = /(http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+)/.exec(o.stdout)
+        assert.doesNotMatch(o.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
+        const match = /(http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+)/.exec(o.stdout)
         return match?.[1]
       })
       for (let i = 0; i < 3; i++) {
         assert.ok(urls[i], `Round ${r} start ${i} printed no URL: stdout=${JSON.stringify(outcomes[i].stdout)} stderr=${JSON.stringify(outcomes[i].stderr)}`)
       }
-      assert.equal(urls[0], urls[1], `Round ${r} starts 0 and 1 printed different URLs`)
-      assert.equal(urls[1], urls[2], `Round ${r} starts 1 and 2 printed different URLs`)
+      assert.equal(new URL(urls[0]).origin, new URL(urls[1]).origin, `Round ${r} starts 0 and 1 printed different server origins`)
+      assert.equal(new URL(urls[1]).origin, new URL(urls[2]).origin, `Round ${r} starts 1 and 2 printed different server origins`)
       const page = running
-      assert.equal(page?.url, urls[0], `Round ${r}: the running page is not the one every start printed`)
+      assert.equal(new URL(page?.url).origin, new URL(urls[0]).origin, `Round ${r}: the running page is not the one every start printed`)
 
       // Each round's page must stop, or the next round only finds it again.
       const closed = await closePage(page)
@@ -343,10 +344,35 @@ const holderWorld = ageMs => {
       await wait(50)
     }
   }
-  const linkOf = text => /http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/.exec(text)?.[0]
+  const tokensByOrigin = new Map()
+  const rememberTokens = () => {
+    try {
+      for (const entry of readdirSync(world.root, { recursive: true, withFileTypes: true })) {
+        if (!entry.isFile() || (!entry.name.endsWith('.json') && entry.name !== 'server.owner')) continue
+        try {
+          const parsed = JSON.parse(readFileSync(join(entry.parentPath ?? entry.path, entry.name), 'utf8'))
+          if (typeof parsed.url !== 'string') continue
+          const u = new URL(parsed.url)
+          const t = u.searchParams.get('t')
+          if (t) tokensByOrigin.set(u.origin, t)
+        } catch {}
+      }
+    } catch {}
+  }
+  const linkOf = text => {
+    assert.doesNotMatch(text, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
+    const link = /http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/.exec(text)?.[0]
+    if (link) rememberTokens()
+    return link
+  }
   const pingOf = async link => {
     const uri = new URL(link)
-    const res = await fetch(new URL('/api/ping', uri), { headers: { 'x-board-token': uri.searchParams.get('t') }, signal: AbortSignal.timeout(5000) })
+    let token = uri.searchParams.get('t') ?? tokensByOrigin.get(uri.origin)
+    if (!token) {
+      rememberTokens()
+      token = tokensByOrigin.get(uri.origin) ?? ''
+    }
+    const res = await fetch(new URL('/api/ping', uri), { headers: { 'x-board-token': token }, signal: AbortSignal.timeout(5000) })
     return res.ok ? res.json() : null
   }
   return { world, env, kids, deadPage, board, linkOf, pingOf }
@@ -464,7 +490,7 @@ test('two starts that find the same dead page end with one page', { timeout: 120
   const [a, b] = await Promise.all([h.board(), h.board()])
   const links = [h.linkOf(a.stdout), h.linkOf(b.stdout)]
   assert.ok(links[0] && links[1], JSON.stringify([a, b]))
-  assert.equal(links[0], links[1])
+  assert.equal(new URL(links[0]).origin, new URL(links[1]).origin)
   assert.equal(await untilGone(dead.pid), true)
 }))
 
@@ -496,7 +522,9 @@ test('a start while the page runs reaches that page', { timeout: 120_000 }, () =
   // As a child run with another runtime folder sees it (#1587): the page's address file is not where it looks.
   for (const name of addresses) unlinkSync(join(run, name))
   const again = await h.board()
-  assert.equal(h.linkOf(again.stdout), link, JSON.stringify(again))
+  const againLink = h.linkOf(again.stdout)
+  assert.ok(againLink, JSON.stringify(again))
+  assert.equal(new URL(againLink).origin, new URL(link).origin, JSON.stringify(again))
   assert.ok(await h.pingOf(link))
 }))
 

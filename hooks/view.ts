@@ -150,6 +150,12 @@ export type WaitingItem = {
   archive?: TaskRef
 }
 
+// Whether a question's own session may still be at work, so archiving it waits until it stops:
+// "Still running" is said only of such a question, never of an ended, kept or review-only one,
+// nor of one that can be archived now (#155).
+export const isLiveAsk = (item: WaitingItem): boolean =>
+  item.where !== 'manual' && item.isKept !== true && item.canHide !== false && item.archive === undefined && item.auto !== 'ended'
+
 // The one thing the top of the pane puts in front of the person: the most pressing thing
 // they can act on, chosen in this order: something to answer or do now, work due today or
 // overdue, something stuck, then something that waits on someone else.
@@ -1217,6 +1223,9 @@ export const buildView = (
           target: effectiveTarget,
           ...(task.auto === null ? {} : { auto: task.auto.state === 'done' || isComplete || isGone || isSilence ? 'ended' as const : task.auto.state, nativeSession: task.auto.resume ?? task.auto.session }),
           ...(mayBeClosed && task.auto !== null ? { mayBeClosed: true as const, archive: { project: name, title: task.title, line: task.line, session: task.auto.session } } : {}),
+          // An ended session's question archives its task where it is shown, as the row's Archive
+          // does under the same rule (#155): nothing is running that it could wait for.
+          ...(isInactive && task.auto !== null && (!isSilence || isGone) ? { archive: { project: name, title: task.title, line: task.line, session: task.auto.session } } : {}),
         })
       })
       const carriedAsks: WaitingItem[] = []

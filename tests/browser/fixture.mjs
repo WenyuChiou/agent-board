@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
+import { recordSocketState } from './socket-state.mjs'
 
 const execFileAsync = promisify(execFile)
 const repository = fileURLToPath(new URL('../..', import.meta.url))
@@ -136,7 +137,7 @@ const findServerRecord = (root, url) => {
       } else if (entry.isFile() && entry.name.endsWith('.json')) {
         try {
           const value = JSON.parse(readFileSync(path, 'utf8'))
-          if (value.url === url && Number.isInteger(value.pid) && value.pid > 0) return { path, pid: value.pid }
+          if (typeof value.url === 'string' && new URL(value.url).origin === new URL(url).origin && Number.isInteger(value.pid) && value.pid > 0) return { path, pid: value.pid, url: value.url }
         } catch {}
       }
     }
@@ -274,11 +275,13 @@ export const browserFixture = async (name, run, { hasTouch = false } = {}) => {
     const startServer = async ({ messages = false, language = 'en', allowResume = false } = {}) => {
       const args = ['--serve', '--no-open', '--quiet-board', ...(language === null ? [] : ['--lang', language]), ...(messages ? ['--messages-dir', join(root, 'messages')] : []), ...(allowResume ? ['--allow-resume'] : [])]
       const result = await commandEvidence(evidence, 'serve', installedScript, args, env, boardRoot)
-      const url = result.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/\?t=[\w-]+/)?.[0]
-      assert.ok(url, result.stdout)
-      server = { url, record: findServerRecord(root, url) }
-      assert.ok(server.record, 'the owned localhost server record was not found below the fixture root')
-      return url
+      const openUrl = result.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)?.[0]
+      assert.ok(openUrl, result.stdout)
+      assert.doesNotMatch(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
+      const record = findServerRecord(root, openUrl)
+      assert.ok(record, 'the owned localhost server record was not found below the fixture root')
+      server = { url: record.url, record }
+      return record.url
     }
     await run({ root, env, home, progress, installedScript, evidence, page, startServer })
   } catch (error) {
@@ -289,6 +292,8 @@ export const browserFixture = async (name, run, { hasTouch = false } = {}) => {
     const finish = async action => {
       try { await action() } catch (error) { errors.push(error) }
     }
+    // A socket the runner would not give (#1810): what the system held then, before cleanup frees any of it.
+    if (failure) await finish(() => recordSocketState(failure, evidence))
     if (page) await finish(() => page.screenshot({ path: join(evidence, `${failure ? 'failure' : 'final'}.png`), fullPage: true }))
     if (context) await finish(() => context.tracing.stop({ path: join(evidence, 'trace.zip') }))
     if (context) await finish(() => context.close())

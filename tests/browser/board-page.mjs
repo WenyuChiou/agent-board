@@ -16,6 +16,22 @@ export class BoardPage {
     return this.main.getByRole('article').filter({ hasText: words })
   }
 
+  async openQuestion(words) {
+    const card = this.question(words)
+    const rail = this.page.locator('#detail-rail')
+    const isWide = await this.page.evaluate(() => window.innerWidth >= 1440)
+    if (isWide) {
+      if (!(await card.evaluate(node => node.classList.contains('selected')))) {
+        await card.locator('button.q-toggle').click()
+      }
+      await rail.waitFor({ state: 'visible' })
+      return rail
+    }
+    const more = card.locator('button.q-toggle')
+    if ((await more.getAttribute('aria-expanded')) !== 'true') await more.click()
+    return card
+  }
+
   // A task is one row; pressing it opens its details in the side rail from 1440 px up and in place below.
   task(title) {
     return this.main.locator('li.row').filter({ hasText: title })
@@ -23,6 +39,9 @@ export class BoardPage {
 
   async openTask(title) {
     const task = this.task(title)
+    // Idle, stopped and done rows sit in a closed fold on the Overview (#1023): open the one that holds this row first.
+    const shelf = this.main.locator('.shelf:not(.open)').filter({ has: this.page.locator('li.row').filter({ hasText: title }) })
+    if (await shelf.count()) await shelf.first().locator(':scope > .shelf-head').click()
     await task.locator('.row-btn').first().click()
     const rail = this.page.locator('#detail-rail')
     if (await rail.isVisible()) return rail

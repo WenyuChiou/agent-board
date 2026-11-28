@@ -460,16 +460,16 @@ describe('L0 discover and install from the README', () => {
       'zh-CN': ['Agent', '打开看板', '你的回复怎么送到'],
     }
     // Words of the page and pane cells; "Not tested yet" is MESSAGING.md's Implemented with no live run, the Codex app's
-    // cell gives its Verified reopen route (a background turn once the app is quit, #557), and
-    // Antigravity's cell gives its desktop app's Verified next-turn route and its IDE's Not tested apart; OpenCode's
-    // app shares the terminal's surface id, so its card sends like the terminal's with no run of its own (#1591).
+    // cell gives its Verified reopen route (a background turn once the app is quit, #557), Antigravity's cell gives the
+    // sidecar's new turn (no live run yet, #1396), its desktop app's Verified next-turn route and its IDE's Not tested
+    // apart; OpenCode's app shares the terminal's surface id, so its card sends like the terminal's with no run of its own (#1591).
     const DESKTOP = {
-      en: { pane: '`/agent-board` (board page)', page: 'Board page', notYet: 'Not yet', untested: 'Not tested yet', appNext: 'Held for the session when its card offers it. Desktop app: checked in a live run; IDE: no run of its own, and it is treated like the app when its hook reports it as the app\'s surface; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support)', second: 'The second Quick start command', appNow: 'Sent when it is free. No run of its own; its plugin reports it as the terminal, so it is treated the same', appReopen: 'Runs in the background once the Codex app is fully quit (closing its window is not enough); a reply waits up to 30 minutes for that. Checked in a live run' },
-      'zh-TW': { pane: '`/agent-board`（看板網頁）', page: '看板網頁', notYet: '尚未支援', untested: '尚未測試', appNext: '卡片有「排入」時可排給它。桌面 app：實際跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文）', second: '快速開始的第二個指令', appNow: '它空下來就送出。沒有單獨跑過；它的外掛把它回報成終端機，所以跟終端機一樣處理', appReopen: 'Codex app 完全結束後（只關視窗不算），在背景執行；回覆最多等 30 分鐘。實際跑過' },
-      'zh-CN': { pane: '`/agent-board`（看板网页）', page: '看板网页', notYet: '暂不支持', untested: '尚未测试', appNext: '卡片有“排入”时可排给它。桌面 app：实际跑过；IDE：没有单独跑过，它的 hook 把它报告成 app 的界面时，跟 app 一样处理；[什么时候交给它](docs/MESSAGING.md#agent-and-surface-support)（英文）', second: '快速开始的第二个命令', appNow: '它空下来就发出。没有单独跑过；它的插件把它报告成终端，所以跟终端一样处理', appReopen: 'Codex app 完全退出后（只关窗口不算），在后台执行；回复最多等 30 分钟。实际跑过' },
+      en: { pane: '`/agent-board` (board page)', page: 'Board page', notYet: 'Not yet', untested: 'Not tested yet', appNext: 'Held for the session when its card offers it. Desktop app: checked in a live run; IDE: no run of its own, and it is treated like the app when its hook reports it as the app\'s surface; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support)', second: 'The second Quick start command', appNow: 'Sent when it is free. No run of its own; its plugin reports it as the terminal, so it is treated the same', appWake: 'With its sidecar switched on in Antigravity\'s Automations page, the board starts a new turn for it; otherwise held for the session when its card offers it. Desktop app: the hold checked in a live run, the new turn not yet; IDE: no run of its own, and it is treated like the app when its hook reports it as the app\'s surface; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support)', appReopen: 'Runs in the background once the Codex app is fully quit (closing its window is not enough); a reply waits up to 30 minutes for that. Checked in a live run' },
+      'zh-TW': { pane: '`/agent-board`（看板網頁）', page: '看板網頁', notYet: '尚未支援', untested: '尚未測試', appNext: '卡片有「排入」時可排給它。桌面 app：實際跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文）', second: '快速開始的第二個指令', appNow: '它空下來就送出。沒有單獨跑過；它的外掛把它回報成終端機，所以跟終端機一樣處理', appWake: '在 Antigravity 的 Automations 頁面開著它的 sidecar 時，看板會替它開始新的一輪；沒開時，卡片有「排入」時可排給它。桌面 app：排入實際跑過，開始新的一輪還沒跑過；IDE：沒有單獨跑過，它的 hook 把它回報成 app 的介面時，跟 app 一樣處理；[什麼時候交給它](docs/MESSAGING.md#agent-and-surface-support)（英文）', appReopen: 'Codex app 完全結束後（只關視窗不算），在背景執行；回覆最多等 30 分鐘。實際跑過' },
+      'zh-CN': { pane: '`/agent-board`（看板网页）', page: '看板网页', notYet: '暂不支持', untested: '尚未测试', appNext: '卡片有“排入”时可排给它。桌面 app：实际跑过；IDE：没有单独跑过，它的 hook 把它报告成 app 的界面时，跟 app 一样处理；[什么时候交给它](docs/MESSAGING.md#agent-and-surface-support)（英文）', second: '快速开始的第二个命令', appNow: '它空下来就发出。没有单独跑过；它的插件把它报告成终端，所以跟终端一样处理', appWake: '在 Antigravity 的 Automations 页面开着它的 sidecar 时，看板会替它开始新的一轮；没开时，卡片有“排入”时可排给它。桌面 app：排入实际跑过，开始新的一轮还没跑过；IDE：没有单独跑过，它的 hook 把它报告成 app 的界面时，跟 app 一样处理；[什么时候交给它](docs/MESSAGING.md#agent-and-surface-support)（英文）', appReopen: 'Codex app 完全退出后（只关窗口不算），在后台执行；回复最多等 30 分钟。实际跑过' },
     }
     // Agents with a desktop app or IDE in docs/MESSAGING.md "Agent and surface support", and what that table says of each.
-    const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'appReopen'], Antigravity: ['page', 'appNext'], Cursor: ['page', 'untested'], OpenCode: ['page', 'appNow'] }
+    const DESK = { 'Claude Code': ['pane', 'notYet'], Codex: ['page', 'appReopen'], Antigravity: ['page', 'appWake'], Cursor: ['page', 'untested'], OpenCode: ['page', 'appNow'] }
     // The route lines with a live note on any surface of a README row, whatever the receiver or the state: a route the
     // routes file records that no cell is worded for fails here until the cell is decided.
     const noted = (routes, agent, surfaces) => [...new Set(routes.filter(one => one.agent === agent).flatMap(one => [one.routes.idle, one.routes.working, one.routes.ended])
@@ -480,10 +480,12 @@ describe('L0 discover and install from the README', () => {
     }
     // Codex's terminal row also sends at a step end on the CLI (#319); its cell still says the card offers it and links to when.
     const CELL = { '': 'none', 'now+stepEnd': 'now', nextTurn: 'next', 'afterWait+nextTurn+now': 'next', 'afterWait+nextTurn+now+stepEnd': 'next', 'nextTurn+now': 'next', reopen: 'reopen' }
-    const EXPECT = { terminal: { none: 'paste', now: 'now', next: 'next' }, desktop: { none: 'untested', next: 'appNext', now: 'appNow', reopen: 'appReopen' } }
+    // On a desktop row a next-turn route beside one that sends at once is the Antigravity sidecar's wake (#1396).
+    const DESK_CELL = { ...CELL, 'nextTurn+now': 'wake' }
+    const EXPECT = { terminal: { none: 'paste', now: 'now', next: 'next' }, desktop: { none: 'untested', next: 'appNext', now: 'appNow', wake: 'appWake', reopen: 'appReopen' } }
     const checkCells = routes => {
       for (const [agent, [id, surfaces]] of Object.entries(ROW.terminal)) assert.equal(REPLY[agent], EXPECT.terminal[CELL[noted(routes, id, surfaces)]], `${agent}: the terminal cell follows the recorded routes (${noted(routes, id, surfaces)})`)
-      for (const [agent, [id, surfaces]] of Object.entries(ROW.desktop)) assert.equal(DESK[agent][1], EXPECT.desktop[CELL[noted(routes, id, surfaces)]], `${agent}: the desktop cell follows the recorded routes (${noted(routes, id, surfaces)})`)
+      for (const [agent, [id, surfaces]] of Object.entries(ROW.desktop)) assert.equal(DESK[agent][1], EXPECT.desktop[DESK_CELL[noted(routes, id, surfaces)]], `${agent}: the desktop cell follows the recorded routes (${noted(routes, id, surfaces)})`)
       for (const agent of LISTED.filter(one => !ROW.terminal[one])) assert.equal(REPLY[agent], 'paste', `${agent} has no route, so its cell is paste`)
       // Every surface a recorded route of a listed agent has a note for belongs to a row checked above: a route for a row
       // checked only against "paste" (Grok Build, Hermes Agent), or for a surface no row lists, fails here.
@@ -509,7 +511,7 @@ describe('L0 discover and install from the README', () => {
     assert.throws(() => checkCells([...RECEIVER_ROUTES, ended('grok', 'docs/validation/synthetic-grok.md')]), /grok on /)
     const messaging = read('docs/MESSAGING.md')
     const appNote = 'docs/validation/2026-11-13-antigravity-app-mailbox-live.md', codexAppNote = 'docs/validation/2026-11-22-codex-app-reopen-live.md'
-    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Verified', `[${codexAppNote}](../${codexAppNote})`], ['Antigravity', '2.0 Desktop App', 'Verified', `[${appNote}](../${appNote})`], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Implemented', 'Not tested']]) {
+    for (const [host, surface, status, live] of [['Claude Code', 'Desktop Code', 'Proposed', 'Not tested'], ['Codex', 'Desktop App', 'Verified', `[${codexAppNote}](../${codexAppNote})`], ['Antigravity', '2.0 Desktop App', 'Verified', `[${appNote}](../${appNote})`], ['Antigravity', 'IDE', 'Implemented', 'Not tested'], ['Antigravity', '2.0 Desktop App', 'Implemented', 'Not tested'], ['Cursor', 'IDE (Composer)', 'Implemented', 'Not tested'], ['OpenCode', 'Desktop App', 'Implemented', 'Not tested']]) {
       assert.ok(messaging.split('\n').some(line => line.startsWith(`| ${host} | ${surface} | `) && line.includes(`| ${status} | ${live} |`)), `docs/MESSAGING.md: ${host} ${surface} is ${status}, ${live}`)
     }
     for (const [name, lang] of READMES) {

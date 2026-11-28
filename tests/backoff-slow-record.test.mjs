@@ -95,6 +95,7 @@ test('launcher waits for a slow 0-byte address record after claim backoff and re
     writeFileSync(join(messagesDir, claimName), `${JSON.stringify({ version: 1, pid: process.pid, nonce })}\n`, { mode: 0o600 })
 
     const posts = []
+    const linkTokens = []
     let answerPing = false
     const sockets = new Set()
     const fake = createServer((req, res) => {
@@ -113,6 +114,14 @@ test('launcher waits for a slow 0-byte address record after claim backoff and re
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end('{}')
         })
+        return
+      }
+      // #1650: the launcher asks the running board for a one-use link, with the record's token.
+      if (req.method === 'POST' && url.pathname === '/api/open-link') {
+        linkTokens.push(req.headers['x-board-token'] ?? null)
+        req.resume()
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ url: `http://127.0.0.1:${port}/open/slowrecordlink` }))
         return
       }
       if (req.method === 'POST' && url.pathname === '/api/close') {
@@ -202,7 +211,10 @@ test('launcher waits for a slow 0-byte address record after claim backoff and re
 
       const result = await run
       assert.equal(result.code, 0, result.stderr)
-      assert.ok(result.stdout.includes(fakeUrl), result.stdout)
+      // The reused server's one-use link is printed, never the page's token (#1650).
+      assert.ok(result.stdout.includes(`http://127.0.0.1:${port}/open/slowrecordlink`), result.stdout)
+      assert.ok(!`${result.stdout}${result.stderr}`.includes('slowrecordtoken'), `${result.stdout}${result.stderr}`)
+      assert.ok(linkTokens.length >= 1 && linkTokens.every(token => token === 'slowrecordtoken'), JSON.stringify(linkTokens))
       assert.equal(posts.length, 1, JSON.stringify(posts))
       assert.equal(posts[0]?.version, manifest.version)
       assert.ok(claimCreates - before <= 1, `the launcher started ${claimCreates - before} children in the slow 0-byte backoff scenario`)

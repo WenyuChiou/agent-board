@@ -285,7 +285,7 @@ test('Antigravity Stop extracts the closing question after tool-call PLANNER_RES
     mkdirSync(root, { recursive: true })
     writeFileSync(progress, '')
     writeFileSync(script, BOARD_SCRIPT)
-    const transcript = join(home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-conv-q', '.system_generated', 'logs', 'transcript_full.jsonl')
+    const transcript = join(home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-agy-tool-question', '.system_generated', 'logs', 'transcript_full.jsonl')
     mkdirSync(dirname(transcript), { recursive: true })
     const entries = [
       { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', content: 'Synthetic ask\nPRIVATE-PROMPT-LINE' },
@@ -310,7 +310,7 @@ test('Antigravity Stop extracts the closing question after tool-call PLANNER_RES
     assert.equal(view.groups.flatMap(group => group.rows).filter(row => row.auto === 'working').length, 0)
 
     // Non-string object content on PLANNER_RESPONSE remains rejected as malformed.
-    const badTranscript = join(home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-conv-bad', '.system_generated', 'logs', 'transcript.jsonl')
+    const badTranscript = join(home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-agy-bad-reply-1589', '.system_generated', 'logs', 'transcript.jsonl')
     mkdirSync(dirname(badTranscript), { recursive: true })
     writeFileSync(badTranscript, [
       { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Synthetic bad' },
@@ -326,7 +326,7 @@ test('Antigravity Stop extracts the closing question after tool-call PLANNER_RES
     assert.equal(badRecord.asked, undefined)
 
     // Trailing content-less tool-call PLANNER_RESPONSE clears an earlier question.
-    const trailingToolTranscript = join(home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-conv-trailing-tool', '.system_generated', 'logs', 'transcript_full.jsonl')
+    const trailingToolTranscript = join(home, '.gemini', 'antigravity-cli', 'brain', 'synthetic-agy-trailing-tool-1589', '.system_generated', 'logs', 'transcript_full.jsonl')
     mkdirSync(dirname(trailingToolTranscript), { recursive: true })
     writeFileSync(trailingToolTranscript, [
       { source: 'USER_EXPLICIT', type: 'USER_INPUT', content: 'Synthetic tool tail' },
