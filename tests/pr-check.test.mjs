@@ -455,7 +455,8 @@ test('pr-check finds a Claude Code session link and a Claude app session id in t
 
 test('pr-check finds a session id, a session link and a local_ id in the commit messages of the branch', async t => {
   const sessionUuid = '12345678-abcd-4ef0-9876-abcdef123456'
-  for (const value of [syntheticSessionLink, syntheticLocalUuid, syntheticLocalHex, `Claude-Session: ${syntheticSessionLink}`, `Session: ${sessionUuid}`]) {
+  // The control bytes a record or field separator might use do not hide what follows them (#1972 review).
+  for (const value of [syntheticSessionLink, syntheticLocalUuid, syntheticLocalHex, `Claude-Session: ${syntheticSessionLink}`, `Session: ${sessionUuid}`, `x\x1f y\x1e ${syntheticSessionLink}`]) {
     const setup = fixture(t)
     // Precondition: the branch as the fixture makes it passes.
     const before = await setup.run()

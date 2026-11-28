@@ -1943,11 +1943,12 @@ export const main = async (argv = process.argv.slice(2)) => {
     data.added = addedLines(git(cwd, 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--no-renames', '--unified=0', range))
     data.paths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', range)).filter(Boolean).map(diffPath)
     // Every commit message in base..head: a squash merge copies them to main (#1959).
-    data.commits = git(cwd, 'log', '--format=%H%x1f%B%x1e', `${base}..${data.head}`).split('\x1e').map(item => item.replace(/^\r?\n/, ''))
-      .filter(item => item.includes('\x1f')).map(item => {
-        const [sha, message] = item.split('\x1f')
-        return { sha: sha.trim(), message }
-      })
+    // -z ends each record with NUL, which a commit message cannot hold; the sha is the record's first line, and the rest,
+    // whatever bytes it holds, is the message.
+    data.commits = git(cwd, 'log', '-z', '--format=%H%n%B', `${base}..${data.head}`).split('\0').filter(item => item.trim()).map(item => {
+      const end = item.indexOf('\n')
+      return end === -1 ? { sha: item.trim(), message: '' } : { sha: item.slice(0, end).trim(), message: item.slice(end + 1) }
+    })
     data.changedPaths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', '--diff-filter=ACMRT', range)).filter(Boolean).map(diffPath)
     data.addedPaths = linesOf(git(cwd, 'diff', '--name-only', '--no-renames', '--diff-filter=A', range)).filter(Boolean).map(diffPath)
     // Lines added and removed in each file, for the size note on an outside pull request; a binary file shows "-".
