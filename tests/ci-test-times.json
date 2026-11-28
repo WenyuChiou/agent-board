@@ -1949,7 +1949,7 @@
       "B5 release --unsent takes a started wake back to queued; a plain release does not; an unknown ref is NOT_HELD": 2,
       "B6 an ack on a marked message that was not accepted yet acknowledges it": 2,
       "B7 the --mailbox calls of the script: attempt, release and end answer ok and a code, and end says so when its write fails": 1424,
-      "B8 a DeepSeek hook's claims behave as before: handed out again with a repeat count and line, expired at 30 minutes, and another hook's unknown release is still ok": 1,
+      "B8 a DeepSeek hook's claim nobody accepted reads HOLDER_LOST after its lease, as every hook's does, and is not handed out again; another hook's unknown release is still ok (#1870)": 1,
       "B9 a started wake holds the next message to its session only until it reads \"sent, not confirmed\", as an open message did before (#1366 review)": 2,
       "R1 the wake is recorded on the board before the host is called, then woken once and accepted": 19,
       "R10 an idle status answer that returns after a newer busy event takes nothing": 331,
