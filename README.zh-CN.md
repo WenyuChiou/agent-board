@@ -32,12 +32,12 @@ npx @wenyuchiou/agent-board@next
 
 ## 你会得到什么
 
-- **提问排最前面。** 不管是哪个 agent 问的，在等你回复的提问都会排到最上面；它给的选项读得出来，就每个选项一个按钮，否则自己输入回复。
-- **每个 agent 留在原来的地方。** agent 继续在自己的终端和 Codex、Antigravity 桌面 app 里运行，登录和计费都不变；看板读的是它们 hooks 的汇报，关掉看板也不会停掉任何 session。
+- **提问排最前面。** 不管是哪个 agent 问的，在等你回复的提问都会排到最上面；每个选项一个按钮：选项来自 agent 交给看板的选项，或一个简短的「A 还是 B？」提问的两边（`24 小时还是 7 天？`）。回复里的编号或列点清单不会变成按钮。你随时都可以自己输入回复。
+- **每个 agent 留在原来的地方。** agent 继续在自己的终端和 Codex、Antigravity 桌面 app 里运行；看板读的是它们 hooks 的汇报，关掉看板也不会停掉任何 session。
 - **在本机、纯文本。** 一个你可以自己看、自己改的 Markdown 文件，只在 127.0.0.1 的网页，看板本身不调用模型。
 - **一个命令装、一个命令卸载。** `setup` 写入前先列出要改什么；`remove` 去掉 setup 写的东西，不动你自己的设置。
 
-[T3 Code](https://github.com/pingdotgg/t3code) 这类工具把每个 agent session 放在工具自己里面运行，所以只看得到在那里运行的 session。Agent Board 显示的是你已经在各家自己的终端或桌面 app 里运行的 session，工作不用搬到新工具。
+[T3 Code](https://github.com/pingdotgg/t3code) 把 agent 放在它自己的 app 里运行：session 由它开，过去的对话也能导入，从 T3 接手那个 session 接着做。Agent Board 跟着的是还开在各家终端或桌面 app 里的那个 session：显示它在等什么，并在“支持的 agent”表格标明可以的地方，把你的回答送回那个 session。想在同一个 app 里开新的 session、用 worktree 和手机 app，就用 T3 Code；已经开在各家 app 里的 session，就用 Agent Board。
 
 <img alt="看板网页：“需要你”里是 Claude Code 的提问，附答案按钮；“进行中”列出 Codex、Antigravity 和 OpenCode 的任务和步骤。合成数据。" src="docs/images/page-zh-CN-dark.png" width="860">
 
@@ -61,7 +61,7 @@ npx @wenyuchiou/agent-board@next
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board`（看板网页） | 暂不支持 |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | 看板网页 | Codex app 完全退出后（只关窗口不算），在后台执行；回复最多等 30 分钟。实际跑过 |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页 | 卡片有“排入”时可排给它。桌面 app：实际跑过；IDE：没有单独跑过，它的 hook 把它报告成 app 的界面时，跟 app 一样处理；[什么时候交给它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | 看板网页 | 在 Antigravity 的 Automations 页面开着它的 sidecar 时，看板会替它开始新的一轮；没开时，卡片有“排入”时可排给它。桌面 app：排入实际跑过，开始新的一轮还没跑过；IDE：没有单独跑过，它的 hook 把它报告成 app 的界面时，跟 app 一样处理；[什么时候交给它](docs/MESSAGING.md#agent-and-surface-support)（英文） |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | 看板网页 | 尚未测试 |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | 看板网页 | 它空下来就发出。没有单独跑过；它的插件把它报告成终端，所以跟终端一样处理 |
 

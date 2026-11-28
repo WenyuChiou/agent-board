@@ -5,7 +5,8 @@ import { sha256 } from './sha256.ts'
 // a later bridge can add its own value without a new store version.
 export type Origin = 'local'
 // A connected session is a live lease from a host adapter, never a name in progress.md.
-export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin; folderDigest?: string; mcpOwner?: string; mcpLeaseUntil?: number; hostTurn?: string }
+// busySeq: the highest turn number an Antigravity mailbox's turn-start hook sent with its take (#1396).
+export type Connection = { id: string; agent: string; session: string; surface: string; turn: string; scope?: 'turn' | 'session' | 'mailbox'; expires: number; contested?: boolean; origin?: Origin; folderDigest?: string; mcpOwner?: string; mcpLeaseUntil?: number; hostTurn?: string; busySeq?: number }
 export type Message = {
   id: string
   target: string
@@ -52,18 +53,33 @@ export type Message = {
   // When an automatic receiver left with this message still queued. The board refuses the message a fixed time after
   // this, working from the store alone; the next receiver of the session takes it over and clears the stamp (#318).
   leftAt?: number
+  // When the Antigravity sidecar started a wake for this message, and what it reported of it (#1396); the first report
+  // stays. A field of its own, so OpenCode's `attempted` rules (release, lapse, settle) never read an Antigravity wake.
+  // wakeAfter: the number of the turn whose Stop the wake followed, so one Stop starts one wake.
+  woke?: number
+  wakeAfter?: number
+  wake?: 'sent' | 'failed'
   // When the Codex desktop app first refused this message, with nothing sent, because it held the conversation (#557).
   // Later refusals keep it: from the open limit after it, the message is never handed out or begun, and is refused as not sent.
   heldSince?: number
 }
 export type MessageState = { messages: Message[]; mailboxes?: Connection[]; pausePeerMessages?: boolean }
 // When a message from the board reaches an agent, as the receiver's own record states it (#1351). `line`:
-// now (goes in at once), afterWait (goes in after a wait, such as the Codex daemon's ~10-minute watch, #1814),
+// now (goes in at once), afterWait (goes in after a wait, such as the Codex daemon's, within seconds with a Codex window open and up to 10 minutes without, #1814, #1652),
 // stepEnd (when its current step ends), nextTurn (at its next turn; it does not wake it), chatOpen (when this
 // chat is opened again), reopen (the board reopens the session and sends), none (cannot receive yet). `record`
 // is the docs/validation note that showed the route live, or null.
 export type RouteLine = 'now' | 'afterWait' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none'
 export const ROUTE_LINES: readonly RouteLine[] = ['now', 'afterWait', 'stepEnd', 'nextTurn', 'chatOpen', 'reopen', 'none']
+// The route lines 0.25.1 reads (#1860). Its parser refuses the whole message store on any other `line`, and a typed install of
+// 0.25.1 is 0.26.0's way back (docs/dev/plan-0.26.0.md, release check 8). So the store holds only these in `line`: a newer
+// line is saved as the older line it replaces, with the line itself in `routeLine`, a field 0.25.1 keeps and never reads.
+// Each new line must name its older line here before the board can write it.
+export type StoredRouteLine = 'now' | 'stepEnd' | 'nextTurn' | 'chatOpen' | 'reopen' | 'none'
+export const STORED_LINE_OF: Readonly<Record<RouteLine, StoredRouteLine>> = {
+  // 0.25.1 sent a board message to the Codex daemon with the line `now`.
+  now: 'now', afterWait: 'now', stepEnd: 'stepEnd', nextTurn: 'nextTurn', chatOpen: 'chatOpen', reopen: 'reopen', none: 'none',
+}
 export type RowState = 'idle' | 'working' | 'ended'
 export type RouteKind = 'live' | 'mailbox' | 'turn'
 export const SURFACE_IDS = {
@@ -87,19 +103,25 @@ export const routeRecord = (route: Route, surface: string): string | null =>
 // The line of a route on one surface, read the same way: only the route's own keys count.
 export const routeLine = (route: Route, surface: string): RouteLine =>
   route.surfaceLines !== undefined && Object.hasOwn(route.surfaceLines, surface) ? route.surfaceLines[surface] ?? route.line : route.line
-export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route> }
+// `sidecar`: an entry that holds only while the Antigravity sidecar polls the board (#1396); `sidecarRoutes` drops it otherwise.
+export type ReceiverRoutes = { agent: string; kind: RouteKind; routes: Record<RowState, Route>; sidecar?: true }
+export const sidecarRoutes = (routes: readonly ReceiverRoutes[], isOn: boolean): readonly ReceiverRoutes[] => isOn ? routes : routes.filter(one => one.sidecar !== true)
 type SendRefusal = 'NO_TARGET' | 'SHADOWED' | 'CONTESTED' | 'OFFLINE' | 'STATE_UNKNOWN' | 'SURFACE_UNKNOWN' | 'NO_RECORD' | 'TURN_RUNNING'
 export type SendDecision =
   | { canSend: true; line: RouteLine; target: Connection; state: RowState }
   | { canSend: false; line: RouteLine; reason: SendRefusal }
 
-const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteKind, state: RowState): Route | undefined =>
-  records.find(one => one.agent === (agent === '' ? 'claude' : agent) && one.kind === kind)?.routes[state]
+// Two entries of one agent and kind can cover different surfaces (the Antigravity sidecar's covers the app, #1396): the last
+// one whose route covers the surface wins, and the first is the default.
+const routeOf = (records: readonly ReceiverRoutes[], agent: string, kind: RouteKind, state: RowState, surface?: string): Route | undefined => {
+  const all = records.filter(one => one.agent === (agent === '' ? 'claude' : agent) && one.kind === kind)
+  return (all.filter(one => surface !== undefined && Array.isArray(one.routes[state]?.surfaces) && one.routes[state].surfaces.includes(surface)).at(-1) ?? all[0])?.routes[state]
+}
 // Whether a connection's own route, for its session's state now, has a live note that covers its surface. Only such a
 // live connection takes the place of the session's mailbox: an unrecorded route never stands in for a recorded one (#318).
 export const isRecordedRoute = (one: Connection, stateOfSession: (agent: string, session: string) => RowState | undefined, routes: readonly ReceiverRoutes[]): boolean => {
   const state = stateOfSession(one.agent, one.session)
-  const route = state === undefined ? undefined : routeOf(routes, one.agent, routeKind(one.scope), state)
+  const route = state === undefined ? undefined : routeOf(routes, one.agent, routeKind(one.scope), state, one.surface)
   return route !== undefined && routeLine(route, one.surface) !== 'none' && isNote(routeRecord(route, one.surface)) && Array.isArray(route.surfaces) && route.surfaces.includes(one.surface)
 }
 
@@ -117,7 +139,7 @@ export const sendDecision = (
   if (target.expires <= now) return { canSend: false, line: 'none', reason: 'OFFLINE' }
   const state = stateOfSession(target.agent, target.session)
   if (state === undefined) return { canSend: false, line: 'none', reason: 'STATE_UNKNOWN' }
-  const route = routeOf(routes, target.agent, routeKind(target.scope), state)
+  const route = routeOf(routes, target.agent, routeKind(target.scope), state, target.surface)
   if (route === undefined) return { canSend: false, line: 'none', reason: 'NO_RECORD' }
   const line = routeLine(route, target.surface)
   // Background resume cannot run while a turn is already active in that conversation.
@@ -149,8 +171,8 @@ export const isRoute = (value: unknown): value is Route => {
 // whole, so a missing key cannot read as a record.
 export const isReceiverRoutes = (value: unknown): value is ReceiverRoutes[] => Array.isArray(value) && value.every(one => {
   if (one === null || typeof one !== 'object') return false
-  const { agent, kind, routes } = one as Record<string, unknown>
-  if (!isNote(agent) || kind !== 'live' && kind !== 'mailbox' && kind !== 'turn' || routes === null || typeof routes !== 'object') return false
+  const { agent, kind, routes, sidecar } = one as Record<string, unknown>
+  if (!isNote(agent) || kind !== 'live' && kind !== 'mailbox' && kind !== 'turn' || routes === null || typeof routes !== 'object' || sidecar !== undefined && sidecar !== true) return false
   return (['idle', 'working', 'ended'] as const).every(state => isRoute((routes as Record<string, unknown>)[state]))
 })
 // A connection's scope names its kind of receiver: a session the host owns, a hook mailbox, or one turn.
@@ -506,7 +528,12 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   if (one.status === 'accepted' && status === 'accepted' && one.reply === reply) return state
   // An accept that reaches the board after the wake read "sent, not confirmed" is recorded, and the message stays as it is:
   // it must not hold the session's next message for another 30 minutes (#1366 review). Its day-long retention does not restart.
-  if (one.status === 'uncertain' && one.error === UNCONFIRMED && status === 'accepted' && one.to.startsWith('opencode:')) return one.hasAccepted === true ? state : { ...state, messages: state.messages.map(message => message === one ? { ...one, hasAccepted: true } : message) }
+  // An uncertain receipt, with no error or a timeout, says nothing new of it either and must not hold the session again (#1553).
+  // A receipt that the turn ended is still recorded.
+  if (one.status === 'uncertain' && one.error === UNCONFIRMED && one.to.startsWith('opencode:')) {
+    if (status === 'accepted') return one.hasAccepted === true ? state : { ...state, messages: state.messages.map(message => message === one ? { ...one, hasAccepted: true } : message) }
+    if (status === 'uncertain' && !isEndedUncertain({ status, error })) return state
+  }
   const { awaitsStart: _awaitsStart, ...rest } = one
   // An uncertain receipt with no error says nothing new of a message a board start or a lease's end made Unsure (#1407, #1843).
   const kept = status === 'uncertain' && error === '' && one.status === 'uncertain' && (one.error === BOARD_RESTARTED || one.error === HOLDER_LOST) ? one.error : error

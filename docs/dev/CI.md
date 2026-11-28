@@ -59,7 +59,7 @@ files one at a time (`CI_TEST_SERIAL`), and the other Windows jobs run at most t
 three spawn-heavy files ran side by side on the 4-vCPU runner, every test ran about 1.35x slower, and
 the tests with the tightest time limits failed, a different one each run (#910). Each part runs a share
 of the other files, dealt out slowest first, each to the part with the least time so far (`partFiles`, #1059):
-on Windows one file at a time, each in its own Node run, and on Ubuntu in one Node run. A file weighs its measured time in `tests/ci-test-times.json` (#1762), else about its slowest Windows time, read back from its time budget, and a file with no budget 5 s. `tests/codex-local.test.mjs`, `tests/board.test.mjs`, `tests/legacy-connect.test.mjs` and `tests/opencode-receiver.test.mjs` take
+on Windows one file at a time, each in its own Node run, and on Ubuntu in one Node run. A file weighs its measured time in `tests/ci-test-times.json` (#1762), else about its slowest Windows time, read back from its time budget, and a file with no budget 5 s. `tests/codex-local.test.mjs`, `tests/board.test.mjs`, `tests/host-upgrade.test.mjs` (#1912), `tests/legacy-connect.test.mjs` and `tests/opencode-receiver.test.mjs` take
 far longer than the rest (about 8 and 5 minutes there), so every part runs them, each part taking the tests that the same table deals it: slowest first, each to the part with the least time so far, so every part gets the same time from them whatever the number of parts, and the parts together run each test once. A test the table does not know (added since it was made) goes to the part its title hashes to, and no other test moves. `tests/messaging.test.mjs` is dealt the same way in the local exchange job. Refresh the table, in the pull request that adds or removes many tests or a test file, with `node scripts/ci-test-times.mjs <job logs of a main run>`; `tests/ci-impact.test.mjs` also fails when the table says the heaviest Windows board part would take over the part budget on a runner 1.6 times slower than the table, which means adding a part or making tests faster. Before the table, the shares of seven parts were measured by hand and any other number of parts started every part from zero, so the slowest other file went to part 1, the part with the largest share, and part 1 ran over its 480 s (#1733). On Ubuntu the board set runs in three parts: files run side by side there, but
 Node runs one file's tests one after another, so a single part ran about as long as `codex-local` alone
 (449.9 s of that file in a 498.5 s run, over the 480 s part budget; #1130). In two parts a part still ran
@@ -69,6 +69,18 @@ its budget, or a part over 480 s, fails the job and names the slow files. The fi
 step 1 of #902 (each file's share of the Windows board logs, x 1.5); the part budget is re-derived
 from recent main runs, since a 420 s job wall already fails on main. A parallel run records no
 per-file times, so the file check only applies to serial parts.
+
+How many parts a job starts (#1917). The counts above (board 3 on Ubuntu and 10 on Windows, local exchange 2
+and 3, journeys 1 and 3) are the most a run starts, on every Node line. The planner writes the board, local
+exchange and journeys matrices itself (`partMatrices` in `scripts/ci-impact.mjs`), for the (system, Node)
+pairs the workflow gives it, so a part with no test file is never started. A full plan keeps every count. For
+each pair, a selection that includes a self-parted file keeps the count, since that file deals its tests into
+those parts; so does a selection with a file that has no time of its own in `tests/ci-test-times.json`, since
+its weight is only a guess. Otherwise the count is the smallest whose heaviest part, dealing the selected files
+by the table as above, is predicted no longer than the heaviest part of today's full run of that group on that
+pair: a part CI already runs, so no new budget is needed. A pull request that changes one small board test starts
+two board jobs, one per pair, not thirteen. When the trusted base planner writes no matrices (an older base, or the
+bootstrap), test.yml uses the fixed counts above, so no run starts fewer tests than before.
 
 Every job that runs tests on Windows first tries to turn off Windows
 Defender's real-time scanning (a failure there does not stop the job); the product's own antivirus

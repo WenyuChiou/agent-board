@@ -4,7 +4,7 @@ import { themeControls } from './page-look'
 
 const esc = (text: string): string => text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;')
 
-export const settingsToggle = (s: Strings): string => `<button type="button" class="icon-btn" id="settings-toggle" data-local data-settings-toggle aria-haspopup="dialog" aria-expanded="false" aria-controls="settings"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 1.5h3l.5 2 1 .6 2-.6 1.5 2.6-1.5 1.4v1l1.5 1.4-1.5 2.6-2-.6-1 .6-.5 2h-3l-.5-2-1-.6-2 .6L1.5 10 3 8.5v-1L1.5 6 3 3.5l2 .6 1-.6z"/><circle cx="8" cy="8" r="2.2"/></svg><span>${esc(s.settingsTitle)}</span></button>`
+export const settingsToggle = (s: Strings): string => `<button type="button" class="icon-btn" id="settings-toggle" data-local data-settings-toggle aria-haspopup="dialog" aria-expanded="false" aria-controls="settings" aria-label="${esc(s.settingsTitle)}" title="${esc(s.settingsTitle)}"><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.5 1.5h3l.5 2 1 .6 2-.6 1.5 2.6-1.5 1.4v1l1.5 1.4-1.5 2.6-2-.6-1 .6-.5 2h-3l-.5-2-1-.6-2 .6L1.5 10 3 8.5v-1L1.5 6 3 3.5l2 .6 1-.6z"/><circle cx="8" cy="8" r="2.2"/></svg><span>${esc(s.settingsTitle)}</span></button>`
 
 export const settingsPanel = (s: Strings, language: SettingsLang, isLan = false, isLangOverridden = false): string =>
   `<div id="settings" class="settings-overlay" data-lan="${isLan}" role="dialog" aria-modal="true" aria-labelledby="settings-title" hidden><div class="settings-panel">` +

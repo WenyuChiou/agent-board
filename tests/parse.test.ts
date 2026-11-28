@@ -287,3 +287,20 @@ test('an options line with a comment opening or over-long entry is refused whole
   expect(parseProgress(blockWithBadOptions.split('\n').filter(line => !line.startsWith('<!-- options=')).join('\n'))[0]?.tasks[0]?.steps.map(step => step.options)).toEqual([undefined, undefined])
   expect(parseProgress(blockWithBadOptions.replace(/^<!-- options=.*$/m, NO_OPTIONS))[0]?.tasks[0]?.steps[0]?.options).toEqual([])
 })
+
+test('a hand-kept task heading may end with a session trailer that names its writer, and the title stays plain', () => {
+  const file = '## Home\n### Water the synthetic plants <!-- session=ab12cd34 -->\n- [ ] Fill the can\n### No trailer\n- [ ] Next\n### Bad <!-- session=a b -->\n- [ ] Other\n'
+  const tasks = parseProgress(file).flatMap(project => project.tasks)
+  expect(tasks.map(task => [task.title, task.writer, task.steps.length])).toEqual([
+    ['Water the synthetic plants', 'ab12cd34', 1],
+    ['No trailer', undefined, 1],
+    ['Bad', undefined, 1],
+  ])
+})
+
+test('a file with session trailers reads as the same file without them, apart from the writer a newer board names', () => {
+  const plain = '## Home\n### Water the synthetic plants\n> Context: synthetic\n- [ ] Fill the can\n- [x] Find the can\n### Other\n- [?] Ask\n'
+  const trailed = plain.replace('plants', 'plants <!-- session=ab12cd34 -->').replace('### Other', '### Other <!-- session=zz99zz99 -->')
+  const withoutWriter = parseProgress(trailed).map(project => ({ ...project, tasks: project.tasks.map(({ writer: _writer, ...task }) => task) }))
+  expect(withoutWriter).toEqual(parseProgress(plain))
+})

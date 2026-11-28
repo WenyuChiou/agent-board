@@ -32,12 +32,12 @@ npx @wenyuchiou/agent-board@next
 
 ## What you get
 
-- **Questions first.** A question an agent is waiting on goes to the top, whichever agent asked, with a button for each option it can read, or you write your own answer.
-- **Every agent stays where it is.** Agents keep running in their own terminals and in the Codex and Antigravity desktop apps, with your sign-in and billing unchanged; the board reads what their hooks report, and closing it stops no session.
+- **Questions first.** A question an agent is waiting on goes to the top, whichever agent asked, with a button for each choice: the choices the agent gives the board, or the two sides of a short `A or B?` question (`24 hours or 7 days?`). A numbered or bulleted list inside a reply gets no buttons. You can always write your own answer.
+- **Every agent stays where it is.** Agents keep running in their own terminals and in the Codex and Antigravity desktop apps; the board reads what their hooks report, and closing it stops no session.
 - **Local and plain.** One Markdown file you can read and edit, a page on 127.0.0.1 only, and no model calls by the board.
 - **One command to install, one to remove.** `setup` shows what it will change before it writes; `remove` takes out what setup wrote and leaves your own settings alone.
 
-Tools such as [T3 Code](https://github.com/pingdotgg/t3code) run each agent session inside the tool itself, so they show only the sessions running there. Agent Board shows the sessions you already run in each vendor's own terminal or desktop app, so nothing moves to a new tool.
+[T3 Code](https://github.com/pingdotgg/t3code) runs agents inside its own app: it starts sessions there, and it can import a past conversation and resume that same session from T3. Agent Board stays with the session that is still open in each vendor's own terminal or desktop app: it shows what that session is waiting on and, where the Supported agents table says so, sends your answer back into it. Use T3 Code to run new sessions in one app, with worktrees and a phone app; use Agent Board for the sessions you keep open in the vendors' own apps.
 
 <img alt="The board's page: Needs you shows a question from Claude Code with answer buttons; Working now lists tasks from Codex, Antigravity and OpenCode with their steps. Synthetic data." src="docs/images/page-en-dark.png" width="860">
 
@@ -61,7 +61,7 @@ Tools such as [T3 Code](https://github.com/pingdotgg/t3code) run each agent sess
 |:-:|---|---|---|
 | <img src="docs/images/agents/claude-code.svg" width="28" alt="Claude Code"> | Claude Code | `/agent-board` (board page) | Not yet |
 | <img src="docs/images/agents/codex.svg" width="28" alt="Codex"> | Codex | Board page | Runs in the background once the Codex app is fully quit (closing its window is not enough); a reply waits up to 30 minutes for that. Checked in a live run |
-| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | Held for the session when its card offers it. Desktop app: checked in a live run; IDE: no run of its own, and it is treated like the app when its hook reports it as the app's surface; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
+| <img src="docs/images/agents/antigravity.svg" width="28" alt="Antigravity"> | Antigravity | Board page | With its sidecar switched on in Antigravity's Automations page, the board starts a new turn for it; otherwise held for the session when its card offers it. Desktop app: the hold checked in a live run, the new turn not yet; IDE: no run of its own, and it is treated like the app when its hook reports it as the app's surface; [when it is handed over](docs/MESSAGING.md#agent-and-surface-support) |
 | <img src="docs/images/agents/cursor.svg" width="28" alt="Cursor"> | Cursor | Board page | Not tested yet |
 | <img src="docs/images/agents/opencode.svg" width="28" alt="OpenCode"> | OpenCode | Board page | Sent when it is free. No run of its own; its plugin reports it as the terminal, so it is treated the same |
 

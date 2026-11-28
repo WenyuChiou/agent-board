@@ -38,14 +38,15 @@ import { claimHookRecovery } from './hook-recovery-owner'
 import { findSessionFile, readSessionMeta } from './codex-history'
 import { RELEASED } from '../hooks/released'
 import { deliveryText, SURFACE_IDS } from '../hooks/messaging'
-import { antigravitySurface, deliverTurnEvent } from './hook-delivery'
-import { checkStoreFile, hookMailbox } from './board-messaging'
+import { antigravitySurface, deliverAntigravityStopWait, deliverTurnEvent } from './hook-delivery'
+import { appendTurnStart, appendTurnStop, checkStoreFile, hookMailbox, startSeq, workerTurnMark } from './board-messaging'
+import { isTurnStart } from '../hooks/hook-messages'
 import { defaultMessagesDirectory } from './runtime-folder'
 import { folderIdentity, matchesFolderIdentity } from './folder-identity'
 import { appendJournal, journalLine, journalPath } from '../hooks/journal'
 import { currentPart } from '../hooks/retention'
 import { lastQuestion } from '../hooks/digest'
-import { antigravityMarkedLines, antigravityProcessClaim, ANTIGRAVITY_TRANSCRIPTS, MARK_PREFIX, resolveAntigravityTitle } from './antigravity-meta'
+import { antigravityMarkedLines, antigravityProcessClaim, isSessionAntigravityTranscript, MARK_PREFIX, resolveAntigravityTitle } from './antigravity-meta'
 
 type Json = Record<string, unknown>
 type Manifest = { files: Record<string, string>; groups: Record<string, unknown>; foreignGroups: Record<string, unknown> }
@@ -135,8 +136,9 @@ export const isPlain = (bytes: Buffer): boolean => Buffer.from(bytes.toString('u
 
 // Antigravity hooks name their own transcript but do not carry the reply text.
 // agy 1.5.2 names transcript_full.jsonl, which has the same line shape as transcript.jsonl.
-const antigravityQuestion = (path: unknown): string | null => {
-  if (typeof path !== 'string' || !isAbsolute(path) || !ANTIGRAVITY_TRANSCRIPTS.has(basename(path))) return null
+// Bind the read strictly to this hook's own conversation folder (#1467).
+const antigravityQuestion = (path: unknown, conversationId: string, home: string): string | null => {
+  if (!isSessionAntigravityTranscript(path, conversationId, home)) return null
   try {
     if (!lstatSync(path).isFile()) return null
     const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
@@ -1109,7 +1111,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const status = flag('--state') ?? payload.state
       if (mode === '--agent-status' && !['working', 'waiting', 'ended'].includes(String(status))) throw new Error('INVALID_STATE')
       const event = agent === 'antigravity' && mode === '--agent-status' ? flag('--event') : undefined
-      if (event !== undefined && statusEvents.antigravity?.[event] !== status) throw new Error('INVALID_EVENT_STATE')
+      if (event !== undefined && (event === 'StopWait' ? 'waiting' : statusEvents.antigravity?.[event]) !== status) throw new Error('INVALID_EVENT_STATE')
       // Classify before Cursor's adapter drops prompt text; retain lifecycle
       // ordering without treating a board lookup as an answer to the question.
       const isPromptLike = isPromptEvent(raw) || raw.prompt_submitted === true
@@ -1134,7 +1136,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       const question = mode === '--codex-event' && agent === 'codex' && raw.hook_event_name === 'Stop' ? lastQuestion(String(raw.last_assistant_message ?? ''))
         : mode === '--codex-event' && agent === 'cursor' && raw.hook_event_name === 'afterAgentResponse' ? lastQuestion(String(raw.text ?? ''))
           : mode === '--agent-status' && status === 'waiting' && (agent === 'grok' || agent === 'opencode' || agent === 'hermes') ? lastQuestion(message)
-            : mode === '--agent-status' && status === 'waiting' && agent === 'antigravity' && (event === undefined || event === 'Stop') ? antigravityQuestion(raw.transcriptPath) : null
+            : mode === '--agent-status' && status === 'waiting' && agent === 'antigravity' && (event === undefined || event === 'Stop') ? antigravityQuestion(raw.transcriptPath, session, home) : null
       // The one tool input a Codex approval keeps (#1798): the command and its description, with secrets and the home folder
       // masked before they are queued or written. Any other field of the tool input is dropped, as before.
       const toolInput = typeof raw.tool_input === 'object' && raw.tool_input !== null && !Array.isArray(raw.tool_input) ? raw.tool_input as Json : {}
@@ -1502,6 +1504,31 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       atomic(file, `${JSON.stringify(current)}\n`, checkDeadline)
       queuedFile = file
     }
+    // Antigravity's turn log (#1396, D2): appended to before the lock below and before any board call, so a lock that stays
+    // busy, a row write that fails or a take that fails each loses one mark at most. A turn start's number also goes with its
+    // take, so a log write that fails still reaches the board. A replayed event writes nothing: no turn counts twice.
+    const turnMark = current?.agent === 'antigravity' && current.mode === '--agent-status' && current.event !== undefined
+      ? isTurnStart('antigravity', current.event) ? 'start' : current.event === 'Stop' ? 'stop' : undefined : undefined
+    let turnSeq: number | undefined
+    // The hook worker usually marked the turn already and handed on what it wrote (hooks/hook-safety.ts), for this
+    // process only.
+    const handed = process.env.AGENT_BOARD_TURN_MARK
+    delete process.env.AGENT_BOARD_TURN_MARK
+    if (current !== undefined && turnMark !== undefined) {
+      const messages = defaultMessagesDirectory(progress, home, process.env, process.platform)
+      const marked = workerTurnMark(handed, messages, 'antigravity', current.session, turnMark)
+      try {
+        if (turnMark === 'start') {
+          // A start the worker could not append is appended here, with the same three tries; its number is the place of its
+          // own line, or, with none, the number of starts plus one.
+          const token = marked?.token ?? appendTurnStart(messages, 'antigravity', current.session)
+          turnSeq = startSeq(messages, 'antigravity', current.session, token)
+        } else if (marked?.token === undefined && marked?.none !== true) {
+          // A Stop the worker did not mark, or could not append, ends the turns before the size it read first.
+          appendTurnStop(messages, 'antigravity', current.session, marked?.size)
+        }
+      } catch {}
+    }
     // A board that refuses writes, for its lock or any file under it, as agy's terminal sandbox does (#1384).
     const isDenied = (error: unknown): boolean => !isBusy(error)
       && (error instanceof Error && error.message === 'LOCK_DENIED' || ['EACCES', 'EPERM', 'EROFS'].includes(String((error as { code?: unknown } | null)?.code)))
@@ -1565,6 +1592,13 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
         mkdirSync(dirname(offsetFile), { recursive: true })
         atomic(offsetFile, `${JSON.stringify({ version: 1, file: resolve(path as string), offset: read.end })}\n`, checkDeadline)
       } catch {}
+    }
+    if (mode === '--agent-status' && agent === 'antigravity' && current?.event === 'StopWait') {
+      const delivered = await deliverAntigravityStopWait({
+        session: current.session, raw, progress, home, root, hookDeadline, s, hash, readLocal, atomic, checkDeadline,
+      })
+      if (!delivered) output({})
+      return true
     }
     if (mode === '--agent-status' && agent === 'antigravity' && planInput === undefined && current !== undefined) await bringMarkedReport(current.session)
     let delay = 50
@@ -1683,7 +1717,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       '--progress-file', progress, '--home', home, '--data-dir', root,
     ])) : null
     if (await deliverTurnEvent({
-      mode, agent, event, session, report, raw, folder: current.folder, base, progress, home, root, hookDeadline, s,
+      mode, agent, event, session, report, raw, folder: current.folder, base, progress, home, root, hookDeadline, s, seq: turnSeq,
       hash, readLocal, atomic, checkDeadline, hereNames,
     })) return true
     if (mode === '--codex-report' && planInput !== undefined) return true

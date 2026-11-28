@@ -168,6 +168,7 @@ export const BOARD_FILE_BUDGETS_MS = Object.freeze({
   // 44681768984), over the 105 s line of 150 s. By the rule of #1715: 109.1 x 1.3 / 0.7, rounded up to five seconds.
   // Grew with #1778's `setup --update` tests (#1314): 24 tests, 50.0 s of test time in its part. 170.8 s on Windows Node 24
   // (run 45073388887, attempt 2), over the 143.5 s line of 205 s. By the rule of #1715: 170.8 x 1.3 / 0.7, rounded up to five seconds.
+  // Since #1912 each part runs a share; as for legacy-connect, keep the whole-file budget until main measures its shares.
   'tests/host-upgrade.test.mjs': 320_000, // slowest 170.8 s
   // Re-derived by the same rule (#1715): 60.6-73.4 s on Windows Node 24 on #1709, which adds terminal setup tests here.
   'tests/setup-terminal.test.mjs': 140_000, // slowest 73.4 s
@@ -310,7 +311,7 @@ const listTests = (root, folder, pattern) => existsSync(join(root, folder))
   ? readdirSync(join(root, folder)).filter(name => pattern.test(name)).map(name => folder + '/' + name)
   : []
 
-export const buildPlan = async (files, { roots, forceFull = false }) => {
+export const buildPlan = async (files, { roots, forceFull = false, pairs }) => {
   if (!Array.isArray(roots) || !roots.length) throw new Error('base and head source roots are required')
   const tests = Object.fromEntries(GROUPS.map(group => [group, []]))
   const deps = Object.fromEntries(GROUPS.map(group => [group, new Set()]))
@@ -380,7 +381,7 @@ export const buildPlan = async (files, { roots, forceFull = false }) => {
   const finalPlan = plan.full && notes.length ? makePlan(files, { tests, deps, bundleSources, pluginRuntime, forceFull: true }) : plan
   // Changed paths include deletions; runnable files must always come from the head.
   for (const group of GROUPS) finalPlan.testFiles[group] = finalPlan.testFiles[group].filter(path => existsSync(join(head, path)))
-  return { ...finalPlan, notes }
+  return { ...finalPlan, notes, ...(pairs === undefined ? {} : { partMatrices: partMatrices(finalPlan, tests, pairs) }) }
 }
 
 const gitPaths = (root, base, head) => {
@@ -396,6 +397,7 @@ const emitPlan = plan => {
     const output = { plan: JSON.stringify(plan), full: String(plan.full), installers_os: JSON.stringify(plan.installerMatrix.length ? plan.installerMatrix : systems), plugin_os: JSON.stringify(plan.pluginMatrix.length ? plan.pluginMatrix : systems) }
     for (const group of GROUPS) output[group] = String(plan.checks[group])
     for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys', 'browser']) output[group + '_tests'] = JSON.stringify(plan.testFiles[group])
+    if (plan.partMatrices) for (const [group, matrix] of Object.entries(plan.partMatrices)) output[group + '_matrix'] = JSON.stringify(matrix)
     output.bundle = String(plan.generated.bundle)
     output.released = String(plan.generated.released)
     appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(output).map(([key, value]) => key + '=' + value).join('\n') + '\n')
@@ -420,7 +422,9 @@ const parsePart = part => {
 // 164.0 s, and the Windows board part that held it to 448.6 s of its 480 s (#1366, runs 43641832826, 43644841624).
 // legacy-connect joined when, whole, it took 162.2 and 167.0 s in Windows Node 22 part 4 of 7 beside that part's share
 // of codex-local, and the part ran 487.9 and 494.4 s of its 480 s on main e977c727 (#1741, run 44697238483).
-export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
+// host-upgrade joined at 182.9 s in the refreshed table: Windows board part 6/10 ran 394.8 and 438.8 s of its 480 s
+// on main 6881827b (#1912, run 45920668633).
+export const selfPartedTests = ['tests/board.test.mjs', 'tests/codex-local.test.mjs', 'tests/host-upgrade.test.mjs', 'tests/legacy-connect.test.mjs', 'tests/messaging.test.mjs', 'tests/opencode-receiver.test.mjs']
 
 // The table of times that deals both the files and the tests out to the parts (#1762): the time of each test file, and of each
 // top-level test of a self-parted file, from a main run's job logs. `node scripts/ci-test-times.mjs <job logs>` writes it; see
@@ -458,7 +462,7 @@ const callerFile = () => {
 }
 
 // Which part runs each test of a self-parted file that the table holds: the tests of the files that share jobs (the same
-// group: the four board files, or messaging alone) go out together, slowest first, each to the part with the least time so
+// group: the five board files, or messaging alone) go out together, slowest first, each to the part with the least time so
 // far, so the parts of a job get the same time from all of them. It depends only on the table and the number of parts, so
 // every job works out the same split and the parts together run each test once.
 const dealCache = new WeakMap()
@@ -543,6 +547,36 @@ const dealFiles = (files, total) => {
 export const partLoads = (files, total) => {
   const { shares, loads } = dealFiles(files, total)
   return { shares, loads }
+}
+
+// Today's number of parts of each split job on each system, on every Node line (#1917): the counts test.yml falls back to
+// when the planner names no matrices, and the most a pull request's selection ever gets.
+export const PART_COUNTS = Object.freeze({
+  board: Object.freeze({ 'ubuntu-latest': 3, 'windows-latest': 10 }),
+  messaging: Object.freeze({ 'ubuntu-latest': 2, 'windows-latest': 3 }),
+  journeys: Object.freeze({ 'ubuntu-latest': 1, 'windows-latest': 3 }),
+})
+
+// How many of today's `total` parts a selection of a group needs (#1917): a part with no test file is a job started for
+// nothing, and each job is one more chance of a runner fault. The limit is the heaviest part of today's full run of the
+// group, `all`, which CI already runs, so no part gets longer than one CI runs today. A self-parted file deals its tests
+// into today's parts, and a file with no time of its own in the table weighs a guess, so either keeps today's count.
+export const partCount = (selected, all, total) => {
+  if (total <= 1 || !selected.length) return total
+  if (selected.some(path => selfPartedTests.includes(path) || TIMES.files[path] === undefined)) return total
+  const limit = Math.max(...partLoads(all, total).loads)
+  for (let count = 1; count < total; count++) if (Math.max(...partLoads(selected, count).loads) <= limit) return count
+  return total
+}
+
+// The matrices of the split jobs for the (system, Node) pairs the workflow runs: today's counts on a full plan, else the
+// count each pair's selection needs.
+export const partMatrices = (plan, tests, pairs) => {
+  if (!Array.isArray(pairs) || !pairs.length || pairs.some(pair => !systems.includes(pair?.os) || !Number.isInteger(pair?.node))) throw new Error('the Node pairs must be a list of {os, node}')
+  return Object.fromEntries(Object.entries(PART_COUNTS).map(([group, counts]) => [group, pairs.flatMap(({ os, node }) => {
+    const total = plan.full ? counts[os] : partCount(plan.testFiles[group], tests[group], counts[os])
+    return Array.from({ length: total }, (_, index) => ({ os, node, part: (index + 1) + '/' + total }))
+  })]))
 }
 
 // The Node run of one part: its share of the other files, and every self-parted file, which keeps its own
@@ -686,7 +720,9 @@ const main = async () => {
   if (process.argv[2] !== 'plan') throw new Error('use plan, run, check, summary or verify')
   const roots = JSON.parse(process.env.CI_SOURCE_ROOTS)
   const files = process.env.CI_CHANGED_FILES ? JSON.parse(process.env.CI_CHANGED_FILES) : process.env.CI_FORCE_FULL === 'true' ? [] : gitPaths(roots.at(-1), process.env.CI_BASE_SHA, process.env.CI_HEAD_SHA)
-  emitPlan(await buildPlan(files, { roots, forceFull: process.env.CI_FORCE_FULL === 'true' }))
+  // The workflow's (system, Node) pairs (#1917); without them the planner names no matrices and test.yml keeps today's.
+  const pairs = process.env.CI_NODE_PAIRS ? JSON.parse(process.env.CI_NODE_PAIRS) : undefined
+  emitPlan(await buildPlan(files, { roots, forceFull: process.env.CI_FORCE_FULL === 'true', pairs }))
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => {

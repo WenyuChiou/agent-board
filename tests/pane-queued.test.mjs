@@ -88,8 +88,9 @@ test('the pane counts a queued answer as handled and queued, as the page, --stat
   // The cards stay listed; only the count moves.
   assert.equal(shown.waiting.length, 2)
   const line = statusLine(shown, EN)
-  assert.ok(line.includes(EN.statusWaiting(1)), line)
+  assert.ok(line.startsWith(`● ${EN.statusWaiting(1)}`), line)
   assert.ok(line.includes(EN.boardQueuedCount(1)), line)
+  assert.ok(line.indexOf(EN.statusWaiting(1)) < line.indexOf(EN.boardQueuedCount(1)), line)
   // No store, or no message from the board: the view is the one built.
   assert.equal(withQueuedAnswers(before, [], EN, undefined), before)
   assert.equal(withQueuedAnswers(before, [], EN, { connections: [], mailboxes: [], messages: [] }), before)

@@ -15,7 +15,7 @@ import type { Tone } from './palette'
 import { homeForms, redact } from './redact'
 import { sha256 } from './sha256'
 import { agentLabel } from './strings'
-import { isSameName, questionHead, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
+import { isLiveAsk, isSameName, questionHead, relativeTime, replyHint, rowNeedsNow, rowNeedsYou } from './view'
 import type { StepRef, TaskRef, TaskRow, View, ViewStep, WaitingItem } from './view'
 import type { ConfirmRef } from './blocks'
 import type { TidyPreview } from './tidy'
@@ -416,7 +416,9 @@ export const boardText = (view: View, pending: readonly PendingTurn[], s: String
     lines.push('')
   }
 
-  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && recentQuestions.length === 0) lines.push(c('quiet', s.empty), '')
+  // An empty board names the command that connects the first agent (#256). A finished
+  // task counts even with no questions: `recent` holds it, not only `recentQuestions`.
+  if (view.groups.every(group => group.rows.length === 0) && asks.length === 0 && news.length === 0 && view.idle.length === 0 && view.stopped.length === 0 && view.due.length === 0 && view.recent.length === 0) lines.push(c('quiet', s.empty), c('quiet', s.boardNoAgents), '')
   // Runs agents started for themselves, with no session known: one folded line, never in the counts (#399).
   if (view.background) lines.push(c('quiet', cut(view.background, o.width)), '')
   for (const line of view.health ?? []) lines.push(...wrapNote(line, o.width - 2, isWide).map(part => c('quiet', part)))
@@ -780,7 +782,7 @@ export const boardKey = (state: BoardState, key: string, items: readonly BoardIt
     }
     // Said only when asked: a live session's question is that session's to take off the board.
     if (key === 'a' && ask.archive !== undefined) return { state, action: { type: 'archive', ref: ask.archive, title: ask.task } }
-    if (key === 'a' && ask.where !== 'manual' && ask.isKept !== true && ask.canHide !== false) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
+    if (key === 'a' && isLiveAsk(ask)) return { state: { ...state, note: s.archiveLive, tone: 'quiet' }, action: null }
   }
   if (item.type === 'row') {
     const { row } = item

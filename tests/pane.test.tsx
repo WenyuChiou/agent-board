@@ -3113,7 +3113,7 @@ test('session start survives an engine without session surfaces and shows no boa
   await clock.advance(10)
   expect(started.cwd).toBe('/work/demo')
   expect(world.paneOpenCalls).toBe(1)
-  expect(seen.status.at(-1)).toBe(`${EN.statusPrefix} · ${EN.statusWaiting(1)}`)
+  expect(seen.status.at(-1)).toBe(`● ${EN.statusWaiting(1)}`)
 })
 
 test('a terminal that binds after session start clears the board-page hint', async ($, on) => {
@@ -3121,7 +3121,7 @@ test('a terminal that binds after session start clears the board-page hint', asy
   const clock = engineBeneath(on, world)
   const seen = outside(on, world)
   await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
-  const normalStatus = `${EN.statusPrefix} · ${EN.statusWaiting(1)}`
+  const normalStatus = `● ${EN.statusWaiting(1)}`
   expect(seen.status.at(-1)).toBe(`${normalStatus} · ${EN.statusBoardPage}`)
   world.hasBrokenSurfaces = true
   await clock.advance(30000)
@@ -3143,7 +3143,7 @@ test('a terminal that binds after the pane found no surface at session start cle
   await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
   await clock.advance(10)
   expect(world.paneOpenCalls).toBe(1)
-  const normalStatus = `${EN.statusPrefix} · ${EN.statusWaiting(1)}`
+  const normalStatus = `● ${EN.statusWaiting(1)}`
   expect(seen.status.at(-1)).toBe(`${normalStatus} · ${EN.statusBoardPage}`)
   world.hasNoSurface = false
   await clock.advance(30000)
@@ -3155,7 +3155,7 @@ test('the footer status is unchanged when the pane is placed', async ($, on) => 
   engineBeneath(on, world)
   const seen = outside(on, world)
   await $.session.start({ cwd: '/work/demo', surface: 'terminal', isInteractive: true })
-  expect(seen.status.at(-1)).toBe(`${EN.statusPrefix} · ${EN.statusWaiting(1)}`)
+  expect(seen.status.at(-1)).toBe(`● ${EN.statusWaiting(1)}`)
   const opened = await $.command.run({ ...TIDY, args: '' })
   expect(opened.text).toBe(EN.paneOpened)
   expect(opened.text).not.toContain(FILE)
@@ -3226,7 +3226,7 @@ test('the footer status shows the waiting count and /agent-board when no surface
   for (const lang of ['en', 'zh-TW', 'zh-CN'] as const) {
     const s = STRINGS[lang]
     await $.command.run({ ...TIDY, args: `lang ${lang}` })
-    const normalStatus = `${s.statusPrefix} · ${s.statusWaiting(1)}`
+    const normalStatus = `● ${s.statusWaiting(1)}`
     expect(seen.status.at(-1)).toBe(`${normalStatus} · ${s.statusBoardPage}`)
     expect(seen.status.at(-1)).toContain('/agent-board')
     expect(seen.status.at(-1)).toContain(s.statusWaiting(1))
@@ -3381,7 +3381,7 @@ test('with the pane closed, the line under the prompt carries the progress', asy
   const seen = outside(on, world)
   await start($, '幫我重做進度面板')
   await $.tool.call({ tool: 'TaskCreate', subject: '讀 API', description: '' })
-  expect(seen.status.at(-1)).toMatch(/^進度 · .* 0\/1 · Claude 正在做 · 1 件等你$/)
+  expect(seen.status.at(-1)).toBe('● 1 件等你 · 0/1 · 讀 API')
 
   // Opened, the pane says it all, so the line is cleared.
   await $.command.run({ ...TIDY, args: '' })
@@ -3436,6 +3436,86 @@ test('pressing Archive on a stopped task that asks says its question stays', asy
     await ui.press({ key: 'demo::Stopped plan' })
     await ui.press({ key: 'demo::Stopped plan::archive' })
     expect(await ui.find({ type: 'Text', text: ZH_TW.archivedKeptQuestions('Stopped plan', 1) })).toBeDefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+// #155: an ended session's question under Older archives its task from the pane, only while the block still asks it.
+const ENDED_ASKING = '## demo\n<!-- auto session=a1b2c3d4 agent=codex state=ended updated=2026-10-16T11:00:00Z -->\n### Stopped plan\n- [x] Prepare\n- [?] Notify the team, OK?\n<!-- /auto session=a1b2c3d4 -->'
+const OLDER_ASK = 'older::demo::Stopped plan::1'
+const openedOlder = async ($: Parameters<Parameters<typeof test>[1]>[0], on: Parameters<Parameters<typeof test>[1]>[1], board = ENDED_ASKING) => {
+  const world: World = { files: new Map([[FILE, board]]), mtime: 1, hasTasks: true, store: { lang: 'en', autoConnectOff: true } }
+  const clock = engineBeneath(on, world)
+  await $.session.start({ cwd: '/work/persona_framework', surface: 'desktop', isInteractive: true })
+  await settledSetup($, world)
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop', props: PROPS })
+  await ui.press({ key: 'section::stoppedAsking' })
+  await ui.press({ key: `ask::${OLDER_ASK}` })
+  return { world, clock, ui }
+}
+
+test("the pane offers Archive on an ended session's question under Older and never says Still running there (#155)", async ($, on) => {
+  const { world, ui } = await openedOlder($, on)
+  try {
+    expect(await ui.find({ type: 'Text', text: EN.archiveLive })).toBeUndefined()
+    await ui.press({ key: `${OLDER_ASK}::archive` })
+    expect(world.files.get(FILE)).not.toContain('Stopped plan')
+    expect(world.files.get(ARCHIVE)).toContain('Stopped plan')
+    expect(await ui.find({ type: 'Text', text: EN.archivedKeptQuestions('Stopped plan', 1) })).toBeDefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test("pressing Archive on an ended session's question after the session resumed leaves its block and shows the question as live", async ($, on) => {
+  const { world, clock, ui } = await openedOlder($, on)
+  try {
+    const resumed = ENDED_ASKING.replace('state=ended updated=2026-10-16T11:00:00Z', 'state=waiting updated=2026-10-16T12:00:00Z')
+    world.files.set(FILE, resumed)
+    await ui.press({ key: `${OLDER_ASK}::archive` })
+    expect(world.files.get(FILE)).toBe(resumed)
+    expect(world.files.has(ARCHIVE)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: EN.archiveGone })).toBeDefined()
+    await clock.advance(2_000)
+    // The question is a live card again: its session's own to take off the board.
+    expect(await ui.find({ type: 'Button', key: 'demo::Stopped plan::1::hide' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'demo::Stopped plan::1::archive' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: EN.archiveLive })).toBeDefined()
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('pressing Archive on a question whose block cleanup already took writes nothing and leaves its kept copy for review', async ($, on) => {
+  const { world, clock, ui } = await openedOlder($, on)
+  try {
+    world.files.set(FILE, '## demo\n')
+    await ui.press({ key: `${OLDER_ASK}::archive` })
+    expect(world.files.get(FILE)).toBe('## demo\n')
+    expect(world.files.has(ARCHIVE)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: EN.archiveGone })).toBeDefined()
+    await clock.advance(2_000)
+    // Its copy stays once, for review, with nothing to archive and no word about a running session.
+    const kept = JSON.stringify(await ui.drawn()).match(/"key":"(ask::retained::[^"]*)"/g) ?? []
+    expect(kept).toHaveLength(1)
+    await ui.press({ key: kept[0]!.slice(7, -1) })
+    expect(await ui.find({ type: 'Text', text: EN.archiveLive })).toBeUndefined()
+    expect(JSON.stringify(await ui.drawn()).includes('::archive"')).toBe(false)
+  } finally {
+    await ui.unmount()
+  }
+})
+
+test('a pane Archive on an ended question rechecks its words before writing', async ($, on) => {
+  const { world, ui } = await openedOlder($, on)
+  try {
+    const reworded = ENDED_ASKING.replace('Notify the team, OK?', 'Notify the whole team, OK?')
+    world.files.set(FILE, reworded)
+    await ui.press({ key: `${OLDER_ASK}::archive` })
+    expect(world.files.get(FILE)).toBe(reworded)
+    expect(world.files.has(ARCHIVE)).toBe(false)
+    expect(await ui.find({ type: 'Text', text: EN.archiveGone })).toBeDefined()
   } finally {
     await ui.unmount()
   }

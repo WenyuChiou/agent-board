@@ -24,7 +24,7 @@ export const HOOK_TIMEOUTS: Record<string, { timeout: number; events?: Record<st
   grok: { timeout: 5000, events: { Stop: 10000 } },
   muse: { timeout: 5000, events: { Stop: 10000 } },
   hermes: { timeout: 10000 },
-  antigravity: { timeout: 3000 },
+  antigravity: { timeout: 3000, events: { StopWait: 30000 } },
   opencode: { timeout: 3000 },
   openclaw: { timeout: 3000 },
   deepseek: { timeout: 3000 },
@@ -174,6 +174,37 @@ export const HERMES_PREFIX_SOURCE = String.raw`const hermesPrefix = text => {
 }
 `
 
+// The turn log's lines and the one write that appends one (D2, #1396), as source the hook worker carries below. Each line is
+// one write on a descriptor opened with the append flag, with a newline on each side, so a cut line is cut apart from its
+// neighbours: a start is 36 bytes and a stop at most 70. The write's return is checked, since a short one would leave a cut
+// line, and no line over 512 bytes, one sector, is ever built. A log that is a link or has a second name is never written
+// through: it is refused before it is opened, and the opened file must be the one the folder names, with one name, before
+// the write (codex_788). It uses the worker's fs and randomUUID, and the multi-process append test builds it with its own.
+export const TURN_LOG_SOURCE = `const turnToken = () => randomUUID().replace(/-/g, '')
+const isTurnToken = token => typeof token === 'string' && /^[0-9a-f]{32}$/.test(token)
+const startLine = token => {
+  if (!isTurnToken(token)) throw Error('INVALID_TOKEN')
+  return '\\nS ' + token + '\\n'
+}
+const stopLine = (size, at, token) => {
+  if (!Number.isSafeInteger(size) || size < 0 || !Number.isSafeInteger(at) || at < 0 || !isTurnToken(token)) throw Error('INVALID_STOP')
+  return '\\nE ' + size + ' ' + at + ' ' + token + '\\n'
+}
+const appendTurnLine = (file, line) => {
+  const bytes = Buffer.from(line, 'latin1')
+  if (bytes.length > 512) throw Error('LINE_TOO_LONG')
+  let before
+  try { before = fs.lstatSync(file, { bigint: true }) } catch (error) { if (error.code !== 'ENOENT') throw error }
+  if (before !== undefined && (!before.isFile() || before.nlink !== 1n)) throw Error('TURN_LOG_UNSAFE')
+  const fd = fs.openSync(file, 'a', 0o600)
+  try {
+    const opened = fs.fstatSync(fd, { bigint: true }), named = fs.lstatSync(file, { bigint: true })
+    if (!opened.isFile() || !named.isFile() || opened.nlink !== 1n || opened.ino !== named.ino || opened.dev !== named.dev) throw Error('TURN_LOG_UNSAFE')
+    if (fs.writeSync(fd, bytes, 0, bytes.length) !== bytes.length) throw Error('SHORT_WRITE')
+  } finally { try { fs.closeSync(fd) } catch {} }
+}
+`
+
 export const hookWorker = (home: string, script: string, boardPromptHelper: string, dataRoot?: string): string => `import { createRequire } from 'node:module'
 const require = createRequire(import.meta.url)
 const { spawn, spawnSync } = require('node:child_process')
@@ -191,9 +222,84 @@ ${hookLogSource(home, '__AGENT__', true).replace(JSON.stringify('__AGENT__'), 's
 const isReport = args.includes('--codex-report')
 // The plan mirror (#922) is read as a decision by Codex and Gemini: it never prints and is never queued.
 const isPlan = args.includes('--plan-event')
+const isWait = value('--hook-event') === 'StopWait'
 const fail = code => { hookError(code); process.exitCode = isReport ? 1 : 0; if (!isReport && !isPlan && ['cursor', 'gemini', 'antigravity'].includes(agent)) process.stdout.write('{}\\n'); return false }
 ${hookRecoverySource(home, script, dataRoot)}
+// Antigravity's turn log (#1396, D2; readTurnLog in scripts/board-messaging.ts) is appended to here, before the board script
+// starts, so a board script that is slow, or stopped at the deadline and queued, still leaves the line that keeps a wake
+// out of the running turn. One line is one write and the log has no lock: a turn start appends the line S token; a Stop
+// reads the size of every turn log as its first act, before its input, and later appends the line E size at token, which
+// ends the starts that begin before that size, so a start that lands after the read stays open. Each is tried three times
+// with a new token, as a start's record was. A start that no try could append is appended by the board script, and a Stop
+// that could not append hands it the size it read, which the board script appends if it is no larger than the log.
+${TURN_LOG_SOURCE}
+const turnMarks = { SessionStart: 'start', PreInvocation: 'start', Stop: 'stop' }
+const turnHash = text => createHash('sha256').update(text).digest('hex')
+// The mark this hook writes, from its own arguments, so a Stop knows it is one before it reads its input.
+const turnMarkOf = () => {
+  const event = value('--event')
+  return agent === 'antigravity' && args.includes('--agent-status') && Object.hasOwn(turnMarks, event) ? turnMarks[event] : undefined
+}
+// The board's messages folder for the progress file this hook reports to, worked out as the board script does.
+const turnRoot = () => {
+  const progress = value('--progress-file')
+  if (typeof progress !== 'string' || progress === '') return undefined
+  const boardHome = path.resolve(${JSON.stringify(home)}), runtime = process.env.XDG_RUNTIME_DIR
+  const isOwn = dir => { try { const found = fs.lstatSync(dir); return found.isDirectory() && (process.getuid === undefined || found.uid === process.getuid() && (found.mode & 0o077) === 0) } catch { return false } }
+  const folder = process.platform === 'win32' ? (runtime ? path.join(runtime, 'agent-board') : path.join(boardHome, '.cache', 'agent-board')) : runtime && isOwn(runtime) ? runtime : path.join(boardHome, '.cache', 'agent-board')
+  return path.resolve(folder, 'agent-board-' + turnHash(path.resolve(progress)).slice(0, 16) + '-messages')
+}
+// A Stop's sizes, read as the worker's first act, before its input is read: the size of every turn log in the folder, since
+// the conversation is not known yet, and markTurn keeps its own. Undefined when the folder cannot be read; a log that cannot
+// be looked at, or is no plain file, has the size undefined, which is no size.
+const readTurnSizes = () => {
+  if (turnMarkOf() !== 'stop') return undefined
+  try {
+    const root = turnRoot()
+    if (root === undefined) return undefined
+    const sizes = new Map()
+    for (const name of fs.readdirSync(root)) {
+      if (!name.endsWith('.turns.log')) continue
+      try { const found = fs.lstatSync(path.join(root, name)); sizes.set(name, found.isFile() ? found.size : undefined) } catch { sizes.set(name, undefined) }
+    }
+    return sizes
+  } catch { return undefined }
+}
+const markTurn = (payload, sizes) => {
+  const mark = turnMarkOf(), root = turnRoot()
+  const session = typeof payload.conversationId === 'string' ? payload.conversationId : payload.session_id ?? payload.sessionId ?? payload.sessionID
+  if (mark === undefined || typeof session !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{5,127}$/.test(session) || root === undefined) return undefined
+  const name = 'mailbox_' + turnHash('antigravity:' + session).slice(0, 24) + '.turns.log'
+  const file = path.join(root, name)
+  const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  // Three tries, 10 and 25 ms apart, each with a new token. A short write is a failure; the cut line it left reads as a start.
+  const append = makeLine => {
+    for (const wait of [10, 25, undefined]) {
+      const token = turnToken()
+      try { appendTurnLine(file, makeLine(token)); return token } catch (error) {
+        if (wait === undefined || error.message === 'TURN_LOG_UNSAFE') return undefined
+        pause(wait)
+      }
+    }
+  }
+  // Only a board makes this folder, private; one made here would not be, and nothing is appended without it.
+  try {
+    const found = fs.lstatSync(root)
+    if (!found.isDirectory() || found.isSymbolicLink()) return undefined
+  } catch { return undefined }
+  if (mark === 'start') {
+    const token = append(startLine)
+    return token === undefined ? undefined : { file, mark, token }
+  }
+  // A missing own log has the size 0, and any other trouble reading the sizes is no size: nothing is appended, and the board
+  // script is told so, since the turn then stays open until the next Stop.
+  const size = sizes === undefined ? undefined : sizes.has(name) ? sizes.get(name) : 0
+  if (size === undefined) return { file, mark, none: true }
+  const token = append(made => stopLine(size, Date.now(), made))
+  return token === undefined ? { file, mark, size } : { file, mark, token }
+}
 const run = async () => {
+  const sizes = readTurnSizes()
   const now = Date.now(), supplied = Number(value('--hook-started'))
   const started = Math.floor(Math.min(performance.timeOrigin, Number.isSafeInteger(supplied) && supplied >= 0 && supplied <= now ? supplied : Infinity))
   if (safeAgent === 'unknown') return fail('UNSUPPORTED_AGENT')
@@ -215,7 +321,7 @@ const run = async () => {
   // even later, after a slow Windows PowerShell start (#241), still reads its input for a short
   // grace and queues the event, unless the host stops it first.
   // A report is never queued, so it waits only until its deadline.
-  const budget = isReport || isPlan ? deadline - Date.now() : Math.max(started + hostTimeout - 300 - Date.now(), ${HOOK_LATE_INPUT_GRACE})
+  const budget = isReport || isPlan || isWait ? deadline - Date.now() : Math.max(started + hostTimeout - 300 - Date.now(), ${HOOK_LATE_INPUT_GRACE})
   if (budget <= 0) return fail('REPORTER_TIMEOUT')
   let text = '', timer, isCut = false
   process.stdin.setEncoding('utf8')
@@ -229,6 +335,7 @@ const run = async () => {
   let payload
   try { payload = isCut ? hermesPrefix(text) : JSON.parse(text.replace(/^\\uFEFF/, '')); if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw Error() }
   catch { return fail('INCOMPLETE_INPUT') }
+  const turn = markTurn(payload, sizes)
   const internal = ['--hook-version', '--hook-event', '--hook-deadline', '--hook-started', '--home']
   const reporterArgs = args.filter((arg, index) => !internal.includes(arg) && !internal.includes(args[index - 1]))
   // The board script names the copy it queues with this id. A worker that has to stop it at the deadline can then tell
@@ -240,7 +347,7 @@ const run = async () => {
     try {
       // A late copy is still written: it holds the worker's start time, and replay drops it once a
       // newer event was applied. A host that stops the worker mid-write leaves a .tmp file that is swept.
-      if (isReport || isPlan) return fail('REPORTER_TIMEOUT')
+      if (isReport || isPlan || isWait) return fail('REPORTER_TIMEOUT')
       const pending = path.join(${dataRoot === undefined ? `path.dirname(${JSON.stringify(script)})` : JSON.stringify(dataRoot)}, 'pending')
       fs.mkdirSync(pending, { recursive: true, mode: 0o700 })
       if (queueId !== undefined && fs.existsSync(path.join(pending, String(started).padStart(15, '0') + '-' + queueId + '.json'))) {
@@ -278,19 +385,35 @@ const run = async () => {
   }
   const remaining = deadline - Date.now()
   if (remaining <= 0) return queue()
-  const childArgs = [...reporterArgs, ...(!isReport && !isPlan ? ['--hook-recovery-parent'] : []), '--hook-deadline', String(deadline), '--hook-started', String(started), '--home', ${JSON.stringify(home)}]
+  const childArgs = [...reporterArgs, ...(!isReport && !isPlan && !isWait ? ['--hook-recovery-parent'] : []), '--hook-deadline', String(deadline), '--hook-started', String(started), '--home', ${JSON.stringify(home)}]
   // OpenCode starts this worker from its own process, so the parent here is OpenCode: the board script puts it on the row,
   // and the board ends the row once that process is gone, whether or not OpenCode's exit reached the plugin (#1595).
   // An environment variable, not a flag: a board script older than this worker ignores it instead of refusing the event.
   const childEnv = { ...process.env }
   delete childEnv.AGENT_BOARD_HOOK_PARENT
+  // Only a mark this worker wrote is handed on, never one from its own parent.
+  delete childEnv.AGENT_BOARD_TURN_MARK
+  if (turn !== undefined) childEnv.AGENT_BOARD_TURN_MARK = JSON.stringify(turn)
   delete childEnv.AGENT_BOARD_HOOK_QUEUE_ID
-  if (!isReport && !isPlan) childEnv.AGENT_BOARD_HOOK_QUEUE_ID = queueId = randomUUID()
+  if (!isReport && !isPlan && !isWait) childEnv.AGENT_BOARD_HOOK_QUEUE_ID = queueId = randomUUID()
   if (agent === 'opencode' && Number.isSafeInteger(process.ppid) && process.ppid > 1) childEnv.AGENT_BOARD_HOOK_PARENT = String(process.ppid)
   const result = spawnSync(process.execPath, [${JSON.stringify(script)}, ...childArgs], {
     input: JSON.stringify(payload), encoding: 'utf8', windowsHide: true, env: childEnv,
     timeout: remaining, killSignal: 'SIGKILL', maxBuffer: 1048576,
   })
+  const hasContinue = text => {
+    try { const parsed = JSON.parse(text); return Boolean(parsed && parsed.decision === 'continue' && typeof parsed.reason === 'string') }
+    catch { return false }
+  }
+  if (isWait && hasContinue(result.stdout ?? '')) {
+    if (result.error?.code === 'ETIMEDOUT' || result.signal || (result.error || result.status !== 0) && Date.now() >= deadline) hookError('REPORTER_TIMEOUT')
+    else if (result.error || result.status !== 0) {
+      const reason = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
+      hookError(reason ? 'REPORTER_FAILED ' + reason : 'REPORTER_FAILED')
+    }
+    process.stdout.write(result.stdout)
+    return true
+  }
   // A plan that failed in the board script exits 0 there; its code is only logged here.
   if (isPlan && !result.error && result.status === 0) {
     const code = /[(（]([A-Z][A-Z0-9_]{2,63})[)）]/.exec(result.stderr ?? '')?.[1]
@@ -314,10 +437,10 @@ const run = async () => {
     // foresaw (#241) costs a retry, not the event. A refusal of the event itself (INVALID_SESSION, say) would refuse
     // its replay too, and replay drops such an entry, so it is only logged. A refusal missing here is saved and dropped
     // at replay, which wastes a replay; a retryable code listed here would lose its event.
-    if (isReport || isPlan || /^(?:INVALID_|BLOCK_|SESSION_CONFLICT$|UNSUPPORTED_AGENT$|MISSING_ARGUMENT$|MISSING_TURN$|STALE_TURN$|SHARED_BOARD_PATH_CONFLICT$|UNSAFE_COMMAND_PATH$)/.test(reason ?? '')) return fail(failure)
+    if (isReport || isPlan || isWait || /^(?:INVALID_|BLOCK_|SESSION_CONFLICT$|UNSUPPORTED_AGENT$|MISSING_ARGUMENT$|MISSING_TURN$|STALE_TURN$|SHARED_BOARD_PATH_CONFLICT$|UNSAFE_COMMAND_PATH$)/.test(reason ?? '')) return fail(failure)
     return queue(failure)
   }
-  if (!isReport && result.stderr?.split(/\\r?\\n/).includes('AGENT_BOARD_HOOK_PENDING')) requestRecovery()
+  if (!isReport && !isWait && result.stderr?.split(/\\r?\\n/).includes('AGENT_BOARD_HOOK_PENDING')) requestRecovery()
   process.stdout.write(result.stdout)
   return true
 }
