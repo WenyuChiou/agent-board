@@ -163,6 +163,17 @@ const parallelAmounts = (first: string, last: string): [string, string] | typeof
   return [amount.join(' '), last]
 }
 
+// A comma can sit inside one amount (`1 day, 12 hours or 2 days`, `3, 5 or 7 times`): when the
+// lead opens with a number and the words before its comma end with an amount, the first option's
+// start is unclear, so there are no buttons rather than one that sends a shorter amount (#1936).
+const amountBeforeComma = (before: string, lead: string): boolean => {
+  const head = before.slice(0, before.lastIndexOf(lead)).trimEnd()
+  if (!/[,，]$/.test(head)) return false
+  const words = head.slice(0, -1).trim().split(/\s+/)
+  const last = words.at(-1) ?? ''
+  return NUMBER.test(last) || (UNIT.test(last) && NUMBER.test(words.at(-2) ?? ''))
+}
+
 const lastOption = (text: string): string => {
   const option = text.trim()
   // These common nouns end in the same characters as question particles.
@@ -235,6 +246,7 @@ const optionsOf = (text: string): string[] => {
   const rest = lastOption(match[2] ?? '')
   // Reply length must not turn a real choice into a yes/no question; interfaces clip labels.
   const first = firstOption(lead)
+  if (NUMBER.test(first) && amountBeforeComma(match[1] ?? '', lead)) return UNCLEAR_AMOUNTS
   const amounts = parallelAmounts(first, rest)
   if (amounts !== null) return amounts
   return [first, pairedLast(first, rest)].filter(one => one !== '')

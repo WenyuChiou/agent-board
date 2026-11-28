@@ -1307,6 +1307,18 @@ test('an inline "A or B?" choice of amounts offers the amounts, not the question
   expect(askOf('Should the 2 workers keep running or stop?', '')).toMatchObject({ kind: 'choose', options: ['Should the 2 workers keep running', 'stop'] })
 })
 
+test('an inline "A or B?" choice whose first amount holds a comma offers no shorter amount (#1936)', () => {
+  // `1 day, 12 hours` may be one amount: no buttons rather than a `12 hours` button that drops `1 day`.
+  expect(askOf('Should the export keep 1 day, 12 hours or 2 days?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('History', 'Should the export keep 1 day, 12 hours or 2 days?')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Should the export keep 1 day, 12 hours or forever?', '')).toMatchObject({ kind: 'reply', options: [] })
+  expect(askOf('Retry 3, 5 or 7 times?', '')).toMatchObject({ kind: 'reply', options: [] })
+  // A comma before `or`, a comma after a lead-in and a listed choice keep their buttons.
+  expect(askOf('Should the export keep 1 day, or 2 days?', '').options).toEqual(['1 day', '2 days'])
+  expect(askOf('Tests pass, 3 or 5?', '').options).toEqual(['3', '5'])
+  expect(askOf('Which count, 3, 5 or 7?', '').options).toEqual(['3', '5', '7'])
+})
+
 test('an English question with a relative clause keeps its words and does not strip to the clause\'s verb', () => {
   expect(askOf('Should I keep files that are backed up or delete them?', '')).toMatchObject({
     kind: 'choose',
