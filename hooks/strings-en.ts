@@ -181,6 +181,8 @@ export const EN: Strings = {
     "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",
     "keptData": "Keeps your data and history beside {progress} (answers, questions, journal, archive, sessions):",
+    "keptBoard": "Also keeps the board's session records and queued messages:",
+    "folderIfEmpty": "{folder} (the folder too, if it is left empty)",
     "applyRemove": "Apply this removal: {command}",
     "restartRemove": "Restart each of: {agents} to unload their removed reporting hooks.",
     "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks.",

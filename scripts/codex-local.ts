@@ -459,7 +459,7 @@ export const codexTrustOutput = (result: { changes: number; applied: boolean; fi
 export type LocalPlan = {
   agent: string
   progress: string
-  changes: { file: string; action: string }[]
+  changes: { file: string; action: string; folder?: true }[]
   conflicts: string[]
   alreadyGone: string[]
   // Shared files this removal leaves alone, and the other agents still using each one.
@@ -1807,7 +1807,7 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
   // The board's hook groups the person removed, which an update leaves removed and does not read trust for.
   const removedByPerson = new Set<string>()
   const conflicts: string[] = []
-  const changes: { file: string; action: string }[] = []
+  const changes: { file: string; action: string; folder?: true }[] = []
   // Beside the hooks.json it trusts, as the doctor reads it, so --codex-dir finds the same installation.
   const trustConfig = agent === 'codex' ? join(dirname(resolve(config)), 'config.toml') : ''
   let nextTrust: string | undefined
@@ -2281,7 +2281,8 @@ export const runCodexLocal = async (args: string[], boardPath: string, s: String
       try {
         if (readdirSync(folder).every(name => deletedFiles.has(join(folder, name)) || removedDirs.has(join(folder, name)))) {
           removedDirs.add(folder)
-          changes.push({ file: folder, action: 'remove' })
+          // A folder goes only if it is still empty when the removal runs, so it is marked, not counted as a file (#1244).
+          changes.push({ file: folder, action: 'remove', folder: true })
         }
       } catch {}
     }

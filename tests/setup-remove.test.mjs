@@ -289,3 +289,107 @@ test('a remove that skips an agent for an edited file keeps the board script and
     rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
   }
 })
+
+// #1244: a remove preview counts and lists files only, names a folder as going only if it is left empty, names every
+// board file that stays, and a command copied from `npx … remove` says remove once.
+const removeHome = (prefix, body, extraEnv = {}, agents = 'codex,cursor') => {
+  const home = mkdtempSync(join(tmpdir(), prefix))
+  try {
+    const env = { ...makeEnv(home), ...extraEnv }
+    const run = (...args) => spawnSync(process.execPath, [installer, '--home', home, '--lang', 'en', ...args], { cwd: home, env, encoding: 'utf8', windowsHide: true, timeout: 30000 })
+    const install = run('--agent', agents, '--apply')
+    assert.equal(install.status, 0, install.stderr)
+    return body({ home, run })
+  } finally {
+    rmSync(home, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 })
+  }
+}
+const succeededRun = result => {
+  assert.equal(result.status, 0, result.stderr)
+  return result.stdout
+}
+// Each status line's count, by its heading (Shared, Codex, Cursor).
+const countsOf = text => Object.fromEntries([...text.matchAll(/^(Shared|Codex|Cursor): (?:would remove|removed) (\d+) setup files?$/gm)].map(([, name, count]) => [name, Number(count)]))
+// The paths a preview lists under each heading, up to the next heading or the kept list.
+const listedOf = text => {
+  const listed = {}
+  let heading
+  for (const line of text.split('\n')) {
+    const head = line.match(/^(Shared|Codex|Cursor):/)
+    if (head) { heading = head[1]; listed[heading] = []; continue }
+    if (!line.startsWith('  ') || heading === undefined) { heading = undefined; continue }
+    listed[heading].push(line.trim())
+  }
+  return listed
+}
+const assertFilesCounted = preview => {
+  const counts = countsOf(preview), listed = listedOf(preview)
+  for (const [heading, count] of Object.entries(counts)) {
+    const files = listed[heading].filter(line => !line.includes('if it is left empty'))
+    assert.equal(count, files.length, `${heading} counts its files only: ${preview}`)
+    for (const line of files) assert.ok(!/(?:^|[\\/])(?:\.codex|\.cursor|\.agents|skills|agent-board)$/.test(line), `${heading} lists a folder as a file: ${line}\n${preview}`)
+  }
+}
+
+test('a folder that gains the person\'s file between the remove preview and the apply stays, and both counts name the same files', () => removeHome('setup-remove-1244-gain-', ({ home, run }) => {
+  const preview = succeededRun(run('--remove', '--agent', 'codex'))
+  assert.match(preview, /~[\\/]\.codex \(the folder too, if it is left empty\)/, preview)
+  writeFileSync(join(home, '.codex', 'mine.txt'), 'the person\'s own file\n')
+  const apply = succeededRun(run('--remove', '--agent', 'codex', '--apply'))
+  assert.equal(countsOf(apply).Codex, countsOf(preview).Codex, `${preview}\n---\n${apply}`)
+  assert.ok(existsSync(join(home, '.codex', 'mine.txt')))
+}))
+
+test('removing one agent while another stays installed lists the session and message files that stay', () => removeHome('setup-remove-1244-stay-', ({ home, run }) => {
+  mkdirSync(join(home, '.agent-board', 'sessions'), { recursive: true })
+  writeFileSync(join(home, '.agent-board', 'sessions', 'a.json'), '{}\n')
+  mkdirSync(join(home, '.cache', 'agent-board', 'x-messages'), { recursive: true })
+  writeFileSync(join(home, '.cache', 'agent-board', 'x-messages', 'messages.json'), '{}\n')
+  for (const output of [succeededRun(run('--remove', '--agent', 'codex')), succeededRun(run('--remove', '--agent', 'codex', '--apply'))]) {
+    assert.match(output, /~[\\/]\.agent-board[\\/]sessions[\\/]a\.json/, output)
+    assert.match(output, /~[\\/]\.cache[\\/]agent-board[\\/]x-messages[\\/]messages\.json/, output)
+  }
+  assert.ok(existsSync(join(home, '.agent-board', 'sessions', 'a.json')))
+}))
+
+test('removing the last agent counts files only and lists the message files that stay', () => removeHome('setup-remove-1244-last-', ({ home, run }) => {
+  succeededRun(run('--remove', '--agent', 'codex', '--apply'))
+  mkdirSync(join(home, '.cache', 'agent-board', 'x-messages'), { recursive: true })
+  writeFileSync(join(home, '.cache', 'agent-board', 'x-messages', 'messages.json'), '{}\n')
+  const preview = succeededRun(run('--remove', '--agent', 'cursor'))
+  assertFilesCounted(preview)
+  const apply = succeededRun(run('--remove', '--agent', 'cursor', '--apply'))
+  assert.deepEqual(countsOf(apply), countsOf(preview), `${preview}\n---\n${apply}`)
+  for (const output of [preview, apply]) assert.match(output, /~[\\/]\.cache[\\/]agent-board[\\/]x-messages[\\/]messages\.json/, output)
+}))
+
+test('a remove of two agents in one run counts each shared and own file once, with folders not counted', () => removeHome('setup-remove-1244-both-', ({ run }) => {
+  const preview = succeededRun(run('--remove', '--agent', 'codex,cursor'))
+  assertFilesCounted(preview)
+  assert.equal((preview.match(/agents[\\/]skills[\\/]agent-board \(the folder too, if it is left empty\)/g) ?? []).length, 1, preview)
+  const apply = succeededRun(run('--remove', '--agent', 'codex,cursor', '--apply'))
+  assert.deepEqual(countsOf(apply), countsOf(preview), `${preview}\n---\n${apply}`)
+}))
+
+test('a remove that skips one agent prints apply and retry commands with remove once', () => removeHome('setup-remove-1244-npx-', ({ home, run }) => {
+  // The person edited Antigravity's skill, so its removal is skipped, as in #1291.
+  const find = dir => readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? find(join(dir, entry.name)) : [join(dir, entry.name)])
+  const skill = find(home).find(file => /gemini/.test(file) && file.endsWith('SKILL.md'))
+  assert.ok(skill, 'Antigravity skill installed')
+  writeFileSync(skill, `${readFileSync(skill, 'utf8')}\nedited by the person\n`)
+  const preview = succeededRun(run('--remove'))
+  const apply = run('--remove', '--apply')
+  assert.match(apply.stdout, /Antigravity: skipped/, apply.stdout)
+  const commands = [...`${preview}\n${apply.stdout}`.matchAll(/npx @wenyuchiou\/agent-board remove[^\n]*/g)].map(([line]) => line)
+  assert.ok(commands.length >= 2, `${preview}\n---\n${apply.stdout}`)
+  for (const line of commands) assert.ok(!line.includes('--remove'), line)
+}, { AGENT_BOARD_SETUP_COMMAND: 'npx @wenyuchiou/agent-board remove' }, 'codex,antigravity'))
+
+test('the kept list after a remove names the run cursor, page state and pane files beside progress.md', () => removeHome('setup-remove-1244-kept-', ({ home, run }) => {
+  const names = ['progress-run-cursor.txt', 'progress-page-state.json', 'progress-pane.json']
+  for (const name of names) writeFileSync(join(home, '.agent-board', name), 'synthetic\n')
+  writeFileSync(join(home, '.agent-board', 'notes.txt'), 'not the board\'s\n')
+  const apply = succeededRun(run('--remove', '--apply'))
+  for (const name of names) assert.ok(apply.includes(name), `${name}: ${apply}`)
+  assert.ok(!apply.includes('notes.txt'), apply)
+}))

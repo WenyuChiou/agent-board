@@ -136,6 +136,8 @@ const summaries = [
     "appliedRemoveOne": "removed {count} setup file",
     "noInstalled": "no installed Agent Board setups to remove",
     "keptData": "Keeps your data and history beside {progress} (answers, questions, journal, archive, sessions):",
+    "keptBoard": "Also keeps the board's session records and queued messages:",
+    "folderIfEmpty": "{folder} (the folder too, if it is left empty)",
     "applyRemove": "Apply this removal: {command}",
     "restartRemove": "Restart each of: {agents} to unload their removed reporting hooks.",
     "restartRemoveOne": "Restart {agents} to unload its removed reporting hooks.",
@@ -220,6 +222,8 @@ const summaries = [
     "appliedRemoveOne": "已移除 {count} 個設定檔案",
     "noInstalled": "沒有已安裝的 Agent Board 設定可供移除",
     "keptData": "保留 {progress} 旁邊的資料與歷史紀錄（回答、提問、日誌、歸檔、工作階段）：",
+    "keptBoard": "也保留看板的工作階段紀錄與排隊中的訊息：",
+    "folderIfEmpty": "{folder}（資料夾若已清空也一併移除）",
     "applyRemove": "套用此移除變更：{command}",
     "restartRemove": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
     "restartRemoveOne": "重新啟動 {agents}，卸載已移除的看板回報 hooks。",
@@ -304,6 +308,8 @@ const summaries = [
     "appliedRemoveOne": "已移除 {count} 个设置文件",
     "noInstalled": "没有已安装的 Agent Board 设置可供移除",
     "keptData": "保留 {progress} 旁的数据与历史记录（回答、提问、日志、归档、会话）：",
+    "keptBoard": "也保留看板的会话记录与排队中的消息：",
+    "folderIfEmpty": "{folder}（文件夹若已清空也一并移除）",
     "applyRemove": "应用此移除更改：{command}",
     "restartRemove": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
     "restartRemoveOne": "重新启动 {agents}，卸载已移除的看板报告 hooks。",
@@ -544,7 +550,8 @@ const main = () => {
   const setupCommand = extra => {
     const at = extra.indexOf('--agent')
     return installCommand({ ...context, program: command || nodeCommand(fileURLToPath(import.meta.url)) }, {
-      target: 'setup', mode: extra.includes('--remove') ? '--remove' : extra.includes('--update') ? '--update' : undefined,
+      // `npx … remove` already names the removal, so its copied command takes no second --remove (#1244).
+      target: 'setup', mode: extra.includes('--remove') ? (/\sremove$/.test(command) ? undefined : '--remove') : extra.includes('--update') ? '--update' : undefined,
       agent: at < 0 ? undefined : extra[at + 1], apply: extra.includes('--apply'),
       extra: [...(args.includes('--antigravity-sidecar') ? ['--antigravity-sidecar'] : []), ...extra],
       // The Codex the person named stays the one the copied command uses (#1356).
@@ -664,7 +671,9 @@ const main = () => {
   const changesFor = (plan, isShared) => plan.changes.filter(change => shared.has(change.file) === isShared)
   const describe = changes => {
     if (isShowingApplied) {
-      if (isRemove) return changes.length ? words(changes.length === 1 ? 'appliedRemoveOne' : 'appliedRemove', { count: changes.length }) : ''
+      // A folder is named beside its files, not counted as one, so the preview's count is the apply's (#1244).
+      const files = changes.filter(change => !change.folder)
+      if (isRemove) return files.length ? words(files.length === 1 ? 'appliedRemoveOne' : 'appliedRemove', { count: files.length }) : ''
       return [['create', 'appliedCreate'], ['update', 'applied'], ['remove', 'appliedRemove']]
         .flatMap(([action, key]) => {
           const count = changes.filter(change => change.action === action).length
@@ -673,12 +682,13 @@ const main = () => {
     }
     return [['create', 'previewCreate'], ['update', 'preview'], ['remove', 'previewRemove']]
       .flatMap(([action, key]) => {
-        const count = changes.filter(change => change.action === action).length
+        const count = changes.filter(change => change.action === action && !change.folder).length
         return count ? [words(count === 1 ? `${key}One` : key, { count })] : []
       }).join('; ')
   }
   const fileLine = (file, changes) => {
     const change = changes.find(one => one.file === file)
+    if (change?.folder) return `  ${words('folderIfEmpty', { folder: shortPath(file) })}`
     return `  ${change?.action === 'remove' && !isRemove && !file.endsWith('.new') ? words('retire', { file: shortPath(file) }) : shortPath(file)}`
   }
   const sharedChanges = [...new Map(results.flatMap(plan => plan.conflicts.length ? [] : changesFor(plan, true)).map(change => [change.file, change])).values()]
@@ -725,23 +735,43 @@ const main = () => {
   if (isRemove && results.length) {
     const progress = results[0]?.progress || join(data, 'progress.md')
     const progressDir = dirname(progress)
-    const keptDataFiles = []
-    try {
-      const names = readdirSync(progressDir)
-      for (const name of names) {
-        if (name === 'progress.md' || /^progress-(?:answered|answers|questions|journal|archive|sessions|seen|settings)(?:-[^.]+)?\.(?:json|md|log)$/.test(name) || name === 'progress-inbox') {
-          keptDataFiles.push(join(progressDir, name))
-        }
-      }
-    } catch {}
-    if (keptDataFiles.length) {
-      keptDataFiles.sort((a, b) => {
-        if (basename(a) === 'progress.md') return -1
-        if (basename(b) === 'progress.md') return 1
+    // What this run removes is not kept; after an apply it is gone, so only what is still there is named.
+    const removed = new Set(results.filter(plan => !plan.conflicts.length).flatMap(plan => plan.changes).filter(change => change.action === 'remove').map(change => resolve(change.file)))
+    const isKept = file => !removed.has(resolve(file)) && existsSync(file)
+    const filesIn = (folder, depth = 1) => {
+      try {
+        return readdirSync(folder, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? depth > 0 ? filesIn(join(folder, entry.name), depth - 1) : [] : entry.isFile() ? [join(folder, entry.name)] : [])
+      } catch { return [] }
+    }
+    // The board's files beside progress.md take its name: progress-*.json, -run-cursor.txt and the like (#1244).
+    // Nothing else there is named, as that folder can be the home folder.
+    const stem = basename(progress).replace(/\.md$/i, '')
+    const keptDataFiles = filesIn(progressDir, 0).filter(file => {
+      const name = basename(file)
+      return name === basename(progress) || (name.startsWith(`${stem}-`) && /\.(?:json|md|log|txt)$/.test(name))
+    })
+    try { if (statSync(join(progressDir, `${stem}-inbox`)).isDirectory()) keptDataFiles.push(join(progressDir, `${stem}-inbox`)) } catch {}
+    const keptFiles = keptDataFiles.filter(isKept)
+    if (keptFiles.length) {
+      keptFiles.sort((a, b) => {
+        if (basename(a) === basename(progress)) return -1
+        if (basename(b) === basename(progress)) return 1
         return a.localeCompare(b)
       })
       lines.push(words('keptData', { progress: shortPath(progress) }))
-      for (const file of keptDataFiles) lines.push(`  ${shortPath(file)}`)
+      for (const file of keptFiles) lines.push(`  ${shortPath(file)}`)
+    }
+    // The session records in the board's folder and the queued messages in its runtime folders stay too (#1244).
+    const runtime = process.env.XDG_RUNTIME_DIR
+    const runtimeFolders = [join(home, '.cache', 'agent-board'), ...(runtime ? [join(runtime, 'agent-board')] : [])]
+    if (runtime) try { for (const name of readdirSync(runtime)) if (/^agent-board-.*-messages$/.test(name)) runtimeFolders.push(join(runtime, name)) } catch {}
+    const boardFiles = [...new Set([
+      ...[...new Set(results.map(plan => plan.data).filter(Boolean))].flatMap(folder => filesIn(join(folder, 'sessions'), 0).filter(file => file.endsWith('.json'))),
+      ...runtimeFolders.flatMap(folder => filesIn(folder)),
+    ])].filter(isKept).sort((a, b) => a.localeCompare(b))
+    if (boardFiles.length) {
+      lines.push(words('keptBoard'))
+      for (const file of boardFiles) lines.push(`  ${shortPath(file)}`)
     }
   }
   const steps = []
