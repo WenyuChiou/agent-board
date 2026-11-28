@@ -213,7 +213,8 @@ const viewOf = (state: string, steps: string[] = TICKED) => buildView(parseProgr
 
 test('a block leaves waiting when its last real step is ticked, whatever the hook placeholder says', () => {
   expect(deriveRowState(input({ steps: [placeholder, step('Read the file', 'done'), step('Count the lines', 'done')] }))).toBe('toCheck')
-  // The placeholder alone, or a real step still open, keeps the row waiting as before.
+  // The placeholder alone keeps the row waiting, and a real step still open reads stopped.
+  expect(deriveRowState(input({ steps: [placeholder] }))).toBe('waiting')
   expect(deriveRowState(input({ steps: [placeholder, step('Read the file', 'done'), step('Count the lines', 'todo')] }))).toBe('stopped')
   const view = viewOf('waiting')
   expect(view.groups.flatMap(group => group.rows)).toEqual([])
@@ -252,4 +253,15 @@ test('a finished waiting block whose session went quiet or lost its process stay
   expect(lost.finished ?? []).toEqual([])
   expect(lost.stopped).toHaveLength(1)
   expect(lost.stopped[0]?.archive).not.toBeNull()
+})
+
+test('a done block holding only its ticked placeholder still reads toCheck', () => {
+  // As on main: the session already ended done, so the placeholder-only branches below do not apply.
+  const quiet = input({ auto: auto('done', NOW - 60 * MIN), steps: [step('Waiting for the next instruction', 'done')], events: { hasSessionEnd: false, lastEventAt: NOW - 60 * MIN, host: 'antigravity' }, liveness: 'unknown' })
+  expect(deriveRowState(quiet)).toBe('toCheck')
+  const noAge = input({ auto: auto('done', NOW - 60 * MIN), steps: [step('Waiting for the next instruction', 'done')], events: { hasSessionEnd: false, lastEventAt: 0, host: 'antigravity' }, liveness: 'unknown' })
+  expect(deriveRowState(noAge)).toBe('toCheck')
+  // An open placeholder on a done block keeps the older reading: the session may still be settling.
+  const open = input({ auto: auto('done', NOW - 60 * MIN), steps: [step('Waiting for the next instruction', 'todo')], events: { hasSessionEnd: false, lastEventAt: NOW - 60 * MIN, host: 'antigravity' }, liveness: 'unknown' })
+  expect(deriveRowState(open)).toBe('unsure')
 })

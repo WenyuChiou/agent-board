@@ -3909,6 +3909,8 @@ export const LINES = [
 "  const open = steps.filter(isOpenStep);",
 "  if (steps.length > 0 && isWorkDone(steps))",
 "    return \"toCheck\";",
+"  if (auto.state === \"done\" && steps.length > 0 && steps.every((step) => isLifecycleStep(step.text) && (step.status === \"done\" || step.status === \"cancelled\")))",
+"    return \"toCheck\";",
 "  if (open.length > 0 && open.every((step) => step.status === \"running\"))",
 "    return \"waitingElsewhere\";",
 "  if (auto.state === \"waiting\" && open.length > 0)",

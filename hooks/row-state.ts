@@ -112,6 +112,9 @@ export const deriveRowState = (input: RowStateInput): RowState => {
   // Every step done is work to check, not work in progress. The hook's own placeholder does not count: it is
   // rewritten to open at every turn's end, so waiting on it would keep a finished block waiting (#1839).
   if (steps.length > 0 && isWorkDone(steps)) return 'toCheck'
+  // A block the session already ended done, holding only its own ticked placeholder, reads toCheck as on main:
+  // isWorkDone drops the placeholder, so without this line it would fall to the unsure/cannotTell branches below.
+  if (auto.state === 'done' && steps.length > 0 && steps.every(step => isLifecycleStep(step.text) && (step.status === 'done' || step.status === 'cancelled'))) return 'toCheck'
   // Only steps that wait on someone else are left: the session waits elsewhere.
   if (open.length > 0 && open.every(step => step.status === 'running')) return 'waitingElsewhere'
   // A turn that ended with real steps left and no ask stopped, not finished.
