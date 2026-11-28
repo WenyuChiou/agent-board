@@ -2159,8 +2159,9 @@ const tokenOf = (url: string): string => new URL(url).searchParams.get('t') ?? '
 
 // The board's answer to a request for a one-use link (#1650). `unsupported`: a page from before
 // one-use links, which has no such route. `busy`: anything else (no answer in time, a refusal, a
-// reply of another shape), from a page that should have made one.
-type LinkAnswer = { kind: 'ok'; url: string } | { kind: 'unsupported' } | { kind: 'busy' }
+// reply of another shape), from a page that should have made one; `isBoardBusy` only when the
+// board itself answered 503 busy.
+type LinkAnswer = { kind: 'ok'; url: string } | { kind: 'unsupported' } | { kind: 'busy'; isBoardBusy: boolean }
 
 const requestOpenLink = async (address: string): Promise<LinkAnswer> => {
   try {
@@ -2175,13 +2176,13 @@ const requestOpenLink = async (address: string): Promise<LinkAnswer> => {
       return { kind: 'unsupported' }
     }
     if (!res.ok) {
-      await res.arrayBuffer().catch(() => undefined)
-      return { kind: 'busy' }
+      const body = (await res.json().catch(() => null)) as { error?: unknown } | null
+      return { kind: 'busy', isBoardBusy: res.status === 503 && body?.error === 'busy' }
     }
     const reply = (await res.json()) as { url?: unknown }
-    return typeof reply.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/.test(reply.url) ? { kind: 'ok', url: reply.url } : { kind: 'busy' }
+    return typeof reply.url === 'string' && /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/.test(reply.url) ? { kind: 'ok', url: reply.url } : { kind: 'busy', isBoardBusy: false }
   } catch {
-    return { kind: 'busy' }
+    return { kind: 'busy', isBoardBusy: false }
   }
 }
 
@@ -2193,7 +2194,8 @@ const launchHere = (url: string, asApp: boolean): Promise<boolean> => new Promis
 // the person sees the page. 'launched': a launcher said yes, but nothing has loaded the page (yet).
 // 'failed': no window. 'busy': the board's table of open links is full of links still wanted, so it
 // opened nothing and answered 503; this process does not open a link of its own either.
-type Launch = 'redeemed' | 'launched' | 'failed' | 'busy'
+// 'nolink': the link of its own could not be had some other way; it is worded as busy.
+type Launch = 'redeemed' | 'launched' | 'failed' | 'busy' | 'nolink'
 
 // The board opens its own page, with a one-time approval key the address file never holds, so only
 // that page can answer approvals (D3, #1318), and says whether the window it opened used its code.
@@ -2225,7 +2227,7 @@ const launchThroughBoard = async (address: string, canLaunchHere: boolean): Prom
   }
   if (!canLaunchHere) return 'failed'
   const own = await requestOpenLink(address)
-  if (own.kind === 'busy') return 'busy'
+  if (own.kind === 'busy') return own.isBoardBusy ? 'busy' : 'nolink'
   if (own.kind !== 'ok') return 'failed'
   return (await launchHere(own.url, true)) ? 'launched' : 'failed'
 }
@@ -2996,8 +2998,8 @@ const ensureServer = async (failure?: ServeFailure): Promise<RunningServer | nul
 // command, `--html`, `--no-open`, the terminal board's `o`, the plugin, other agents' tools); each
 // of them only words it. 'opened': a window this run started loaded its page, so no link is
 // printed. 'link': a fresh one-use link, with why it is printed. 'refused': no way in from here,
-// with the next step; the command exits 1. `isBusy`: the board said busy, so nothing else is
-// handed out either, the phone's address included.
+// with the next step; the command exits 1. `isBusy`: the board itself answered 503 busy, so nothing
+// else is handed out either, the phone's address included.
 type LinkHint = 'plain' | 'already' | 'launched' | 'none'
 type OpenResult =
   | { kind: 'opened'; server: RunningServer }
@@ -3016,7 +3018,7 @@ const openBoard = async (mayLaunch: boolean): Promise<OpenResult> => {
   if (server === null) return { kind: 'refused', server: null, note: serveFailureNote(failure), isBusy: false }
   // The link comes first, so every outcome below has a way in, or says why not.
   const link = await requestOpenLink(server.url)
-  if (link.kind === 'busy') return { kind: 'refused', server, note: s.serveBusy, isBusy: true }
+  if (link.kind === 'busy') return { kind: 'refused', server, note: s.serveBusy, isBusy: link.isBoardBusy }
   if (link.kind === 'unsupported') {
     // A page from before one-use links is kept, never restarted: a reply may be on its way.
     if (mayLaunch && (await launchOlderPage(server.url))) return { kind: 'opened', server }
@@ -3027,7 +3029,7 @@ const openBoard = async (mayLaunch: boolean): Promise<OpenResult> => {
   const page = await openPageState(server)
   if (page === 'open') return { kind: 'link', server, url: link.url, hint: 'already' }
   const launch = await launchThroughBoard(server.url, page === 'none')
-  if (launch === 'busy') return { kind: 'refused', server, note: s.serveBusy, isBusy: true }
+  if (launch === 'busy' || launch === 'nolink') return { kind: 'refused', server, note: s.serveBusy, isBusy: launch === 'busy' }
   if (launch === 'redeemed') return { kind: 'opened', server }
   if (launch === 'launched') return { kind: 'link', server, url: link.url, hint: 'launched' }
   if (page === 'unkeyed') return { kind: 'link', server, url: link.url, hint: 'already' }
