@@ -4676,7 +4676,7 @@ export const LINES = [
 "        const view = o.view();",
 "        const targets = deliveryTargets(state?.connections ?? [], state?.mailboxes, (live) => isRecordedRoute(live, (agent, session) => sessionState(view, agent, session), o.routes ?? RECEIVER_ROUTES));",
 "        const isShelf = text3(body.type) === \"hide\" || text3(body.type) === \"archive\" && text3(body.key).startsWith(\"older:\");",
-"        const action = serveAction(boardItems(view, o.pending(), true, isShelf), { key: text3(body.key), type: text3(body.type), text: text3(body.text), session: text3(body.session), asked: text3(body.asked), fp: text3(body.fp), line: lineOf(body.line), connection: text3(body.connection), turn: text3(body.turn) }, o.s, isLan, targets, true, o.allowResume, o.routes);",
+"        const action = serveAction(boardItems(view, o.pending(), true, isShelf), { key: text3(body.key), type: text3(body.type), text: text3(body.text), session: text3(body.session), asked: text3(body.asked), fp: text3(body.fp), line: lineOf(body.line), connection: text3(body.connection), turn: text3(body.turn) }, o.s, isLan, targets, true, o.allowResume, o.routes, view.hidden.map((item) => item.hideKey));",
 "        if (action.type === \"refuse\")",
 "          return json(res, 409, { note: action.note || o.s.pressNothing });",
 "        if (action.type === \"message\") {",

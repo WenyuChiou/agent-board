@@ -931,9 +931,12 @@ const LAN_KEYS = new Set(['key', 'unhideKey', 'hideKey', 'questionId'])
 const lanApprovals = (value: unknown): void => {
   if (typeof value !== 'object' || value === null) return
   const record = value as Record<string, unknown>
+  // A note beside approval words comes from the same step: the command can hide past the
+  // ` — ` split, so the network must not read it either.
+  const isApproval = Object.values(record).some(one => typeof one === 'string' && APPROVAL_HEADS.some(({ head }) => one.includes(head)))
   for (const name of Object.keys(record)) {
     const one = record[name]
-    if (typeof one === 'string') record[name] = lanWords(one, LAN_KEYS.has(name))
+    if (typeof one === 'string') record[name] = (name === 'note' || name === 'noteLine') && isApproval ? '' : lanWords(one, LAN_KEYS.has(name))
     else lanApprovals(one)
   }
 }
@@ -969,8 +972,8 @@ export const replyText = (raw: string): string =>
 // gone or changed since the page drew it is refused, never taken for the one now in its place.
 // From the local network (`isLan`) a reply to an agent is refused: it would run a program on
 // the computer, and the network's page is plain HTTP that others on the network could read.
-export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false, connections: readonly Connection[] = [], isMessaging = false, allowResume = false, _routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES): ServeAction => {
-  const action = actionOf(items, request, s, isLan, connections, isMessaging, allowResume)
+export const serveAction = (items: readonly BoardItem[], request: ServeRequest, s: Strings = ZH_TW, isLan = false, connections: readonly Connection[] = [], isMessaging = false, allowResume = false, _routes: readonly ReceiverRoutes[] = RECEIVER_ROUTES, hiddenKeys: readonly string[] = []): ServeAction => {
+  const action = actionOf(items, request, s, isLan, connections, isMessaging, allowResume, hiddenKeys)
   if (action.type === 'refuse' && action.note === '') return { type: 'refuse', note: s.pressNothing }
   if (action.type !== 'tick' && action.type !== 'archive' && action.type !== 'done' && action.type !== 'send' && action.type !== 'message') return action
   // The key is a project and a title, which another session's block can take over, and a step
@@ -981,9 +984,16 @@ export const serveAction = (items: readonly BoardItem[], request: ServeRequest, 
   return action.type === 'tick' ? { ...action, ref: guardStep(action.ref, items) } : action
 }
 
-const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean): ServeAction => {
-  // A hidden question is off the board: it is named by the key it was hidden under.
-  if (request.type === 'unhide') return request.key.startsWith('hidden:') ? { type: 'unhide', key: request.key.slice('hidden:'.length) } : { type: 'refuse', note: '' }
+const actionOf = (items: readonly BoardItem[], request: ServeRequest, s: Strings, isLan: boolean, connections: readonly Connection[], isMessaging: boolean, allowResume: boolean, hiddenKeys: readonly string[] = []): ServeAction => {
+  // A hidden question is off the board: it is named by the key it was hidden under. That key
+  // holds the step's words, so the key the phone names is the hashed form `lanWords` gives
+  // it: file the press under the key the computer filed it under.
+  if (request.type === 'unhide') {
+    if (!request.key.startsWith('hidden:')) return { type: 'refuse', note: '' }
+    const shown = request.key.slice('hidden:'.length)
+    const filed = isLan ? hiddenKeys.find(key => key === shown || lanWords(`hidden:${key}`, true) === request.key) : undefined
+    return { type: 'unhide', key: filed ?? shown }
+  }
   const item = items.find(one => one.key === request.key) ?? (isLan ? items.find(one => lanWords(one.key, true) === request.key) : undefined)
   if (item === undefined) return { type: 'refuse', note: s.boardLineChanged }
   if (request.type === 'tick') {

@@ -8284,6 +8284,7 @@ test('a Codex approval command is masked after its white space is made one line,
     `deploy --client-secret ${secret}`,
     `sshpass -p ${secret} ssh host`,
     `mysql -pSynthetic1${secret} db`,
+    `mysql -p${secret}word db`,
     `curl -u user:${secret} https://example.invalid`,
     `curl --user=user:${secret} https://example.invalid`,
     `curl -u "user:${secret}" https://example.invalid`,
@@ -8305,7 +8306,7 @@ test('a Codex approval command is masked after its white space is made one line,
 test('a Codex approval command and description lose control characters and bidi marks (#1798)', () => fixture(f => {
   f.install('--apply')
   assert.equal(f.event('UserPromptSubmit', 'turn-1').status, 0)
-  const bad = [0, 7, 8, 27, 127, 0x85, 0x202e, 0x2066, 0x200b, 0xfeff].map(code => String.fromCharCode(code)).join('')
+  const bad = [...[0, 7, 8, 27, 127, 0x85, 0x202e, 0x2066, 0x200b, 0xfeff].map(code => String.fromCharCode(code)), String.fromCharCode(0x034f, 0xfe0f), String.fromCodePoint(0xE0001)].join('')
   assert.equal(f.event('PermissionRequest', 'turn-1', { tool_name: 'Bash', tool_input: { command: `echo a${bad}b${String.fromCharCode(27)}[31mred`, description: `say${bad}hi` } }).status, 0)
   const step = readFileSync(f.progress, 'utf8').match(/- \[\?\] Codex [^\n]*/)?.[0]
   assert.equal(step, '- [?] Codex asks to run a command: echo a b [31mred (say hi)')
