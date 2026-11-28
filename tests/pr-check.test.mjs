@@ -622,9 +622,36 @@ test('a reviewer the author\'s lane started new for this review may approve a li
   }
   assert.equal(selfApproval([{ body: `Review: APPROVE ${head} by sonnet_900, lane claude` }], 'risk', true), 0)
   assert.equal(selfApproval([{ body: `Review: APPROVE ${head} by sonnet_900, lane claude, maintainer route` }], 'risk', true), 1)
-  assert.equal(prCheck.riskApprovalGap({ kind: 'APPROVE', isFresh: true }, { tier: 'risk', isRelease: true, codexState: 'clean' }), 'release')
-  assert.equal(prCheck.riskApprovalGap({ kind: 'APPROVE', isFresh: true }, { tier: 'normal', isRelease: true, codexState: 'clean' }), 'release')
-  assert.equal(prCheck.riskApprovalGap({ kind: 'APPROVE', isFresh: true }, { tier: 'normal' }), null)
+  assert.equal(prCheck.approvalGap({ kind: 'APPROVE', isFresh: true }, { tier: 'risk', isRelease: true, codexState: 'clean' }), 'release')
+  assert.equal(prCheck.approvalGap({ kind: 'APPROVE', isFresh: true }, { tier: 'normal', isRelease: true, codexState: 'clean' }), 'release')
+  assert.equal(prCheck.approvalGap({ kind: 'APPROVE', isFresh: true }, { tier: 'normal' }), null)
+  // Nor does a line with the maintainer's note and no route: it says the maintainer started its reviewer (#1974).
+  const noted = [codexBotState(head), { body: `Review: APPROVE ${head} by sonnet_900 (read-only, started new for this review by the maintainer), lane claude` }]
+  assert.equal(reviewOf(noted[1]).isMaintainerNote, true)
+  for (const tier of ['risk', 'normal', 'light', null]) {
+    assert.equal(selfApproval(noted, tier, true), 1, `${tier}`)
+    assert.match(verdict(noted, head, { authorAgent: 'codex', number: 7, tier, isRelease: true }).problems[0]?.message ?? '', /release pull request/)
+    // Off a release the maintainer's note and route add nothing: the line reads as an ordinary approval.
+    assert.equal(selfApproval(noted, tier), 0, `${tier}`)
+  }
+  // One function decides for the PR check and the review queue. Each way of saying how the reviewer was started only
+  // adds a reason; only the lane's note lifts the author check, and only where a lane's own reviewer may approve.
+  const gap = (review, options) => prCheck.approvalGap({ kind: 'APPROVE', ...review }, options)
+  assert.equal(gap({ isMaintainerNote: true }, { tier: 'risk', isRelease: true }), 'release')
+  assert.equal(gap({ isMaintainerRoute: true }, { isRelease: true }), 'release')
+  assert.equal(gap({}, { tier: 'risk', isRelease: true }), null)
+  assert.equal(gap({}, { tier: 'risk', isRelease: true, isByAuthor: true }), 'author')
+  for (const tier of ['light', 'normal', 'risk', null]) {
+    assert.equal(gap({ isFresh: true }, { tier, isSurfaceNone: true, codexState: 'clean' }), 'surface-none', `${tier}`)
+    assert.equal(gap({ isFresh: true, isMaintainerNote: true, isMaintainerRoute: true }, { tier, isSurfaceNone: true, codexState: 'clean' }), 'surface-none', `${tier}`)
+    assert.equal(gap({ isMaintainerNote: true, isMaintainerRoute: true }, { tier, isSurfaceNone: true }), null, `${tier}`)
+    assert.equal(gap({ isMaintainerNote: true, isMaintainerRoute: true }, { tier, isByAuthor: true }), 'author', `${tier}`)
+  }
+  assert.equal(gap({ isFresh: true }, { tier: 'light', isByAuthor: true }), null)
+  assert.equal(gap({ isFresh: true }, { tier: null, isByAuthor: true }), 'author')
+  assert.equal(gap({ isFresh: true, isMaintainerNote: true }, { tier: 'risk', codexState: 'stale' }), 'no-codex-review')
+  assert.equal(gap({ isFresh: true }, { tier: 'risk', codexState: 'open', isByAuthor: true }), null)
+  assert.equal(prCheck.approvalGap({ kind: 'REQUEST CHANGES', isFresh: true }, { isRelease: true }), null)
   // Only the whole note in the parentheses after the name counts: not a negation, and not the words elsewhere.
   const negated = [{ body: `Review: APPROVE ${head} by codex (not started new for this review), lane codex` }]
   const elsewhere = [{ body: `Review: APPROVE ${head} by codex, lane codex, started new for this review` }]
@@ -646,6 +673,10 @@ test('the PR check takes a risk-tier approval from the lane of the author when i
   const other = [codexBotState(pr.head), { body: `Review: APPROVE ${pr.head} by sonnet_900 (read-only, started new for this review), lane codex` }]
   assert.equal(reviewProblems({ title: 'chore(release): Agent Board 9.9.9', prComments: other }).length, 1)
   assert.match(reviewProblems({ title: 'chore(release): Agent Board 9.9.9', prComments: other })[0]?.message ?? '', /release pull request/)
+  // The maintainer's note alone closes a release too, and a plain outside approval still opens it (#1974).
+  const noted = [{ body: `Review: APPROVE ${pr.head} by sonnet_900 (read-only, started new for this review by the maintainer), lane claude` }]
+  assert.match(reviewProblems({ title: 'chore(release): Agent Board 9.9.9', prComments: noted })[0]?.message ?? '', /release pull request/)
+  assert.deepEqual(reviewProblems({ title: 'chore(release): Agent Board 9.9.9', prComments: [{ body: `Review: APPROVE ${pr.head} by sonnet_900, lane dot` }] }), [])
 })
 
 test('a risk-tier approval by a reviewer started new for this review counts only once the Codex review bot reviewed that head, and never for a lane under risk-tier review, even when its line ends with the maintainer route; a maintainer-route verdict with the maintainer\'s note is read as before (#1974)', () => {
@@ -679,6 +710,18 @@ test('a risk-tier approval by a reviewer started new for this review counts only
   const maintainer = { body: `Review: APPROVE ${pr.head} by sonnet_900 (read-only, started new for this review by the maintainer), lane claude, maintainer route` }
   assert.deepEqual(problems([maintainer], 'none'), [])
   assert.deepEqual(problems([maintainer]), [])
+  // A lane under risk-tier review takes the maintainer route on every tier its body names, and a line with both notes
+  // keeps the lane's conditions.
+  for (const tier of ['light', 'normal']) {
+    const held = checkPr({ ...pr, body: `${body}Tier: ${tier}\nSurface: none\n`, prComments: [codexBotState(pr.head), line('sonnet_900')] }).problems.filter(item => item.check === 'review')
+    assert.equal(held.length, 1, tier)
+    assert.match(held[0]?.message ?? '', /lane under risk-tier review/, tier)
+    assert.deepEqual(checkPr({ ...pr, body: `${body}Tier: ${tier}\nSurface: none\n`, prComments: [maintainer] }).problems.filter(item => item.check === 'review'), [], tier)
+  }
+  const both = { body: `Review: APPROVE ${pr.head} by sonnet_900 (started new for this review, started new for this review by the maintainer), lane claude, maintainer route` }
+  assert.match(problems([codexBotState(pr.head), both], 'none')[0]?.message ?? '', /lane under risk-tier review/)
+  assert.match(problems([both])[0]?.message ?? '', /Codex review bot has not reviewed/)
+  assert.deepEqual(problems([codexBotState(pr.head), both]), [])
   // A state whose code review did not complete is not the bot's review of that head (Gemini Carbon, #1974).
   const unfinished = status => ({ ...codexBotState(pr.head), body: `Codex review\n<!-- codex-review-state:v1 ${JSON.stringify({ code_review: { commit_sha: pr.head, has_unresolved_findings: false, status } })} -->` })
   assert.equal(problems([unfinished('failed'), line('codex')]).length, 1)
@@ -718,8 +761,8 @@ test('a verdict line that carries the words started new for this review but does
   // The forms in use read as before: the name up to the first comma, the note, the route.
   assert.deepEqual(read('by AB01 PM-main, lane AB01 PM-main'), { kind: 'APPROVE', sha: pr.head, reviewer: 'AB01 PM-main' })
   assert.deepEqual(read('by codex_824 (read-only, GPT Terra 6.1, started new for this review), lane AB01 PM-main'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex_824 (read-only', isFresh: true })
-  assert.deepEqual(read('by codex_826 (read-only, GPT Terra 6.1, started new for this review by the maintainer), lane AB01 PM-main, maintainer route'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex_826 (read-only', isMaintainerRoute: true })
-  assert.deepEqual(read('by codex_827 (read-only, started new for this review by the maintainer), lane AB01 PM-main'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex_827 (read-only' })
+  assert.deepEqual(read('by codex_826 (read-only, GPT Terra 6.1, started new for this review by the maintainer), lane AB01 PM-main, maintainer route'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex_826 (read-only', isMaintainerNote: true, isMaintainerRoute: true })
+  assert.deepEqual(read('by codex_827 (read-only, started new for this review by the maintainer), lane AB01 PM-main'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex_827 (read-only', isMaintainerNote: true })
   assert.deepEqual(read("by Muse's pr-reviewer subagent (Claude Opus 5.5, read-only, started new for this review), lane AB03"), { kind: 'APPROVE', sha: pr.head, reviewer: "Muse's pr-reviewer subagent (Claude Opus 5.5", isFresh: true })
   assert.deepEqual(read('by codex (desktop) (read-only, started new for this review), lane x'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex (desktop) (read-only', isFresh: true })
   assert.deepEqual(read('by  codex ( read-only ,  started  new for this review ) , lane x'), { kind: 'APPROVE', sha: pr.head, reviewer: 'codex ( read-only', isFresh: true })

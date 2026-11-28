@@ -271,6 +271,21 @@ test('a reviewer the author\'s lane started new for this review counts as an app
     const other = by('WenyuChiou', answered(`sonnet_900 (read-only, started new for this review), lane codex${suffix}`))
     assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9', '', [bot, other]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, releaseDetail]], suffix)
   }
+  // Nor a line with the maintainer's note and no route (#1974).
+  const noted = by('WenyuChiou', answered('sonnet_900 (read-only, started new for this review by the maintainer), lane claude'))
+  assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9', '', [bot, noted]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, releaseDetail]])
+  assert.deepEqual(queue('normal', undefined, '', [noted]).approvedNow.map(item => item.number), [1])
+  // A lane under risk-tier review takes the maintainer route on every tier its body names.
+  for (const tier of ['light', 'normal']) {
+    assert.deepEqual(queue(tier, undefined, '\nSurface: none').waitingForAuthor.map(item => item.detail), ['approved by the lane; a lane under risk-tier review takes the maintainer route'], tier)
+    assert.deepEqual(queue(tier, undefined, '\nSurface: none', [noted]).approvedNow.map(item => item.number), [1], tier)
+  }
+  // A note is no lane: with the maintainer's note, a reviewer named like an author that names its lane is still the author.
+  const laned = (name, tier = 'normal') => classify([pull(1, { body: `Author: codex (local), branch\nTier: ${tier}`, files: [] })], { 1: [ready(head, '2026-10-20T08:00:00Z'), by('WenyuChiou', answered(name))] }, now)
+  assert.deepEqual(laned('codex (started new for this review by the maintainer), lane codex, maintainer route').waitingForAuthor.map(item => item.detail), ['approval is by the author'])
+  assert.deepEqual(laned('codex (started new for this review), lane codex', '').waitingForAuthor.map(item => item.detail), ['approval is by the author'])
+  assert.deepEqual(laned('codex (started new for this review), lane codex').approvedNow.map(item => item.number), [1])
+  assert.deepEqual(laned('codex (e2e), lane codex').approvedNow.map(item => item.number), [1])
   const outside = by('WenyuChiou', answered('sonnet_900, lane claude'))
   assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9', '', [bot, outside]).approvedNow.map(item => item.number), [1])
   // A name with two notes is still the author's name: the queue compares it as the PR check does.
