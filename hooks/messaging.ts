@@ -515,7 +515,12 @@ export const messageReceipt = (state: MessageState, target: Connection, input: R
   if (one.status === 'accepted' && status === 'accepted' && one.reply === reply) return state
   // An accept that reaches the board after the wake read "sent, not confirmed" is recorded, and the message stays as it is:
   // it must not hold the session's next message for another 30 minutes (#1366 review). Its day-long retention does not restart.
-  if (one.status === 'uncertain' && one.error === UNCONFIRMED && status === 'accepted' && one.to.startsWith('opencode:')) return one.hasAccepted === true ? state : { ...state, messages: state.messages.map(message => message === one ? { ...one, hasAccepted: true } : message) }
+  // An uncertain receipt, with no error or a timeout, says nothing new of it either and must not hold the session again (#1553).
+  // A receipt that the turn ended is still recorded.
+  if (one.status === 'uncertain' && one.error === UNCONFIRMED && one.to.startsWith('opencode:')) {
+    if (status === 'accepted') return one.hasAccepted === true ? state : { ...state, messages: state.messages.map(message => message === one ? { ...one, hasAccepted: true } : message) }
+    if (status === 'uncertain' && !isEndedUncertain({ status, error })) return state
+  }
   const { awaitsStart: _awaitsStart, ...rest } = one
   // An uncertain receipt with no error says nothing new of a message a board start or a lease's end made Unsure (#1407, #1843).
   const kept = status === 'uncertain' && error === '' && one.status === 'uncertain' && (one.error === BOARD_RESTARTED || one.error === HOLDER_LOST) ? one.error : error
