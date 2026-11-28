@@ -149,7 +149,7 @@ import type { ListedFile, StoreRecord } from './retention'
 import { INBOX_DROPPED_FILE } from './hook-reporters'
 import { withQueuedAnswers } from './board-status'
 import { messagesFolder, queuedMessagingOf } from './queued-store'
-import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
+import { agentName, answeredJson, answeredPath, buildView, handKeptSeenAt, isSeenText, keptQuestionCount, mirrorMatchesTask, parseAnswered, parseSeen, seenJson, seenPath, splitNote, statusLine, SWEEP_ARMED_KEY, viewCache, withAnswered, withSeen } from './view'
 import type { StepRef, TaskRef, TaskRow, View, WaitingItem } from './view'
 import { acknowledgementKeys, archiveQuestionsKept, isAnsweredBy, isTurnRecorded, refTasks, captureCovers, captureHashOf, captureJson, capturePath, copiesToKeep, cutOffScopes, emptyQuestions, identitiesToRetire, parseCapture, withCaptures, isAskedBy, isKeptQuestion, isQuestionProof, isQuestionSnapshot, isTornLedger, ledgerLeftovers, migratedAnswered, observeQuestions, ownQuestionsKey, parseQuestions, prunableProofs, questionProofJson, questionProofOf, questionProofPath, questionScope, questionStatsKey, questionWords, questionsJson, questionsPath, resolveQuestion, resolvedQuestionsToRetire, QUESTION_FILES_KEPT } from './questions'
 import type { HeldCapture, HeldProof, QuestionAnswerEvidence, QuestionCapture, QuestionLedger, QuestionProofs, QuestionRecord } from './questions'
@@ -3594,7 +3594,10 @@ const appendArchive = async (
 
 // One task to the archive at the person's word, written the way archiveOld writes. False when
 // it could not be found for sure, so the file is left as it was.
-const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> => {
+const isSameAsked = (step: { text: string; note: string }, asked: { text: string; note: string }): boolean => step.text === asked.text && step.note === asked.note
+
+// `asked`: the press came from a question card, so the block must still ask those words (#155).
+const archiveOne = async ($: EngineInterface, ref: TaskRef, asked?: { text: string; note: string }): Promise<boolean> => {
   const path = await progressPath($)
   const at = await $.clock.now()
   const s = await wordsOf($)
@@ -3605,6 +3608,7 @@ const archiveOne = async ($: EngineInterface, ref: TaskRef): Promise<boolean> =>
   const wrote = await rewrite($, path, async text => {
     currentBoardHash = sha256(text)
     const projects = parseProgress(text)
+    if (asked !== undefined && !refTasks(projects, ref).some(task => task.steps.some(step => step.status === 'waiting' && isSameAsked(splitNote(step.text), asked)))) return null
     const hasQuestions = refTasks(projects, ref).some(task => task.steps.some(step => step.status === 'waiting'))
     if (hasQuestions) {
       if (!(await keepAskedQuestions($, path, projects, ref))) throw new Error('QUESTION_RETENTION_FAILED')
@@ -5054,6 +5058,18 @@ export const register: Register = (on, options) => {
           return count > 0 ? s.archivedKeptQuestions(row.title, count) : s.archivedOne(row.title)
         } catch {
           return s.archivedOne(row.title)
+        }
+      },
+      archiveAsk: async item => {
+        const ref = item.archive
+        if (ref === undefined) return failure(s.archiveGone)
+        const isTaken = await enqueue(() => archiveOne($, ref, { text: item.text, note: item.note }))
+        if (!isTaken) return failure(s.archiveGone)
+        try {
+          const count = keptQuestionCount(await paneView(), ref, s)
+          return count > 0 ? s.archivedKeptQuestions(item.task, count) : s.archivedOne(item.task)
+        } catch {
+          return s.archivedOne(item.task)
         }
       },
       confirmRow: async row => {

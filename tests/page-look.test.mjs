@@ -113,7 +113,7 @@ const isMobile = rule => rule.ancestors.some(ancestor => /@media\s*\([^)]*max-wi
 // The sheet that holds Needs you is the one raised surface. A field, an outlined button (filled with the surface so it reads on the
 // ground and on the sheet alike) and a card of the Needs you view, which is its own sheet, may use it too. A select is a field.
 const surfaceAllowed = selector => /(?:^|\s)(?:textarea|input|select)(?=$|[:[\s])/.test(selector) || /(?:^|\s)\.sheet$/.test(selector) ||
-  /(?:^|\s)(?:\.btn|\.shelf-head|button[\w.:-]*|#close)(?=$|[:\s])/.test(selector) || /\.cards>li$/.test(selector)
+  /(?:^|\s)(?:\.btn|\.shelf-head|button[\w.:-]*|#close)(?=$|[:[\s])/.test(selector) || /\.cards>li$/.test(selector)
 
 test('the page uses only colour, size, radius, spacing and motion tokens from page-look', () => {
   const expected = {
@@ -1221,5 +1221,131 @@ test('row summaries clamp cleanly, phantom gaps collapse, and chrome controls re
   assert.equal(archiveBtn.getAttribute('title'), s.archiveNow)
   assert.equal(archiveBtn.textContent, s.archiveNow)
   assert.equal(archiveBtn.parentNode?.getAttribute('data-card-key'), 'recent')
+})
+
+test('delivery badges, secondary copy button, coarse-pointer labels, interactive card rail, and compact HUD fold', async () => {
+  const s = STRINGS.en
+  const html = servePage(s, 'n')
+  const rules = styleRules(html)
+  const ruleFor = sel => rules.find(r => r.selector === sel)
+
+  const copyRule = ruleFor('.answers button.answer-send[data-copy="1"]')
+  const copyHoverRule = ruleFor('.answers button.answer-send[data-copy="1"]:hover:not(:disabled)')
+  assert.equal(copyRule?.declarations.find(d => d.property === 'background')?.value, 'var(--surface)')
+  assert.equal(copyRule?.declarations.find(d => d.property === 'border-color')?.value, 'var(--btn-line)')
+  assert.equal(copyRule?.declarations.find(d => d.property === 'color')?.value, 'var(--ink)')
+  assert.equal(copyHoverRule?.declarations.find(d => d.property === 'border-color')?.value, 'var(--btn-line)')
+  assert.ok(ruleFor('.q-toggle::after'), 'card question toggle renders disclosure chevron')
+  assert.ok(ruleFor('.fold-in>.fx.gone,.row-open>.fx.gone'), 'hidden slots inside folds leave zero grid gap')
+  assert.match(html, new RegExp(`<button[^>]*id="settings-toggle"[^>]*aria-label="${s.settingsTitle}"`))
+
+  const touchRules = rules.filter(r => r.ancestors.some(a => a.includes('pointer:coarse')))
+  const chkAfter = touchRules.find(r => r.selector === 'button.chk::after')
+  assert.equal(chkAfter?.declarations.find(d => d.property === 'width')?.value, '44px')
+  assert.equal(chkAfter?.declarations.find(d => d.property === 'height')?.value, '44px')
+  const touchCard = touchRules.find(r => r.selector === '.card')
+  assert.equal(touchCard?.declarations.find(d => d.property === 'padding-top')?.value, 'var(--s3)')
+  assert.equal(touchCard?.declarations.find(d => d.property === 'padding-bottom')?.value, 'var(--s3)')
+  assert.equal(touchRules.find(r => r.selector === '.pfoot #close::after')?.declarations.find(d => d.property === 'content')?.value, 'attr(aria-label)')
+  assert.ok(touchRules.some(r => r.selector.includes('.answer-send[data-copy="1"] .sr-lbl') && r.declarations.some(d => d.property === 'position' && d.value === 'static')))
+
+  const now = Date.UTC(2026, 10, 24, 12, 0, 0)
+  const freshIso = new Date(now - 2 * 60_000).toISOString()
+  const staleIso = new Date(now - 12 * 60_000).toISOString()
+  const md = [
+    '## ux-repo',
+    `<!-- auto session=ee100001 agent=claude state=waiting updated=${freshIso} -->`,
+    '### Immediate ask card',
+    '- [?] Proceed with live rollout?',
+    '<!-- options=["Go live","Hold off"] -->',
+    '<!-- /auto session=ee100001 -->',
+    '',
+    `<!-- auto session=ee100006 agent=opencode state=waiting updated=${freshIso} -->`,
+    '### Immediate mailbox ask card',
+    '- [?] Use immediate mailbox route?',
+    '<!-- options=["Yes","No"] -->',
+    '<!-- /auto session=ee100006 -->',
+    '',
+    `<!-- auto session=ee100002 agent=codex state=waiting updated=${freshIso} -->`,
+    '### Deferred queue ask card',
+    '- [?] Pick rollout mode or defer?',
+    '<!-- options=["Strict","Loose","Audit","Skip"] -->',
+    '<!-- /auto session=ee100002 -->',
+    '',
+    `<!-- auto session=ee100003 agent=cursor state=waiting updated=${freshIso} -->`,
+    '### Copy fallback card',
+    '- [?] Paste patch manually?',
+    '<!-- options=["Apply patch","Inspect diff"] -->',
+    '<!-- /auto session=ee100003 -->',
+    '',
+    `<!-- auto session=ee100004 agent=codex state=working updated=${staleIso} -->`,
+    '### Quiet stale worker',
+    '- [~] Rebuild shard index',
+    '<!-- /auto session=ee100004 -->',
+    '',
+    `<!-- auto session=ee100005 agent=gemini state=done updated=${freshIso} -->`,
+    '### Fresh finished worker',
+    '- [x] Verified report',
+    '<!-- /auto session=ee100005 -->',
+    '',
+  ].join('\n')
+
+  const baseView = buildView(parseProgress(md), ['ux-repo'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const model = serveModel(baseView, [], s, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const findAsk = text => model.asks.find(a => a.text.includes(text))
+  Object.assign(findAsk('Proceed with live rollout?'), { send: 'send', line: 'now', session: 'ee100001', where: 'in Claude' })
+  Object.assign(findAsk('Use immediate mailbox route?'), { send: 'mailbox', line: 'now', lineText: 'OpenCode reads this now.', session: 'ee100006', where: 'in OpenCode' })
+  Object.assign(findAsk('Pick rollout mode or defer?'), { send: 'mailbox', line: 'nextTurn', lineText: 'Codex reads this next turn.', session: 'ee100002', where: 'in Codex' })
+  Object.assign(findAsk('Paste patch manually?'), { send: 'none' })
+
+  const walk = node => [node, ...(node.childNodes ?? []).flatMap(walk)]
+  const hasClass = (node, name) => String(node?.className ?? '').split(/\s+/).includes(name)
+
+  // Route pills mark deferred queue vs copy-only vs +2 hidden options, stale row carries tooltip, and Done starts collapsed.
+  const dom = await pageDom(html, model)
+  const cardNamed = needle => walk(dom.node('needs')).find(n => n.tag === 'article' && n.textContent.includes(needle))
+  const liveCard = cardNamed('Proceed with live rollout?')
+  const liveMailboxCard = cardNamed('Use immediate mailbox route?')
+  const queueCard = cardNamed('Pick rollout mode or defer?')
+  const copyCard = cardNamed('Paste patch manually?')
+  assert.equal(walk(liveCard).some(n => hasClass(n, 'route-pill')), false, 'immediate live card shows no redundant route badge')
+  assert.equal(walk(liveMailboxCard).some(n => hasClass(n, 'route-pill')), false, 'immediate mailbox route (line: now) omits Queued badge')
+  const queuePill = walk(queueCard).find(n => hasClass(n, 'route-queue'))
+  const morePill = walk(queueCard).find(n => hasClass(n, 'route-more'))
+  const copyPill = walk(copyCard).find(n => hasClass(n, 'route-copy'))
+  assert.equal(queuePill?.textContent, s.pgRouteQueue)
+  assert.equal(morePill?.textContent, '+2')
+  assert.equal(copyPill?.textContent, s.pgRouteCopy)
+
+  const staleRight = walk(dom.node('working-now')).find(n => hasClass(n, 'r-right') && hasClass(n, 't-stale'))
+  assert.equal(staleRight?.getAttribute('title'), s.pgRowStaleHint)
+
+  const doneShelf = walk(dom.node('board')).find(n => hasClass(n, 'shelf') && n.textContent.includes(s.pgDone))
+  assert.ok(doneShelf && !hasClass(doneShelf, 'open'), 'Done shelf stays collapsed on initial load so working rows stay above the fold')
+
+  const compactRules = rules.filter(r => r.ancestors.some(a => a.includes('max-width:559px')))
+  assert.equal(compactRules.find(r => r.selector === '.pbar')?.declarations.find(d => d.property === 'min-width')?.value, '52px')
+  assert.equal(compactRules.find(r => r.selector === '.r-meta .r-proj')?.declarations.find(d => d.property === 'max-width')?.value, '13ch')
+
+  // Twin manual tasks keep distinct per-step tickKey/tickFp matching each twin's own row key (#2).
+  const twinMd = [
+    '## twin-proj',
+    '### Repeated manual task',
+    '- [?] First twin prompt?',
+    '- [ ] Twin one follow-up',
+    '',
+    '## twin-proj',
+    '### Repeated manual task',
+    '- [?] Second twin prompt?',
+    '- [ ] Twin two follow-up',
+    '',
+  ].join('\n')
+  const twinView = buildView(parseProgress(twinMd), ['twin-proj'], null, now, 0, {}, s, [], {}, { version: 1, next: 1, records: [], legacy: {} })
+  const twinModel = serveModel(twinView, [], s, new Set(), false, undefined, false, { now, versions: { board: '0.26.0', package: null }, unreadable: [], repoOf: () => '' })
+  const twinOneAsk = twinModel.asks.find(a => a.text.includes('First twin prompt?'))
+  const twinTwoAsk = twinModel.asks.find(a => a.text.includes('Second twin prompt?'))
+  assert.ok(twinOneAsk?.steps?.[0]?.tickKey && twinTwoAsk?.steps?.[0]?.tickKey)
+  assert.notEqual(twinOneAsk.steps[0].tickKey, twinTwoAsk.steps[0].tickKey, 'twin manual ask steps bind to distinct row tickKeys')
+  assert.match(twinTwoAsk.steps[0].tickKey, /#2$/)
 })
 
