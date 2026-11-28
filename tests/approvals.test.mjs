@@ -2320,6 +2320,31 @@ test('an answer that comes after the hook\'s end allows nothing', async () => {
   } finally { await stand.close() }
 })
 
+test('an answer read after the hook\'s end, before its timer runs, allows nothing', async () => {
+  // The clock passes the end the moment the board answers, while the timer, set for 5 s, has not run yet.
+  let late = false
+  const server = createServer((req, res) => {
+    req.resume()
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.flushHeaders()
+      setTimeout(() => { late = true; res.end('{"decision":{"behavior":"allow"}}') }, 100)
+    })
+  })
+  await new Promise(done => server.listen(0, '127.0.0.1', done))
+  try {
+    const started = performance.now()
+    const end = started + 5_000
+    const answer = await hook.askBoard({ origin: `http://127.0.0.1:${server.address().port}`, token: 'synthetic-token' }, Buffer.from('{"tool":"Bash"}'), { end, now: () => (late ? end + 1 : performance.now()) })
+    assert.equal(late, true)
+    assert.equal(answer, null)
+    assert.ok(performance.now() - started < 4_000, 'the answer was read only when the timer ran')
+  } finally {
+    server.closeAllConnections()
+    await new Promise(done => server.close(done))
+  }
+})
+
 test('late headers leave only the time until the hook\'s end for the answer', async () => {
   const stand = await timedBoard({ headersAfter: 400 })
   try {

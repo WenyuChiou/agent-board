@@ -688,6 +688,8 @@ export const askBoard = (address, payload, { end = Infinity, now = () => perform
     answer.on('data', chunk => chunks.push(chunk))
     answer.on('error', () => finish(null))
     answer.on('end', () => {
+      // The answer's end event can run after `end` but before the timer's callback: it is still too late.
+      if (now() >= end) { finish(null); return }
       try { finish(JSON.parse(Buffer.concat(chunks).toString('utf8'))) } catch { finish(null) }
     })
   })
