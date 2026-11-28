@@ -7041,7 +7041,7 @@ test('over SSH with a config folder variable set, plain agent-board opens the pa
   }
 })
 
-test('a second agent-board reuses the running page and prints the same bare URL', { timeout: 40_000 }, async () => {
+test('a second agent-board reuses the running board server and prints a fresh one-use link', { timeout: 40_000 }, async () => {
   const board = serveIn()
   const urls = []
   try {

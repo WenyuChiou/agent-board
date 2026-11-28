@@ -1662,7 +1662,7 @@ test("the plugin keeps the board's ssh -L forwarding note beside the one-use lin
 // A board whose table of open links is full answers 503 busy on /api/open-link or /api/open. The
 // command says so in one line and opens nothing: it must not fall back to opening a link of its own,
 // or to printing one it minted.
-test('a 503 busy from the board on either open route prints serveBusy, opens nothing and prints no link', { timeout: 90_000 }, async () => {
+test('a 503 busy from the board on either open route prints serveBusy, opens nothing and prints no link, the phone\'s included', { timeout: 90_000 }, async () => {
   const runBusy = route => withCliFixture({ openResult: true, recordOpen: true, extraEnv: { AGENT_BOARD_TEST_PID: String(process.pid) } }, async ({ run, env, progress, script, openLog }) => {
     const calls = []
     const openBodies = []
@@ -1684,6 +1684,8 @@ test('a 503 busy from the board on either open route prints serveBusy, opens not
         openBodies.push(raw)
         return reply(503, { error: 'busy' })
       }
+      // A busy board hands out no phone address either: --lan says busy and stops, like the rest.
+      if (req.url === '/api/lan') return reply(200, { url: `http://192.0.2.10:${stub.address().port}/?t=synthetic-lan` })
       reply(404, {})
     }
     stub.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)) })
@@ -1691,7 +1693,7 @@ test('a 503 busy from the board on either open route prints serveBusy, opens not
     const { port } = stub.address()
     writeAddressFile(run, progress, JSON.stringify({ pid: process.pid, port, url: `http://127.0.0.1:${port}/?t=synthetic-busy`, path: progress, built: String(statSync(script).mtimeMs) }))
     try {
-      const runs = [['--serve', ['--serve']], ['--html', ['--html']], ['--keys o', ['--keys', 'o']]]
+      const runs = [['--serve', ['--serve']], ['--html', ['--html']], ['--keys o', ['--keys', 'o']], ['--serve --lan', ['--serve', '--lan']], ['--html --lan', ['--html', '--lan']]]
       const results = await Promise.all(runs.map(([, args]) => runCli(script, args, env)))
       results.forEach((result, index) => {
         const label = `${route}: ${runs[index][0]}`
@@ -1700,13 +1702,16 @@ test('a 503 busy from the board on either open route prints serveBusy, opens not
         assert.equal(all.includes('synthetic-busy'), false, label)
         assert.equal(all.includes('synthetic-first-link'), false, `${label}: the link it minted first is not printed`)
         assert.equal(all.includes(EN.serveKeptNoLink), false, label)
-        if (index < 2) assert.equal(result.stdout.trim().split(/\r?\n/).at(-1), EN.serveBusy, label)
+        assert.equal(all.includes('synthetic-lan'), false, `${label}: no phone address after a busy answer`)
+        assert.equal(all.includes(EN.serveLanWarn), false, label)
+        if (runs[index][0] !== '--keys o') assert.equal(result.stdout.trim().split(/\r?\n/).at(-1), EN.serveBusy, label)
       })
+      assert.equal(calls.includes('/api/lan'), false, `${route}: a busy board is not asked for the phone's address`)
       assert.equal(existsSync(openLog), false, `${route}: no window is opened from here after a busy answer`)
       // A busy first request never goes on to /api/open; the command that does asks to hear whether the window loaded.
       if (route === '/api/open-link') assert.equal(calls.includes('/api/open'), false)
       else {
-        assert.equal(openBodies.length, 3, 'each entry point asked /api/open once')
+        assert.equal(openBodies.length, runs.length, 'each entry point asked /api/open once')
         for (const body of openBodies) assert.equal(JSON.parse(body).waitRedeem, true, body)
       }
     } finally {

@@ -338,7 +338,7 @@
       "a restarted served board applies immutable retirement evidence after stale active ledger replay": 1768,
       "a row whose title is its current step shows the step once": 20,
       "a saved checkbox press refuses after another card moves its twin lines (#1204)": 888,
-      "a second agent-board reuses the running page and prints the same bare URL": 1734,
+      "a second agent-board reuses the running board server and prints a fresh one-use link": 1734,
       "a second pass adds to the summary line instead of writing another": 134,
       "a second press on the page for the first of two hand-kept tasks with the same words is refused once it is archived, and the second task stays": 651,
       "a send still pending when the receiver reconnects clears only the text it sent, and the next send uses the new connection": 895,
