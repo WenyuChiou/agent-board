@@ -264,7 +264,20 @@ test('a reviewer the author\'s lane started new for this review counts as an app
     assert.deepEqual(queue(tier).approvedNow.map(item => item.number), [1], tier)
     assert.deepEqual(queue(tier).waitingForAuthor, [], tier)
   }
-  assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9').waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approval is by the author']])
+  const releaseDetail = 'approved, but a release needs a reviewer outside the maintainer\'s lane, or the owner'
+  assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9').waitingForAuthor.map(item => [item.number, item.detail]), [[1, releaseDetail]])
+  // On a release a reviewer a lane started does not count whatever its name, nor a verdict on the maintainer route (#1974).
+  for (const suffix of ['', ', maintainer route']) {
+    const other = by('WenyuChiou', answered(`sonnet_900 (read-only, started new for this review), lane codex${suffix}`))
+    assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9', '', [bot, other]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, releaseDetail]], suffix)
+  }
+  const outside = by('WenyuChiou', answered('sonnet_900, lane claude'))
+  assert.deepEqual(queue('risk', 'chore(release): Agent Board 9.9.9', '', [bot, outside]).approvedNow.map(item => item.number), [1])
+  // A name with two notes is still the author's name: the queue compares it as the PR check does.
+  const twoNotes = by('WenyuChiou', answered('codex (read-only, started new for this review by the maintainer), lane codex'))
+  assert.deepEqual(queue('normal', undefined, '', [twoNotes]).waitingForAuthor.map(item => item.detail), ['approval is by the author'])
+  const twoNotesFresh = by('WenyuChiou', answered('codex (read-only, started new for this review), lane codex'))
+  assert.deepEqual(queue('', undefined, '', [twoNotesFresh]).waitingForAuthor.map(item => item.detail), ['approval is by the author'])
   for (const tier of ['light', 'normal']) assert.deepEqual(queue(tier, undefined, '', [fresh]).approvedNow.map(item => item.number), [1], tier)
   assert.deepEqual(queue('risk', undefined, '', [fresh]).waitingForAuthor.map(item => [item.number, item.detail]), [[1, 'approved; the Codex review bot has not reviewed this head']])
   assert.deepEqual(queue('risk', undefined, '', [codexState(oldHead, false, '2026-10-20T10:00:00Z', 5), fresh]).waitingForAuthor.map(item => item.detail), ['approved; the Codex review bot has not reviewed this head'])

@@ -612,6 +612,19 @@ test('a reviewer the author\'s lane started new for this review may approve a li
   assert.equal(isLaneReviewer({ isFresh: true }, 'risk', { isRelease: true }), false)
   assert.equal(isLaneReviewer({ isFresh: true }, 'normal', { isRelease: true }), false)
   assert.equal(selfApproval(named, 'normal'), 1)
+  // On a release no reviewer a lane started counts, whatever its name, and no verdict on the maintainer route (#1974).
+  const other = suffix => [codexBotState(head), { body: `Review: APPROVE ${head} by sonnet_900 (read-only, started new for this review), lane codex${suffix}` }]
+  for (const tier of ['risk', 'normal', null]) {
+    for (const suffix of ['', ', maintainer route']) {
+      assert.equal(selfApproval(other(suffix), tier, true), 1, `${tier}${suffix}`)
+      assert.match(verdict(other(suffix), head, { authorAgent: 'codex', number: 7, tier, isRelease: true }).problems[0]?.message ?? '', /release pull request/)
+    }
+  }
+  assert.equal(selfApproval([{ body: `Review: APPROVE ${head} by sonnet_900, lane claude` }], 'risk', true), 0)
+  assert.equal(selfApproval([{ body: `Review: APPROVE ${head} by sonnet_900, lane claude, maintainer route` }], 'risk', true), 1)
+  assert.equal(prCheck.riskApprovalGap({ kind: 'APPROVE', isFresh: true }, { tier: 'risk', isRelease: true, codexState: 'clean' }), 'release')
+  assert.equal(prCheck.riskApprovalGap({ kind: 'APPROVE', isFresh: true }, { tier: 'normal', isRelease: true, codexState: 'clean' }), 'release')
+  assert.equal(prCheck.riskApprovalGap({ kind: 'APPROVE', isFresh: true }, { tier: 'normal' }), null)
   // Only the whole note in the parentheses after the name counts: not a negation, and not the words elsewhere.
   const negated = [{ body: `Review: APPROVE ${head} by codex (not started new for this review), lane codex` }]
   const elsewhere = [{ body: `Review: APPROVE ${head} by codex, lane codex, started new for this review` }]
@@ -630,6 +643,9 @@ test('the PR check takes a risk-tier approval from the lane of the author when i
 `, prComments: fresh, ...extra }).problems.filter(item => item.check === 'review')
   assert.deepEqual(reviewProblems({}), [])
   assert.equal(reviewProblems({ title: 'chore(release): Agent Board 9.9.9' }).length, 1)
+  const other = [codexBotState(pr.head), { body: `Review: APPROVE ${pr.head} by sonnet_900 (read-only, started new for this review), lane codex` }]
+  assert.equal(reviewProblems({ title: 'chore(release): Agent Board 9.9.9', prComments: other }).length, 1)
+  assert.match(reviewProblems({ title: 'chore(release): Agent Board 9.9.9', prComments: other })[0]?.message ?? '', /release pull request/)
 })
 
 test('a risk-tier approval by a reviewer started new for this review counts only once the Codex review bot reviewed that head, and never for a lane under risk-tier review, even when its line ends with the maintainer route; a maintainer-route verdict with the maintainer\'s note is read as before (#1974)', () => {
