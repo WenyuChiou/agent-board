@@ -6245,6 +6245,45 @@ test('a delay the daemon will not give does not send a terminal thread to the 10
   await codexAtOnce(board, dir, { daemonConfig: { configFaults } })
 }))
 
+test('an unanswered config/read does not hold the short route while a Codex window is open (#1908)', () => codexFixture(async (board, dir) => {
+  // The daemon never answers config/read (its 5 s limit runs out on every look). With a Codex window open the message is started
+  // from the thread/read look at the next tick: the unload delay is the long route's alone.
+  const muted = join(dir, 'config-muted')
+  writeFileSync(muted, 'mute')
+  const person = join(dir, 'person')
+  writeFileSync(person, '')
+  const daemon = codexDaemon(dir, { person, unloadSecs: 'none', configFaults: muted })
+  const stepped = codexStepped(board, daemon, codexWindow)
+  try {
+    const connection = await codexConnection(board)
+    await stepped.settle(2)
+    // The precondition: config/read was asked, and its answer is still outstanding.
+    assert.ok(daemon.calls().some(one => one.method === 'config/read'), 'config/read was asked')
+    const sentAt = Date.now()
+    assert.equal(await codexSend(board, connection), 200)
+    await waitFor(async () => codexStarts(daemon) === 1)
+    // A board poll and a receiver tick, well inside the 5 s an unanswered config/read would hold each look.
+    assert.ok(Date.now() - sentAt < 4000, `started ${Date.now() - sentAt} ms after the send`)
+    assert.equal(stepped.now(), 0)
+    await waitFor(async () => (await codexMessage(board, 'AB-CX-001'))?.status === 'acknowledged')
+  } finally { await stepped.receiver.close() }
+  // No Codex window found: the long route, which needs the unload delay, still waits for it. While config/read goes unanswered
+  // nothing is started; once it answers, the message goes only after the 10-minute wait, as on main.
+  const second = codexCase(dir, 1, { person, configFaults: muted, unloadSecs: 'none' })
+  const unreadable = codexStepped(board, second.daemon, { clients: async () => [] })
+  try {
+    const connection = await codexConnection(board)
+    assert.equal(await codexSend(board, connection, second.id), 200)
+    await unreadable.advance(20_000, { step: 10_000 })
+    assert.deepEqual([codexStarts(second.daemon), (await codexMessage(board, second.id)).status], [0, 'queued'])
+    unlinkSync(muted)
+    let at = null
+    await unreadable.advance(900_000, { step: 10_000, done: () => { if (codexStarts(second.daemon) > 0) at ??= unreadable.now(); return at !== null } })
+    assert.equal(codexStarts(second.daemon), 1)
+    assert.ok(at >= 605_000, `started at ${Math.round(at / 1000)} s by the receiver's clock`)
+  } finally { await unreadable.receiver.close() }
+}))
+
 test('terminal gone, thread still listed: not started at the next tick, and started only once the 10-minute wait is over (#1652)', () => codexFixture(async (board, dir) => {
   const person = join(dir, 'person')
   writeFileSync(person, '')
