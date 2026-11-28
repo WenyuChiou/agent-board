@@ -9,6 +9,11 @@ type FileWatcher = {
 type WatchFiles = (directory: string, listener: (event: string, name: string | Buffer | null) => void) => FileWatcher
 type InboxEntry = { name: string; at: number; body: string }
 
+const identityOf = (directory: string): string => {
+  const found = statSync(directory, { bigint: true })
+  return `${found.dev}:${found.ino}:${found.birthtimeNs}`
+}
+
 // The inbox is mutable. A watcher can spare unchanged display reads, but actions read fresh,
 // listings still find changes, and unavailable watchers fall back to checking every stamp.
 export const recentInboxFiles = (options: {
@@ -16,6 +21,10 @@ export const recentInboxFiles = (options: {
   isPersistent: boolean
   accepts: (name: string) => boolean
   watchFiles?: WatchFiles
+  // The folder's names and identity. The page server's idle poll passes ones that keep them while
+  // its folder watch reports nothing (#254); a fresh read always looks.
+  list?: (isFresh: boolean) => string[]
+  identify?: (isFresh: boolean) => string
 }) => {
   const known = new Map<string, { stamp: string; at: number; body?: string }>()
   const dirty = new Set<string>()
@@ -60,7 +69,7 @@ export const recentInboxFiles = (options: {
   return {
     read: (isFresh = true): InboxEntry[] => {
       try {
-        const names = readdirSync(options.directory).filter(options.accepts)
+        const names = (options.list?.(isFresh) ?? readdirSync(options.directory)).filter(options.accepts)
         // An empty listing has no entries to validate. Drop old hints so the next report is read
         // fresh, without adding directory identity checks to every empty-inbox poll (#428).
         if (names.length === 0) {
@@ -73,8 +82,7 @@ export const recentInboxFiles = (options: {
         }
         // File numbers are 64-bit and Windows gives ones past 2^53, where a Number drops the low
         // digits a replaced folder differs by, so read them exactly (#1498).
-        const directory = statSync(options.directory, { bigint: true })
-        const nextIdentity = `${directory.dev}:${directory.ino}:${directory.birthtimeNs}`
+        const nextIdentity = options.identify?.(isFresh) ?? identityOf(options.directory)
         if (identity !== nextIdentity) {
           close()
           known.clear()

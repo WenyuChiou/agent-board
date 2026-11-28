@@ -14,7 +14,8 @@ import { withLocalLock } from './local-lock'
 import { goneBlocksOf } from './session-liveness'
 import { repoLookup } from './repo-lookup'
 import { legacyConnect } from './connect-transaction'
-import { appendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync as fsAppendFileSync, chmodSync, closeSync, existsSync, fstatSync, fsyncSync, linkSync as fsLinkSync, lstatSync, mkdirSync as fsMkdirSync, openSync as fsOpenSync, readdirSync, readFileSync, readSync, renameSync as fsRenameSync, statSync, unlinkSync as fsUnlinkSync, writeFileSync as fsWriteFileSync } from 'node:fs'
+import type { Stats } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -35,6 +36,7 @@ import { waitForPublishedRecord } from './backoff-publish'
 import { immutableQuestionFiles } from './question-files'
 import { reusableQuestionObservation } from './question-observation'
 import { recentInboxFiles } from './inbox-files'
+import { watchedReads } from './watched-reads'
 import { dropServerMemoryEnv, serverMemoryArgs, serverMemoryEnv } from './server-runtime'
 import { defaultMessagesDirectory, isOwnFolder, MESSAGE_FOLDER_ENV, migratePrivateRuntimeFile, privateRuntimeFolder, privateRuntimeFolderAsync, readPrivateRuntimeFile, readPrivateRuntimeFileAsync, RUNTIME_FOLDER_ENV, isAccessRefused, RuntimeFolderDeniedError, RuntimeFolderError, RuntimeFolderTimeoutError, runtimeFolderHandoff, unprotectedRuntimeFolder, writePrivateRuntimeFile } from './runtime-folder'
 import { isTimeout, privateFolder, privateFolderHandoff } from './private-folder'
@@ -190,7 +192,7 @@ const storageNote = (error: BoardFileError, isLan = false): string =>
     : error.isUnchanged ? s.boardSaveFailed(plainFile(error.file), plainReason(s, error.code))
     : s.boardStorageFailed(plainFile(error.file), error.isRead ? plainReadReason(s, error.code) : plainReason(s, error.code))
 
-const read = (file: string): string => {
+const readFresh = (file: string): string => {
   try {
     return readFileSync(file, 'utf8')
   } catch (error) {
@@ -198,6 +200,41 @@ const read = (file: string): string => {
     throw fileError(file, error, true)
   }
 }
+
+// The page server's idle poll reads the files of progress.md's folder and of the inbox only when a
+// folder watch or a stamp says they may have changed (#254, scripts/watched-reads.ts). Only the
+// poll's own view uses what is kept (isPollRead): a press, a tidy or a terminal board reads the
+// files themselves, and a write in this script (the wrappers below) forgets everything kept.
+const isPageServer = args.includes('--serve-child') || args.includes('--serve')
+const idleReads = isPageServer && !args.includes('--chat') && !args.includes('--json') && !args.includes('--mcp')
+  ? watchedReads({ directories: [dirname(path), join(dirname(path), 'progress-inbox')], files: [path] })
+  : null
+let isPollRead = false
+const isKept = (): boolean => isPollRead && idleReads !== null
+const read = (file: string): string => isKept() ? idleReads!.get(file, 'read', () => readFresh(file)) : readFresh(file)
+const statKept = (file: string): Stats => isKept() ? idleReads!.get(file, 'stat', () => statSync(file)) : statSync(file)
+const isThere = (file: string): boolean => isKept() ? idleReads!.get(file, 'exists', () => existsSync(file)) : existsSync(file)
+const forget = (): void => { idleReads?.clear() }
+// A folder's identity and names, kept for the idle poll as its files are (#254).
+const lookFolder = (directory: string): { identity: string; names: string[] } => {
+  const found = statSync(directory, { bigint: true })
+  return { identity: `${found.dev}:${found.ino}:${found.birthtimeNs}`, names: readdirSync(directory) }
+}
+const keptFolder = (directory: string) => (isFresh: boolean): { identity: string; names: string[] } =>
+  !isFresh && isKept() ? idleReads!.listing(directory, 'folder', () => lookFolder(directory)) : lookFolder(directory)
+// Runs `look` as the idle poll's own read.
+const polled = <T>(look: () => T): T => {
+  if (isPollRead) return look()
+  isPollRead = true
+  try { return look() } finally { isPollRead = false }
+}
+const appendFileSync = (...a: Parameters<typeof fsAppendFileSync>): void => { forget(); fsAppendFileSync(...a) }
+const linkSync = (...a: Parameters<typeof fsLinkSync>): void => { forget(); fsLinkSync(...a) }
+const mkdirSync = (...a: Parameters<typeof fsMkdirSync>): string | undefined => { forget(); return fsMkdirSync(...a) }
+const openSync = (...a: Parameters<typeof fsOpenSync>): number => { if (a[1] !== undefined && a[1] !== 'r') forget(); return fsOpenSync(...a) }
+const renameSync = (...a: Parameters<typeof fsRenameSync>): void => { forget(); fsRenameSync(...a) }
+const unlinkSync = (...a: Parameters<typeof fsUnlinkSync>): void => { forget(); fsUnlinkSync(...a) }
+const writeFileSync = (...a: Parameters<typeof fsWriteFileSync>): void => { forget(); fsWriteFileSync(...a) }
 
 // The part of a month's journal or archive new lines go to: the month's file until it reaches
 // 1 MB, then `-2`, and so on (hooks/retention.ts, #373).
@@ -213,7 +250,7 @@ const partOf = (base: string): string => currentPart(base, file => {
 // began today. The rest of a long month is not read (#373).
 const journalRaw = (now: number): string => {
   const base = journalPath(path, now)
-  const parts = monthParts(base, existsSync)
+  const parts = monthParts(base, isThere)
   // A month with no journal yet is read as before, so a file the board cannot read is still named.
   const text = read(parts.at(-1) ?? base)
   const before = parts.at(-2)
@@ -295,6 +332,7 @@ const pageDoneFiles = immutableQuestionFiles({
   directory: dirname(path),
   isPersistent: args.some(arg => ['--watch', '--serve', '--serve-child'].includes(arg)),
   accepts: name => pageDoneHash(name) !== null,
+  look: keptFolder(dirname(path)),
   parse: (text, name) => readPageDone(text, pageDoneHash(name)!),
   // A broken receipt cannot invalidate another session's processed question.
   isValidationIndependent: true,
@@ -334,6 +372,11 @@ const inboxFiles = recentInboxFiles({
   directory: join(dirname(path), 'progress-inbox'),
   isPersistent: isPersistentQuestions,
   accepts: isInboxFile,
+  list: isFresh => !isFresh && isKept() ? idleReads!.listing(join(dirname(path), 'progress-inbox'), 'names', () => readdirSync(join(dirname(path), 'progress-inbox'))) : readdirSync(join(dirname(path), 'progress-inbox')),
+  identify: isFresh => {
+    const look = (): string => { const found = statSync(join(dirname(path), 'progress-inbox'), { bigint: true }); return `${found.dev}:${found.ino}:${found.birthtimeNs}` }
+    return !isFresh && isKept() ? idleReads!.listing(join(dirname(path), 'progress-inbox'), 'identity', look) : look()
+  },
 })
 let tornQuestionCache: { text: string; isTorn: boolean } | null = null
 let parsedQuestionCache: { file: string; text: string; isMissing: boolean; ledger: QuestionLedger | null } | null = null
@@ -364,6 +407,7 @@ const placeQuestionFile = (from: string, to: string): boolean => {
     ? [system32('WindowsPowerShell/v1.0/powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', `Move-Item -LiteralPath ${quote(source)} -Destination ${quote(target)} -ErrorAction Stop`]] as const
     : ['mv', ['-n', '--', source, target]] as const
   const ran = spawnSync(tool, [...argv], { cwd: dirname(path), stdio: 'ignore', timeout: 10000, windowsHide: true })
+  forget()
   const isMoved = ran.status === 0 && !existsSync(source)
   if (isMoved) writes += 1
   return isMoved
@@ -400,14 +444,15 @@ const quarantineQuestions = (file: string): boolean => {
 const readQuestions = (file: string, text?: string) => {
   if (text === undefined) {
     text = read(file)
-    if (isQuestionWriter && tornQuestions(text)) {
+    // A torn copy that was kept is looked at again in the file before it is put aside (#254).
+    if (isQuestionWriter && tornQuestions(text) && (!isKept() || tornQuestions(text = readFresh(file)))) {
       if (!quarantineQuestions(file)) return null
       text = read(file)
     }
   }
   let isMissing = false
   try {
-    statSync(file)
+    statKept(file)
   } catch (error) {
     if ((error as { code?: string } | null)?.code !== 'ENOENT') throw fileError(file, error)
     isMissing = true
@@ -426,6 +471,7 @@ const captureFiles = immutableQuestionFiles<QuestionCapture>({
   directory: dirname(path),
   isPersistent: isPersistentQuestions,
   accepts: name => captureHashOf(path, name) !== null,
+  look: keptFolder(dirname(path)),
   parse: (text, name) => {
     const hash = captureHashOf(path, name)
     return hash === null ? null : parseCapture(text, hash)
@@ -441,6 +487,7 @@ const proofFiles = immutableQuestionFiles<{ kind: keyof QuestionProofs; hash: st
   directory: dirname(path),
   isPersistent: isPersistentQuestions,
   accepts: name => questionProofOf(path, name) !== null,
+  look: keptFolder(dirname(path)),
   parse: (text, name) => {
     const proof = questionProofOf(path, name)
     return proof !== null && isQuestionProof(text, proof.kind, proof.hash) ? proof : null
@@ -626,7 +673,7 @@ const readBoardView = (source: string, now: number) => {
   let stat = ''
   let mtimeMs = 0
   try {
-    const one = statSync(path)
+    const one = statKept(path)
     stat = `${one.mtimeMs}:${one.size}`
     mtimeMs = one.mtimeMs
   } catch {
@@ -722,7 +769,7 @@ const readBoardView = (source: string, now: number) => {
         nextText = compactQuestionsJson(next)
       }
       proofs = latestProofs
-      const raw = parsedQuestions(file, before, !existsSync(file))
+      const raw = parsedQuestions(file, before, !isThere(file))
       // The parsed ledger is immutable. Keep one canonical form instead of allocating another
       // complete copy for every unchanged page or terminal poll.
       if (raw !== null && rawQuestionJsonCache?.ledger !== raw) rawQuestionJsonCache = { ledger: raw, text: compactQuestionsJson(raw) }
@@ -788,9 +835,13 @@ const view = (source = read(path), now = Date.now()) => {
   try { return readBoardView(source, now) } finally { isViewQuestionRead = false }
 }
 
+// The page server's poll: the only view that reads what idleReads kept (#254).
 const freshView = () => {
   const before = writes
-  const shown = view()
+  idleReads?.check()
+  isPollRead = true
+  let shown: ReturnType<typeof view>
+  try { shown = view() } finally { isPollRead = false }
   writes -= before
   return shown
 }
@@ -937,10 +988,14 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
     }
   }
   let failure: unknown = { code: 'EAGAIN' }
+  // An idle poll starts from what it kept (#254). A change, or a torn ledger, is worked out again
+  // from the file itself before anything is written: a kept copy never decides a write.
+  let isFreshRead = !isKept()
   for (let attempt = 0; attempt < REWRITE_TRIES; attempt += 1) {
-    const before = read(file)
+    const before = isFreshRead ? readFresh(file) : read(file)
     const isLedger = file === questionsPath(path)
     if (isLedger && tornQuestions(before)) {
+      if (!isFreshRead) { isFreshRead = true; forget(); attempt -= 1; continue }
       if (!quarantineQuestions(file)) return null
       continue
     }
@@ -949,6 +1004,7 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
     if (after === AGAIN) continue
     if (after === null) return null
     if (after === before) return after
+    if (!isFreshRead) { isFreshRead = true; forget(); attempt -= 1; continue }
     const temp = `${file}.${process.pid}.${Date.now().toString(36)}.board-tmp`
     let isOwned = false
     try {
@@ -979,7 +1035,7 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
         // `change` can take long (a sweep reads and writes question files for each block that
         // asks), and a rename over a file another agent wrote meanwhile would undo that write:
         // look at the file once more and make the change again from what it holds now.
-        if (read(file) !== before) {
+        if (readFresh(file) !== before) {
           unlinkSync(temp)
           isOwned = false
           continue
@@ -995,7 +1051,7 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
           patiently(() => {
             if (lastError !== undefined) {
               if (isLedger && !existsSync(file)) return
-              if (read(file) !== before) {
+              if (readFresh(file) !== before) {
                 isChanged = true
                 return
               }
@@ -1032,7 +1088,7 @@ const rewrite = (file: string, change: (text: string, isLast: boolean) => string
     writes += 1
     // The file is replaced now, even if reading it back fails below.
     onReplaced?.()
-    if (read(file) === after) return after
+    if (readFresh(file) === after) return after
     failure = { code: 'EAGAIN' }
   }
 
@@ -1376,7 +1432,7 @@ const archiveOut = (take: (text: string, isLast: boolean) => { text: string; ent
 // JSON counts as a write caught half-way and a press never writes over the marks in it.
 const answeredAge = (file: string): number => {
   try {
-    return Date.now() - statSync(file).mtimeMs
+    return Date.now() - statKept(file).mtimeMs
   } catch {
     return 0
   }
@@ -2422,7 +2478,7 @@ const serveChild = (): void => {
       reports: (isFresh = true) => {
         // A page snapshot follows its synchronous view read. Handoff requests
         // still read current bytes instead of accepting an older page's baseline.
-        const projects = !isFresh && progressProjectCache !== null ? progressProjectCache.projects : parseProgress(read(path))
+        const projects = !isFresh && progressProjectCache !== null ? progressProjectCache.projects : parseProgress(readFresh(path))
         return projects.flatMap(project => project.tasks.flatMap(task => task.auto === null ? [] : [{ agent: task.auto.agent, session: task.auto.resume ?? task.auto.session, updated: task.auto.updated }]))
       },
       get s() { return s },
@@ -2432,7 +2488,8 @@ const serveChild = (): void => {
       view: freshView,
       // An open board request is answered when progress.md or the hooks' inbox changes (#359).
       watch: { progress: path, inbox: join(dirname(path), 'progress-inbox') },
-      pending: (isFresh = true) => pending(undefined, isFresh),
+      // The poll's second look at the inbox, after its view, reads what that view kept (#254).
+      pending: (isFresh = true) => isFresh ? pending(undefined, true) : polled(() => pending(undefined, false)),
       act,
       tidy,
       paste,

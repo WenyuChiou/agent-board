@@ -17,6 +17,9 @@ export const immutableQuestionFiles = <T>(options: {
   parse: (text: string, name: string) => T | null
   isValidationIndependent?: boolean
   watchFiles?: WatchFiles
+  // The folder's identity and names. The page server's idle poll passes one that keeps them while
+  // its folder watch reports nothing (#254); a fresh read always looks.
+  look?: (isFresh: boolean) => { identity: string; names: string[] }
 }) => {
   const known = new Map<string, { stamp: string; value: T }>()
   const accepted = new Map<string, boolean>()
@@ -27,6 +30,10 @@ export const immutableQuestionFiles = <T>(options: {
   let hasFailed = false
   let isClosed = false
   let isUncertain = true
+  const lookFolder = (): { identity: string; names: string[] } => {
+    const directory = statSync(options.directory, { bigint: true })
+    return { identity: `${directory.dev}:${directory.ino}:${directory.birthtimeNs}`, names: readdirSync(options.directory) }
+  }
   const accepts = (name: string): boolean => {
     const previous = accepted.get(name)
     if (previous !== undefined) return previous
@@ -78,8 +85,8 @@ export const immutableQuestionFiles = <T>(options: {
       try {
         // A renamed/replaced directory must not leave a watcher on its old inode. File numbers are
         // 64-bit and a Number drops the low digits of the ones past 2^53, so read them exactly (#1498).
-        const directory = statSync(options.directory, { bigint: true })
-        const nextIdentity = `${directory.dev}:${directory.ino}:${directory.birthtimeNs}`
+        const looked = (options.look ?? lookFolder)(isFresh)
+        const nextIdentity = looked.identity
         if (identity !== nextIdentity) {
           close()
           invalidateAll()
@@ -87,7 +94,7 @@ export const immutableQuestionFiles = <T>(options: {
           hasFailed = false
         }
         watchDirectory()
-        const names = readdirSync(options.directory)
+        const names = looked.names
         const listed = new Set(names)
         // Matching a stable name must not rebuild its path prefix on every poll. Forget absent
         // names so this cache stays bounded by the current directory, including unrelated files.
