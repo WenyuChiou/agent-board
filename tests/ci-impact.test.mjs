@@ -1274,11 +1274,11 @@ test('a pull request runs Node 22 on Ubuntu and Node 24 on Windows, and main, th
   // parts, since a part lasts about as long as its share of codex-local (#1130, #1764).
   const parts = (node, n, os = 'windows-latest') => Array.from({ length: n }, (_, i) => `{"os":"${os}","node":${node},"part":"${i + 1}/${n}"}`).join(',')
   const ubuntu = '{"os":"ubuntu-latest","node":22,"part":"1/1"}', ubuntu24 = '{"os":"ubuntu-latest","node":24,"part":"1/1"}'
-  assert.ok(text.includes(`board_matrix: \${{ ${onPr} && '[${parts(22, 3, 'ubuntu-latest')},${parts(24, 10)}]' || '[${parts(22, 3, 'ubuntu-latest')},${parts(24, 3, 'ubuntu-latest')},${parts(22, 10)},${parts(24, 10)}]' }}`))
-  assert.ok(text.includes(`journeys_matrix: \${{ ${onPr} && '[${ubuntu},${parts(24, 3)}]' || '[${ubuntu},${ubuntu24},${parts(22, 3)},${parts(24, 3)}]' }}`))
+  assert.ok(text.includes(`board_matrix: \${{ steps.plan.outputs.board_matrix || (${onPr} && '[${parts(22, 3, 'ubuntu-latest')},${parts(24, 10)}]' || '[${parts(22, 3, 'ubuntu-latest')},${parts(24, 3, 'ubuntu-latest')},${parts(22, 10)},${parts(24, 10)}]') }}`))
+  assert.ok(text.includes(`journeys_matrix: \${{ steps.plan.outputs.journeys_matrix || (${onPr} && '[${ubuntu},${parts(24, 3)}]' || '[${ubuntu},${ubuntu24},${parts(22, 3)},${parts(24, 3)}]') }}`))
   // The local exchange job runs in two parts on Ubuntu and three on Windows: with the Codex delivery tests the whole
   // Ubuntu run took 92-94% of ten minutes and each Windows part of two up to 67% on main (#1445).
-  assert.ok(text.includes(`messaging_matrix: \${{ ${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 3)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 3)},${parts(24, 3)}]' }}`))
+  assert.ok(text.includes(`messaging_matrix: \${{ steps.plan.outputs.messaging_matrix || (${onPr} && '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 3)}]' || '[${parts(22, 2, 'ubuntu-latest')},${parts(24, 2, 'ubuntu-latest')},${parts(22, 3)},${parts(24, 3)}]') }}`))
   for (const group of ['board', 'messaging', 'tooling', 'npm', 'journeys']) {
     const block = text.split('\n  ' + group + ':\n')[1]?.split(/\n  [\w-]+:\n/)[0]
     assert.ok(block, group)
@@ -1430,5 +1430,135 @@ test('the browser tool install stops at its first success, tries three times and
     assert.match(down.out, /slept 40\n::error::browser tool install failed three times\n$/)
   } finally {
     await rm(root, { recursive: true, force: true })
+  }
+})
+
+// #1917: a split job starts only the parts that get a test file. Synthetic plans over the real table and test lists.
+const prPairs = [{ os: 'ubuntu-latest', node: 22 }, { os: 'windows-latest', node: 24 }]
+const allPairs = [{ os: 'ubuntu-latest', node: 22 }, { os: 'ubuntu-latest', node: 24 }, { os: 'windows-latest', node: 22 }, { os: 'windows-latest', node: 24 }]
+const splitTests = async () => ({
+  board: await boardTestFiles(),
+  messaging: ['tests/exchange.test.mjs', 'tests/messaging.test.mjs'],
+  journeys: (await readdir(new URL('./e2e', import.meta.url))).filter(name => name.endsWith('.test.mjs')).map(name => 'tests/e2e/' + name).sort(),
+})
+const selection = (board, { full = false, messaging = [], journeys = [] } = {}) => ({ full, testFiles: { board, messaging, journeys } })
+// The part totals of a matrix, one per pair, in the pairs' order.
+const totalsOf = (matrix, pairs) => pairs.map(({ os, node }) => matrix.filter(entry => entry.os === os && entry.node === node).length)
+// The board files that weigh a time of their own in the table and do not split their own tests, heaviest first.
+const measuredBoardFiles = async () => {
+  const { selfPartedTests } = await import('../scripts/ci-impact.mjs')
+  const table = await readTimes()
+  return (await boardTestFiles()).filter(path => !selfPartedTests.includes(path) && table.files[path] !== undefined).sort((a, b) => table.files[b] - table.files[a])
+}
+
+test('one small selected board file starts one board part on each system and Node pair (#1917)', async () => {
+  const { partMatrices } = await import('../scripts/ci-impact.mjs')
+  const tests = await splitTests()
+  for (const pairs of [prPairs, allPairs]) {
+    const { board } = partMatrices(selection(['tests/messaging-matrix.test.mjs']), tests, pairs)
+    assert.deepEqual(board, pairs.map(({ os, node }) => ({ os, node, part: '1/1' })))
+  }
+})
+
+test('a selection with a self-parted file keeps today\'s board parts, since that file deals its tests into them (#1917)', async () => {
+  const { partMatrices, PART_COUNTS } = await import('../scripts/ci-impact.mjs')
+  const tests = await splitTests()
+  for (const board of [['tests/codex-local.test.mjs'], ['tests/codex-local.test.mjs', 'tests/messaging-matrix.test.mjs']]) {
+    const matrices = partMatrices(selection(board), tests, allPairs)
+    assert.deepEqual(totalsOf(matrices.board, allPairs), allPairs.map(({ os }) => PART_COUNTS.board[os]), board.join(' '))
+  }
+  // messaging.test.mjs splits its own tests too, so the local exchange job keeps its parts.
+  const { messaging } = partMatrices(selection([], { messaging: tests.messaging }), tests, prPairs)
+  assert.deepEqual(totalsOf(messaging, prPairs), [2, 3])
+})
+
+test('a selected file the time table does not know keeps today\'s parts for its group (#1917)', async () => {
+  const { partMatrices, PART_COUNTS } = await import('../scripts/ci-impact.mjs')
+  const tests = await splitTests()
+  const matrices = partMatrices(selection(['tests/messaging-matrix.test.mjs', 'tests/a-file-the-table-does-not-know.test.mjs'], { journeys: ['tests/e2e/l0-readme.test.mjs'] }), tests, prPairs)
+  assert.deepEqual(totalsOf(matrices.board, prPairs), prPairs.map(({ os }) => PART_COUNTS.board[os]))
+  // The journeys have no times of their own in the table: they keep their parts whatever is selected.
+  assert.deepEqual(totalsOf(matrices.journeys, prPairs), prPairs.map(({ os }) => PART_COUNTS.journeys[os]))
+})
+
+test('several board files get the fewest parts whose heaviest is no longer than the heaviest part of today\'s full run, and one part fewer is longer (#1917)', async () => {
+  const { partMatrices, partLoads, PART_COUNTS } = await import('../scripts/ci-impact.mjs')
+  const tests = await splitTests()
+  const files = await measuredBoardFiles()
+  const heaviest = (selected, total) => Math.max(...partLoads(selected, total).loads)
+  let isShrunkPastOne = false
+  for (const take of [2, 8, 20, files.length]) {
+    const board = files.slice(0, take)
+    const matrix = partMatrices(selection(board), tests, allPairs).board
+    totalsOf(matrix, allPairs).forEach((total, index) => {
+      const today = PART_COUNTS.board[allPairs[index].os]
+      const limit = heaviest(tests.board, today)
+      assert.ok(total >= 1 && total <= today, take + ' files: ' + total + ' of ' + today)
+      assert.ok(heaviest(board, total) <= limit, take + ' files in ' + total + ' parts')
+      if (total > 1) {
+        assert.ok(heaviest(board, total - 1) > limit, take + ' files would fit ' + (total - 1) + ' parts')
+        isShrunkPastOne ||= total < today
+      }
+    })
+  }
+  // Every measured board file at once needs more than one Windows part and fewer than today's ten.
+  assert.ok(isShrunkPastOne, 'no selection needed between one part and today\'s count')
+})
+
+test('a full plan starts today\'s parts, the same matrices test.yml keeps when the planner names none (#1917)', async () => {
+  const { partMatrices } = await import('../scripts/ci-impact.mjs')
+  const tests = await splitTests()
+  const text = await workflow()
+  for (const group of ['board', 'messaging', 'journeys']) {
+    const line = text.split('\n').find(row => row.trimStart().startsWith(group + '_matrix:'))
+    const [onPr, onMain] = [...line.matchAll(/'(\[[^']*\])'/g)].map(match => JSON.parse(match[1]))
+    const full = selection(tests.board, { full: true, messaging: tests.messaging, journeys: tests.journeys })
+    assert.deepEqual(partMatrices(full, tests, prPairs)[group], onPr, group)
+    assert.deepEqual(partMatrices(full, tests, allPairs)[group], onMain, group)
+    // The planner's matrix comes first, and today's stand when it names none.
+    assert.ok(line.includes(`\${{ steps.plan.outputs.${group}_matrix || (`), group)
+  }
+  // The planner is given the same pairs the other Node jobs run.
+  const pairs = line => line.slice(line.indexOf('${{'))
+  const nodeLine = text.split('\n').find(row => row.trimStart().startsWith('node_matrix:'))
+  const pairsLine = text.split('\n').find(row => row.trimStart().startsWith('CI_NODE_PAIRS:'))
+  assert.ok(pairsLine, 'no CI_NODE_PAIRS on the plan step')
+  assert.equal(pairs(pairsLine), pairs(nodeLine))
+})
+
+test('with fewer parts every selected board file still runs exactly once on each pair (#1917)', async () => {
+  const { partMatrices, partFiles, selfPartedTests } = await import('../scripts/ci-impact.mjs')
+  const tests = await splitTests()
+  const files = await measuredBoardFiles()
+  for (const board of [files.slice(0, 1), files.slice(0, 8), files, [...files.slice(0, 5), 'tests/codex-local.test.mjs']]) {
+    const matrix = partMatrices(selection(board), tests, allPairs).board
+    for (const { os, node } of allPairs) {
+      const runs = matrix.filter(entry => entry.os === os && entry.node === node).flatMap(entry => partFiles(board, entry.part))
+      const others = runs.filter(path => !selfPartedTests.includes(path))
+      assert.deepEqual([...others].sort(), board.filter(path => !selfPartedTests.includes(path)).sort(), os + ' Node ' + node)
+      for (const path of board.filter(one => selfPartedTests.includes(one))) assert.equal(runs.filter(run => run === path).length, matrix.filter(entry => entry.os === os && entry.node === node).length)
+    }
+  }
+})
+
+test('the planner writes the part matrices for the workflow only when it is given the pairs (#1917)', async () => {
+  const root = fileURLToPath(new URL('..', import.meta.url))
+  const dir = await mkdtemp(join(tmpdir(), 'ci-impact-matrices-'))
+  try {
+    const run = env => {
+      const output = join(dir, 'output-' + Object.keys(env).length)
+      const result = spawnSync(process.execPath, ['scripts/ci-impact.mjs', 'plan'], { cwd: root, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: output, GITHUB_STEP_SUMMARY: '', CI_SOURCE_ROOTS: JSON.stringify([root]), CI_CHANGED_FILES: '["tests/messaging-matrix.test.mjs"]', CI_FORCE_FULL: 'false', ...env } })
+      assert.equal(result.status, 0, result.stderr)
+      return result
+    }
+    run({ CI_NODE_PAIRS: JSON.stringify(prPairs) })
+    const values = Object.fromEntries((await readFile(join(dir, 'output-1'), 'utf8')).trim().split('\n').map(row => [row.slice(0, row.indexOf('=')), row.slice(row.indexOf('=') + 1)]))
+    assert.deepEqual(JSON.parse(values.board_matrix), prPairs.map(({ os, node }) => ({ os, node, part: '1/1' })))
+    assert.deepEqual(totalsOf(JSON.parse(values.messaging_matrix), prPairs), [2, 3])
+    assert.deepEqual(totalsOf(JSON.parse(values.journeys_matrix), prPairs), [1, 3])
+    run({})
+    assert.doesNotMatch(await readFile(join(dir, 'output-0'), 'utf8'), /_matrix=/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
   }
 })
