@@ -108,6 +108,10 @@ test('a file renamed over another in the folder is read again on the next poll e
   try {
     w.reads.check()
     w.readSeen()
+    // The turn stamps the kept file once. NTFS does not move the folder's stamp on a rename over a
+    // file, so on Windows it is the turn, seeing the new file identity, that forgets the kept copy.
+    w.tick(100)
+    w.reads.check()
     const temp = `${w.seen}.tmp`
     writeFileSync(temp, '{"b":1}')
     renameSync(temp, w.seen)
