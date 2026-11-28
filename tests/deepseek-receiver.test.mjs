@@ -402,3 +402,27 @@ test('a DeepSeek claim whose give-back failed and whose lease ran out is not han
     assert.notEqual(run.message().status, 'accepted')
   } finally { await run.close() }
 }))
+
+test('a DeepSeek give-back the board saved but whose answer was lost is taken again at the next idle, once (#1870)', () => fixture(async f => {
+  const run = await giveBackRig(f, 'deepseek-lost-answer', 'lost-answer-1', 'Synthetic answer whose give-back answer was lost')
+  try {
+    // The board saves the give-back, but its answer never reaches the receiver: the command exits with no output.
+    run.rig.onSpawn = (action, args) => {
+      if (action === 'take') { run.root.status = 'running'; return undefined }
+      return action === 'release' ? spawn(process.execPath, ['-e', `require('node:child_process').spawnSync(process.execPath, ${JSON.stringify(args)}, { stdio: 'ignore' }); process.exit(1)`]) : undefined
+    }
+    run.hooks.get('agent/created')({ agent: run.root })
+    await run.until(() => run.calls.includes('release') && run.settled(), 'the receiver tried to give the claim back')
+    assert.equal(run.message().status, 'queued')
+    assert.equal(run.root.received.length, 0)
+    // The board folder's change from the give-back is seen while the session still works, so only the idle can take it.
+    await new Promise(done => setTimeout(done, 1000))
+    await run.until(run.settled, 'the check after the give-back finished')
+    run.rig.onSpawn = null
+    run.root.status = 'idle'
+    run.hooks.get('agent/status')({ agent: run.root, status: 'idle' })
+    await run.until(() => run.message().status === 'accepted' && run.settled(), 'the message queued again was taken and accepted at the next idle')
+    assert.equal(run.root.received.length, 1)
+    assert.match(run.root.received[0].content[0].text, /Synthetic answer whose give-back answer was lost/)
+  } finally { await run.close() }
+}))

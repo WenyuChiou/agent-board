@@ -109,8 +109,11 @@ const mailboxReceiver = () => {
       let message = stashed.get(session)
       if (message !== undefined) {
         stashed.delete(session)
-        if (!isDeliverable(message)) return
-      } else {
+        // A kept claim the board no longer holds (a give-back it saved but whose answer was lost, a dismissal, a lease
+        // that ran out) is dropped, and this idle takes afresh, so a message queued again is not left for a later idle.
+        if (!isDeliverable(message)) message = undefined
+      }
+      if (message === undefined) {
         const taken = await mailboxCall('take', session)
         // A session that closed while its take ran (or was added again as a new agent) changes nothing: no
         // watcher, no failure log and no count or timer, since its id can come back as a new session, which
