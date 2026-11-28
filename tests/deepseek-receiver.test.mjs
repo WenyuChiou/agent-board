@@ -449,9 +449,10 @@ test('an older board\'s unnamed DeepSeek claim taken for a working session is st
     await run.until(() => run.calls.includes('take') && run.settled() && run.message().status === 'uncertain', 'the unnamed claim was taken while the session worked')
     // Nothing to give back: no release is asked for.
     assert.equal(run.calls.includes('release'), false)
-    // The turn outlasts the lease; that board keeps the claim for this plugin, which hands it over at the next idle.
+    // That board holds the claim with no name too. The turn outlasts the lease; that board keeps the claim for this plugin,
+    // which hands it over at the next idle.
     const state = run.store()
-    run.write({ ...state, messages: state.messages.map(one => ({ ...one, claimed: Date.now() - run.messaging.MAILBOX_LEASE_MS - 1000 })) })
+    run.write({ ...state, messages: state.messages.map(({ ref: _ref, ...one }) => ({ ...one, claimed: Date.now() - run.messaging.MAILBOX_LEASE_MS - 1000 })) })
     run.rig.onSpawn = null
     run.root.status = 'idle'
     run.hooks.get('agent/status')({ agent: run.root, status: 'idle' })
@@ -459,6 +460,61 @@ test('an older board\'s unnamed DeepSeek claim taken for a working session is st
     assert.match(run.root.received[0].content[0].text, /Synthetic answer from an older board/)
     await new Promise(done => setTimeout(done, 300))
     await run.until(run.settled, 'the accept finished')
+    assert.equal(run.root.received.length, 1)
+  } finally { await run.close() }
+}))
+
+test('a DeepSeek take answered with no name while the board holds a named claim is not handed over after its lease (#1870)', () => fixture(async f => {
+  const run = await giveBackRig(f, 'deepseek-unnamed-answer', 'unnamed-answer-1', 'Synthetic answer whose take named no claim')
+  try {
+    // The take's answer leaves out the name the board stored; the session started a turn meanwhile.
+    run.rig.onSpawn = (action, args) => {
+      if (action === 'take') {
+        run.root.status = 'running'
+        const script = `const out = require('node:child_process').spawnSync(process.execPath, ${JSON.stringify(args)}, { encoding: 'utf8' }).stdout.trim().split(/\\r?\\n/).pop(); const answer = JSON.parse(out); if (answer.message) delete answer.message.ref; process.stdout.write(JSON.stringify(answer) + '\\n')`
+        return spawn(process.execPath, ['-e', script])
+      }
+      return undefined
+    }
+    run.hooks.get('agent/created')({ agent: run.root })
+    await run.until(() => run.calls.includes('take') && run.settled() && run.message().status === 'uncertain', 'the claim was taken while the session worked')
+    assert.equal(typeof run.message().ref, 'string')
+    // The named claim's lease runs out before the next idle: it is not handed over.
+    const state = run.store()
+    run.write({ ...state, messages: state.messages.map(one => ({ ...one, claimed: Date.now() - run.messaging.MAILBOX_LEASE_MS - 1000 })) })
+    run.rig.onSpawn = null
+    run.root.status = 'idle'
+    run.hooks.get('agent/status')({ agent: run.root, status: 'idle' })
+    await new Promise(done => setTimeout(done, 300))
+    await run.until(run.settled, 'the idle check finished')
+    assert.equal(run.root.received.length, 0)
+    assert.notEqual(run.message().status, 'accepted')
+  } finally { await run.close() }
+}))
+
+test('a DeepSeek session that goes idle while a give-back is tried again still gets the kept claim inside its lease, once (#1870)', () => fixture(async f => {
+  const run = await giveBackRig(f, 'deepseek-idle-during-retry', 'idle-retry-1', 'Synthetic answer kept through a slow give-back')
+  try {
+    // The first give-back fails, with the board's claim made 14.4 s before it, so its lease ends 15.6 s later; the second
+    // never answers, and the session goes idle while it runs.
+    let releases = 0
+    run.rig.onSpawn = action => {
+      if (action === 'take') { run.root.status = 'running'; return undefined }
+      if (action !== 'release') return undefined
+      releases += 1
+      if (releases === 1) {
+        const state = run.store()
+        run.write({ ...state, messages: state.messages.map(one => ({ ...one, claimed: Date.now() - run.messaging.MAILBOX_LEASE_MS + 15_600 })) })
+        return spawn(process.execPath, ['-e', 'process.exit(1)'])
+      }
+      setTimeout(() => { run.root.status = 'idle'; run.hooks.get('agent/status')({ agent: run.root, status: 'idle' }) }, 200)
+      return spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'])
+    }
+    run.hooks.get('agent/created')({ agent: run.root })
+    await run.until(() => releases >= 2, 'the give-back was tried again')
+    await run.until(() => run.root.received.length === 1, 'the kept claim was handed over after the slow give-back')
+    assert.match(run.root.received[0].content[0].text, /Synthetic answer kept through a slow give-back/)
+    await run.until(() => run.message().status === 'accepted' && run.settled(), 'the kept claim was accepted')
     assert.equal(run.root.received.length, 1)
   } finally { await run.close() }
 }))

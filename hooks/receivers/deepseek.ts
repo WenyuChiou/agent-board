@@ -47,13 +47,13 @@ import { spawn as spawnMailbox } from 'node:child_process'
 const detectSurface = ${detectDeepseekSurface.toString()}
 const surface = detectSurface(process.argv.slice(2))
 // One call to the board script's --mailbox; its one JSON line, or null when it failed or took too long.
-const mailboxCall = (action, session, extra = []) => new Promise(resolve => {
+const mailboxCall = (action, session, extra = [], wait = 15000) => new Promise(resolve => {
   let child, timer, output = ''
   const finish = value => { clearTimeout(timer); resolve(value) }
   try {
     child = spawnMailbox(${JSON.stringify(node)}, [${JSON.stringify(board)}, '--mailbox', action, '--agent', 'deepseek', '--home', ${JSON.stringify(home)}, '--progress-file', ${JSON.stringify(progress)}, '--session', session, '--surface', surface, ...extra], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true })
   } catch { return resolve(null) }
-  timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} resolve(null) }, 15000)
+  timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} resolve(null) }, wait)
   child.on('error', () => finish(null))
   child.stdout.setEncoding('utf8')
   child.stdout.on('data', chunk => { if (output.length < 262144) output += chunk })
@@ -79,38 +79,52 @@ const sessionOf = agent => {
 const DEFERRED_ASKS = 20
 // The board's lease on a claim (MAILBOX_LEASE_MS): after it, a claim nobody accepted reads Unsure and is not the plugin's to give.
 const LEASE_MS = 30000
-// How long a receiver waits before it gives a kept claim back again while its session works.
-const GIVE_BACK_MS = 2000
+// How long a receiver waits before it gives a kept claim back again while its session works, how long it lets one give-back
+// run, and how much of the lease a try must leave after it, so a session that goes idle while a try runs still gets the
+// claim inside its lease.
+const GIVE_BACK_MS = 1000
+const GIVE_BACK_CALL_MS = 5000
+const IDLE_ROOM_MS = 8000
 const mailboxReceiver = () => {
   const roots = new Map(), busy = new Set(), failing = new Set(), again = new Set(), stashed = new Map(), asks = new Map(), retries = new Map(), regives = new Map()
   let watcher = null, folder = null, pending = null, timer = null, ticks = 0
   // A named claim the plugin kept because its give-back failed goes to the session only while the board still holds it for
   // this claim, with no error, inside its lease. An older board's claim names nothing, cannot be given back, and that board
   // keeps it for this plugin past its lease, so it keeps the old rule: it goes at the next idle while the board holds it.
-  const isDeliverable = message => {
-    const named = typeof message.ref === 'string'
-    if (folder === null) return !named
+  // An answer with no name is trusted only while the board holds the claim with no name either.
+  const liveClaim = message => {
+    if (folder === null) return undefined
     let store
-    try { store = JSON.parse(readFileSync(join(folder, 'messages.json'), 'utf8')) } catch { return false }
+    try { store = JSON.parse(readFileSync(join(folder, 'messages.json'), 'utf8')) } catch { return null }
     const live = Array.isArray(store?.messages) && store.messages.find(one => one?.id === message.id)
-    return Boolean(live && live.status === 'uncertain' && live.nonce === message.nonce && (!live.error || live.error === '')
-      && (!named || (live.ref === message.ref && typeof live.claimed === 'number' && Date.now() - live.claimed < LEASE_MS)))
+    return live && live.status === 'uncertain' && live.nonce === message.nonce && (!live.error || live.error === '')
+      && (typeof message.ref === 'string' ? live.ref === message.ref : typeof live.ref !== 'string') ? live : null
+  }
+  const isDeliverable = message => {
+    const live = liveClaim(message)
+    if (live === undefined) return typeof message.ref !== 'string'
+    return Boolean(live && (typeof message.ref !== 'string' || (typeof live.claimed === 'number' && Date.now() - live.claimed < LEASE_MS)))
+  }
+  // When the board's lease on a kept named claim ends, by the board's own claim time; 0 once the board no longer holds it.
+  const leaseEnd = message => {
+    const live = liveClaim(message)
+    return live && typeof live.claimed === 'number' ? live.claimed + LEASE_MS : 0
   }
   // Gives a claim back to the board, which queues it again for the next take. True when the board no longer holds it for
   // this claim. A take from an older board names no claim, so there is nothing to give back.
   const giveBack = async (session, message) => {
     if (typeof message.ref !== 'string') return false
-    const answer = await mailboxCall('release', session, ['--ref', message.ref])
+    const answer = await mailboxCall('release', session, ['--ref', message.ref], GIVE_BACK_CALL_MS)
     return answer?.ok === true || answer?.code === 'NOT_HELD'
   }
-  // A named claim whose give-back failed is given back again every few seconds while the session works, inside the lease the
-  // take started, so a board that recovers queues it again before it reads Unsure. The next idle takes the kept claim itself.
+  // A named claim whose give-back failed is given back again every few seconds while the session works, inside the board's
+  // lease, so a board that recovers queues it again before it reads Unsure. A try starts only while it would end with
+  // IDLE_ROOM_MS of the lease left, since an idle that comes during a try waits for it; the next idle takes the kept claim itself.
   const keep = (session, agent, message) => {
     stashed.set(session, message)
     if (typeof message.ref !== 'string') return
-    const until = Date.now() + LEASE_MS
     const later = () => {
-      if (Date.now() + GIVE_BACK_MS >= until) return
+      if (Date.now() + GIVE_BACK_MS + GIVE_BACK_CALL_MS + IDLE_ROOM_MS > leaseEnd(message)) return
       const one = setTimeout(attempt, GIVE_BACK_MS)
       one.unref?.()
       regives.set(session, one)
