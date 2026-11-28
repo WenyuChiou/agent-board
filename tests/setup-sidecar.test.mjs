@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { basename, join, sep } from 'node:path'
+import { basename, dirname, join, relative, sep } from 'node:path'
 import { test } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { antigravitySidecarSource } from '../hooks/antigravity-sidecar.ts'
@@ -114,6 +114,210 @@ test('a no to the lone sidecar question writes nothing and leaves the question f
   assert.ok(asked.stdout.includes('[y/N]'), asked.stdout)
   assert.ok(!existsSync(dir), 'an empty answer is a no')
   assert.ok(run(['--agent', 'antigravity'], { input: '\n', env: TTY }).stdout.includes('[y/N]'), 'asked again')
+}))
+
+// #1642: the sidecar is part of what the preview shows and of what the person answers before setup writes anything, so no
+// "done" line comes ahead of its question and a yes writes only the two files the preview named.
+const SIDECAR_FILES = ['sidecar.json', 'sidecar.mjs']
+// The text a run printed before its first "[y/N]" question, or all of it.
+const beforeSidecarQuestion = stdout => stdout.split('[y/N]')[0]
+const namesSidecarFiles = text => SIDECAR_FILES.every(name => text.includes(join('sidecars', 'agent-board', name)))
+// Runs `change` (Node code, `fs` in scope) once, when setup first reads an answer: after its preview, before any write.
+const onFirstAnswer = (home, change) => {
+  const preload = join(home, 'change-on-answer.cjs'), mark = join(home, 'changed')
+  writeFileSync(preload, `const fs = require('node:fs')\nconst read = fs.readSync\nfs.readSync = (fd, ...rest) => {\n  if (fd === 0 && !fs.existsSync(${JSON.stringify(mark)})) { fs.writeFileSync(${JSON.stringify(mark)}, ''); ${change} }\n  return read(fd, ...rest)\n}\nrequire('node:module').syncBuiltinESMExports()\n`)
+  return { NODE_OPTIONS: `--require ${JSON.stringify(preload)}`, mark }
+}
+// Every file under a folder, as absolute paths.
+const filesUnder = folder => readdirSync(folder, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile()).map(entry => join(entry.parentPath ?? entry.path, entry.name))
+const runChanging = (home, run, args, input, change) => {
+  const { mark, ...env } = onFirstAnswer(home, change)
+  const result = run(args, { input, env: { ...TTY, ...env } })
+  assert.ok(existsSync(mark), 'setup read an answer')
+  return result
+}
+
+test('in a terminal the "This will" list names sidecar.json and sidecar.mjs as an optional change before any question (#1642)', () => withHome(({ run, dir }) => {
+  const asked = run(['--agent', 'antigravity'], { input: 'n\n', env: TTY })
+  const preview = asked.stdout.split('Set these up? [Y/n]')[0]
+  assert.notEqual(preview, asked.stdout, 'setup asked its question')
+  assert.ok(namesSidecarFiles(preview), preview)
+  const will = preview.split('This will:')[1] ?? ''
+  assert.match(will, /^- .*Antigravity sidecar.*optional/im, preview)
+  assert.ok(!existsSync(dir), 'a preview writes nothing')
+}))
+
+test('a no to the main question asks no sidecar question and writes nothing (#1642)', () => withHome(({ home, run, dir }) => {
+  const asked = run(['--agent', 'antigravity'], { input: 'n\ny\n', env: TTY })
+  assert.ok(asked.stdout.includes('Set these up? [Y/n]'), asked.stdout)
+  assert.ok(namesSidecarFiles(asked.stdout.split('Set these up? [Y/n]')[0]), asked.stdout)
+  assert.ok(!asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.ok(!existsSync(join(home, '.gemini', 'config', 'hooks.json')) && !existsSync(dir), 'a no writes nothing')
+}))
+
+test('a yes then a no writes the agent\'s files and no sidecar, and the sidecar question comes before the first done line (#1642)', () => withHome(({ home, run, dir }) => {
+  for (const second of ['n\n', '\n', '']) {
+    rmSync(join(home, '.gemini'), { recursive: true, force: true })
+    rmSync(join(home, '.agent-board'), { recursive: true, force: true })
+    const asked = run(['--agent', 'antigravity'], { input: `y\n${second}`, env: TTY })
+    assert.equal(asked.status, 0, asked.stderr)
+    assert.ok(asked.stdout.includes('[y/N]'), asked.stdout)
+    assert.doesNotMatch(beforeSidecarQuestion(asked.stdout), /done\./, asked.stdout)
+    assert.match(asked.stdout, /Antigravity files: done\./, asked.stdout)
+    assert.doesNotMatch(asked.stdout, /sidecar files: (?:done|not done|failed)/i, asked.stdout)
+    assert.ok(existsSync(join(home, '.gemini', 'config', 'hooks.json')), 'Antigravity\'s own files are written')
+    assert.ok(!existsSync(dir), `${JSON.stringify(second)} writes no sidecar`)
+  }
+}))
+
+test('a yes to both questions asks both before any done line and reports the sidecar files with the other parts (#1642)', () => withHome(({ run, dir }) => {
+  const asked = run(['--agent', 'antigravity'], { input: 'y\ny\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  const questions = asked.stdout.lastIndexOf('[y/N]')
+  assert.ok(questions > 0 && questions < asked.stdout.indexOf('done.'), asked.stdout)
+  const parts = asked.stdout.slice(questions).split('\n').filter(line => /: done\.$/.test(line))
+  assert.deepEqual(parts, ['Antigravity files: done.', 'Antigravity sidecar files: done.'], asked.stdout)
+  assert.ok(asked.stdout.lastIndexOf(TERMS) > asked.stdout.indexOf('Antigravity sidecar files: done.'), asked.stdout)
+  assert.ok(existsSync(join(dir, 'sidecar.json')) && existsSync(join(dir, 'sidecar.mjs')), asked.stdout)
+}))
+
+test('a sidecar yes writes no sidecar file when Antigravity\'s own apply fails, and its part line gives the command to run (#1642)', () => withHome(({ home, run, dir }) => {
+  // The person's own hooks.json lands while setup waits, so Antigravity's apply stops on it.
+  const hooks = join(home, '.gemini', 'config', 'hooks.json')
+  const asked = runChanging(home, run, ['--agent', 'antigravity'], 'y\ny\n', `fs.mkdirSync(${JSON.stringify(dirname(hooks))}, { recursive: true }); fs.writeFileSync(${JSON.stringify(hooks)}, 'synthetic person hooks')`)
+  assert.equal(asked.status, 1, asked.stdout)
+  assert.ok(asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.doesNotMatch(asked.stdout, /Antigravity (?:sidecar )?files: done\./, asked.stdout)
+  assert.match(asked.stdout, /Antigravity sidecar files: .*--agent antigravity --antigravity-sidecar --apply/, asked.stdout)
+  assert.equal(readFileSync(hooks, 'utf8'), 'synthetic person hooks')
+  assert.ok(!existsSync(dir), 'no sidecar file')
+}))
+
+// Another run's sidecar file lands while setup waits on its answers; the yes must not write over it.
+const otherRunWrites = (home, run, dir, name) => {
+  const file = join(dir, name), text = `// synthetic ${name} of another run\n`
+  const asked = runChanging(home, run, ['--agent', 'antigravity'], 'y\ny\n', `fs.mkdirSync(${JSON.stringify(dir)}, { recursive: true }); fs.writeFileSync(${JSON.stringify(file)}, ${JSON.stringify(text)})`)
+  assert.equal(asked.status, 1, asked.stdout)
+  assert.ok(asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.doesNotMatch(beforeSidecarQuestion(asked.stdout), /done\./, asked.stdout)
+  assert.match(asked.stdout, /Antigravity files: done\./, asked.stdout)
+  assert.doesNotMatch(asked.stdout, /Antigravity sidecar files: done\./, asked.stdout)
+  assert.match(asked.stdout, /Antigravity sidecar files: .*--antigravity-sidecar --apply/, asked.stdout)
+  assert.equal(readFileSync(file, 'utf8'), text)
+}
+
+test('a sidecar.json another setup wrote while this setup waited is kept, and the sidecar part is not called done (#1642)', () => withHome(({ home, run, dir }) => otherRunWrites(home, run, dir, 'sidecar.json')))
+
+test('in a terminal an edit to sidecar.mjs made after the yes is kept and the sidecar part is reported as not done (#1642)', () => withHome(({ home, run, dir }) => otherRunWrites(home, run, dir, 'sidecar.mjs')))
+
+test('the lone sidecar question follows a line naming sidecar.json and sidecar.mjs (#1642)', () => withHome(({ run, dir }) => {
+  assert.equal(run(['--agent', 'antigravity', '--apply']).status, 0)
+  for (const [input, isWritten] of [['\n', false], ['y\n', true]]) {
+    const asked = run(['--agent', 'antigravity'], { input, env: TTY })
+    assert.equal(asked.status, 0, asked.stderr)
+    assert.ok(asked.stdout.includes('[y/N]'), asked.stdout)
+    const preview = beforeSidecarQuestion(asked.stdout)
+    assert.ok(namesSidecarFiles(preview), preview)
+    assert.doesNotMatch(preview, /done\./, asked.stdout)
+    assert.equal(existsSync(join(dir, 'sidecar.json')) && existsSync(join(dir, 'sidecar.mjs')), isWritten, asked.stdout)
+  }
+}))
+
+test('where the connector manages Antigravity the preview names the sidecar files as optional before the question (#1642)', () => withHome(({ home, run, dir }) => {
+  const { root } = connectorHome(home)
+  const before = new Set(filesUnder(home))
+  const asked = run(['--agent', 'antigravity'], { input: 'y\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  const preview = beforeSidecarQuestion(asked.stdout)
+  assert.ok(namesSidecarFiles(preview), asked.stdout)
+  // Every file the yes adds is one the preview named, the sidecar's own install record included.
+  const added = filesUnder(home).filter(file => !before.has(file))
+  assert.ok(added.some(file => basename(file) === 'install-antigravity-sidecar.json'), added.join('\n'))
+  for (const file of added) assert.ok(preview.includes(join('~', relative(home, file))), `${file} is not in the preview:\n${preview}`)
+  assert.ok(existsSync(join(dir, 'sidecar.json')) && existsSync(join(dir, 'sidecar.mjs')), asked.stdout)
+  assert.ok(!existsSync(join(home, '.gemini', 'config', 'hooks.json')) && !existsSync(join(root, 'install-antigravity.json')))
+}))
+
+test('in a terminal --antigravity-sidecar lists the sidecar files as planned changes and asks no second question (#1642)', () => withHome(({ run, dir }) => {
+  const asked = run(['--agent', 'antigravity', '--antigravity-sidecar'], { input: 'y\ny\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.ok(namesSidecarFiles(asked.stdout.split('Set these up? [Y/n]')[0]), asked.stdout)
+  assert.ok(!asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.doesNotMatch(asked.stdout, /optional/i, asked.stdout)
+  assert.ok(existsSync(join(dir, 'sidecar.json')) && existsSync(join(dir, 'sidecar.mjs')), asked.stdout)
+}))
+
+test('an existing sidecar.json leaves the optional line and the sidecar question out (#1642)', () => withHome(({ run, dir }) => {
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  const before = readFileSync(join(dir, 'sidecar.json'), 'utf8')
+  const asked = run(['--agent', 'antigravity'], { input: 'y\ny\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.ok(!asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.doesNotMatch(asked.stdout, /optional/i, asked.stdout)
+  assert.equal(readFileSync(join(dir, 'sidecar.json'), 'utf8'), before)
+}))
+
+test('a sidecar.json deleted after an earlier setup wrote it comes back with the main yes, with no sidecar question and no failed part (#1642)', () => withHome(({ run, dir }) => {
+  assert.equal(run(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']).status, 0)
+  rmSync(join(dir, 'sidecar.json'))
+  const asked = run(['--agent', 'antigravity'], { input: 'y\ny\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stdout)
+  assert.ok(asked.stdout.includes('Set these up? [Y/n]'), asked.stdout)
+  assert.ok(!asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.doesNotMatch(asked.stdout, /failed/, asked.stdout)
+  assert.match(asked.stdout, /Antigravity files: done\./, asked.stdout)
+  assert.ok(existsSync(join(dir, 'sidecar.json')), asked.stdout)
+}))
+
+test('a sidecar plan that fails asks no sidecar question, and the preview says it failed with the command to run (#1642)', () => withHome(({ home, run, dir }) => {
+  connectorHome(home)
+  // A folder where sidecar.mjs would go: the main plan has no sidecar file, and the sidecar's own plan cannot write it.
+  mkdirSync(join(dir, 'sidecar.mjs'), { recursive: true })
+  const asked = run(['--agent', 'antigravity'], { input: 'y\n', env: TTY })
+  assert.ok(!asked.stdout.includes('[y/N]'), asked.stdout)
+  assert.match(asked.stdout, /Antigravity sidecar files: (?:failed|skipped)[^\n]*(?:\n.*)*--agent antigravity --antigravity-sidecar --apply/, asked.stdout + asked.stderr)
+  assert.ok(!existsSync(join(dir, 'sidecar.json')), asked.stdout)
+}))
+
+test('a sidecar plan that stops on a conflict asks no sidecar question, and the preview says it was skipped with the command to run (#1642)', () => withHome(({ home, run, dir }) => {
+  // A sidecar.mjs of someone else's and no sidecar.json: the main plan does not touch it, the sidecar's own plan stops on it.
+  const theirs = '// a synthetic sidecar.mjs of someone else\n'
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'sidecar.mjs'), theirs)
+  const asked = run(['--agent', 'antigravity'], { input: 'y\ny\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.ok(!asked.stdout.includes('[y/N]'), asked.stdout)
+  const preview = asked.stdout.slice(0, asked.stdout.indexOf('This will:'))
+  assert.match(preview, /Antigravity sidecar files: skipped: [^\n]*sidecar\.mjs[^\n]*\n[^\n]*--agent antigravity --antigravity-sidecar --apply/, asked.stdout)
+  assert.doesNotMatch(asked.stdout, /optional, asked next/, asked.stdout)
+  assert.match(asked.stdout, /Antigravity files: done\./, asked.stdout)
+  assert.equal(readFileSync(join(dir, 'sidecar.mjs'), 'utf8'), theirs)
+  assert.ok(!existsSync(join(dir, 'sidecar.json')), asked.stdout)
+  assert.ok(existsSync(join(home, '.gemini', 'config', 'hooks.json')), asked.stdout)
+}))
+
+test('piped setup and terminal --apply ask no sidecar question and write no sidecar (#1642)', () => withHome(({ home, run, dir }) => {
+  const piped = run(['--agent', 'antigravity'], { input: 'y\ny\n' })
+  assert.equal(piped.status, 0, piped.stderr)
+  assert.ok(!piped.stdout.includes('[y/N]'), piped.stdout)
+  const json = JSON.parse(run(['--agent', 'antigravity', '--json'], { input: 'y\ny\n', env: TTY }).stdout)
+  assert.ok(!('sidecarNotice' in json), JSON.stringify(json))
+  const applied = run(['--agent', 'antigravity', '--apply'], { input: 'y\ny\n', env: TTY })
+  assert.equal(applied.status, 0, applied.stderr)
+  assert.ok(!applied.stdout.includes('[y/N]'), applied.stdout)
+  assert.ok(existsSync(join(home, '.gemini', 'config', 'hooks.json')) && !existsSync(dir), applied.stdout)
+}))
+
+test('a skipped agent does not stop the sidecar a yes asked for, and both questions come before any part line (#1642)', () => withHome(({ home, run, dir }) => {
+  mkdirSync(join(home, '.codex'), { recursive: true })
+  writeFileSync(join(home, '.codex', 'hooks.json'), 'synthetic conflicting file')
+  const asked = run(['--agent', 'codex,antigravity'], { input: 'y\ny\n', env: TTY })
+  assert.equal(asked.status, 0, asked.stderr)
+  assert.match(asked.stdout, /Codex: skipped: /, asked.stdout)
+  assert.doesNotMatch(beforeSidecarQuestion(asked.stdout), /done\./, asked.stdout)
+  assert.match(asked.stdout, /Antigravity files: done\.\n(?:.*\n)*Antigravity sidecar files: done\./, asked.stdout)
+  assert.ok(existsSync(join(dir, 'sidecar.json')) && existsSync(join(dir, 'sidecar.mjs')), asked.stdout)
+  assert.equal(readFileSync(join(home, '.codex', 'hooks.json'), 'utf8'), 'synthetic conflicting file')
 }))
 
 test('structured output carries the terms line whenever a run writes the sidecar, also a run that only updates sidecar.mjs', () => withHome(({ home, run, dir }) => {

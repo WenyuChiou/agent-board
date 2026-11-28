@@ -117,6 +117,7 @@ const summaries = [
     "sidecarQuestion": "Also write the Antigravity sidecar, so the board can start a turn in an idle conversation? Google's terms may not cover it, and you switch it on yourself in Automations. [y/N] ",
     "filesPart": "{host} files",
     "sidecarPart": "Antigravity sidecar files",
+    "sidecarOptional": "Antigravity sidecar (optional, asked next): {status}",
     "trustPart": "Approve the board's hooks in {host}",
     "installPlugin": "Install the Claude Code plugin",
     "enablePlugin": "Claude Code: the plugin is installed but turned off in your user settings. Run {command} to turn it back on.",
@@ -201,6 +202,7 @@ const summaries = [
     "sidecarQuestion": "要一併寫入 Antigravity sidecar，讓看板能在閒置的對話裡開始一輪嗎？Google 的條款可能不涵蓋它，而且要由你自己在 Automations 開啟。[y/N] ",
     "filesPart": "{host} 設定檔案",
     "sidecarPart": "Antigravity sidecar 檔案",
+    "sidecarOptional": "Antigravity sidecar（選用，接著會詢問）：{status}",
     "trustPart": "在 {host} 核准看板的 hooks",
     "installPlugin": "安裝 Claude Code 外掛",
     "enablePlugin": "Claude Code：外掛已安裝，但在使用者設定裡被停用了。請執行 {command} 重新啟用。",
@@ -285,6 +287,7 @@ const summaries = [
     "sidecarQuestion": "要一并写入 Antigravity sidecar，让看板能在空闲的对话里开始一轮吗？Google 的条款可能不涵盖它，而且要由你自己在 Automations 开启。[y/N] ",
     "filesPart": "{host} 设置文件",
     "sidecarPart": "Antigravity sidecar 文件",
+    "sidecarOptional": "Antigravity sidecar（可选，接着会询问）：{status}",
     "trustPart": "在 {host} 批准看板的 hooks",
     "installPlugin": "安装 Claude Code 插件",
     "enablePlugin": "Claude Code：插件已安装，但在用户设置里被禁用了。请运行 {command} 重新启用。",
@@ -862,25 +865,68 @@ const main = () => {
     const report = (part, isDone, next) => process.stdout.write(`${words(isDone ? 'partDone' : 'partFailed', { part, command: next })}\n`)
     // The sidecar is a second, separate question that defaults to no. A yes only writes its files (the person
     // switches it on in Antigravity's Automations); with the flag, its files were part of the plan above. It is
-    // asked of an installed Antigravity that has no sidecar yet, whether or not the main question was asked.
-    const offerSidecar = () => {
-      if (args.includes('--antigravity-sidecar') || existsSync(join(home, '.gemini', 'config', 'sidecars', 'agent-board', 'sidecar.json')) || !askYes('sidecarQuestion', false)) return
-      let isDone = true
+    // asked of an installed Antigravity that has no sidecar yet, whether or not the main question was asked. The
+    // preview names every file a yes adds to the plan as an optional part, and the question comes right after the
+    // main yes, before anything is written or called done; a yes writes them after the agents' own files (#1642).
+    const sidecarJson = join(home, '.gemini', 'config', 'sidecars', 'agent-board', 'sidecar.json')
+    const antigravityPlan = plans[selected.indexOf('antigravity')]
+    const isLoneSidecar = !will.length && available.includes('antigravity') && !antigravityPlan.changes.length
+    // On a run with other work, Antigravity has its part line, so the sidecar can follow it: not on a repair that leaves it out.
+    // A plan that already writes a sidecar file (an earlier setup's sidecar.json was deleted) restores it with the main yes.
+    let isSidecarOffered = available.includes('antigravity') && !args.includes('--antigravity-sidecar') && !existsSync(sidecarJson)
+      && !hasSidecar([antigravityPlan])
+      && (will.length ? !(isRepair && !changedAgents.includes('antigravity')) : isLoneSidecar)
+    // What a yes adds: the plan with the sidecar, less the files the main plan already changes. Where the connector manages
+    // Antigravity this includes the sidecar's own install record. A sidecar plan that fails or stops on a conflict offers no
+    // question; the preview says so, with the command that writes the sidecar once the cause is fixed.
+    let sidecarChanges = []
+    let sidecarUnplanned = ''
+    if (isSidecarOffered) {
+      const retry = setupCommand(['--agent', 'antigravity', '--antigravity-sidecar', '--apply'])
       try {
-        const applied = run('antigravity', true, ['--antigravity-sidecar'])
-        isDone = applied.applied === true && !applied.conflicts.length && hasSidecar([applied])
-      } catch { isDone = false }
+        const planned = new Set(antigravityPlan.changes.map(change => change.file))
+        const withSidecar = run('antigravity', false, ['--antigravity-sidecar'])
+        if (withSidecar.conflicts.length) sidecarUnplanned = `${words('sidecarPart')}: ${words('skipped', { files: withSidecar.conflicts.map(shortPath).join(', ') })}\n${words('retry', { command: retry })}`
+        else sidecarChanges = withSidecar.changes.filter(change => !planned.has(change.file))
+      } catch (error) {
+        sidecarUnplanned = `${words('partFailed', { part: words('sidecarPart'), command: retry })}${error?.message ? `\n  ${error.message}` : ''}`
+      }
+      if (!hasSidecar([{ conflicts: [], changes: sidecarChanges }])) isSidecarOffered = false
+      if (sidecarUnplanned) {
+        const at = lines.findIndex(line => line.startsWith('Claude Code: '))
+        lines.splice(at < 0 ? lines.length : at, 0, sidecarUnplanned)
+      }
+    }
+    if (isSidecarOffered) {
+      const optional = words('sidecarOptional', { status: describe(sidecarChanges) })
+      const at = lines.findIndex(line => line.startsWith('Claude Code: '))
+      lines.splice(at < 0 ? lines.length : at, 0, optional, ...sidecarChanges.map(change => `  ${shortPath(change.file)}`))
+      if (will.length) will.push(optional)
+    }
+    // Writes the sidecar a yes asked for, once Antigravity's own part is done; else its part says how to write it later.
+    const writeSidecar = isAntigravityDone => {
+      let isDone = false
+      if (isAntigravityDone) {
+        try {
+          const applied = run('antigravity', true, ['--antigravity-sidecar'])
+          isDone = applied.applied === true && !applied.conflicts.length && hasSidecar([applied])
+        } catch {}
+      }
       if (!isDone) process.exitCode = 1
-      process.stdout.write('\n')
       report(words('sidecarPart'), isDone, setupCommand(['--agent', 'antigravity', '--antigravity-sidecar', '--apply']))
       if (isDone) process.stdout.write(`${words('sidecarTerms')}\n`)
     }
     // With nothing to do there is nothing to ask; the plain preview below says so.
     let hasConsent = false
+    let isSidecarYes = false
     if (will.length) {
       process.stdout.write(`${lines.join('\n')}\n\n${words('thisWill')}\n${will.map(line => `- ${line}`).join('\n')}\n`)
       hasConsent = askYes()
       process.stdout.write('\n')
+      if (hasConsent && isSidecarOffered) {
+        isSidecarYes = askYes('sidecarQuestion', false)
+        process.stdout.write('\n')
+      }
     }
     if (hasConsent) {
       // A folder or a link to nothing is not a file a way can rest on; a link to a file is (#1698).
@@ -949,7 +995,7 @@ const main = () => {
           }
         }
       }
-      if (completed.includes('antigravity')) offerSidecar()
+      if (isSidecarYes) writeSidecar(completed.includes('antigravity'))
       const next = []
       const sessions = []
       // How each agent opens the board (docs/SETUP.md, After setup): /agent-board, $agent-board in Codex, the skill in
@@ -995,10 +1041,13 @@ const main = () => {
       return
     }
     // Nothing else to do, but an installed Antigravity without the sidecar still gets its question.
-    if (!will.length && available.includes('antigravity') && !plans[selected.indexOf('antigravity')].changes.length) {
+    if (isLoneSidecar) {
       process.stdout.write(`${lines.join('\n')}\n\n`)
       lines.length = 0
-      offerSidecar()
+      if (isSidecarOffered && askYes('sidecarQuestion', false)) {
+        process.stdout.write('\n')
+        writeSidecar(true)
+      }
     }
     // A no: the preview is already on screen, so only the next steps follow.
     if (will.length) lines.length = 0

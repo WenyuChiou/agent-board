@@ -162,6 +162,7 @@ export const ZH_CN: Strings = {
     "sidecarQuestion": "要一并写入 Antigravity sidecar，让看板能在空闲的对话里开始一轮吗？Google 的条款可能不涵盖它，而且要由你自己在 Automations 开启。[y/N] ",
     "filesPart": "{host} 设置文件",
     "sidecarPart": "Antigravity sidecar 文件",
+    "sidecarOptional": "Antigravity sidecar（可选，接着会询问）：{status}",
     "trustPart": "在 {host} 批准看板的 hooks",
     "installPlugin": "安装 Claude Code 插件",
     "enablePlugin": "Claude Code：插件已安装，但在用户设置里被禁用了。请运行 {command} 重新启用。",
