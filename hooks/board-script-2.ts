@@ -4998,7 +4998,7 @@ export const LINES = [
 "  try {",
 "    const files = ackClaimsFiles(root, messages, owner);",
 "    const size = antigravityTranscriptSize(transcriptPath);",
-"    const isInputIn = size !== null && (isLaterInvocation || antigravityInputIsIn(transcriptPath, size) === true);",
+"    const isInputIn = size !== null && size > 0 && (isLaterInvocation || antigravityInputIsIn(transcriptPath, size) === true);",
 "    const claim = size === null ? { id, nonce } : { id, nonce, from: size, ...isInputIn ? { input: true } : {} };",
 "    isSaved = saveAckClaims(files, [...readAckClaims(files, readLocal).filter((one) => one.id !== id), claim].slice(-ACK_CLAIMS_KEEP), atomic, checkDeadline);",
 "  } catch {}",

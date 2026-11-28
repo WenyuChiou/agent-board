@@ -321,7 +321,8 @@ const saveAntigravityAckClaim = (
   try {
     const files = ackClaimsFiles(root, messages, owner)
     const size = antigravityTranscriptSize(transcriptPath)
-    const isInputIn = size !== null && (isLaterInvocation || antigravityInputIsIn(transcriptPath, size) === true)
+    // An empty or missing transcript cannot hold the turn's input yet, even at a later invocation.
+    const isInputIn = size !== null && size > 0 && (isLaterInvocation || antigravityInputIsIn(transcriptPath, size) === true)
     const claim = size === null ? { id, nonce } : { id, nonce, from: size, ...(isInputIn ? { input: true as const } : {}) }
     isSaved = saveAckClaims(files, [...readAckClaims(files, readLocal).filter(one => one.id !== id), claim].slice(-ACK_CLAIMS_KEEP), atomic, checkDeadline)
   } catch {}

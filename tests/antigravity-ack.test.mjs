@@ -304,4 +304,14 @@ for (const [surface, folder] of SURFACES) {
     f.stop('mid-turn', false)
     assert.equal(JSON.stringify(f.state().messages), before)
   }))
+
+  test(`${surface}: a hand-over at a later invocation before the transcript exists still takes the ACK of that turn's own reply`, () => fixture(folder, async f => {
+    f.seed('later-empty')
+    const nonce = await f.handOver('later-empty', { invocationNum: 1 })
+    // The transcript is written after the hand-over: the turn's input, then its reply with the ACK line.
+    f.say(`ACK ${nonce}`)
+    f.stop('later-empty', true)
+    assert.equal(f.one('later-empty').status, 'acknowledged')
+    assert.equal(f.one('later-empty').reply, `ACK ${nonce}`)
+  }))
 }
