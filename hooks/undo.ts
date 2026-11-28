@@ -96,7 +96,7 @@ export const recordUndo = (before: string, after: string, span: UndoSpan): UndoR
     if (span.session === null && afterSecs.length === beforeSecs.length) afterTitleCount = manualRangesIn(afterLines, afterSeen, afterSec).filter(one => one.heading === span.title).length
     if (beforeSec !== undefined && afterSecs.length < beforeSecs.length && beforeSec.end < beforeSeen.length) {
       nextProject = beforeSeen[beforeSec.end]!
-      nextProjectIdx = beforeSeen.slice(0, beforeSec.end).filter(l => l === nextProject).length
+      nextProjectIdx = beforeSeen.slice(0, beforeSec.heading).filter(l => l === nextProject).length
     } else if (beforeSec !== undefined && afterSec !== undefined && afterSecs.length === beforeSecs.length) {
       const afterItems = sectionItemStarts(afterLines, afterSeen, afterSec), beforeItems = sectionItemStarts(beforeLines, beforeSeen, beforeSec)
       const next = beforeItems.find(i => i > span.end)

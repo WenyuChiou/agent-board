@@ -235,6 +235,19 @@ test('Undo after Archive puts the task back and removes its archive entry', { ti
     assert.ok(afterSolo.indexOf('## alpha') >= 0 && afterSolo.indexOf('## alpha') < afterSolo.indexOf('## beta'), afterSolo)
   } finally { await soloOrder.close() }
 
+  // Regression Greptile 4725809569: consecutive duplicate ## alpha sections restore #1 before #2 after concurrent ## beta edit.
+  const consecDup = await startBoard(`# Progress\n\n## alpha\n${autoStopped('a4445555', 'alpha', 'Alpha solo one')}\n\n## alpha\n### Alpha second keeper\n- [ ] Stay\n\n## beta\n### Beta task\n- [ ] Open\n`)
+  try {
+    const row1 = await consecDup.rowOf('Alpha solo one')
+    const p1 = await consecDup.call('POST', '/api/act', { key: row1.key, type: 'archive', fp: row1.fp })
+    assert.equal(p1.status, 200)
+    writeFileSync(consecDup.path, readFileSync(consecDup.path, 'utf8').replace('- [ ] Open', '- [ ] Beta edited'))
+    const u1 = await consecDup.call('POST', '/api/undo', { token: p1.json().undoToken })
+    assert.equal(u1.status, 200, u1.body)
+    const after1 = readFileSync(consecDup.path, 'utf8')
+    assert.ok(after1.indexOf('Alpha solo one') > 0 && after1.indexOf('Alpha solo one') < after1.indexOf('Alpha second keeper'), after1)
+  } finally { await consecDup.close() }
+
   // Regression Greptile #1: archiving one of two blocks sharing a session still allows Undo.
   const shared = await startBoard(
     `# Progress\n\n## alpha\n<!-- auto session=55aa66bb agent=claude state=working updated=${RECENT} -->\n### Shared live\n- [~] Working\n<!-- /auto session=55aa66bb -->\n\n${autoStopped('55aa66bb', 'alpha', 'Shared ended')}\n`,
