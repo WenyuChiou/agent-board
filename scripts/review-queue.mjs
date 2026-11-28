@@ -247,6 +247,10 @@ export const classify = (prs, commentsByNumber, now, reviewers = null, context =
       const isOverFourHours = hours > 4
       const suggestion = reviewers ? suggestReviewer(reviewers, { author: nameOf(item.author), isOverFourHours }, openCounts) : {}
       result.needsReviewer.push({ ...item, readyAt: ready.comment.created_at, hours, isOverFourHours, takenBy, lapsedBy, ...suggestion, ...extras })
+    } else if (latestHeadVerdict?.verdict.isUnreadable === true) {
+      // An approval with the words "started new for this review" that do not read as that one note is no approval,
+      // as the PR check reads it (#1974).
+      result.waitingForAuthor.push({ ...item, detail: 'the approval line cannot be read; write it in the R2 form', ...extras })
     } else if (latestHeadVerdict?.verdict.kind === 'APPROVE' && latestHeadVerdict.by && sameAgent(latestHeadVerdict.by, item.author) && !isLaneReviewer(latestHeadVerdict.verdict, tierOf(pr.body), { isRelease: /^chore\(release\):/.test(item.title) })) {
       // Nobody approves their own work (RULES R2): a verdict named for the Author line's agent is not an approval,
       // even when it arrives from the shared login. The lane is part of the identity, so "codex (e2e)" approving

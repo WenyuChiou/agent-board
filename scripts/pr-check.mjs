@@ -774,13 +774,55 @@ export const binaryImages = paths => {
 }
 
 // A lane's own reviewer says so in the parentheses right after its name, as one of their comma-separated notes:
-// `by codex (read-only, started new for this review), lane x` (RULES R2). A name that carries a parenthesis of its own,
-// `by sonnet (desktop) (read-only, started new for this review)`, is read through each parenthesis that follows it
-// (#1974). Only that whole note counts, so a line that says "not started new for this review", or says it anywhere
-// else, is not one; nor does a parenthesis that does not close before another opens.
-const isFreshLine = line => {
-  const groups = line.match(/[ \t]by[ \t]+[^\r\n(,]*((?:\([^()\r\n]*\)[ \t]*)+)/i)?.[1] ?? ''
-  return [...groups.matchAll(/\(([^()]*)\)/g)].some(([, notes]) => notes.split(',').some(note => note.trim().toLowerCase() === 'started new for this review'))
+// `by codex (read-only, started new for this review), lane x` (RULES R2); one the maintainer started says
+// `started new for this review by the maintainer` instead. The reviewer field, from the ` by ` after the sha, is read
+// once (#1974, the Fable diagnosis on #1975): split at commas outside parentheses, its first part is the name and the
+// parentheses after it, one level deep. Read as fresh, a line lifts the author check; read as not fresh, it skips the
+// risk-tier conditions; so a misreading either way is a hole, and an approval that has the words but not as one of
+// those notes, cleanly placed, cannot be read and is no approval. A line without the words reads as it always did.
+const FRESH_NOTE = 'started new for this review'
+const MAINTAINER_NOTE = 'started new for this review by the maintainer'
+const noteOf = text => text.trim().replace(/\s+/g, ' ').toLowerCase()
+const reviewerNotes = field => {
+  const parts = []
+  let depth = 0
+  let part = ''
+  let isBroken = false
+  for (const char of field) {
+    if (char === '(') {
+      depth += 1
+      if (depth > 1) isBroken = true
+    } else if (char === ')') {
+      if (depth === 0) isBroken = true
+      else depth -= 1
+    } else if (char === ',' && depth === 0) {
+      parts.push(part)
+      part = ''
+      continue
+    }
+    part += char
+  }
+  parts.push(part)
+  if (depth !== 0) isBroken = true
+  const name = parts[0]
+  const open = name.indexOf('(')
+  const notes = []
+  let rest = open < 0 ? '' : name.slice(open)
+  while (!isBroken && rest.trim() !== '') {
+    const group = rest.match(/^[ \t]*\(([^()]*)\)/)
+    if (!group) isBroken = true
+    else {
+      notes.push(...group[1].split(',').map(noteOf))
+      rest = rest.slice(group[0].length)
+    }
+  }
+  return { notes, isBroken }
+}
+const readVerdictLine = (line, fieldStart, kind) => {
+  const { notes, isBroken } = fieldStart === null ? { notes: [], isBroken: true } : reviewerNotes(line.slice(fieldStart))
+  const isFresh = !isBroken && notes.includes(FRESH_NOTE)
+  const isUnreadable = kind === 'APPROVE' && noteOf(line).includes(FRESH_NOTE) && !isFresh && !(!isBroken && notes.includes(MAINTAINER_NOTE))
+  return { isFresh, isUnreadable }
 }
 
 // On every named tier a reviewer the author's lane started new for this review may approve, whatever its name; on the
@@ -852,8 +894,10 @@ const readReview = item => {
       return { review: null, ignored: { who: reviewer || 'unknown account', reason: blocked } }
     }
     const verdictLine = body.slice(match.index).split(/\r?\n/, 1)[0]
-    const isFresh = isFreshLine(verdictLine)
-    // The maintainer route's verdict ends `, maintainer route` (RULES R2).
+    // The reviewer field starts where the name does, right after the ` by ` that follows the sha.
+    const { isFresh, isUnreadable } = readVerdictLine(verdictLine, match[3] === undefined ? null : match[0].length - match[3].length, kind)
+    // The maintainer route's verdict ends `, maintainer route` (RULES R2); tied to the end of the line, it cannot bind
+    // to a later part of it.
     const isMaintainerRoute = /,[ \t]*maintainer route[ \t.]*$/i.test(verdictLine)
     return {
       review: {
@@ -862,6 +906,7 @@ const readReview = item => {
         ...(reviewer ? { reviewer } : {}),
         ...(isFresh ? { isFresh } : {}),
         ...(isMaintainerRoute ? { isMaintainerRoute } : {}),
+        ...(isUnreadable ? { isUnreadable } : {}),
       },
       ignored: null,
     }
@@ -1539,6 +1584,14 @@ export const verdict = (comments, head, options = {}) => {
     output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
       output.problems.push(problem('review', `the latest review requested changes on ${last.sha.slice(0, 7)}.`, 'address the review findings and request a new review.'))
+    }
+    return output
+  }
+
+  if (last.isUnreadable) {
+    output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, the current head, in a line that cannot be read.`)
+    if (!isDraft && number !== null) {
+      output.problems.push(problem('review', 'the approval line cannot be read: it says "started new for this review", but not as one note in the parentheses right after the reviewer\'s name (RULES.md, R2).', 'post the verdict again in the R2 form, `Review: APPROVE <full head sha> by <reviewer> (read-only, started new for this review), lane <lane>`, with no parenthesis inside another.'))
     }
     return output
   }
