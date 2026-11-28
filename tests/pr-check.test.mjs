@@ -658,6 +658,20 @@ test('a risk-tier approval by a reviewer started new for this review counts only
   assert.deepEqual(checkPr({ ...pr, body: `${body}Tier: normal\n`, prComments: [line('codex')] }).problems.filter(item => item.check === 'review'), [])
 })
 
+test('a reviewer whose name carries a note in parentheses of its own still reads as started new for this review from a later parenthesis, so the risk-tier conditions hold for it too (#1974)', () => {
+  const pr = syntheticPr()
+  const problems = (comments, tier = 'risk') => checkPr({ ...pr, body: `${body}Tier: ${tier}\nSurface: delivery\n`, prComments: comments }).problems.filter(item => item.check === 'review')
+  const named = who => ({ body: `Review: APPROVE ${pr.head} by ${who} (read-only, started new for this review), lane example` })
+  // Not named like the author: without the bot's review of the head it does not count.
+  assert.equal(problems([named('sonnet (desktop)')]).length, 1)
+  assert.deepEqual(problems([codexBotState(pr.head), named('sonnet (desktop)')]), [])
+  // Named like the author: it is the lane's own reviewer, not the author approving.
+  assert.deepEqual(problems([codexBotState(pr.head), named('codex (local)')]), [])
+  assert.deepEqual(problems([named('codex (local)')], 'normal'), [])
+  // The note counts only inside the parentheses that follow the name, not after the lane.
+  assert.equal(problems([codexBotState(pr.head), { body: `Review: APPROVE ${pr.head} by codex (local), lane example (started new for this review)` }], 'normal').length, 1)
+})
+
 test('approval gate: a ready pull request requires a qualifying review approval on the exact head (#1219)', () => {
   const head = syntheticPr().head
   const basePr = { ...syntheticPr(), prComments: [] }
