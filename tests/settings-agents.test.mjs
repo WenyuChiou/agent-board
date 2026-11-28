@@ -14,6 +14,7 @@ import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { setupAgents } from '../scripts/setup-discovery.mjs'
 import { setupPrograms } from './helpers/setup-programs.mjs'
+import { readPrintedLink } from './helpers/printed-link.mjs'
 
 const installer = fileURLToPath(new URL('../scripts/setup-agent.mjs', import.meta.url))
 const sourceLoader = registerHooks({
@@ -269,10 +270,8 @@ test('Settings sets up an agent in the home and data folder a normal --serve sta
   mkdirSync(join(other, '.cursor'), { recursive: true })
   mkdirSync(otherData)
   writeFileSync(otherProgress, '# Progress\n\n## Synthetic project\n')
-  const out = await new Promise((done, fail) => execFile(process.execPath, [f.script, '--serve', '--no-open', '--home', other, '--data-dir', otherData, '--progress-file', otherProgress, '--lang', 'en'], { env: f.env, encoding: 'utf8', timeout: 20_000, windowsHide: true }, (error, stdout) => (error ? fail(error) : done(stdout))))
-  assert.doesNotMatch(out, /\?t=/)
-  const address = out.match(/http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)?.[0]
-  assert.ok(address, out)
+  const out = await new Promise((done, fail) => execFile(process.execPath, [f.script, '--serve', '--no-open', '--home', other, '--data-dir', otherData, '--progress-file', otherProgress, '--lang', 'en'], { env: f.env, encoding: 'utf8', timeout: 20_000, windowsHide: true }, (error, stdout, stderr) => (error ? fail(error) : done({ stdout, stderr }))))
+  const { link: address } = readPrintedLink(out, { wordings: [EN.serveAt] })
   const pageHtml = await (await fetch(address)).text()
   const pageSession = JSON.parse(pageHtml.match(/<script type="application\/json" id="page-session">([^<]+)<\/script>/)[1])
   const url = new URL(`/?t=${pageSession}`, address)

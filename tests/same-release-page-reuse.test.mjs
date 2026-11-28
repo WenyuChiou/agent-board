@@ -12,6 +12,7 @@ import { EN } from '../hooks/strings-en.ts'
 import { ZH_TW } from '../hooks/i18n.ts'
 import { ZH_CN } from '../hooks/strings-zh-cn.ts'
 import { noAddress, readPrintedLink } from './helpers/printed-link.mjs'
+import { qrModules, qrText } from '../hooks/qr.ts'
 
 // Acceptance tests for #1831: two copies of the same release with different mtimes/preludes/CRLF
 // reuse the running board page, while different script bytes (even with equal mtime) or different
@@ -381,7 +382,8 @@ test('the printed-link reader refuses a second link, a link on a line that is no
 
 test('the printed-link reader refuses a page token or a ?t= address on either stream', () => {
   const good = `\n${EN.serveAt(READ_LINK)}\n`
-  assert.throws(readOf(`${good}${READ_TOKEN}\n`), undefined, 'refused: the token on stdout')
+  // Above the address line, so the token check, not the last-line rule, is what refuses it.
+  assert.throws(readOf(`${READ_TOKEN}\n${good}`), undefined, 'refused: the token on stdout')
   assert.throws(readOf(good, `${READ_TOKEN}\n`), undefined, 'refused: the token on stderr')
   assert.throws(readOf(good, `http://127.0.0.1:${READ_PORT}/?t=other\n`), undefined, 'refused: a ?t= address on stderr')
   assert.throws(readOf(`http://127.0.0.1:${READ_PORT}/?t=other\n${good}`), undefined, 'refused: a ?t= address on stdout')
@@ -397,4 +399,58 @@ test('the printed-link reader reads the address line in English, Traditional Chi
     assert.deepEqual(readPrintedLink({ stdout: `\n${words.serveAt(READ_LINK)}\n`, stderr: '' }, READ_OPTIONS), READ_SHAPE)
     assert.deepEqual(readPrintedLink({ stdout: `\n${words.serveAt(READ_LINK)}\n`, stderr: '' }, { ...READ_OPTIONS, wordings: [words.serveAt] }), READ_SHAPE)
   }
+})
+
+// --lan (#868, #1146): the phone's block follows the address line on stdout. Its address is the one
+// printed address meant to carry a token.
+const READ_LAN = `http://192.168.1.20:${READ_PORT}/?t=${READ_TOKEN}`
+// The code as --lan prints it, without and with colour.
+const READ_QR = qrText(qrModules(READ_LAN), false)
+const READ_QR_COLOR = qrText(qrModules(READ_LAN), true)
+const READ_LAN_OPTIONS = { wordings: [EN.serveAt], lan: { at: [EN.serveLanAt, ZH_TW.serveLanAt, ZH_CN.serveLanAt], warn: [EN.serveLanWarn, ZH_TW.serveLanWarn, ZH_CN.serveLanWarn], none: [EN.serveLanNone, EN.serveLanFailed] } }
+const lanBlock = (url, words = EN) => `\n${words.serveLanAt(url)}\n${READ_QR}\n${words.serveLanWarn}\n`
+
+test('the printed-link reader with --lan reads the phone address after the address line, and a note when there is none', () => {
+  const good = `\n${EN.serveAt(READ_LINK)}\n`
+  for (const words of [EN, ZH_TW, ZH_CN]) {
+    assert.deepEqual(readPrintedLink({ stdout: `${good}${lanBlock(READ_LAN, words)}`, stderr: '' }, READ_LAN_OPTIONS), { ...READ_SHAPE, lan: READ_LAN })
+  }
+  for (const ip of ['10.0.0.5', '172.16.4.2', '172.31.255.1']) {
+    const lan = `http://${ip}:${READ_PORT}/?t=x`
+    assert.equal(readPrintedLink({ stdout: `${good}${lanBlock(lan)}`, stderr: '' }, READ_LAN_OPTIONS).lan, lan)
+  }
+  assert.deepEqual(readPrintedLink({ stdout: `${good}${lanBlock(READ_LAN).replace(READ_QR, READ_QR_COLOR)}`, stderr: '' }, READ_LAN_OPTIONS), { ...READ_SHAPE, lan: READ_LAN })
+  assert.deepEqual(readPrintedLink({ stdout: `${good}\n${EN.serveLanNone}\n`, stderr: '' }, READ_LAN_OPTIONS), { ...READ_SHAPE, lan: null })
+  // Without the option, the phone's ?t= address is refused like any other.
+  assert.throws(readOf(`${good}${lanBlock(READ_LAN)}`), undefined, 'refused: a phone block nobody asked for')
+})
+
+test('the printed-link reader with --lan refuses a phone address that is not whole, private or alone', () => {
+  const good = `\n${EN.serveAt(READ_LINK)}\n`
+  const lanOf = stdout => () => readPrintedLink({ stdout, stderr: '' }, READ_LAN_OPTIONS)
+  for (const bad of [`http://8.8.8.8:${READ_PORT}/?t=x`, `http://127.0.0.1:${READ_PORT}/?t=x`, `http://169.254.1.1:${READ_PORT}/?t=x`, `http://172.32.0.1:${READ_PORT}/?t=x`]) {
+    assert.throws(lanOf(`${good}${lanBlock(bad)}`), undefined, `refused: ${bad}`)
+  }
+  assert.throws(lanOf(`${good}${lanBlock(`${READ_LAN}/extra`)}`), undefined, 'refused: a longer phone address')
+  assert.throws(lanOf(`${good}${lanBlock(READ_LAN).replace(READ_QR, `${READ_QR}\n${READ_LINK}`)}`), undefined, 'refused: a link inside the code')
+  assert.throws(lanOf(`${good}${lanBlock(READ_LAN)}${lanBlock(READ_LAN)}`), undefined, 'refused: two phone blocks')
+  assert.throws(lanOf(`${good}${lanBlock(READ_LAN).replace(`\n${EN.serveLanWarn}\n`, '\n')}`), undefined, 'refused: no warning that the link is unencrypted')
+  assert.throws(lanOf(`${lanBlock(READ_LAN)}${good}`), undefined, 'refused: the phone block above the address line')
+  assert.throws(lanOf(`${good}\nsee ${EN.serveLanAt(READ_LAN)}\n${READ_QR}\n${EN.serveLanWarn}\n`), undefined, 'refused: words before the phone line')
+})
+
+test('the printed-link reader takes the SSH hint that prints the link twice on stdout, and only with that count', () => {
+  const host = '203.0.113.9'
+  const ssh = `\n${EN.serveSshHint(READ_PORT, host, READ_LINK)}\n${READ_LINK}\n`
+  const note = link => EN.serveSshHint(READ_PORT, host, link)
+  const options = { ...READ_OPTIONS, wordings: [EN.boardPageLink], copies: { stdout: 2, stderr: 0 }, notes: [note] }
+  assert.deepEqual(readPrintedLink({ stdout: ssh, stderr: '' }, options), READ_SHAPE)
+  // The note goes to stderr when --serve prints the address line on stdout.
+  assert.deepEqual(readPrintedLink({ stdout: `\n${EN.serveAt(READ_LINK)}\n`, stderr: `${note(READ_LINK)}\n` }, { ...READ_OPTIONS, copies: { stdout: 1, stderr: 1 }, notes: [note] }), READ_SHAPE)
+  assert.throws(readOf(ssh, '', { ...options, notes: [] }), undefined, 'refused: the forward named nowhere in the notes')
+  assert.throws(readOf(`\nsee ${note(READ_LINK)}\n${READ_LINK}\n`, '', options), undefined, 'refused: a note that is not the whole line')
+  assert.throws(readOf(ssh, '', { ...options, copies: { stdout: 1, stderr: 0 } }), undefined, 'refused: two copies where one is expected')
+  assert.throws(readOf(`\n${READ_LINK}\n`, '', options), undefined, 'refused: one copy where the hint prints two')
+  const other = `http://127.0.0.1:${READ_PORT}/open/${'F'.repeat(32)}`
+  assert.throws(readOf(`\n${EN.serveSshHint(READ_PORT, host, other)}\n${READ_LINK}\n`, '', options), undefined, 'refused: the hint names another link')
 })

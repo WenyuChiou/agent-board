@@ -10,6 +10,7 @@ import { agents, apply, assertBlocks, assertRepeat, assertWaiting, board, checke
 import { spawnIsolated } from './e2e/lib/spawn.mjs'
 import { newestUse, newUses } from '../scripts/setup-discovery.mjs'
 import { EN } from '../hooks/strings-en.ts'
+import { readPrintedLink, wordingsOf } from './helpers/printed-link.mjs'
 import { partTest } from '../scripts/ci-impact.mjs'
 
 // Whole, this file weighed 182.9 s and left one Windows board part at 394.8-438.8 s of its 480 s (#1912).
@@ -110,9 +111,8 @@ const closePage = url => new Promise(done => {
 // Runs the board script the way a command file does and loads the page it prints, then closes it.
 const openPage = async (f, script, flags, label) => {
   const stdout = checked(await run(f, [script, ...flags], { timeoutMs: 60000 }), `${label}: board ${flags.join(' ')}`)
-  assert.doesNotMatch(stdout, /\?t=/)
-  const url = /http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/.exec(stdout)?.[0]
-  assert.ok(url, `${label}: the output carries the page address\n${stdout}`)
+  // A command file's flags pick the line: --serve's address line, or the plain command's link.
+  const { link: url } = readPrintedLink({ stdout, stderr: '' }, { wordings: wordingsOf(['serveAt', 'boardPageLink', 'serveBrowserNone']) })
   let closeTarget = url
   try {
     const response = await fetch(url)

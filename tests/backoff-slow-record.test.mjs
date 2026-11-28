@@ -9,6 +9,8 @@ import assert from 'node:assert/strict'
 import { fileURLToPath } from 'node:url'
 import { bundleFromDir } from '../scripts/bundle-text.mjs'
 import { privateRuntimeFolder, writePrivateRuntimeFile } from '../scripts/runtime-folder.ts'
+import { EN } from '../hooks/strings-en.ts'
+import { readPrintedLink } from './helpers/printed-link.mjs'
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
 const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'))
@@ -23,8 +25,11 @@ const makeBox = () => {
   const home = join(box, 'home')
   const tmp = join(box, 'tmp')
   for (const dir of [home, tmp]) mkdirSync(dir)
+  // Over SSH the launcher prints the forward note before the link (#1283); this fixture's launcher runs
+  // here, so the two variables of the person's own terminal are left out (#1970).
+  const { SSH_CONNECTION: _sshConnection, SSH_TTY: _sshTty, ...outer } = process.env
   const env = {
-    ...process.env,
+    ...outer,
     HOME: home, USERPROFILE: home, TEMP: tmp, TMP: tmp,
     CLAUDE_PROGRESS_FILE: '', CLAUDE_CONFIG_DIR: join(home, '.claude'),
     CODEX_HOME: join(home, '.codex'), GROK_HOME: join(home, '.grok'), HERMES_HOME: join(home, '.hermes'),
@@ -212,8 +217,7 @@ test('launcher waits for a slow 0-byte address record after claim backoff and re
       const result = await run
       assert.equal(result.code, 0, result.stderr)
       // The reused server's one-use link is printed, never the page's token (#1650).
-      assert.ok(result.stdout.includes(`http://127.0.0.1:${port}/open/slowrecordlink`), result.stdout)
-      assert.ok(!`${result.stdout}${result.stderr}`.includes('slowrecordtoken'), `${result.stdout}${result.stderr}`)
+      readPrintedLink(result, { wordings: [EN.boardPageLink], expected: `http://127.0.0.1:${port}/open/slowrecordlink`, secrets: ['slowrecordtoken'] })
       assert.ok(linkTokens.length >= 1 && linkTokens.every(token => token === 'slowrecordtoken'), JSON.stringify(linkTokens))
       assert.equal(posts.length, 1, JSON.stringify(posts))
       assert.equal(posts[0]?.version, manifest.version)

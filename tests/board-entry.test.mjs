@@ -17,6 +17,8 @@ registerHooks({ resolve(specifier, context, next) {
 
 import { BOARD_SCRIPT } from '../hooks/board-script.ts'
 import { removeTree } from './helpers/remove-tree.mjs'
+import { readPrintedLink, wordingsOf } from './helpers/printed-link.mjs'
+import { EN } from '../hooks/strings-en.ts'
 const { BOARD_REQUEST_HINTS, LEGACY_BOARD_PROMPTS, boardRequestWords, geminiBoardCommand, isBoardRequest, opencodeBoardCommand } = await import('../hooks/board-commands.ts')
 const { isInstallerSkill } = await import('../hooks/connect-pure.ts')
 const { STRINGS } = await import('../hooks/strings.ts')
@@ -60,17 +62,11 @@ test('agent-board with no flag inside an agent opens the page and prints one bar
       NO_COLOR: '1',
     }
     const result = await run(script, ['--no-open'], env)
-    assert.equal(result.stderr, '')
-    const lines = result.stdout.trim().split(/\r?\n/)
-    assert.equal(lines.length, 1)
-    url = lines[0]
-    assert.match(url, /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
-    assert.doesNotMatch(result.stdout, /\?t=/)
+    url = readPrintedLink(result, { wordings: [EN.boardPageLink] }).link
+    assert.equal(result.stdout.trim(), url)
     const alias = await run(script, ['--html', '--no-open'], env)
-    assert.equal(alias.stderr, '')
-    const aliasUrl = alias.stdout.trim()
-    assert.match(aliasUrl, /^http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
-    assert.doesNotMatch(alias.stdout, /\?t=/)
+    const aliasUrl = readPrintedLink(alias, { wordings: [EN.boardPageLink] }).link
+    assert.equal(alias.stdout.trim(), aliasUrl)
     assert.equal(new URL(aliasUrl).origin, new URL(url).origin)
     assert.notEqual(aliasUrl, url)
     assert.equal(existsSync(join(root, 'progress.html')), false)
@@ -216,11 +212,8 @@ const withBoard = async fn => {
 test('--serve from an older command file opens the page and prints no text board before its address (#868)', { timeout: 30_000 }, async () => {
   await withBoard(async ({ script, env }) => {
     const result = await run(script, ['--serve', '--no-open'], env)
-    assert.equal(result.stderr, '')
-    const lines = result.stdout.trim().split(/\r?\n/)
-    assert.equal(lines.length, 1, result.stdout)
-    assert.match(lines[0], /http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+$/)
-    assert.doesNotMatch(result.stdout, /\?t=/)
+    const { link } = readPrintedLink(result, { wordings: [EN.serveAt] })
+    assert.equal(result.stdout.trim(), EN.serveAt(link), result.stdout)
     assert.ok(!result.stdout.includes('Entry plan') && !result.stdout.includes('Continue the entry work'), 'the board text is not printed')
   })
 })
@@ -228,10 +221,8 @@ test('--serve from an older command file opens the page and prints no text board
 test('--lan without --serve opens the page and shows the network address, as --serve --lan does (#868)', { timeout: 30_000 }, async () => {
   await withBoard(async ({ script, env }) => {
     const result = await run(script, ['--no-open', '--lan'], env)
-    assert.equal(result.stderr, '')
-    assert.match(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)
-    assert.doesNotMatch(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
-    assert.match(result.stdout, /open http:\/\/[\d.]+:\d+\/\?t=[\w-]+ or scan this code:|This computer has no address on a local network/)
+    // The plain link, then the phone's address with its code, or the note that there is none.
+    readPrintedLink(result, { wordings: [EN.boardPageLink], lan: { at: wordingsOf(['serveLanAt']), warn: wordingsOf(['serveLanWarn']), none: wordingsOf(['serveLanNone', 'serveLanFailed']) } })
     assert.ok(!result.stdout.includes('Entry plan'), 'no text board either')
   })
 })
@@ -239,17 +230,13 @@ test('--lan without --serve opens the page and shows the network address, as --s
 test('--lan with the board page already open still shows the network address (#868)', { timeout: 30_000 }, async () => {
   await withBoard(async ({ script, env }) => {
     const first = await run(script, ['--no-open'], env)
-    const local = first.stdout.match(/http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)?.[0]
-    assert.ok(local, first.stdout)
-    assert.doesNotMatch(first.stdout, /\?t=/)
+    const { link: local } = readPrintedLink(first, { wordings: [EN.boardPageLink] })
     // A page loading the address is what makes the board count it as open.
     await new Promise((done, fail) => request(local, res => { res.resume(); res.on('end', done) }).on('error', fail).end())
     const result = await run(script, ['--lan'], env)
-    assert.equal(result.stderr, '')
     // "Already open" always comes with a fresh one-use link, never the page's reusable address.
-    assert.match(result.stdout, /already open in your browser\. If you do not see it, open this one-use link: http:\/\/127\.0\.0\.1:\d+\/open\/[\w-]+/)
-    assert.doesNotMatch(result.stdout, /http:\/\/127\.0\.0\.1:\d+\/\?t=/)
-    assert.match(result.stdout, /open http:\/\/[\d.]+:\d+\/\?t=[\w-]+ or scan this code:|This computer has no address on a local network/)
+    const { link } = readPrintedLink(result, { wordings: [EN.boardPageAlreadyOpenLink], lan: { at: wordingsOf(['serveLanAt']), warn: wordingsOf(['serveLanWarn']), none: wordingsOf(['serveLanNone', 'serveLanFailed']) } })
+    assert.notEqual(link, local, 'a fresh one-use link')
   })
 })
 
