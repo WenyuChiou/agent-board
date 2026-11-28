@@ -11,8 +11,9 @@
 // that comes more than IDLE_HOP_STALL_MS after the one before saw a stall (any callback, in any phase), and requests
 // that queued in it may still wait unread, so the chain ends there and starts again IDLE_RETRY_MS later, from a new
 // reading. Only the last hop of an unbroken chain stops the board, and only if the last-seen time has not moved and no
-// delivery is under way. A request that arrives within the chain's last few milliseconds is the race every idle exit
-// has; one held by a stall is not, since a stall breaks the chain.
+// delivery is under way. Only a stall over IDLE_HOP_STALL_MS breaks the chain. A request that arrives within the
+// chain's last few milliseconds is the race every idle exit has, and so is one held by a shorter stall just before the
+// last hop: it came at most IDLE_HOP_STALL_MS before the stop, after the board had seen no request for `idleMs`.
 export const IDLE_HOPS = 3
 export const IDLE_HOP_STALL_MS = 25
 export const IDLE_RETRY_MS = 50
