@@ -27,7 +27,8 @@ Owner, 2026-11-03: 「我們希望都是能夠立刻收到 (在板子上直接�
 ## 4. One board, for every agent and every screen
 
 - **Every agent, the same way:** every connected agent gets the same command, the same board and the same sending. A fix is checked on every connected agent and on every way to open the board (owner, 2026-10-17).
-- **The phone:** the phone page sends like the computer's page. It is also the path for personal and cloud agents such as Muse and dot. Owner: due across 0.24.3 to 0.24.5 (#866).
+- **Every screen, the same order:** a narrow side pane (`< 800px`), a single-column window and a wide desktop (`1440px` and up) keep the same order: what needs the person first, what is working next, and finished work folded on open until a running session finishes live. On wide screens (`1440px` and up), both waiting cards and working rows open their full detail and message box in the same side pane while cards keep their top two quick choices on the card; touch screens show text labels beside icon controls (#209, #1948).
+- **The phone:** the phone page sends like the computer's page. It is also the path for personal and cloud agents such as Muse and dot. Owner: due across 0.24.3 to 0.24.5 (#866). Until that paired path lands, the unpaired plain-HTTP local-network page (`--lan`) stays read, copy and own-to-do only, and never exposes live local targets or sends to local sessions (#866, #1948).
 
 ## 5. Agents use the board too
 
