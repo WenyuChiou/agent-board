@@ -29,7 +29,7 @@ import { isFolder, runSendPlan } from './background-resume'
 import { createMessaging, readTurnLog } from './board-messaging'
 import { messageStatus, nextStatusDeadline } from '../hooks/message-status'
 import { watchBoard } from './board-watch'
-import { IDLE_RECHECK_MS, idleStep } from './board-idle'
+import { IDLE_RETRY_MS, idleStep } from './board-idle'
 import type { IdleWatch } from './board-idle'
 import type { BoardWatch, WatchFn } from './board-watch'
 import { startCodexReceiver } from './codex-receiver.mjs'
@@ -1572,24 +1572,31 @@ export const startServer = (o: ServeOptions): void => {
     // are not counted, so the server goes once no tab in sight has asked and nobody has loaded the page or pressed
     // anything for `idleMs`, and no reply is on its way.
     // A stale reading stops nothing by itself: requests held by a stall of this process are read after the timers phase
-    // this check runs in, so it sets up a re-check, and only a re-check that ran on time stops the board (#1958, board-idle.ts).
-    let idleRecheck: ReturnType<typeof setTimeout> | null = null
+    // this check runs in, so it starts a chain of setImmediate hops over several poll phases, and only the last hop of a
+    // chain no stall broke stops the board (#1958, board-idle.ts).
+    let idlePending: { timer: ReturnType<typeof setTimeout> | null; immediate: ReturnType<typeof setImmediate> | null } | null = null
     const judgeIdle = (watch: IdleWatch | null): void => {
-      idleRecheck = null
+      idlePending = null
       if (isStopping) return
       const now = Date.now()
       touchWaiting(now)
       const step = idleStep(watch, now, lastSeen, isBusySending(), o.idleMs)
       if (step.kind === 'stop') stop()
-      else if (step.kind === 'recheck') idleRecheck = setTimeout(() => judgeIdle(step.watch), IDLE_RECHECK_MS)
+      else if (step.kind === 'hop') idlePending = { timer: null, immediate: setImmediate(() => judgeIdle(step.watch)) }
+      else if (step.kind === 'retry') idlePending = { timer: setTimeout(() => judgeIdle(null), IDLE_RETRY_MS), immediate: null }
     }
     const idle = setInterval(() => {
       if (isStopping) return
       touchWaiting(Date.now())
       if (lan !== null && Date.now() - lan.lastSeen > LAN_IDLE) closeLan()
-      if (idleRecheck === null) judgeIdle(null)
+      if (idlePending === null) judgeIdle(null)
     }, o.idleMs > 0 ? Math.min(30_000, Math.max(10, o.idleMs)) : 30_000)
-    server.on('close', () => { clearInterval(idle); if (idleRecheck !== null) clearTimeout(idleRecheck) })
+    server.on('close', () => {
+      clearInterval(idle)
+      if (idlePending?.timer) clearTimeout(idlePending.timer)
+      if (idlePending?.immediate) clearImmediate(idlePending.immediate)
+      idlePending = null
+    })
     const sweeper = setInterval(() => { if (!isStopping) try { o.sweep() } catch {} }, o.sweepMs)
     server.on('close', () => clearInterval(sweeper))
   })

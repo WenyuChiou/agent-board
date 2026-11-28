@@ -3398,6 +3398,19 @@ test('a second stall after the idle re-check is set up, in the timers phase and 
   // re-check is set up; the third is a setImmediate it schedules, which runs after the next poll phase.
 }, stallFault('setTimeout(() => { hold(1000); setImmediate(() => hold(1000)) }, 1000)'), ['--idle-minutes', '0.03']))
 
+test('a short second stall of 80 ms in a callback after the poll phase, once the idle re-check is set up, does not stop a polled board (#1958)', async () => fixture(async board => {
+  // The 80 ms is under any timer's lateness margin, so only a re-check that sees the stall itself waits for the poll
+  // phase that reads the new connections accepted before it.
+  let calls = 0
+  for (const until = Date.now() + 6000; Date.now() < until; calls++) {
+    assert.equal(await freshPing(board.address), 200)
+    await pause(100)
+  }
+  assert.ok(calls > 10)
+  // The second stall is a setImmediate that a timer due after the idle check queues in the same timers phase, so it
+  // runs in the check phase right after the re-check is set up.
+}, stallFault('setTimeout(() => setImmediate(() => hold(80)), 1000)'), ['--idle-minutes', '0.03']))
+
 test('a board closed by a request that waited out a stall, while its idle re-check is pending, stops once and cleanly (#1958)', async () => fixture(async board => {
   // Sent 2 s after the start, inside the stall (1.5 s to 3.5 s after the server listens): it is read after the idle check
   // that set up the re-check, so the close and the re-check meet.
