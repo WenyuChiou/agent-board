@@ -224,11 +224,11 @@ const journalRaw = (now: number): string => {
 // A task any agent finished today is one journal line, written once (#245). Claude's ticks already
 // wrote their own lines, so a task with a line today under the same project and title is not added.
 let doneProjects: readonly ProgressProject[] = []
-const doneBlockLines = (projects: readonly ProgressProject[], journal: string, now: number): string[] => {
+const doneBlockLines = (projects: readonly ProgressProject[], journal: string, now: number, staleMs = staleTimeoutMs(), gone: ReadonlySet<string> = new Set()): string[] => {
   const day = localDay(now)
   const written = new Set(parseJournal(journal).filter(entry => entry.at === day).map(entry => `${entry.project}\n${entry.task}`))
   const lines: string[] = []
-  const duplicates = new Set(foldRuns(projects, { now }).duplicates.map(one => one.task))
+  const duplicates = new Set(foldRuns(projects, { now, staleMs, gone }).duplicates.map(one => one.task))
   for (const project of projects) {
     for (const task of project.tasks) {
       if (duplicates.has(task)) continue
@@ -247,19 +247,20 @@ const doneBlockLines = (projects: readonly ProgressProject[], journal: string, n
 
 // The journal for today with what other agents finished today counted too, so every surface that
 // reads it (the count, the done list, --json) agrees with the blocks.
-const journalToday = (now: number): string => {
+const journalToday = (now: number, gone: ReadonlySet<string> = goneBlocksOf(doneProjects)): string => {
   const text = journalRaw(now)
-  return appendJournal(text, doneBlockLines(doneProjects, text, now), s)
+  return appendJournal(text, doneBlockLines(doneProjects, text, now, staleTimeoutMs(), gone), s)
 }
 
 // An interactive board also saves those lines to the month's journal, which the weekly report reads.
 let isDoneSaveFailed = false
-const saveDoneBlocks = (projects: readonly ProgressProject[], now: number): void => {
+const saveDoneBlocks = (projects: readonly ProgressProject[], now: number, gone: ReadonlySet<string> = goneBlocksOf(projects)): void => {
+  const staleMs = staleTimeoutMs()
   try {
     isDoneSaveFailed = false
-    if (doneBlockLines(projects, journalRaw(now), now).length === 0) return
+    if (doneBlockLines(projects, journalRaw(now), now, staleMs, gone).length === 0) return
     rewrite(partOf(journalPath(path, now)), past => {
-      const missing = doneBlockLines(projects, `${journalRaw(now)}\n${past}`, now)
+      const missing = doneBlockLines(projects, `${journalRaw(now)}\n${past}`, now, staleMs, gone)
       return missing.length === 0 ? null : appendJournal(past, missing, s)
     })
   } catch {

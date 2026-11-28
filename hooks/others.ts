@@ -5,6 +5,7 @@ import { ZH_TW } from './i18n'
 import type { Strings } from './i18n'
 import { asData, dataBlock } from './mirror'
 import { countSteps, isHereProject, isTaskComplete } from './parse'
+import { questionWords } from './questions'
 import { foldRuns } from './runs'
 import { sha256 } from './sha256'
 
@@ -94,40 +95,55 @@ export const sessionPushNote = (
   }
 
   const folded = foldRuns(projects, { now })
-  const duplicates = new Set(folded.duplicates.map(one => one.task))
+  const dupWinner = new Map<ProgressTask, ProgressTask | undefined>(folded.duplicates.map(one => [one.task, one.winner?.task]))
   for (const project of projects) {
     if (!isHereProject(project.name, here)) continue
     for (const task of project.tasks) {
-      if (duplicates.has(task)) continue
+      const isDuplicate = dupWinner.has(task)
+      const winner = dupWinner.get(task)
       const auto = task.auto
       if (auto === null || matchesSpan(auto, own)) continue
       if (now - auto.updated > 7 * DAY) continue
       const from = asData(auto.agent || project.name)
       const title = asData(task.title)
 
-      for (const note of task.notes) {
-        const match = HANDOFF.exec(note)
-        if (match?.[1] !== undefined && namesTarget(match[1], agentTokens, exactIds)) {
-          add(`handoff:${auto.session}:${sha256(match[1]).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(match[1])))
+      if (!isDuplicate) {
+        for (const note of task.notes) {
+          const match = HANDOFF.exec(note)
+          if (match?.[1] !== undefined && namesTarget(match[1], agentTokens, exactIds)) {
+            add(`handoff:${auto.session}:${sha256(match[1]).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(match[1])))
+          }
         }
       }
 
+      const winnerDone = winner !== undefined && (winner.auto?.state === 'done' || isTaskComplete(winner))
+      const winnerReplied = winner?.auto?.replied !== undefined && Number.isFinite(winner.auto.replied) ? winner.auto.replied : null
+      const loserReplied = auto.replied !== undefined && Number.isFinite(auto.replied) && auto.replied >= auto.updated
+      const winnerQuestions = winner === undefined ? null : new Set(winner.steps.filter(step => step.status === 'waiting').map(step => questionWords(step.text)))
+      const pushTwinQuestionsOnly = isDuplicate
+      if (pushTwinQuestionsOnly && (auto.state === 'done' || auto.state === 'ended' || isTaskComplete(task) || winnerDone || loserReplied || (winnerReplied !== null && winnerReplied >= auto.updated))) {
+        continue
+      }
+
       for (const step of task.steps) {
-        const transferred = TRANSFERRED.exec(step.text)
-        if (transferred?.[1] !== undefined && namesTarget(transferred[1], agentTokens, exactIds, true)) {
-          add(`handoff:${auto.session}:${sha256(step.text).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(step.text)))
-          continue
-        }
-        if (step.status === 'running' && namesTarget(step.text, agentTokens, exactIds)) {
-          add(`handoff:${auto.session}:${sha256(step.text).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(step.text)))
-          continue
+        if (!pushTwinQuestionsOnly) {
+          const transferred = TRANSFERRED.exec(step.text)
+          if (transferred?.[1] !== undefined && namesTarget(transferred[1], agentTokens, exactIds, true)) {
+            add(`handoff:${auto.session}:${sha256(step.text).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(step.text)))
+            continue
+          }
+          if (step.status === 'running' && namesTarget(step.text, agentTokens, exactIds)) {
+            add(`handoff:${auto.session}:${sha256(step.text).slice(0, 16)}`, s.othersPushHandoff(from, title, asData(step.text)))
+            continue
+          }
         }
         if (step.status === 'waiting' && step.native === undefined && namesTarget(step.text, agentTokens, exactIds)) {
+          if (pushTwinQuestionsOnly && winnerQuestions?.has(questionWords(step.text))) continue
           add(`ask:${auto.session}:${sha256(step.text).slice(0, 16)}`, s.othersPushQuestion(from, title, asData(step.text)))
         }
       }
 
-      if (auto.state === 'done' || isTaskComplete(task)) {
+      if (!pushTwinQuestionsOnly && (auto.state === 'done' || isTaskComplete(task))) {
         const isDelegatedRun = auto.isRun === true && auto.parent !== undefined
           && [ownSession.toLowerCase(), ownShort, ownResume?.toLowerCase() ?? ''].filter(Boolean).includes(auto.parent.toLowerCase())
         const otherTitle = task.title.trim().toLowerCase()

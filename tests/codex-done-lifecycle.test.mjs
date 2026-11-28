@@ -545,6 +545,7 @@ test('an open question on a folded twin appears once under Needs you and clears 
   const { buildView } = await import('../hooks/view.ts')
   const { serveModel } = await import('../hooks/serve.ts')
   const { boardDocument } = await import('../hooks/board-json.ts')
+  const { emptyQuestions, observeQuestions } = await import('../hooks/questions.ts')
 
   const s = STRINGS.en
   const resume = '019a1832-5555-4222-8333-555555555555'
@@ -556,7 +557,7 @@ test('an open question on a folded twin appears once under Needs you and clears 
   const t2 = new Date(now - 60_000).toISOString()
   const group = { now, repoOf: () => null, versions: { board: '0.25.1', package: null }, unreadable: [] }
 
-  // Row 11 (forward): loser (skill) has open [?], winner (hooks) has none.
+  // Row 11 (forward): loser (skill) has open [?], winner (hooks) has none; persisted ledger ID matches.
   const loserAskingProgress = [
     '# Progress',
     '',
@@ -573,15 +574,32 @@ test('an open question on a folded twin appears once under Needs you and clears 
     '',
   ].join('\n')
 
-  const forwardView = buildView(parseProgress(loserAskingProgress), [], null, now, 0, {}, s)
+  const observed = observeQuestions(emptyQuestions(), parseProgress(loserAskingProgress), null, [], now - 90 * 60_000, true, 'writer:1').ledger
+  const recL = observed.records.find(r => r.source?.session === localId)
+  assert.ok(recL)
+
+  const forwardView = buildView(parseProgress(loserAskingProgress), [], null, now, 0, {}, s, [], {}, observed)
   assert.equal(forwardView.waiting.length, 1)
   assert.equal(forwardView.waiting[0]?.sessionId, resume)
   assert.equal(forwardView.waiting[0]?.text, 'Which database should we use?')
+  assert.equal(forwardView.waiting[0]?.questionId, recL.id)
+  assert.equal(forwardView.waiting[0]?.hideKey, recL.id)
+  assert.equal(forwardView.waiting[0]?.ageStage, 'pending')
+  assert.equal(observed.records.some(r => r.id === recL.id && r.isWaiting && r.isPresent), true)
   const forwardModel = serveModel(forwardView, [], s, new Set(), false, undefined, false, group)
   assert.equal(forwardModel.asks.length, 1)
   assert.equal(forwardModel.asks[0]?.sessionId, resume)
   const forwardDoc = boardDocument(forwardView, [], [], s, '', false, now, group)
   assert.equal(forwardDoc.needs.length, 1)
+
+  // Real ledger aging moves the carried-over ask to reminder (> 3 days) without losing its id.
+  const agedObserved = observeQuestions(emptyQuestions(), parseProgress(loserAskingProgress), null, [], now - 4 * 86_400_000, true, 'writer:1').ledger
+  const agedRecL = agedObserved.records.find(r => r.source?.session === localId)
+  assert.ok(agedRecL)
+  const agedView = buildView(parseProgress(loserAskingProgress), [], null, now, 0, {}, s, [], {}, agedObserved)
+  assert.equal(agedView.reminder?.length, 1)
+  assert.equal(agedView.reminder?.[0]?.questionId, agedRecL.id)
+  assert.equal(agedView.reminder?.[0]?.ageStage, 'reminder')
 
   // Duplicate identical [?] on both twins is still asked only once.
   const bothAskingProgress = loserAskingProgress.replace(
@@ -591,19 +609,34 @@ test('an open question on a folded twin appears once under Needs you and clears 
   const bothView = buildView(parseProgress(bothAskingProgress), [], null, now, 0, {}, s)
   assert.equal(bothView.waiting.length, 1)
 
-  // Answering via hideKey clears Needs you.
-  const hideKey = forwardView.waiting[0]?.hideKey ?? ''
-  assert.ok(hideKey)
-  const answeredView = buildView(parseProgress(loserAskingProgress), [], null, now, 0, {}, s, [hideKey])
+  // Answering via persisted recL.id clears Needs you and stays gone even after loser leaves progress.md (no resurfacing).
+  const answeredView = buildView(parseProgress(loserAskingProgress), [], null, now, 0, {}, s, [recL.id], {}, observed)
   assert.equal(answeredView.waiting.length, 0)
+  const winnerOnlyProgress = [
+    '# Progress',
+    '',
+    '## Demo',
+    `<!-- auto session=${turnId} agent=codex state=working updated=${t2} resume=${resume} source=turns -->`,
+    '### Active hook copy',
+    `- [ ] ${s.codexLifecycleWorking}`,
+    `<!-- /auto session=${turnId} -->`,
+    '',
+  ].join('\n')
+  const afterLoserRemoved = buildView(parseProgress(winnerOnlyProgress), [], null, now, 0, {}, s, [recL.id], {}, observed)
+  assert.equal(afterLoserRemoved.waiting.length, 0)
+  assert.equal(afterLoserRemoved.older?.length ?? 0, 0)
 
-  // Replying on winner clears carried-over question.
-  const repliedProgress = loserAskingProgress.replace(
+  // Replying on winner AFTER loser updated clears carried-over question; OLDER reply on winner does NOT swallow a fresher ask on loser.
+  const repliedAfterLoser = loserAskingProgress.replace(
     `updated=${t2} resume=${resume}`,
     `updated=${t2} replied=${new Date(now - 10_000).toISOString()} resume=${resume}`,
   )
-  const repliedView = buildView(parseProgress(repliedProgress), [], null, now, 0, {}, s)
-  assert.equal(repliedView.waiting.length, 0)
+  assert.equal(buildView(parseProgress(repliedAfterLoser), [], null, now, 0, {}, s).waiting.length, 0)
+
+  const winnerOlderReply = loserAskingProgress
+    .replace(`updated=${t1} resume=${resume}`, `updated=${new Date(now - 30_000).toISOString()} resume=${resume}`)
+    .replace(`updated=${t2} resume=${resume}`, `updated=${new Date(now - 60_000).toISOString()} replied=${new Date(now - 50_000).toISOString()} resume=${resume}`)
+  assert.equal(buildView(parseProgress(winnerOlderReply), [], null, now, 0, {}, s).waiting.length, 1)
 
   // Row 11 (reverse): winner has open [?], loser has none.
   const winnerAskingProgress = [
@@ -825,6 +858,30 @@ test('archiving a winning row or tidying removes its hidden older twin copy so i
   assert.equal(tidiedUnclosed.entries.length, 0)
   assert.ok(tidiedUnclosed.text.includes('Older skill copy'))
   assert.equal(takeTask(liveTwinText, winnerArchive, now, s), null)
+
+  // Row 4 / Row 13 safety: mid-turn done skill block (t2 > t1) NEVER sweeps a live fresh working hooks block (t1).
+  const midTurnRow4Text = [
+    '# Progress',
+    '',
+    '## board-sitting-1125',
+    `<!-- auto session=${localId} agent=codex source=codex-local owner=${localSession} state=done updated=${t2} resume=${resume} -->`,
+    '### Done skill mid-turn',
+    '- [x] Report finished',
+    `<!-- /auto session=${localId} -->`,
+    '',
+    `<!-- auto session=${turnId} agent=codex state=working updated=${t1} resume=${resume} source=turns -->`,
+    '### Live working hooks',
+    `- [ ] ${s.codexLifecycleWorking}`,
+    `<!-- /auto session=${turnId} -->`,
+    '',
+  ].join('\n')
+  const midTurnTidied = takeArchivable(midTurnRow4Text, now, undefined, s, true)
+  assert.equal(midTurnTidied.entries.length, 0)
+  assert.ok(midTurnTidied.text.includes('Live working hooks'))
+  const directTakeOnMidTurnSkill = takeTask(midTurnRow4Text, { project: 'board-sitting-1125', title: 'Done skill mid-turn', line: 4, session: localId }, now, s)
+  assert.ok(directTakeOnMidTurnSkill)
+  assert.equal(directTakeOnMidTurnSkill.entries.length, 1)
+  assert.ok(directTakeOnMidTurnSkill.text.includes('Live working hooks'))
 })
 
 test('non-Claude ended row without a target gets send=none and no Copy answer box (#1832)', async () => {
@@ -935,6 +992,14 @@ test('after folding to one row both writers keep writing and othersNote deduplic
   assert.ok(plan)
   assert.equal(plan.args.includes(resume), true)
 
+  // Also verify dir= and sendPlan survive when codex-local (dir: null) writes AFTER source=turns (has dir=).
+  text = putCodexBlock(text, { ...skillReport1, updated: new Date(now - 10_000).toISOString(), steps: ['- [x] Writing code', '- [~] Testing'] }, owner)
+  const skillWinnerView = buildView(parseProgress(text), [], null, now, 0, {}, s)
+  assert.equal(skillWinnerView.active.length, 1)
+  const skillWinnerTarget = skillWinnerView.active[0]?.target
+  assert.ok(skillWinnerTarget?.dir)
+  assert.equal(sendPlan(skillWinnerTarget, 'Follow up', false)?.args.includes(resume), true)
+
   // othersNote lists the open conversation once (never twice).
   const openNote = othersNote(parseProgress(text), ['Demo'], peer, now, s)
   assert.ok(openNote)
@@ -942,7 +1007,7 @@ test('after folding to one row both writers keep writing and othersNote deduplic
   assert.equal(listedLines.length, 1)
 
   // Once skill marks done while hooks is waiting/ended, othersNote omits the finished conversation.
-  text = putCodexBlock(text, { ...skillReport1, state: 'done', updated: new Date(now - 10_000).toISOString(), steps: ['- [x] Writing code', '- [x] Testing'] }, owner)
-  text = upsertAutoBlock(text, { ...hookMirror1WithTask, state: 'ended', updated: now - 5_000, tasks: [{ id: '1', subject: s.codexLifecycle, status: 'todo', waiting: null, blocked: null }] }, s)
+  text = putCodexBlock(text, { ...skillReport1, state: 'done', updated: new Date(now - 5_000).toISOString(), steps: ['- [x] Writing code', '- [x] Testing'] }, owner)
+  text = upsertAutoBlock(text, { ...hookMirror1WithTask, state: 'ended', updated: now - 1_000, tasks: [{ id: '1', subject: s.codexLifecycle, status: 'todo', waiting: null, blocked: null }] }, s)
   assert.equal(othersNote(parseProgress(text), ['Demo'], peer, now, s), null)
 })

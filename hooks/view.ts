@@ -934,7 +934,36 @@ export const buildView = (
   // A run an agent started for itself is no row and asks no one (#399); the older block of a twin
   // pair is no second row. What is left is what the rows, the questions and the counts read.
   const folded = foldRuns(projects, { now, staleMs, gone, seen })
-  const observed = questions === undefined ? null : observe(questions, folded.projects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
+  const twinsByWinner = new Map<ProgressTask, Array<{ project: ProgressProject; task: ProgressTask }>>()
+  const nonDoneAskingDuplicates: Array<{ project: ProgressProject; task: ProgressTask }> = []
+  for (const dup of folded.duplicates) {
+    if (dup.winner === undefined) continue
+    const list = twinsByWinner.get(dup.winner.task)
+    if (list === undefined) twinsByWinner.set(dup.winner.task, [{ project: dup.project, task: dup.task }])
+    else list.push({ project: dup.project, task: dup.task })
+    const winnerDone = dup.winner.task.auto?.state === 'done' || isTaskComplete(dup.winner.task)
+    if (!winnerDone && dup.task.steps.some(step => step.status === 'waiting')) {
+      nonDoneAskingDuplicates.push({ project: dup.project, task: dup.task })
+    }
+  }
+  let observeProjects = folded.projects
+  if (nonDoneAskingDuplicates.length > 0) {
+    const extraByProject = new Map<string, ProgressTask[]>()
+    for (const dup of nonDoneAskingDuplicates) {
+      const list = extraByProject.get(dup.project.name)
+      if (list === undefined) extraByProject.set(dup.project.name, [dup.task])
+      else list.push(dup.task)
+    }
+    const existingNames = new Set(folded.projects.map(project => project.name))
+    observeProjects = [
+      ...folded.projects.map(project => {
+        const extra = extraByProject.get(project.name)
+        return extra === undefined ? project : { ...project, tasks: [...project.tasks, ...extra] }
+      }),
+      ...[...extraByProject.entries()].filter(([projectName]) => !existingNames.has(projectName)).map(([projectName, tasks]) => ({ name: projectName, tasks })),
+    ]
+  }
+  const observed = questions === undefined ? null : observe(questions, observeProjects, mine, answered, now, false, 'preview', proofs ?? { retired: [], consumed: [] }, pending, [], frozen)
   const scopeOf = questionScopes(projects, mine, observed?.ledger ?? questions)
   const marked = new Set(proofs === null ? [] : observed?.marked ?? answered)
   const records = observed?.ledger.records ?? []
@@ -1216,6 +1245,85 @@ export const buildView = (
           if (!isInactive) provisional.push(item)
         } else if (!isInactive) waiting.push(item)
       }
+      // Carry open unanswered `[?]` steps from live folded twins using their own persisted
+      // ledger scopes/IDs so Hide, aging, and archival stay consistent (#1832, Row 11).
+      const carriedAsks: WaitingItem[] = []
+      const carriedUnresolvedItems: WaitingItem[] = []
+      let firstCarriedText: string | null = null
+      if (!isComplete && !isManual && task.auto !== null) {
+        const winnerWords = new Set(task.steps.filter(step => step.status === 'waiting').map(step => questionWords(step.text)))
+        const losers = [...(twinsByWinner.get(task) ?? [])].sort((a, b) => (b.task.auto?.updated ?? 0) - (a.task.auto?.updated ?? 0))
+        const winnerAuto = task.auto
+        const winnerReplied = winnerAuto.replied !== undefined && Number.isFinite(winnerAuto.replied) ? winnerAuto.replied : null
+        for (const { project: loserProject, task: loser } of losers) {
+          const loserAuto = loser.auto
+          if (loserAuto === null || loserAuto.state === 'done' || isTaskComplete(loser) || loserAuto.state === 'ended') continue
+          const loserClock = observedTime(loserAuto, now, seen)
+          if (isStopped(loserAuto, now, loserClock.updated, staleMs, gone)) continue
+          if (loserAuto.replied !== undefined && Number.isFinite(loserAuto.replied) && loserAuto.replied >= loserAuto.updated) continue
+          if (winnerReplied !== null && winnerReplied >= loserAuto.updated) continue
+          const loserScope = scopeOf(loserProject.name, loserAuto.agent, loserAuto.session, loserAuto.resume)
+          const isLoserFrozen = frozen.size > 0 && (frozen.has(loserScope) || frozen.has(questionScope(loserProject.name, loserAuto.agent, loserAuto.session)))
+          const loserKeys = observed === null
+            ? blockKeys(loser)
+            : loser.steps.map((step, index) => step.status === 'waiting' ? observed.keys[questionSlot(loserScope, index)] ?? '' : '')
+          const loserLastActive = hasTime(loserClock.updated) ? loserClock.updated : seen[taskFingerprint(loserProject.name, loser)]
+          const loserWhen = loserClock.isFuture
+            ? loserClock.updated > now ? s.futureTimeUnknown : s.futureTime(relativeTime(loserClock.updated, now, s))
+            : relativeTime(loserClock.updated, now, s)
+          const loserSession = loserAuto.agent !== 'claude' && loserAuto.resume !== null ? sessionName(loserAuto.resume) : loserAuto.session
+          const effectiveDir = winnerAuto.dir ?? loserAuto.dir ?? null
+          loser.steps.forEach((step, index) => {
+            if (step.status !== 'waiting') return
+            const words = questionWords(step.text)
+            if (winnerWords.has(words)) return
+            winnerWords.add(words)
+            if (isLoserFrozen && observed !== null) {
+              const frozenRecords = recordsByScope?.get(loserScope) ?? []
+              if (frozenRecords.some(record => record.words === words)) return
+            }
+            const questionId = isLoserFrozen ? undefined : observed?.keys[questionSlot(loserScope, index)]
+            const hideKey = isLoserFrozen ? '' : loserKeys[index] ?? ''
+            const parts = splitNote(step.text)
+            const item: WaitingItem = {
+              key: `${key}::twin-${loserAuto.session}-${index}`,
+              project: name,
+              task: title,
+              context,
+              ...parts,
+              when: loserWhen,
+              ...(loserLastActive === undefined ? {} : { at: loserLastActive }),
+              dir: effectiveDir,
+              ...askOf(parts.text, parts.note, step.options === undefined ? undefined : { options: optionsGiven(validOptions(step.options)) }),
+              ...(step.native === undefined ? {} : { native: step.native }),
+              where: 'other',
+              agent: agentOf(task),
+              session: loserSession,
+              sessionId: winnerAuto.resume ?? (winnerAuto.agent === 'claude' && RESUME.test(winnerAuto.session) ? winnerAuto.session : null),
+              resumeVia: winnerAuto.resume ? resumeVia(winnerAuto.agent) : null,
+              reopen: winnerAuto.resume ? resumeCommand(winnerAuto.resume, effectiveDir, winnerAuto.agent) : null,
+              hideKey,
+              questionId,
+              step: null,
+              target: targetOf({ ...winnerAuto, dir: effectiveDir }),
+              auto: winnerAuto.state === 'done' || isComplete || isGone || isSilence ? 'ended' as const : winnerAuto.state,
+              nativeSession: winnerAuto.resume ?? winnerAuto.session,
+              ...(mayBeClosed ? { mayBeClosed: true as const, archive: { project: name, title: task.title, line: task.line, session: winnerAuto.session } } : {}),
+            }
+            carriedAsks.push(item)
+            if (!isInactive) waiting.push(item)
+            if (!marked.has(hideKey)) {
+              if (counts !== undefined) counts.indexLookups += 1
+              if (recordsById.get(questionId ?? '')?.isUnresolved !== false) {
+                carriedUnresolvedItems.push(item)
+                if (firstCarriedText === null) firstCarriedText = parts.text
+              }
+            }
+          })
+        }
+      }
+      const carriedUnresolved = carriedUnresolvedItems.length > 0
+      const allUnresolved = carriedUnresolvedItems.length === 0 ? unresolved : [...unresolved, ...carriedUnresolvedItems]
 
       let completion: DoneItem & { at: number } | null = null
       if (isComplete) {
@@ -1255,7 +1363,7 @@ export const buildView = (
         liveness: livenessOf(task.auto, gone),
         now,
         staleMs,
-        hasOpenAsk: task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)),
+        hasOpenAsk: task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) || carriedUnresolved,
       })
       // A session whose turn ended on a question is in 等你處理 by its [?] steps. One whose
       // turn simply ended (`state=waiting` is written at every turn's end), or that waits on
@@ -1263,12 +1371,12 @@ export const buildView = (
       // One whose questions were all marked answered is back with the work in progress.
       // A blocked step keeps its row beside an open question: the card shows the ask, the row shows the blocker (#224).
       const isBlocked = task.steps.some(step => step.status === 'blocked')
-      if (!isIdle && !isBlocked && auto === 'waiting' && task.steps.some((step, index) => step.status === 'waiting' && isAsked(index))) continue
+      if (!isIdle && !isBlocked && auto === 'waiting' && (task.steps.some((step, index) => step.status === 'waiting' && isAsked(index)) || carriedUnresolved)) continue
 
       // A hook's placeholder step says the session waits; while it works the row shows no step (#612).
       const shown = auto === 'working' ? { ...task, steps: task.steps.filter(step => !isLifecycleStep(step.text)) } : task
       const { done, total } = countSteps(shown)
-      const isAnsweredWaiting = !isBlocked && (auto === 'waiting' || isRepliedTask) && (task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index)) || isRepliedTask)
+      const isAnsweredWaiting = !isBlocked && (auto === 'waiting' || isRepliedTask) && (task.steps.some((step, index) => step.status === 'waiting' && !isAsked(index)) || (carriedAsks.length > 0 && !carriedUnresolved) || isRepliedTask)
       const phrase =
         // An unsure row keeps its shelf (Q3) and its lifecycle step text (Q4);
         // only its status line changes, to the unsure wording with its age.
@@ -1309,8 +1417,8 @@ export const buildView = (
         ...(isManual ? { stepLines: task.steps.map(step => step.line), stepTask: { project: name, title: task.title, line: task.line, session: null, expected: confirmKey(name, task, twins.get(partsKey2(name, task.title)) ?? 0) } } : {}),
         cells: rowCells(shown, isRepliedTask),
         left: task.steps.filter(step => step.status !== 'done' && step.status !== 'cancelled').map(step => step.text),
-        questions: isInactive ? unresolved : [],
-        question: isInactive ? unresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? null : splitNote(asked.text).text))(
+        questions: isInactive ? allUnresolved : [],
+        question: isInactive ? allUnresolved.find(item => !marked.has(item.hideKey))?.text ?? null : ((asked: ProgressStep | undefined) => (asked === undefined ? firstCarriedText : splitNote(asked.text).text))(
           task.steps.find((step, index) => step.status === 'waiting' && isPrompt(index)),
         ),
         next:
@@ -1358,7 +1466,7 @@ export const buildView = (
       }
       // A finished session draws no row, so its runs are counted with the background runs instead.
       if (group !== undefined) placed.add(task)
-      if (auto === 'ended' && unresolved.length > 0) {
+      if (auto === 'ended' && allUnresolved.length > 0) {
         stopped.push({ row, updated })
         continue
       }
