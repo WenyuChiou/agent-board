@@ -89,7 +89,7 @@ const BOOL_FLAGS = new Set([
   '--no-codex-send',
   '--help', '-h', '--hermes-trust', '--hook-recovery-parent', '--hooks-approved', '--html', '--json', '--mcp',
   '--no-color', '--no-open', '--plain', '--plan-event', '--print', '--quiet-board',
-  '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
+  '--read-trust', '--recover-hooks', '--remove', '--report', '--serve', '--serve-child', '--status',
   '--stop', '--stopped', '--tidy', '--unsent', '--update', '--version', '-v', '--watch',
 ])
 const VALUE_FLAGS = new Set([

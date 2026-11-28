@@ -36,7 +36,7 @@ test('an unreachable detected Codex retains locate advice instead of a failing d
   })
 })
 
-test('a terminal repair reports already trusted hooks done without trusting them twice in every language', () => {
+test('a terminal repair says already trusted hooks are still trusted without trusting them twice in every language', () => {
   for (const [index, lang] of locales.entries()) terminal(f => {
     assert.equal(f.invoke(['--agent', 'codex', '--lang', lang, '--apply']).status, 0)
     const bin = join(f.root, 'synthetic bin', process.platform === 'win32' ? 'codex.cmd' : 'codex')
@@ -47,18 +47,21 @@ test('a terminal repair reports already trusted hooks done without trusting them
     const result = f.invoke(['--agent', 'codex', '--lang', lang], 'y\n')
     assert.equal(result.status, 0, result.stderr)
     const part = bootstrap[index].trustPart.replace('{host}', 'Codex')
-    assert.ok(result.stdout.includes(bootstrap[index].partDone.replace('{part}', part)), 'every promised approval part has a completion line')
+    // The approval was listed; Codex says nothing is left to approve, so the line says the hooks are trusted, not done (#1806).
+    assert.ok(result.stdout.includes(bootstrap[index].codexTrustHeld), 'the promised approval part ends with what Codex said')
+    assert.ok(!result.stdout.includes(bootstrap[index].partDone.replace('{part}', part)), 'no approval is called done that wrote nothing')
     assert.equal(f.commands.calls().some(call => call.method === 'config/batchWrite'), false, 'read-only confirmation avoids another trust write')
   }, ['codex'])
 })
 
-test('a terminal missing-Codex retry quotes the translated path placeholder in every language', () => {
+test('a terminal missing-Codex trust command quotes the translated path placeholder in every language', () => {
   for (const [index, lang] of locales.entries()) terminal(f => {
     const result = f.invoke(['--agent', 'codex', '--lang', lang], 'y\n')
     assert.equal(result.status, 0, result.stderr)
-    const part = bootstrap[index].trustPart.replace('{host}', 'Codex')
-    const line = result.stdout.split(/\r?\n/).find(one => one.startsWith(part)) ?? ''
-    assert.ok(line.includes(`--codex-bin '${bootstrap[index].codexPath}'`), 'the retry contains a nonempty localized path protected from shell redirection')
+    // No Codex program: no approval part is promised (#1801); the line naming the approval's path carries the command.
+    const missing = bootstrap[index].codexMissing
+    const line = result.stdout.split(/\r?\n/).find(one => one.startsWith(missing.slice(0, missing.indexOf('{')))) ?? ''
+    assert.ok(line.includes(`--codex-bin '${bootstrap[index].codexPath}'`), 'the command contains a nonempty localized path protected from shell redirection')
     assert.equal(f.commands.calls().length, 0, 'no real host is reached')
   }, [])
 })
