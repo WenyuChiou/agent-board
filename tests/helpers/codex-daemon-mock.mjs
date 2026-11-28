@@ -53,6 +53,7 @@
 //   unloadSecs  what config/read reports as `thread_unload_delay_secs` (default 0: the stand-in's own delay is well under a
 //              second); 'none' leaves the key out, as a config that names no delay does
 //   configFaults  a file: while it is there, config/read gets an error answer, or a delay that is not a number when it holds 'odd'
+//              or no answer at all when it holds 'mute'
 //   cwd        the folder thread/read reports for the thread (default '/synthetic/project')
 //   ephemeral  when true, thread/read says the thread is `ephemeral` (a short thread the daemon closes by itself)
 //   loadFlag   a file: until it appears the daemon has not loaded the thread (thread/loaded/list is empty); when it appears the
@@ -187,6 +188,7 @@ const handle = (value, emit) => {
   if (value.method === 'initialize') emit({ id: value.id, result: { userAgent: config.userAgent ?? 'codex_cli_rs/0.169.0 (synthetic)' } })
   if (value.method === 'config/read') {
     const fault = config.configFaults && existsSync(config.configFaults) ? readFileSync(config.configFaults, 'utf8') : null
+    if (fault === 'mute') return
     if (fault !== null && fault !== 'odd') { emit({ id: value.id, error: { code: -32600, message: 'synthetic' } }); return }
     const seconds = fault === 'odd' ? 'sixty' : config.unloadSecs ?? 0
     emit({ id: value.id, result: { config: seconds === 'none' ? {} : { thread_unload_delay_secs: seconds }, origins: {} } })

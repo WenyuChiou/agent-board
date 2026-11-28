@@ -440,7 +440,7 @@ export const startCodexReceiver = ({
     if (q.noneEpoch !== q.epoch) { restart(thread); q.noneEpoch = q.epoch }
   }
   const quietOf = thread => {
-    if (!quiet.has(thread)) quiet.set(thread, { since: null, last: null, marker: undefined, epoch: 0, sampling: null, delay: null, isIdle: false, noneEpoch: null })
+    if (!quiet.has(thread)) quiet.set(thread, { since: null, last: null, marker: undefined, epoch: 0, sampling: null, delay: null, isIdle: false, noneEpoch: null, lookedAt: null, looked: null, isLooking: false, peeking: null })
     return quiet.get(thread)
   }
   // Something happened that the stretch cannot span: it starts again at a later look.
@@ -487,6 +487,13 @@ export const startCodexReceiver = ({
   // watching. A look that is answered late starts a new stretch with its own answer. A turn that began and ended between two
   // looks, however far apart, shows only in the thread's `updatedAt`: a changed one ends the stretch, and a thread that reports
   // none never has one. A look that cannot read the thread's unload delay ends it too.
+  // What the short route needs from a look, noted as soon as thread/read answers (#1908): the thread read idle, is not an ephemeral
+  // one, and the receiver is out of it. The unload delay is the long route's alone, so its config/read never holds this.
+  const note = (q, thread, on, seen) => {
+    if (daemon !== on || quiet.get(thread) !== q) return
+    q.lookedAt = now()
+    q.isIdle = seen?.status === 'idle' && seen.isEphemeral !== true && subs.get(thread)?.mayBeSubscribed !== true
+  }
   const sample = thread => {
     const q = quietOf(thread)
     if (q.sampling !== null) return q.sampling
@@ -494,10 +501,13 @@ export const startCodexReceiver = ({
       const on = daemon, sentAt = now()
       if (q.last === null || sentAt - q.last > 2 * watchTickMs) restart(thread)
       // In the thread, or maybe in it, the receiver's own subscription keeps it loaded: nothing read now is about a person.
-      if (subs.get(thread)?.mayBeSubscribed === true) { q.since = null; q.isIdle = false; return }
+      if (subs.get(thread)?.mayBeSubscribed === true) { q.since = null; q.isIdle = false; q.looked = null; return }
       const epoch = q.epoch
       let seen = null, delay = null
-      try { seen = await read(thread) } catch { /* A look that failed saw nothing. */ }
+      q.isLooking = true
+      q.looked = read(thread).then(found => { seen = found }, () => { /* A look that failed saw nothing. */ })
+        .then(() => { q.isLooking = false; note(q, thread, on, seen) })
+      await q.looked
       if (seen?.status === 'idle') delay = await unloadDelay(seen.cwd)
       // The connection it was asked on is gone, and with it everything seen through it.
       if (daemon !== on || quiet.get(thread) !== q) return
@@ -505,16 +515,28 @@ export const startCodexReceiver = ({
       // Asked in time and answered late: what the thread did meanwhile nobody saw, as when it is asked late.
       if (q.last !== null && at - q.last > 2 * watchTickMs) q.since = null
       q.last = at
-      // What the short route needs from a look: the thread read idle, is not an ephemeral one, and the receiver is out of it.
-      q.isIdle = seen?.status === 'idle' && seen.isEphemeral !== true && subs.get(thread)?.mayBeSubscribed !== true
       if (delay !== null) q.delay = Math.max(q.delay ?? 0, delay)
       const hasMarker = typeof seen?.marker === 'number' || typeof seen?.marker === 'string'
       // An ephemeral thread (a short one the daemon closes by itself) is never a person's.
       if (seen?.status !== 'idle' || seen.isEphemeral || delay === null || !hasMarker || q.epoch !== epoch || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) { q.since = null; return }
       if (seen.marker !== q.marker) { q.marker = seen.marker; q.since = null }
       if (q.since === null) q.since = at
-    })().finally(() => { q.sampling = null })
+    })().finally(() => { q.sampling = null; q.isLooking = false })
     return q.sampling
+  }
+  // The short route's look: the thread/read of a new sample, answered without waiting for its config/read. While a sample still
+  // waits on config/read (an unanswered one holds it up to its 5 s limit), a look of its own reads the thread, one at a time.
+  const look = thread => {
+    const q = quietOf(thread)
+    if (q.sampling === null) {
+      void sample(thread)
+      return q.looked ?? Promise.resolve()
+    }
+    if (q.isLooking && q.looked !== null) return q.looked
+    if (q.peeking !== null) return q.peeking
+    const on = daemon
+    q.peeking = read(thread).then(found => found, () => null).then(seen => note(q, thread, on, seen)).finally(() => { q.peeking = null })
+    return q.peeking
   }
   // A person's client is on the thread, or left it less than 60 s ago: the receiver is out of it, the stretch is unbroken up to
   // a look and a listing no older than two ticks, and that listing was asked for one wait after the stretch began. With no client
@@ -524,8 +546,8 @@ export const startCodexReceiver = ({
     // The short route (#1652) has no quiet wait: a person's Codex window is told by the process check in `deliver`, so a thread that
     // reads idle in a fresh look and a fresh listing can take a message at the next tick, however recently a turn ended.
     if (holdOf(thread) === null) {
-      return canTell && q !== undefined && q.last !== null && q.isIdle && subs.get(thread)?.mayBeSubscribed !== true && listing.set.has(thread)
-        && at - q.last <= 2 * watchTickMs && at - listing.sentAt <= 2 * watchTickMs
+      return canTell && q !== undefined && q.lookedAt !== null && q.isIdle && subs.get(thread)?.mayBeSubscribed !== true && listing.set.has(thread)
+        && at - q.lookedAt <= 2 * watchTickMs && at - listing.sentAt <= 2 * watchTickMs
     }
     if (!canTell || q === undefined || q.since === null || q.last === null || q.delay === null || subs.get(thread)?.mayBeSubscribed === true || !listing.set.has(thread)) return false
     if (at - q.last > 2 * watchTickMs || at - listing.sentAt > 2 * watchTickMs) return false
@@ -537,7 +559,9 @@ export const startCodexReceiver = ({
   // Whether a message can go to the thread now, from a fresh look and a listing no older than two ticks.
   const isReady = async thread => {
     if (!canTell || subs.get(thread)?.mayBeSubscribed === true) return false
-    await sample(thread)
+    // The short route waits for a look at the thread only; the long route for the whole sample, its unload delay included.
+    if (holdOf(thread) === null) await look(thread)
+    else await sample(thread)
     if (now() - listing.sentAt > 2 * watchTickMs) try { await list() } catch { return false }
     // A thread with no Codex window found is not claimed on the short wait until its hold is over; the 10-minute wait still holds.
     return isPersonAttached(thread, floorOf(thread))
