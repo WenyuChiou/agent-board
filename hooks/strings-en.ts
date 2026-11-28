@@ -723,9 +723,12 @@ export const EN: Strings = {
 
   // The board other agents show (the standalone script and each agent's board command)
   boardOpenPage: 'Open board page',
-  boardPageWindowOpened: (url: string): string => `Opened Agent Board in your browser: ${url}`,
+  boardPageWindowOpened: 'Opened Agent Board in your browser.',
   boardPageLink: (url: string): string => url,
-  boardPageAlreadyOpen: (url: string): string => `Agent Board is already open in your browser: ${url}`,
+  boardPageAlreadyOpen: 'Agent Board is already open in your browser.',
+  // Beside a fresh one-use link (#1650): a page in front, or a window started that has not loaded the page.
+  boardPageAlreadyOpenLink: (url: string): string => `Agent Board is already open in your browser. If you do not see it, open this one-use link: ${url}`,
+  boardPageLaunchedLink: (url: string): string => `A browser window was started. If none appears, open this one-use link: ${url}`,
   boardInbox: 'Turns in the inbox not summed up yet (open a Claude Code session to take them in)',
   boardWatching: 'Updates every 2 seconds; Ctrl+C to stop',
   boardCommandDescription: 'Agent Board: what every agent is doing, and what waits on you',
@@ -818,12 +821,15 @@ export const EN: Strings = {
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `The board you can click (tick, archive, answer): ${url}`,
-  serveKept: 'A reply may still be on its way to an agent, so the board page that is already open is kept; it updates when the reply arrives. Run this again after that for the newest page.',
+  serveKept: 'A reply may still be on its way to an agent, so the board server that is already running is kept; any page of it updates when the reply arrives. Run this again after that for the newest board.',
+  serveKeptNoLink: 'The kept board server cannot create a one-use link. Once any reply finishes, run agent-board --stop and open the board again.',
+  serveBusy: 'The board did not hand out a one-use link in time. Run agent-board again in a moment.',
   serveAlreadyRunning: 'The board page is already running.',
   serveStopped: 'Stopped the board page.',
   serveNotStopped: 'The board page did not stop; it may be sending a reply. Run stop again in a moment.',
   serveNoneRunning: 'No board page is running for this file.',
   serveSshHint: (port: number, host: string, url: string): string => `Forward port to open the page: ssh -L ${port}:127.0.0.1:${port} ${host} then open ${url}`,
+  serveSshForwardKey: (port: number, host: string): string => `Forward port to open the page: ssh -L ${port}:127.0.0.1:${port} ${host}, then press o for a one-use link.`,
   serveBrowserNone: (url: string): string => `No browser found. Open this address in your browser: ${url}`,
   serveIdle: 'The local board stays running. Reopen with agent-board in a terminal or /agent-board in an agent\'s chat; Close the board stops the service.',
   serveIdleTimed: (minutes: number): string => `This board is configured to close after ${minutes} minutes unused. Reopen with agent-board.`,

@@ -4156,22 +4156,43 @@ test('a hook whose reporter runs past the deadline saves the raw event and the n
     assert.ok(!raw.argv.includes('--home') && !raw.argv.includes('--hook-deadline'))
     assert.match(readFileSync(join(f.root, 'hook-errors.log'), 'utf8'), /REPORTER_QUEUED/)
     f.save(f.script, real)
-    const next = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'raw-second' }))
+    // The second hook's reporter is held 2.6 s before it starts, past its 2.4 s cap, as on a slow runner: it may queue both events
+    // and exit 0, so its record is not written yet. The next hook of the same kind applies both, in order (#1956).
+    const slow = join(f.root, 'slow-reporter.cjs'), slowOnce = join(f.root, 'slow-reporter-once')
+    f.save(slow, `const fs = require('node:fs'), path = require('node:path')
+const same = (a, b) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+if (process.argv[1] && same(path.resolve(process.argv[1]), ${JSON.stringify(resolve(f.script))}) && fs.existsSync(${JSON.stringify(slowOnce)})) {
+  fs.rmSync(${JSON.stringify(slowOnce)})
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2600)
+}
+`)
+    f.save(slowOnce, '')
+    const options = f.env.NODE_OPTIONS
+    f.env.NODE_OPTIONS = [options, `--require ${JSON.stringify(slow)}`].filter(Boolean).join(' ')
+    let next
+    try { next = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'raw-second' })) }
+    finally { if (options === undefined) delete f.env.NODE_OPTIONS; else f.env.NODE_OPTIONS = options }
     assert.equal(next.status, 0, hookFailure(next))
-    const record = JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`codex:${session}`).digest('hex')}.json`)))
-    assert.equal(record.turn, 'raw-second')
+    assert.equal(existsSync(slowOnce), false, 'the second hook\'s reporter was not held')
+    const last = await fireHook(f, JSON.stringify({ session_id: session, hook_event_name: 'UserPromptSubmit', turn_id: 'raw-third' }))
+    assert.equal(last.status, 0, hookFailure(last))
+    const seen = () => JSON.stringify({ pending: pendingFiles(f), log: existsSync(join(f.root, 'hook-errors.log')) ? readFileSync(join(f.root, 'hook-errors.log'), 'utf8') : null })
+    const recordFile = join(f.root, 'sessions', `${createHash('sha256').update(`codex:${session}`).digest('hex')}.json`)
+    assert.ok(existsSync(recordFile), 'no session record after the next hook: ' + seen())
+    const record = JSON.parse(readFileSync(recordFile))
+    assert.equal(record.turn, 'raw-third', seen())
     assert.equal(record.title, 'raw-folder-project')
     assert.equal(record.project, 'raw-folder-project')
     for (const text of [readFileSync(f.progress, 'utf8'), JSON.stringify(record)]) assert.ok(!text.includes(join(f.root, 'work')), 'only the folder name reaches the board')
-    assert.ok(record.events.indexOf('UserPromptSubmit:raw-first') < record.events.indexOf('UserPromptSubmit:raw-second'))
-    assert.ok(record.events.includes('UserPromptSubmit:raw-first'))
-    assert.deepEqual(pendingFiles(f), [])
+    const order = ['raw-first', 'raw-second', 'raw-third'].map(turn => record.events.indexOf(`UserPromptSubmit:${turn}`))
+    assert.ok(order[0] >= 0 && order[0] < order[1] && order[1] < order[2], JSON.stringify(record.events) + ' ' + seen())
+    assert.deepEqual(pendingFiles(f), [], seen())
     // A late raw event from this very millisecond range cannot reopen an older turn.
     raw.at = record.appliedAt - 1
     raw.payload.turn_id = 'raw-stale'
     f.save(join(f.root, 'pending', `${String(raw.at).padStart(15, '0')}-stale.raw.json`), JSON.stringify(raw))
     assert.equal(f.event('SessionStart', null, { session_id: 'other-replay-session' }).status, 0)
-    assert.equal(JSON.parse(readFileSync(join(f.root, 'sessions', `${createHash('sha256').update(`codex:${session}`).digest('hex')}.json`))).turn, 'raw-second')
+    assert.equal(JSON.parse(readFileSync(recordFile)).turn, 'raw-third')
     assert.deepEqual(pendingFiles(f), [])
   } finally {
     f.save(f.script, real)
@@ -10494,12 +10515,13 @@ test('the DeepSeek tool reports by session id, and opens the board detached with
   await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] One'] }, { agent }), { message: 'AGENT_BOARD_REPORT_FAILED: INVALID_STEP' })
   answer = { status: 1, stdout: '', stderr: 'free text\n' }
   await assert.rejects(tool.execute({ action: 'report', steps: ['- [x] One'] }, { agent }), { message: 'AGENT_BOARD_REPORT_FAILED' })
-  // open starts the board's own command detached and returns the one line it prints.
+  // open starts the board's own command detached and returns the one line it prints: a link
+  // only, with no window that the model could not see (#1650).
   const link = 'http://127.0.0.1:43210/?t=synthetic-token'
   const opened = tool.execute({ action: 'open' }, { agent })
   const [child] = children
   assert.equal(child.command, process.execPath)
-  assert.deepEqual(child.args, [board, '--html'])
+  assert.deepEqual(child.args, [board, '--html', '--no-open'])
   assert.equal(child.options.detached, true)
   assert.equal(child.options.windowsHide, true)
   assert.equal(child.options.stdio[0], 'ignore')

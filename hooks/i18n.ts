@@ -766,9 +766,12 @@ export const ZH_TW = {
 
   // The board other agents show (the standalone script and each agent's board command)
   boardOpenPage: '開啟看板網頁',
-  boardPageWindowOpened: (url: string): string => `已在瀏覽器開啟 Agent Board：${url}`,
+  boardPageWindowOpened: '已在瀏覽器開啟 Agent Board。',
   boardPageLink: (url: string): string => url,
-  boardPageAlreadyOpen: (url: string): string => `Agent Board 已在瀏覽器開著：${url}`,
+  boardPageAlreadyOpen: 'Agent Board 已在瀏覽器開著。',
+  // Beside a fresh one-use link (#1650): a page in front, or a window started that has not loaded the page.
+  boardPageAlreadyOpenLink: (url: string): string => `Agent Board 已在瀏覽器開著。如果沒看到，請打開這個一次性連結：${url}`,
+  boardPageLaunchedLink: (url: string): string => `已啟動瀏覽器視窗。如果沒有出現，請打開這個一次性連結：${url}`,
   boardInbox: '收件匣裡還沒整理的回合（開一個 Claude Code 對話就會整理進來）',
   boardWatching: '每 2 秒更新，Ctrl+C 結束',
   boardCommandDescription: 'Agent Board：每個 agent 在做什麼、什麼在等你',
@@ -858,12 +861,15 @@ export const ZH_TW = {
   // The board's page in the browser (`agent-board.mjs --serve`). The chat-relay prompt stays
   // in English in every language: it is the one tested live, and its markers are literal.
   serveAt: (url: string): string => `可以點的看板（勾完成、封存、回答）：${url}`,
-  serveKept: '可能還有一句正在傳給 agent，所以先保留已經開著的看板網頁；回覆到了它會自己更新。之後再執行一次，就會換成最新的看板。',
+  serveKept: '可能還有一句正在傳給 agent，所以先保留正在執行的看板伺服器；回覆到了它的網頁會自己更新。之後再執行一次，就會換成最新的看板。',
+  serveKeptNoLink: '這個保留中的看板無法產生一次性連結。請等回覆送完後執行 agent-board --stop，再重新開啟看板。',
+  serveBusy: '看板沒有及時給出一次性連結。請稍後再執行一次 agent-board。',
   serveAlreadyRunning: '看板網頁已經在執行中。',
   serveStopped: '已停止看板網頁。',
   serveNotStopped: '看板網頁沒有停止，可能正在送出回覆。稍後再執行一次 stop。',
   serveNoneRunning: '這個檔案沒有正在執行的看板網頁。',
   serveSshHint: (port: number, host: string, url: string): string => `轉發埠號以開啟網頁：ssh -L ${port}:127.0.0.1:${port} ${host} 並打開 ${url}`,
+  serveSshForwardKey: (port: number, host: string): string => `轉發埠號以開啟網頁：ssh -L ${port}:127.0.0.1:${port} ${host}，再按 o 取得一次性連結。`,
   serveBrowserNone: (url: string): string => `找不到瀏覽器。請在瀏覽器打開這個網址：${url}`,
   serveIdle: '本機看板會持續執行；關掉分頁後可在終端機執行 agent-board 或在 agent 對話中輸入 /agent-board 再開啟，按「關閉看板」才停止服務。',
   serveIdleTimed: (minutes: number): string => `此看板已設定閒置 ${minutes} 分鐘後自動關閉；可執行 agent-board 再開啟。`,
