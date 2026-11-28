@@ -3166,3 +3166,48 @@ test('pr-check stops when git cannot tell whether a merge parent is in the base,
   assert.throws(() => isAncestor({ status: 128 }, 'abc1234'), /git could not tell whether abc1234 is in the base/)
   assert.throws(() => isAncestor({ status: null, error: new Error('spawn git ENOENT') }), /git could not tell/)
 })
+
+// #1982: holes the diagnosis of #1257 found outside it (rows 5, 5b, 6, 17 and 20). Each sequence is read as
+// main's fetch builds it: the reviews join the comments only while no comment approves.
+const HOLE_HEAD = syntheticPr().head
+const holeRun = (comments, reviews = [], extra = {}) => {
+  const isApproved = comments.some(comment => reviewOf(comment)?.kind === 'APPROVE')
+  const data = { ...syntheticPr(), prComments: [...comments, ...(isApproved ? [] : reviews)], prReviews: reviews, ...extra }
+  return checkPr(data).problems.filter(item => item.check === 'review')
+}
+const holeApproval = (at = '2026-11-28T10:00:00Z') => ({ body: `Review: APPROVE ${HOLE_HEAD} by independent reviewer`, created_at: at, user: { login: 'team' } })
+
+test('the hole sequences start from an approval that passes', () => {
+  assert.deepEqual(holeRun([holeApproval()]), [])
+  // A GitHub request for changes on an older head, or one submitted before the approving comment, does not hold.
+  assert.deepEqual(holeRun([holeApproval()], [{ state: 'CHANGES_REQUESTED', commit_id: 'f'.repeat(40), submitted_at: '2026-11-28T11:00:00Z', user: { login: 'team' } }]), [])
+  assert.deepEqual(holeRun([holeApproval()], [{ state: 'CHANGES_REQUESTED', commit_id: HOLE_HEAD, submitted_at: '2026-11-28T09:00:00Z', user: { login: 'team' } }]), [])
+})
+
+test('a GitHub request for changes on the head after the approving comment holds', () => {
+  const later = { state: 'CHANGES_REQUESTED', commit_id: HOLE_HEAD, submitted_at: '2026-11-28T11:00:00Z', user: { login: 'team' } }
+  assert.equal(holeRun([holeApproval()], [later]).length, 1)
+  // A tie in time cannot be ordered, so it refuses too.
+  assert.equal(holeRun([holeApproval()], [{ ...later, submitted_at: '2026-11-28T10:00:00Z' }]).length, 1)
+})
+
+test('a GitHub approval does not clear a comment\'s request for changes', () => {
+  const asked = { body: `Review: REQUEST CHANGES ${HOLE_HEAD} by independent reviewer`, created_at: '2026-11-28T10:00:00Z', user: { login: 'team' } }
+  const approved = { state: 'APPROVED', commit_id: HOLE_HEAD, body: '', submitted_at: '2026-11-28T11:00:00Z', user: { login: 'team' } }
+  assert.equal(holeRun([asked], [approved]).length, 1)
+})
+
+test('an approving comment with a second Review: line is refused', () => {
+  const both = [`Review: APPROVE ${HOLE_HEAD} by independent reviewer`, `Review: REQUEST CHANGES ${HOLE_HEAD} by independent reviewer`]
+  assert.equal(holeRun([{ body: both.join('\n'), created_at: '2026-11-28T10:00:00Z', user: { login: 'team' } }]).length, 1)
+  assert.equal(holeRun([{ body: [...both].reverse().join('\n'), created_at: '2026-11-28T10:00:00Z', user: { login: 'team' } }]).length, 1)
+})
+
+test('a GitHub request for changes never approves, whatever it quotes', () => {
+  const quoting = { state: 'CHANGES_REQUESTED', commit_id: HOLE_HEAD, body: `Quoting the earlier verdict:\nReview: APPROVE ${HOLE_HEAD} by independent reviewer`, submitted_at: '2026-11-28T11:00:00Z', user: { login: 'team' } }
+  assert.equal(holeRun([], [quoting]).length, 1)
+})
+
+test('reviews that could not be read hold an approving comment', () => {
+  assert.equal(holeRun([holeApproval()], [], { isReviewsUnread: true }).length, 1)
+})
