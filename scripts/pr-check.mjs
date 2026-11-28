@@ -862,7 +862,9 @@ export const verdictNameOf = body => {
 // author approving (RULES R2).
 export const isLaneReviewer = (review, tier, { isRelease = false } = {}) => review?.isFresh === true && !isRelease && (tier === 'light' || tier === 'normal' || tier === 'risk')
 
-const codexLogin = /^chatgpt-codex-connector(?:\[bot\])?$/i
+// The bot's own comments come from its Bot account (`chatgpt-codex-connector[bot]` over the REST API); an account that only
+// has its name is not the bot (#1974).
+const isCodexBot = user => /^chatgpt-codex-connector\[bot\]$/i.test(user?.login ?? '') || (/^chatgpt-codex-connector$/i.test(user?.login ?? '') && user?.type === 'Bot')
 const codexMarker = /<!--\s*codex-review-state:v1\s+(\{[\s\S]*?\})\s*-->/
 
 // The Codex review bot's code review of a head, from the newest of its state comments that can be read (the caller lists
@@ -870,7 +872,7 @@ const codexMarker = /<!--\s*codex-review-state:v1\s+(\{[\s\S]*?\})\s*-->/
 // is passed over, so noise cannot hide a real state.
 export const codexStateOf = (comments, head) => {
   for (const comment of [...(comments ?? [])].reverse()) {
-    const json = codexLogin.test(comment?.user?.login ?? '') ? (comment.body ?? '').match(codexMarker)?.[1] : null
+    const json = isCodexBot(comment?.user) ? (comment.body ?? '').match(codexMarker)?.[1] : null
     if (!json) continue
     let review
     try { review = JSON.parse(json)?.code_review } catch { continue }
@@ -891,10 +893,11 @@ export const isSurfaceNone = body => {
 // What keeps a risk-tier approval by a reviewer started new for this review from counting, of the R2 conditions this
 // check can read (owner, 2026-11-28; #1974): `surface-none` for a lane under risk-tier review, which takes the maintainer
 // route, and `no-codex-review` until the Codex review bot reviewed the head (clean or with findings: whether they are
-// settled is the reviewer's to read). Null when it counts or the tier does not ask; a verdict ending `, maintainer route`
-// is read as before.
+// settled is the reviewer's to read). Null when it counts or the tier does not ask. A line with the lane's own note keeps
+// these conditions even when it ends `, maintainer route`: the maintainer route's verdict carries the maintainer's note,
+// which is not read as started new by the lane, or none (RULES R2).
 export const riskApprovalGap = (review, { tier = null, isRelease = false, isSurfaceNone: isNone = false, codexState = 'none' } = {}) => {
-  if (tier !== 'risk' || isRelease || review?.kind !== 'APPROVE' || review.isFresh !== true || review.isMaintainerRoute === true) return null
+  if (tier !== 'risk' || isRelease || review?.kind !== 'APPROVE' || review.isFresh !== true) return null
   if (isNone) return 'surface-none'
   return codexState === 'clean' || codexState === 'open' ? null : 'no-codex-review'
 }
