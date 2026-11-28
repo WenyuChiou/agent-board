@@ -854,6 +854,16 @@ const readReview = item => {
 
 export const reviewOf = item => readReview(item).review
 
+// An approval names the full head sha (RULES R2): a verdict line's sha is exactly 40 hex characters, alone or in one
+// pair of backticks, ending the token; a GitHub review names its commit in full. Only the gate reads this, after it
+// has picked the last verdict as before, so it can refuse more than it did and never less (#1257).
+const isFullApproval = item => {
+  const body = typeof item === 'string' ? item : item?.body ?? ''
+  const match = body.match(/^Review:\s*(APPROVE|REQUEST CHANGES)\s+`?[0-9a-fA-F]{7,40}/mi)
+  if (match) return /^Review:[ \t]*APPROVE[ \t]+(`?)[0-9a-f]{40}\1(?=[ \t]|$)/i.test(body.slice(match.index).split(/\r?\n/, 1)[0])
+  return typeof item === 'object' && item?.state === 'APPROVED' && typeof item.commit_id === 'string'
+}
+
 // The tier the body names on its `Tier:` line (RULES R2), or null when it names none.
 export const tierOf = body => visibleBody(body).match(/^Tier:[ \t]*`?(risk|normal|light)\b/mi)?.[1].toLowerCase() ?? null
 
@@ -1483,7 +1493,7 @@ export const verdict = (comments, head, options = {}) => {
   const reviews = []
   for (const comment of comments ?? []) {
     const { review, ignored } = readReview(comment)
-    if (review) reviews.push(review)
+    if (review) reviews.push(review.kind === 'APPROVE' ? { ...review, isFull: isFullApproval(comment) } : review)
     else if (ignored) {
       const who = safeText(String(ignored.who).replace(/\s+/g, ' ').trim())
       const reason = safeText(String(ignored.reason).replace(/\s+/g, ' ').trim())
@@ -1513,6 +1523,14 @@ export const verdict = (comments, head, options = {}) => {
     output.info.push(`review: ${last.kind} for ${last.sha.slice(0, 7)}, the current head.`)
     if (!isDraft && number !== null) {
       output.problems.push(problem('review', `the latest review requested changes on ${last.sha.slice(0, 7)}.`, 'address the review findings and request a new review.'))
+    }
+    return output
+  }
+
+  if (!last.isFull || last.sha !== head.toLowerCase()) {
+    output.info.push(`review: APPROVE for ${last.sha.slice(0, 7)}, not the full head sha.`)
+    if (!isDraft && number !== null) {
+      output.problems.push(problem('review', `the approval names ${last.sha.slice(0, 12)}, not the full head sha (RULES.md, R2).`, 'post the verdict again with the full 40-character head sha.'))
     }
     return output
   }

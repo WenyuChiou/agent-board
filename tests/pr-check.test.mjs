@@ -661,6 +661,62 @@ test('a reviewer the author\'s lane started new for this review may approve a li
   assert.equal(tierOf('<!--\nTier: light\n-->'), null)
 })
 
+test('an approval naming a short sha of the head is refused (#1257)', () => {
+  const head = syntheticPr().head
+  const refused = (comments, options = {}) => verdict(comments, head, { number: 7, ...options }).problems.filter(item => item.check === 'review')
+  const fullSha = refused([{ body: `Review: APPROVE ${head} by muse, lane muse` }])
+  assert.equal(fullSha.length, 0)
+  const short = refused([{ body: `Review: APPROVE ${head.slice(0, 7)} by muse, lane muse` }])
+  assert.equal(short.length, 1)
+  assert.match(short[0].message, /full head sha/)
+  assert.match(short[0].fix, /40-character head sha/)
+  // A draft is told, not failed, as for every other review state.
+  const draft = verdict([{ body: `Review: APPROVE ${head.slice(0, 12)} by muse, lane muse` }], head, { number: 7, isDraft: true })
+  assert.equal(draft.problems.length, 0)
+  assert.match(draft.info.join('\n'), /not the full head sha/)
+})
+
+test('a sha token longer than the head is refused', () => {
+  const head = syntheticPr().head
+  const refused = body => verdict([{ body }], head, { number: 7 }).problems.filter(item => item.check === 'review').length
+  assert.equal(refused(`Review: APPROVE ${head}0 by muse, lane muse`), 1)
+  assert.equal(refused(`Review: APPROVE ${head}xyz by muse, lane muse`), 1)
+  assert.equal(refused(`Review: APPROVE \`${head}\`0 by muse, lane muse`), 1)
+})
+
+test('the full sha matches in either letter case and in backticks', () => {
+  const head = syntheticPr().head
+  const refused = body => verdict([{ body }], head, { number: 7 }).problems.filter(item => item.check === 'review').length
+  assert.equal(refused(`Review: APPROVE ${head.toUpperCase()} by muse, lane muse`), 0)
+  assert.equal(refused(`Review: APPROVE \`${head}\` by muse, lane muse`), 0)
+  assert.equal(refused(`Checks complete\nReview: APPROVE ${head}`), 0)
+  assert.equal(refused(`Review: APPROVE ${head} by codex (read-only, started new for this review), lane claude, maintainer route`), 0)
+  // A GitHub review names its commit in full.
+  assert.equal(verdict([{ state: 'APPROVED', commit_id: head, body: '', user: { login: 'team reviewer' } }], head, { number: 7 }).problems.length, 0)
+})
+
+test('a lane\'s fresh reviewer still needs the full sha', () => {
+  const head = syntheticPr().head
+  const comments = [{ body: `Review: APPROVE ${head.slice(0, 7)} by codex (read-only, started new for this review), lane codex` }]
+  const problems = verdict(comments, head, { authorAgent: 'codex', number: 7, tier: 'normal' }).problems.filter(item => item.check === 'review')
+  assert.equal(problems.length, 1)
+  assert.match(problems[0].message, /full head sha/)
+})
+
+test('a short approval after a full one is refused, not skipped', () => {
+  const head = syntheticPr().head
+  const comments = [{ body: `Review: APPROVE ${head} by muse, lane muse` }, { body: `Review: APPROVE ${head.slice(0, 7)} by muse, lane muse` }]
+  assert.equal(verdict(comments, head, { number: 7 }).problems.filter(item => item.check === 'review').length, 1)
+})
+
+test('a request for changes holds whatever sha length it names', () => {
+  const head = syntheticPr().head
+  const comments = [{ body: `Review: APPROVE ${head} by muse, lane muse` }, { body: `Review: REQUEST CHANGES ${head.slice(0, 7)} by muse, lane muse` }]
+  const problems = verdict(comments, head, { number: 7 }).problems.filter(item => item.check === 'review')
+  assert.equal(problems.length, 1)
+  assert.match(problems[0].message, /requested changes/)
+})
+
 test('approval gate: a ready pull request requires a qualifying review approval on the exact head (#1219)', () => {
   const head = syntheticPr().head
   const basePr = { ...syntheticPr(), prComments: [] }
